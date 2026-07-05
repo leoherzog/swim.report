@@ -104,8 +104,12 @@ async function handleHome(env, location) {
     rows.sort(function (a, b) { return a.distance_mi - b.distance_mi; });
     rows = rows.slice(0, HOME_LIST_LIMIT);
   } else {
+    // Alphabetical by DISPLAY name: rows inside a park render under the park
+    // name, so they must sort under it too (COALESCE matches the frontend's
+    // displayName()).
     const result = await env.DB.prepare(
-      "SELECT * FROM beaches ORDER BY name LIMIT " + String(HOME_LIST_LIMIT)
+      "SELECT * FROM beaches ORDER BY COALESCE(park_name, name), name LIMIT " +
+      String(HOME_LIST_LIMIT)
     ).all();
     rows = result.results || [];
   }
@@ -152,7 +156,7 @@ async function handleApiBeaches(env, url) {
     return jsonResponse({ error: "invalid bbox" }, 400, {});
   }
   const result = await env.DB.prepare(
-    "SELECT id,name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
+    "SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
     "AND lat >= ?2 AND lat <= ?4 LIMIT " + String(API_BEACHES_LIMIT)
   ).bind(bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat).all();
   const rows = result.results || [];

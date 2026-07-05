@@ -21,6 +21,53 @@ of it is scoped for follow-up work.
   `rules_version` bump (`1.1.0`) if thresholds change — old cached `FlagEstimate`
   objects already carry their own `rules_version`, so this is safe to do
   incrementally.
+- **Multiple unnamed beaches per park: only the largest survives.** The daily sync's
+  park-containment pass (`mergeBeachRows` in `src/index.js`) keeps just one unnamed
+  beach per park element — the one with the largest bounding box — because several
+  rows all titled "Ludington State Park" would be indistinguishable in the list UI.
+  Ludington SP, for example, has 4 unnamed beach polygons (Lake Michigan shore plus
+  Hamlin Lake); the smaller ones are dropped (logged as `skipped_unnamed`). A future
+  pass could keep them with a locality suffix, or merge their geometries.
+- **Stale park-beach rows are never deleted.** Sync only upserts. If OSM edits make
+  a different unnamed beach the largest in a park, the previously-kept row lingers
+  alongside the new one (same park name, both rows). Harmless at pilot scale, but a
+  reconciliation/delete pass is needed eventually.
+- **Park association is bbox-overlap, not polygon containment.** The worker
+  associates each beach to the smallest park whose bounding box overlaps the
+  beach's (fetching full polygon geometry for ~9k parks nightly is not worth it).
+  An L-shaped or diagonal park could claim an adjacent beach. Verified accurate on
+  the pilot region's state parks; revisit if wrong pairings show up.
+- **Only named beaches/parks are discoverable — by design, current and future
+  queries.** Every discovery path requires a name somewhere: query 1 takes only
+  named `natural=beach` / `leisure=beach_resort` elements, and query 2's park
+  containment only rescues unnamed beaches inside a NAMED park polygon. An unnamed
+  beach outside any named park never enters the dataset, and any future query
+  (nationwide tiles included) should keep this constraint — a row with no
+  human-searchable name can't be displayed, searched, or trusted as a real swim
+  spot. Scale of the exclusion (US-wide OSM counts, 2026-07): ~21,000
+  `natural=beach` elements total, ~4,900 named, ~10-15k reachable once park
+  containment is applied — the remainder is intentionally out of scope unless a
+  future pass invents names from other containment/proximity signals (nearest
+  named road end, `addr:*` tags, GNIS, etc.).
+- **Beaches OSM simply hasn't mapped stay invisible.** Park containment only
+  rescues beach polygons that exist. P.J. Hoffmaster State Park has a park polygon
+  but no `natural=beach` element inside it, so it still doesn't appear. Fixing OSM
+  is the fix.
+- **Canadian beaches clog the NWS enrichment queue.** `PILOT_BBOX` is a rectangle
+  over the Great Lakes, so it sweeps in Ontario shoreline (Pelee Island, Manitoulin
+  Island, ...). api.weather.gov returns 404 for non-US points, those rows stay
+  `nws_zone IS NULL` forever, and because enrichment picks
+  `WHERE nws_zone IS NULL ORDER BY id LIMIT 30` the same permanent failures occupy
+  the nightly batch — once ≥30 such rows sort first, US beaches behind them never
+  get enriched. Fix ideas: an `enrichment_attempts` counter column (skip after N
+  failures), or filter obviously-Canadian coordinates before queueing. (Canadian
+  beaches could eventually get Environment Canada data instead — bigger feature.)
+- **No Overpass retry inside the daily sync.** Both sync queries run back-to-back;
+  a transient 429/timeout on either simply degrades that night's run (named-only,
+  or full abort). Deliberate for politeness, but a single delayed retry (~60 s)
+  inside `runOverpassSync` would smooth over most transient failures. Note the two
+  queries must never run concurrently with each other or another sync invocation —
+  overpass-api.de allows only 2 slots per IP and 429s beyond that.
 - **SwimSmart / Michigan DNR partnership outreach.** Michigan's SwimSmart program and
   DNR-managed state park beaches are an obvious source of more official flag data
   (beyond South Haven) and possibly a sanctioned data-sharing agreement instead of

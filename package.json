@@ -7,6 +7,8 @@
   "scripts": {
     "predev": "wrangler d1 migrations apply swim-report --local",
     "dev": "wrangler dev",
+    "seed": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*\"",
+    "seed:flags": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*\"",
     "deploy": "wrangler deploy",
     "test": "vitest run"
   },

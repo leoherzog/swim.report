@@ -312,6 +312,25 @@ function renderDocument(title, bodyHtml) {
   return lines.join("\n");
 }
 
+// Park-name-first display (PLAN.md section 9): visitors think "Holland State
+// Park", not "Ottawa Beach", so when a beach sits inside a named park the park
+// name is the primary title and the beach's own name demotes to a quiet
+// subtitle. Unnamed park beaches get name === park_name at sync time, so the
+// subtitle only renders when the two genuinely differ.
+function displayName(beach) {
+  if (beach.park_name) {
+    return beach.park_name;
+  }
+  return beach.name || "";
+}
+
+function subtitleName(beach) {
+  if (beach.park_name && beach.name && beach.name !== beach.park_name) {
+    return beach.name;
+  }
+  return null;
+}
+
 // Rough distance label for a row, e.g. "<1 mi" or "~12 mi". Distances come
 // from IP-level geolocation, so anything more precise would be false accuracy.
 function formatMiles(distance) {
@@ -328,16 +347,24 @@ function renderBeachRow(entry) {
   const beach = entry.beach;
   const estimate = entry.estimate;
   const official = entry.official;
-  const dataName = escapeHtml(String(beach.name || "").toLowerCase());
+  // data-name feeds the client-side search filter: both the park name and the
+  // beach's own name must match, so "Holland State Park" and "Ottawa Beach"
+  // each find the same row.
+  const searchable = (beach.park_name ? beach.park_name + " " : "") + String(beach.name || "");
+  const dataName = escapeHtml(searchable.toLowerCase());
   const href = "/beach/" + encodeURIComponent(beach.id);
   const officialBadgeHtml = official ? (" " + renderOfficialBadge("badge-s")) : "";
   const milesLabel = formatMiles(entry.distanceMi);
   const distanceHtml = milesLabel ?
     ("<span class=\"beach-row-distance\">" + escapeHtml(milesLabel) + "</span>") : "";
+  const subtitle = subtitleName(beach);
+  const subtitleHtml = subtitle ?
+    ("<span class=\"beach-row-subtitle\">" + escapeHtml(subtitle) + "</span>") : "";
   const lines = [];
   lines.push("<li class=\"beach-row\" data-name=\"" + dataName + "\">");
   lines.push("<a class=\"beach-row-link\" href=\"" + escapeHtml(href) + "\">");
-  lines.push("<span class=\"beach-row-name\">" + escapeHtml(beach.name) + distanceHtml + "</span>");
+  lines.push("<span class=\"beach-row-name\">" + escapeHtml(displayName(beach)) + distanceHtml +
+    subtitleHtml + "</span>");
   lines.push("<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(estimate) + officialBadgeHtml + "</span>");
   lines.push("<wa-icon name=\"chevron-right\" class=\"beach-row-chevron\"></wa-icon>");
   lines.push("</a>");
@@ -366,7 +393,7 @@ export function renderListPage(data) {
 
   const searchHtml = "<section class=\"list-search\">" +
     "<wa-input id=\"beach-search\" type=\"search\" label=\"Search beaches\" " +
-    "placeholder=\"Search by beach name\" with-clear>" +
+    "placeholder=\"Search by beach or park name\" with-clear>" +
     "<wa-icon slot=\"start\" name=\"magnifying-glass\"></wa-icon>" +
     "</wa-input>" +
     "</section>";
@@ -409,7 +436,7 @@ export function renderDetailPage(data) {
   const estimate = data.estimate;
   const official = data.official;
   const nowIso = data.nowIso;
-  const title = beach.name + " — Swim Report";
+  const title = displayName(beach) + " — Swim Report";
   const lat = Number(beach.lat).toFixed(4);
   const lon = Number(beach.lon).toFixed(4);
 
@@ -418,9 +445,14 @@ export function renderDetailPage(data) {
   const titleColor = official ? official.color : (estimate ? estimate.color : null);
   const titleFlagHtml = renderFlagIcon(titleColor, "flag-icon-l");
 
+  const subtitle = subtitleName(beach);
+  const subtitleHtml = subtitle ?
+    ("<p class=\"beach-subtitle\">" + escapeHtml(subtitle) + "</p>") : "";
+
   const headerBlock = "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
-    "<h1 class=\"beach-title\">" + titleFlagHtml + "<span>" + escapeHtml(beach.name) + "</span></h1>" +
+    "<h1 class=\"beach-title\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
+    subtitleHtml +
     "<p class=\"beach-meta wa-cluster wa-gap-2xs\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon +
     "</p>";

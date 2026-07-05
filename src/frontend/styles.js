@@ -69,6 +69,13 @@ const RULES = [
   "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
+  ".beach-row-subtitle {",
+  "  display: block;",
+  "  color: var(--wa-color-text-quiet);",
+  "  font-weight: var(--wa-font-weight-normal);",
+  "  font-size: var(--wa-font-size-s);",
+  "}",
+
   ".beach-row-distance {",
   "  margin-inline-start: var(--wa-space-xs);",
   "  color: var(--wa-color-text-quiet);",
@@ -129,6 +136,12 @@ const RULES = [
   "  display: flex;",
   "  align-items: center;",
   "  gap: var(--wa-space-s);",
+  "}",
+
+  ".beach-subtitle {",
+  "  margin-block: var(--wa-space-3xs) 0;",
+  "  color: var(--wa-color-text-quiet);",
+  "  font-size: var(--wa-font-size-l);",
   "}",
 
   ".beach-meta {",

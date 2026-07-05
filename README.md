@@ -48,11 +48,17 @@ Example response:
         {
           "id": "osm-node-123456",
           "name": "South Beach",
+          "park_name": null,
           "lat": 42.401,
           "lon": -86.288,
           "nws_zone": "MIZ071",
           "osm_id": "node/123456"
         }
+
+`park_name` is the containing park from OpenStreetMap (e.g. `"Holland State Park"`
+for the beach named `"Ottawa Beach"`), or `null` when the beach is not inside any
+named park. The UI titles such beaches by park name with the beach's own name as a
+subtitle.
       ]
     }
 
@@ -205,14 +211,29 @@ Two scheduled triggers run in production (see `wrangler.toml`):
   alerts/SRF and Open-Meteo wave/wind data, runs them through `estimateFlag`, runs the
   official-source scrapers, and writes both to KV (`flag:` + beachId,
   `official:` + beachId) with a 7200 second TTL.
-- `47 8 * * *` (daily, ~03:47 America/New_York) — `runOverpassSync`: queries the
-  Overpass API for named beaches in the pilot bbox, upserts them into D1, and
-  enriches up to 30 beaches/night with their NWS zone + gridpoint URL.
+- `47 8 * * *` (daily, ~03:47 America/New_York) — `runOverpassSync`: two Overpass
+  API queries over the pilot bbox — (1) named `natural=beach` /
+  `leisure=beach_resort` elements, and (2) every `natural=beach` element (named or
+  not) that intersects a NAMED park polygon (`leisure=park`,
+  `leisure=nature_reserve`, or `boundary=protected_area`), plus those park polygons'
+  bounding boxes. Each park-contained beach is associated to the smallest
+  overlapping park bbox and stored with that `park_name`; unnamed park beaches are
+  kept one-per-park (the largest) and take the park's name, because most OSM
+  mappers name the park polygon (Holland State Park) rather than the beach way
+  inside it. Results are upserted into D1, then up to 30 beaches/night are enriched
+  with their NWS zone + gridpoint URL. If the park query fails, the sync degrades
+  to named beaches only and existing `park_name` values are left untouched.
 
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
-developing with `wrangler dev --test-scheduled` and a request to
-`/__scheduled?cron=0+*+*+*+*` (or the daily cron string), or call the exported
-`scheduled` handler directly from a small script.
+developing via the scheduled-handler endpoint:
+
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"   # daily discovery sync
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"    # hourly flag recompute
+
+`npm run seed` / `npm run seed:flags` wrap these two commands. The local database
+starts empty — run `npm run seed` once after a fresh checkout (it queries the live
+Overpass API and takes a couple of minutes). The `--test-scheduled` flag and
+`/__scheduled` path from older wrangler versions no longer exist in wrangler 4.
 
 **Paid-plan assumption**: the hourly job's subrequest budget (~360 subrequests/run for
 the pilot region: alert + SRF + wave + wind fetches plus up to 250 KV writes) exceeds

@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `npm test` — run the full Vitest suite
 - `npx vitest run test/rules.test.js` — run a single test file
-- `npm run dev` — local dev server (`wrangler dev`)
+- `npm run dev` — local dev server (`wrangler dev`; `predev` auto-applies migrations to local D1). Starts with an EMPTY local database — populate it explicitly with `npm run seed`.
+- `npm run seed` — with the dev server running, trigger the daily Overpass discovery cron locally (`curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"`). Hits the live Overpass API and takes ~2 minutes; run it once per fresh database, not on every dev start. `npm run seed:flags` triggers the hourly flag-recompute cron the same way.
+- Cron triggering in local dev goes through `/cdn-cgi/handler/scheduled?cron=<urlencoded cron>` — the old `--test-scheduled` flag and `/__scheduled` path are obsolete in wrangler 4.
 - `npm run deploy` — deploy (`wrangler deploy`); `npx wrangler deploy --dry-run` to validate config without deploying
 - `npx wrangler d1 migrations apply swim-report` — apply `migrations/` to D1
 

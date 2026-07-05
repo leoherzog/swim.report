@@ -40,7 +40,13 @@ below is a contract — match it exactly.
 
     {
       id: "osm-node-123456",        // string, PK: "osm-" + osmType + "-" + osmNumericId
-      name: "South Beach",           // string, never null (unnamed beaches are skipped at sync)
+      name: "South Beach",           // string, never null. Beaches with an OSM name keep it;
+                                     // an unnamed beach survives sync ONLY inside a named park,
+                                     // where name = the park's name (see section 7).
+      park_name: null,               // string or null: name of the containing OSM park
+                                     // (leisure=park / leisure=nature_reserve /
+                                     // boundary=protected_area). Drives park-name-first
+                                     // display (section 9).
       lat: 42.401,                   // number (REAL)
       lon: -86.288,                  // number (REAL)
       nws_zone: "MIZ071",            // string or null (null until enriched by daily sync)
@@ -87,9 +93,9 @@ before this shape existed.
       "updated": "2026-07-04T15:00:04.000Z"
     }
 
-## 2. D1 schema — migrations/0001_init.sql (INFRA)
+## 2. D1 schema — migrations/ (INFRA)
 
-Exact SQL:
+migrations/0001_init.sql, exact SQL:
 
     CREATE TABLE beaches (
       id TEXT PRIMARY KEY,
@@ -110,6 +116,10 @@ Exact SQL:
       value TEXT NOT NULL,
       updated TEXT NOT NULL
     );
+
+migrations/0002_park_name.sql:
+
+    ALTER TABLE beaches ADD COLUMN park_name TEXT;
 
 - idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
@@ -324,6 +334,38 @@ and return null.
       //                    name: string, lat: number, lon: number }
       // Failure -> null (never a partial throw).
 
+    export async function fetchParkBeaches(bbox)
+      // Park-containment discovery. Most OSM mappers name the park polygon
+      // (Holland State Park) and leave the beach way inside it unnamed, so the
+      // named-beach query above misses most state park swim beaches.
+      // One POST with query (timeout 180):
+      //   ( way/relation["leisure"="park"]["name"](bbox);
+      //     way/relation["leisure"="nature_reserve"]["name"](bbox);
+      //     way/relation["boundary"="protected_area"]["name"](bbox); )->.parks;
+      //   .parks map_to_area->.pa;
+      //   nwr["natural"="beach"](area.pa)(bbox)->.b;
+      //   .b out tags bb;
+      //   .parks out tags bb;
+      // All three park tag filters are REQUIRED (verified: Van Buren State Park MI
+      // is nature_reserve + protected_area, not leisure=park). Association happens
+      // locally, NOT via Overpass is_in (is_in only accepts nodes) and NEVER via
+      // name-based area lookup (name collisions across states: Silver Lake State
+      // Park exists in MI, NH, and VT).
+      // Return: array of { osmType, osmId, name: string|null, lat, lon,
+      //                    areaDeg2: number (beach bbox area, ranking only),
+      //                    parkName: string|null, parkKey: "relation/8550215"|null }
+      // (lat/lon = bbox center for ways/relations). Failure -> null.
+
+    export function parseParkBeachElements(elements)
+      // Pure, exported for tests. Raw Overpass elements -> { beaches, parks }.
+      // Element with natural=beach -> beach (even when also park-tagged); named
+      // element with a park tag -> park; no usable coords -> skipped.
+
+    export function associateParkForBeach(beach, parks)
+      // Pure, exported for tests. Smallest-bbox-area park whose bounding box
+      // OVERLAPS the beach's bounding box (overlap, not center containment —
+      // shoreline beach polygons bulge lakeward past the park boundary), or null.
+
 ## 6. Official sources (CLIENTS)
 
 ### src/officialSources/index.js
@@ -428,16 +470,29 @@ the Lower and eastern Upper Peninsula):
 Nationwide scale-out (tiled bboxes over CONUS coasts, queued) is explicitly a TODO.md item —
 do NOT attempt it now.
 
-1. const rows = await fetchBeaches(PILOT_BBOX); if null, log and abort (keep existing data).
-2. Upsert every row via env.DB.batch of prepared statements:
-     INSERT INTO beaches (id, name, lat, lon, osm_id) VALUES (?1, ?2, ?3, ?4, ?5)
-     ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4;
-   (nws_zone / nws_grid_url intentionally untouched on conflict.)
-3. NWS enrichment (rate-limited): SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL
+1. const namedRows = await fetchBeaches(PILOT_BBOX); if null, log and abort (keep existing data).
+2. const parkBeaches = await fetchParkBeaches(PILOT_BBOX); if null, log and DEGRADE:
+   continue with named rows only and leave every existing park_name untouched.
+3. mergeBeachRows(namedRows, parkBeaches) — pure, exported from src/index.js:
+   - named beach also found inside a park -> parkName attached;
+   - unnamed beach kept ONLY when park-associated, and only the LARGEST (by bbox
+     area) unnamed beach per park ELEMENT (parkKey, so two same-named parks in
+     different towns stay distinct) survives; its name becomes the park name
+     (several identical "X State Park" rows would be indistinguishable in the UI —
+     TODO.md records the limitation);
+   - returns { rows: [{ id, name, lat, lon, osmId, parkName }], skippedUnnamed }.
+4. Upsert every merged row via env.DB.batch of prepared statements:
+     INSERT INTO beaches (id, name, lat, lon, osm_id, park_name)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6;
+   (nws_zone / nws_grid_url intentionally untouched on conflict.) When step 2
+   failed, use the legacy statement WITHOUT park_name so stale associations
+   survive an Overpass outage.
+5. NWS enrichment (rate-limited): SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL
    ORDER BY id LIMIT 30; for each, fetchPointMetadata(lat, lon) sequentially; on success
    UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?. 30/night drains the
    backlog over successive nights; failures stay null and are retried next night.
-4. Write sync_meta rows last_overpass_sync (nowIso) and last_overpass_count.
+6. Write sync_meta rows last_overpass_sync (nowIso) and last_overpass_count.
 
 ## 8. HTTP surface (INFRA — src/router.js, src/index.js)
 
@@ -464,9 +519,9 @@ Routing table (method GET only; anything else → 405):
 
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
-| GET /?near=lat,lon        | handleHome     | With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches ORDER BY name LIMIT 100. KV: flag:/official: per displayed row | HTML renderListPage (entries carry distanceMi and sortedByProximity when located) |
+| GET /?near=lat,lon        | handleHome     | With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches ORDER BY COALESCE(park_name, name), name LIMIT 100 (alphabetical by DISPLAY name — section 9). KV: flag:/official: per displayed row | HTML renderListPage (entries carry distanceMi and sortedByProximity when located) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official:           | HTML renderDetailPage; 404 HTML if no row |
-| GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 LIMIT 500 | JSON { "beaches": [BeachRow...] } |
+| GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 LIMIT 500 | JSON { "beaches": [BeachRow...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1 row exists check; KV flag: + official:    | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -563,8 +618,17 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Stale-data warning: if (Date.parse(nowIso) - Date.parse(x.updated)) > 7200000 for either
   card, append a visible warning inside that card, exact text:
     "Stale data — last updated " + x.updated + " UTC"
+- Park-name-first display (both pages): displayName = beach.park_name || beach.name;
+  a subtitle with beach.name renders ONLY when park_name is set AND differs from
+  name ("Holland State Park" title with quiet "Ottawa Beach" subtitle; unnamed park
+  beaches have name === park_name at sync time, so no subtitle). List rows put the
+  subtitle in span.beach-row-subtitle inside the name span; the detail page puts it
+  in p.beach-subtitle directly under the h1 and uses displayName in the h1 and the
+  document <title>. The row's data-name search attribute is the lowercased
+  park_name + " " + name so search matches either.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
-  name, estimated flag chip, and OFFICIAL badge when official is non-null.
+  the display name (plus subtitle when applicable), estimated flag chip, and OFFICIAL
+  badge when official is non-null.
 - Detail page, in order: h1 title with a colorized flag icon on the left (official color
   when available, else estimate color, else gray unknown) + beach name; lat/lon meta line;
   wave map section; official card (if any); estimate card with full reason + a
@@ -644,6 +708,20 @@ e.g. a fixture containing lines like:
 8. Product text with no rip mention → null.
 9. null input → null; "" → null.
 10. wfoFromGridUrl("https://api.weather.gov/gridpoints/GRR/33,33") → "GRR"; null / garbage → null.
+
+### test/parkContainment.test.js
+
+- parseParkBeachElements: beach/park split, bbox-center coords, node beaches,
+  skips (unnamed parks, coordinate-less elements), beach-and-park dual tagging
+  counts as beach only.
+- associateParkForBeach: smallest overlapping bbox wins; OVERLAP not center
+  containment (lakeward-bulging beach fixture); null when nothing overlaps.
+- mergeBeachRows: parkName attachment for named beaches, largest-unnamed-per-park
+  selection with name = park name, parkKey keeps same-named parks distinct,
+  unnamed-without-park skipped, id/osm_id derivation.
+- Rendering: park name as row title with beach-name subtitle, no subtitle when
+  names match or park_name is null, detail <title>/h1/subtitle, data-name carries
+  both names for search.
 
 ### test/officialSources.test.js (CLIENTS, optional)
 

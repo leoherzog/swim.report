@@ -8,7 +8,7 @@ import {
 } from "./clients/nws.js";
 import { parseRipCurrentRisk } from "./clients/srfParser.js";
 import { fetchWaveHeightsFt, fetchWinds } from "./clients/openMeteo.js";
-import { fetchBeaches } from "./clients/overpass.js";
+import { fetchBeaches, fetchParkBeaches } from "./clients/overpass.js";
 import { findScraper, scrapeOfficialFlag } from "./officialSources/index.js";
 
 const MAX_BEACHES_PER_RUN = 250;
@@ -282,25 +282,112 @@ async function runFlagRecompute(env) {
   }
 }
 
+// Pure; exported for tests. Merges the named-beach rows with the
+// park-contained beaches (which include unnamed elements):
+// - a named beach inside a park gains that park's name as parkName;
+// - unnamed beaches are kept only when a park was associated, and only the
+//   LARGEST (by bounding-box area) unnamed beach per park element survives —
+//   several identical "X State Park" rows would be indistinguishable in the
+//   UI, so the pilot keeps one per park (TODO.md notes the limitation). Its
+//   display name becomes the park name.
+// Returns { rows: [{ id, name, lat, lon, osmId, parkName }], skippedUnnamed }.
+export function mergeBeachRows(namedRows, parkBeaches) {
+  const byId = new Map();
+  for (const row of namedRows) {
+    const id = "osm-" + row.osmType + "-" + String(row.osmId);
+    byId.set(id, {
+      id: id,
+      name: row.name,
+      lat: row.lat,
+      lon: row.lon,
+      osmId: row.osmType + "/" + String(row.osmId),
+      parkName: null
+    });
+  }
+
+  let skippedUnnamed = 0;
+  const largestUnnamedByPark = new Map();
+  for (const beach of parkBeaches) {
+    const id = "osm-" + beach.osmType + "-" + String(beach.osmId);
+    if (beach.name) {
+      const existing = byId.get(id);
+      if (existing) {
+        existing.parkName = beach.parkName;
+      } else {
+        byId.set(id, {
+          id: id,
+          name: beach.name,
+          lat: beach.lat,
+          lon: beach.lon,
+          osmId: beach.osmType + "/" + String(beach.osmId),
+          parkName: beach.parkName
+        });
+      }
+      continue;
+    }
+    if (beach.parkName === null || beach.parkKey === null) {
+      skippedUnnamed = skippedUnnamed + 1;
+      continue;
+    }
+    const current = largestUnnamedByPark.get(beach.parkKey);
+    if (!current || beach.areaDeg2 > current.areaDeg2) {
+      if (current) {
+        skippedUnnamed = skippedUnnamed + 1;
+      }
+      largestUnnamedByPark.set(beach.parkKey, beach);
+    } else {
+      skippedUnnamed = skippedUnnamed + 1;
+    }
+  }
+
+  for (const beach of largestUnnamedByPark.values()) {
+    const id = "osm-" + beach.osmType + "-" + String(beach.osmId);
+    if (!byId.has(id)) {
+      byId.set(id, {
+        id: id,
+        name: beach.parkName,
+        lat: beach.lat,
+        lon: beach.lon,
+        osmId: beach.osmType + "/" + String(beach.osmId),
+        parkName: beach.parkName
+      });
+    }
+  }
+
+  return { rows: Array.from(byId.values()), skippedUnnamed: skippedUnnamed };
+}
+
 async function runOverpassSync(env) {
   const nowIso = new Date().toISOString();
   let processed = 0;
   let enrichmentFailures = 0;
 
   try {
-    const rows = await fetchBeaches(PILOT_BBOX);
-    if (rows === null) {
+    const namedRows = await fetchBeaches(PILOT_BBOX);
+    if (namedRows === null) {
       console.log("index: overpass sync aborted, fetchBeaches returned null");
       return;
     }
 
-    const statements = rows.map(function (row) {
-      const id = "osm-" + row.osmType + "-" + String(row.osmId);
-      const osmId = row.osmType + "/" + String(row.osmId);
+    // Park containment: failures degrade to the named-only sync and leave
+    // every existing park_name untouched (legacy statement below).
+    const parkBeaches = await fetchParkBeaches(PILOT_BBOX);
+    if (parkBeaches === null) {
+      console.log("index: fetchParkBeaches returned null, keeping existing park associations");
+    }
+
+    const merged = mergeBeachRows(namedRows, parkBeaches === null ? [] : parkBeaches);
+    const statements = merged.rows.map(function (row) {
+      if (parkBeaches === null) {
+        return env.DB.prepare(
+          "INSERT INTO beaches (id, name, lat, lon, osm_id) VALUES (?1, ?2, ?3, ?4, ?5) " +
+          "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4"
+        ).bind(row.id, row.name, row.lat, row.lon, row.osmId);
+      }
       return env.DB.prepare(
-        "INSERT INTO beaches (id, name, lat, lon, osm_id) VALUES (?1, ?2, ?3, ?4, ?5) " +
-        "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4"
-      ).bind(id, row.name, row.lat, row.lon, osmId);
+        "INSERT INTO beaches (id, name, lat, lon, osm_id, park_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6) " +
+        "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6"
+      ).bind(row.id, row.name, row.lat, row.lon, row.osmId, row.parkName);
     });
 
     if (statements.length > 0) {
@@ -336,8 +423,11 @@ async function runOverpassSync(env) {
       "ON CONFLICT(key) DO UPDATE SET value = ?2, updated = ?3"
     ).bind("last_overpass_count", String(processed), nowIso).run();
 
+    const withPark = merged.rows.filter(function (r) { return r.parkName !== null; }).length;
     console.log(
       "index: overpass sync complete, processed=" + String(processed) +
+      " with_park=" + String(withPark) +
+      " skipped_unnamed=" + String(merged.skippedUnnamed) +
       " enrichment_attempted=" + String(toEnrich.length) +
       " enrichment_failures=" + String(enrichmentFailures)
     );
