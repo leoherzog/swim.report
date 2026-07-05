@@ -1,0 +1,15 @@
+name = "swim-report"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+[triggers]
+crons = ["0 * * * *", "47 8 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "swim-report"
+database_id = "TODO-set-after-wrangler-d1-create"
+
+[[kv_namespaces]]
+binding = "FLAGS"
+id = "TODO-set-after-wrangler-kv-namespace-create"

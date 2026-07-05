@@ -1,0 +1,21 @@
+{
+  "name": "swim-report",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Estimated beach hazard flag status for US beaches — swim.report",
+  "scripts": {
+    "predev": "wrangler d1 migrations apply swim-report --local",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9",
+    "wrangler": "^4.107.0"
+  },
+  "dependencies": {
+    "@awesome.me/kit-ddd41b2d81": "^1.0.2",
+    "@web.awesome.me/webawesome-pro": "^3.10.0"
+  }
+}
