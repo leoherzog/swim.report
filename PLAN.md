@@ -51,7 +51,16 @@ below is a contract — match it exactly.
       lon: -86.288,                  // number (REAL)
       nws_zone: "MIZ071",            // string or null (null until enriched by daily sync)
       nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33", // string or null
-      osm_id: "node/123456"          // string: osmType + "/" + osmNumericId
+      osm_id: "node/123456",         // string: osmType + "/" + osmNumericId
+      webcam_id: "1595253287",       // string or null: Windy webcamId of the nearest active cam
+      webcam_title: "Indian Grove: South Haven", // string or null (may be "")
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+                                     // string or null: Windy embed player URL (live variant
+                                     // preferred when the cam offers one)
+      webcam_checked: "2026-07-06T08:47:12.000Z"
+                                     // string or null: when the Windy lookup last COMPLETED
+                                     // for this row (success or confirmed no-cam); null =
+                                     // never checked. Drives the 14-day recheck queue.
     }
 
 ### FlagEstimate (output of estimateFlag; the KV value under "flag:" + beachId)
@@ -84,7 +93,8 @@ before this shape existed.
 
     {
       "beachId": "osm-node-123456",
-      "color": "red",                // "green" | "yellow" | "red" (scraper-dependent set)
+      "color": "red",                // "green" | "yellow" | "red" | "double-red"
+                                     // (scraper-dependent subset)
       "reason": "Official flag reported by City of South Haven Beach Flag Program",
       "official": true,
       "scraperId": "south-haven-mi",
@@ -121,6 +131,38 @@ migrations/0002_park_name.sql:
 
     ALTER TABLE beaches ADD COLUMN park_name TEXT;
 
+migrations/0003_enrichment_attempts.sql:
+
+    ALTER TABLE beaches ADD COLUMN enrichment_attempts INTEGER NOT NULL DEFAULT 0;
+
+  Per-row counter of failed fetchPointMetadata attempts (see section 7 step 5).
+  Non-US points swept in by PILOT_BBOX (Ontario shoreline) 404 on
+  api.weather.gov and stay nws_zone IS NULL forever; without a cap they sort
+  first under ORDER BY id and permanently occupy the enrichment batch, starving
+  US beaches. The enrichment query skips rows at the cap
+  (enrichment_attempts >= 5).
+
+migrations/0004_recompute_updated.sql:
+
+    ALTER TABLE beaches ADD COLUMN recompute_updated TEXT;
+
+  ISO timestamp of the last time runFlagRecompute processed this row (stamped
+  in one D1 batch at the end of each hourly run). Drives the recompute
+  rotation: the hourly SELECT orders by recompute_updated ASC (NULLs sort
+  first) so never-recomputed and longest-waiting beaches always go first.
+
+migrations/0005_webcams.sql:
+
+    ALTER TABLE beaches ADD COLUMN webcam_id TEXT;
+    ALTER TABLE beaches ADD COLUMN webcam_title TEXT;
+    ALTER TABLE beaches ADD COLUMN webcam_player_url TEXT;
+    ALTER TABLE beaches ADD COLUMN webcam_checked TEXT;
+
+  Nearest Windy webcam per beach, hydrated by the daily sync (section 7 step 6).
+  webcam_checked is the completion timestamp of the last Windy lookup (set on
+  success AND on a confirmed "no cam within radius"; left untouched on API
+  failure so the row stays at the front of the recheck queue).
+
 - idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
   key "last_overpass_count" (value = String(count)).
@@ -136,6 +178,9 @@ Binding name: FLAGS (single namespace for both key families).
   { expirationTtl: 7200 }.
 - Key "official:" + beachId → JSON.stringify(OfficialFlag). Written by hourly cron with
   { expirationTtl: 7200 }.
+- Key "scraperhealth:" + scraperId → JSON { consecutiveNulls, lastSuccess,
+  lastFailure }. Written by the hourly cron with NO expirationTtl (the failure
+  streak must survive across runs). See section 7 step 8.
 
 Never written from the fetch handler. Absent/expired key means "no data": API returns null
 for that slot; frontend renders gray "unknown" for a missing estimate and simply omits the
@@ -312,6 +357,91 @@ and return null.
       //           sourceUrl: the request URL }
       // Total request failure -> null.
 
+### src/clients/glerl.js
+
+Great Lakes wave gap-filler: Open-Meteo's wave models frequently return masked/null
+cells on the Great Lakes, so beaches Open-Meteo leaves wave-null are filled from real
+buoy observations served by the GLOS Seagull REST API (unauthenticated JSON,
+10-minute cadence). NOTE: the true gridded source (NOAA GLCFS via the GLOS/Axiom
+ERDDAP at erddap.axiomdatascience.com) was hard-down (HTTP 502) when this was built,
+so this is NEAREST-BUOY point data, not grid interpolation — a beach only gets a
+reading when a wave-reporting buoy sits within MAX_PLATFORM_DISTANCE_KM (25); beyond
+that it stays null so a distant buoy is never presented as the beach's condition.
+Great Lakes buoys are seasonal (many pulled Nov-Apr): winter coverage collapsing to
+null is expected behavior, not an error.
+
+    export const SEAGULL_API_BASE = "https://seagull-api.glos.org/api/v1";
+    export const SEAGULL_PLATFORMS_URL   // SEAGULL_API_BASE + "/obs-datasets.geojson"
+    export const SEAGULL_PARAMETERS_URL  // SEAGULL_API_BASE + "/parameters"
+    export const SEAGULL_INFO_URL = "https://seagull.glos.org/";
+      // human-readable portal for source { url } entries — never the raw API request
+    export const GLCFS_WAVE_MODEL = "glos_seagull_buoy";
+      // model string reported in result entries; WAVE_MODEL_LABELS (section 7) maps it
+    export const MAX_PLATFORM_DISTANCE_KM = 25;
+    export const MAX_OBS_AGE_MS = 7200000;      // matches the product-wide 2 h stale rule
+    export const MAX_PLATFORM_FETCHES = 60;     // hard cap on per-run obs fetches
+
+    export async function fetchGlcfsWaveHeightsFt(points, nowIso)
+      // points: [{ beachId, lat, lon }]; nowIso drives ALL freshness math (no Date.now()).
+      // EXACTLY openMeteo.fetchWaveHeightsFt's result shape:
+      //   { results: { beachId -> { waveHeightFt: number|null, model: GLCFS_WAVE_MODEL|null } },
+      //     sourceUrl }
+      //   Every input beachId MUST appear in results (nulls on miss).
+      // Flow: fetch the platform geojson + parameter catalog (2 subrequests), map each
+      // beach to its nearest wave platform within 25 km, dedup platforms, then one
+      // /obs?obsDatasetId=N&startDate=<UTC date of nowIso - 2 h> fetch per UNIQUE
+      // platform (capped at MAX_PLATFORM_FETCHES, small concurrency batches). There is
+      // no working single-parameter filter upstream — fetch all params and select
+      // standard_name "sea_surface_wave_significant_height" client-side; freshest
+      // observation within the 2 h window wins; value is METERS -> * 3.28084 to feet.
+      // A failed platform fetch nulls only that platform's beaches. Total failure
+      // (either catalog fetch, unparseable nowIso) -> null.
+      // Subrequest cost: <= 2 + MAX_PLATFORM_FETCHES = 62 worst case (budget math in
+      // the module and section 7).
+
+    Pure helpers, exported for tests: parseWaveParameterIds(paramsJson) -> Set of
+    wave parameter_ids (per-platform ids; empty Set on malformed input);
+    parseWavePlatforms(geojson) -> [{ obsDatasetId, lat, lon }] wave platforms only;
+    nearestWavePlatform(lat, lon, platforms) -> { obsDatasetId, distanceKm } | null;
+    obsStartDateUtc(nowIso) -> "YYYY-MM-DD" | null; parseObsWaveHeightFt(obsJson,
+    obsDatasetId, waveParameterIds, nowIso) -> feet | null (stale/ambiguous/malformed
+    degrades to null, never an old number); distanceKm(lat1, lon1, lat2, lon2).
+
+### src/clients/windyWebcams.js
+
+Nearest-webcam lookup against the Windy Webcams API v3 (free tier; header
+auth). The FREE tier's still-image URLs expire in ~15 minutes so images are
+useless under this architecture — the client deliberately captures ONLY the
+embed PLAYER URL, which is durable and rendered browser-side (section 9).
+Requires the WINDY_WEBCAM_API_TOKEN secret (.dev.vars locally,
+`wrangler secret put` in production); the daily cron skips webcam hydration
+entirely when it is unset.
+
+    export const WINDY_WEBCAMS_API_URL = "https://api.windy.com/webcams/api/v3/webcams";
+    export const WINDY_WEBCAMS_INFO_URL = "https://www.windy.com/webcams";
+      // human-readable page for attribution links — never the raw API request
+    export const WEBCAM_RADIUS_KM = 5;     // beyond this a cam is not "at the beach"
+    export const WEBCAM_FETCH_LIMIT = 50;  // API max per request
+
+    export function parseNearestActiveWebcam(json, lat, lon)
+      // Pure, exported for tests. Parsed v3 /webcams body ->
+      //   { webcamId: "1595253287" (String()-coerced), title: string ("" fallback),
+      //     playerUrl: player.live when a non-empty string else player.day }
+      //   or null when no usable cam. Skips entries that are not objects, whose
+      //   status !== "active" (inactive cams DO appear in nearby results), whose
+      //   player object has neither a usable .live nor .day string, or whose
+      //   location.latitude/.longitude are not finite. Nearest by haversine
+      //   (distanceKm imported from ./glerl.js). Malformed input -> null.
+
+    export async function fetchNearestWebcam(lat, lon, apiKey)
+      // GET WINDY_WEBCAMS_API_URL + "?nearby=" + lat + "," + lon + "," +
+      //   WEBCAM_RADIUS_KM + "&include=player,location&limit=" + WEBCAM_FETCH_LIMIT
+      //   with header { "x-windy-api-key": apiKey }.
+      // HTTP success -> { webcam: parseNearestActiveWebcam(...) } — webcam: null is a
+      //   CONFIRMED "no cam within radius" (cron stamps webcam_checked and clears the
+      //   webcam columns). Falsy apiKey or any transport/HTTP/parse failure -> null
+      //   (unknown — cron leaves the row untouched for the next nightly run).
+
 ### src/clients/overpass.js
 
     export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
@@ -371,18 +501,64 @@ and return null.
 ### src/officialSources/index.js
 
     import { southHaven } from "./southHaven.js";
+    // ...one import per registered scraper module (see the registry list below)
 
-    export const scrapers = [southHaven];   // registry; append future scrapers here
+    // Registry, ordered MOST-SPECIFIC-MATCH FIRST (findScraper returns the first
+    // scraper whose matches(beach) is true): tight single-city boxes and
+    // fixed-site scrapers, then regional tables, then broad statewide bboxes.
+    export const scrapers = [
+      southHaven,          // south-haven-mi        — city flag CSV (multi-site)
+      lenawee,             // lenawee-mi            — 2 fixed county HD sites
+      metroparks,          // huron-clinton-metroparks — 4 fixed beaches, closure-only
+      michiganCity,        // michigan-city-in      — 2 fixed sites, E. coli prose
+      ohioBeachGuard,      // ohio-beachguard       — 4 hardcoded ODH BeachGuard ids
+      hdnwMichigan,        // hdnw-michigan         — 4-county WQI table (~32 beaches)
+      bldhd,               // bldhd-mi              — Benzie/Leelanau weekly report
+      chicagoParkDistrict, // chicago-park-district — lakefront flag JSON (~23 beaches)
+      wisconsinDnr         // wisconsin-dnr         — statewide ArcGIS layer (441 rows)
+    ];
+
+    export const DEFAULT_SITE_RADIUS_MI = 1.5;
 
     export function findScraper(beach)
       // BeachRow -> scraper object | null; first scraper whose matches(beach) is true.
 
-    export async function scrapeOfficialFlag(beach, nowIso)
-      // -> OfficialFlag | null. Finds scraper, awaits scraper.scrape(nowIso) inside
-      // try/catch, returns null on no-scraper / any error / null parse. On success stamps
-      // beachId: beach.id onto the result.
+    export function distanceMi(lat1, lon1, lat2, lon2)
+      // Pure. Haversine great-circle distance in statute miles.
 
-### Scraper contract (every registry entry)
+    export function resolveSiteForBeach(beach, sites)
+      // Pure. BeachRow + sites[] (multi-site shape below) -> site | null.
+      // Pass 1 — name match wins over proximity: return the FIRST site, in array
+      // order, with any names[] entry contained as a substring of
+      // ((beach.park_name || "") + " " + beach.name).toLowerCase().
+      // Pass 2 — else return the NEAREST site with numeric lat/lon whose
+      // distanceMi to the beach is <= its radiusMi (default
+      // DEFAULT_SITE_RADIUS_MI = 1.5). Else null.
+
+    export function scrapeOfficialFlagFromResult(beach, scraper, result)
+      // Pure (no fetch) -> OfficialFlag | null. Resolves an ALREADY-FETCHED
+      // scrape result for one beach; handles both result shapes below; never
+      // mutates result; wrapped in try/catch (any error -> null).
+      // Legacy shape (a): copy the result with beachId (and official: true,
+      // scraperId defaulted to scraper.id) stamped on.
+      // Multi-site shape (b): resolveSiteForBeach; no site -> null; else build
+      // { beachId, color: site.color, reason: site.reason (fallback "Official
+      // flag reported by " + scraper.label), official: true,
+      // scraperId: scraper.id, source: result.source, sources: result.sources,
+      // updated: site.updated when it is a non-empty string, else
+      // result.updated } — periodic sources stamp each site with the reading's
+      // own timestamp so the UI stale-data warning stays honest.
+      // Either shape: a color outside green/yellow/red/double-red -> null
+      // (never guess a color).
+
+    export async function scrapeOfficialFlag(beach, nowIso)
+      // -> OfficialFlag | null. Finds scraper, awaits scraper.scrape(nowIso)
+      // inside try/catch, resolves via scrapeOfficialFlagFromResult. Returns
+      // null on no-scraper / any error / null parse / no site resolved.
+      // Convenience single-beach path — the hourly cron instead calls each
+      // scraper's scrape() ONCE and reuses the result (section 7 step 8).
+
+### Scraper contract v2 (every registry entry)
 
     {
       id: "south-haven-mi",              // stable string
@@ -390,8 +566,37 @@ and return null.
       url: "https://...",                // page scraped; goes into source/sources
       matches: function(beach) { ... },  // BeachRow -> boolean, pure
       scrape: async function(nowIso) { ... }
-      // -> { color, reason, official: true, scraperId: id, source: url, sources: [url],
-      //      updated: nowIso } | null on any failure or unparseable page
+      // -> result | null on any failure or unparseable page. Result is EITHER:
+      //
+      // (a) legacy single-color — applied to EVERY matched beach:
+      //   { color, reason, official: true, scraperId: id, source: url,
+      //     sources: [url], updated: nowIso }
+      //
+      // (b) multi-site — each matched beach resolves to at most one site:
+      //   { perBeach: true,
+      //     sites: [
+      //       { siteId,                       // stable per-site string
+      //         color,                        // "green"|"yellow"|"red"|"double-red"
+      //         reason,                       // per-site reason string
+      //         names: ["south beach", ...],  // OPTIONAL lowercase substrings
+      //         lat, lon,                     // OPTIONAL site coordinates
+      //         radiusMi,                     // OPTIONAL, default 1.5
+      //         updated }                     // OPTIONAL ISO string; overrides
+      //                                       // the result-level updated
+      //     ],
+      //     source: url, sources: [url], updated: nowIso }
+      //   Each site must carry names[] and/or lat+lon (a site with neither can
+      //   never be resolved). Sites the source reports without a usable color
+      //   (unmonitored, "no flag", unparseable) must simply be OMITTED from
+      //   sites — a beach that resolves to no site gets no official flag.
+      //   updated honesty: real-time sources (live flag feeds) use nowIso;
+      //   PERIODIC sources (E. coli sampling, weekly reports, advisory issue
+      //   dates) must stamp the source's own report/sample timestamp — result
+      //   level when the whole page shares one date (michiganCity, bldhd), or
+      //   per-site updated when readings differ per beach (lenawee, hdnw,
+      //   wisconsinDnr, ohioBeachGuard advisories). Stamping nowIso on a
+      //   days-old reading would suppress the frontend's 2 h stale-data
+      //   warning and present old data as fresh.
     }
 
 ### src/officialSources/southHaven.js
@@ -399,66 +604,194 @@ and return null.
     export const SOUTH_HAVEN_URL =
       "https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php";
 
-    export function parseSouthHavenHtml(html)
-      // Pure, exported for tests. string | null -> "green" | "yellow" | "red" | null.
-      // The page marks current status with flag images Green.png / Yellow.png / Red.png /
-      // Grey2.png. Parse: first match of /\b(Green|Yellow|Red|Grey|Gray)2?\.png\b/i.
-      // Green/Yellow/Red -> lowercase color. Grey/Gray (unmonitored 9pm-9am / off-season)
-      // -> null (no official data; do NOT fabricate "unknown" official status).
+    // NOTE: the flag PAGE carries only a STATIC LEGEND (Green/Yellow/Red/Grey2.png
+    // images explaining what the colors mean) — it must NEVER be parsed for a live
+    // color (doing so reported official green 24/7). The live feed is the published
+    // Google Sheet linked from the page as the "text version" (ADA alternative): a
+    // headerless CSV, one sentence per line, e.g. "Flag #6 North Beach is Green" /
+    // "North Pier is Open". Flags #6-#9 belong to North Beach, #10-#12 to South
+    // Beach (multiple poles per named beach); same-named flags roll up to the most
+    // severe color. Gray/Grey = unmonitored (9pm-9am local / Sept 15 - May 15
+    // off-season) and maps to NO DATA for that site, never a color.
 
-    export const southHaven = { ...scraper contract... }
+    export function parseSouthHavenCsv(text)
+      // Pure, exported for tests. CSV string -> multi-site sites[] (shape (b)) or null.
+      // Every non-empty line must match /^Flag #(\d+) (.+?) is ([A-Za-z-]+)$/ or the
+      // pier line /^(North|South) Pier is (Open|Closed)$/, else the WHOLE parse
+      // returns null (never guess around a new format). A color outside
+      // green/yellow/red/gray/grey fails the whole parse. Gray/Grey flags are
+      // unmonitored: a site whose flags are all gray, or that mixes gray with real
+      // colors, is OMITTED (no data). Same-named flags roll up to red > yellow >
+      // green. A flag line naming a beach not in SITE_DEFS is skipped. Returns [] when
+      // every site is gray (distinct from null = unparseable).
+
+    export function extractSouthHavenCsvUrl(html)
+      // Pure, exported for tests. Flag-page HTML -> canonical pub?gid=...&single=true
+      // &output=csv export URL, or null. Handles pubhtml/pub hrefs with &amp;-encoded
+      // queries; rebuilds from the discovered publish id + gid so a re-published sheet
+      // keeps working. Requires a gid; returns null otherwise.
+
+    export const southHaven = { ...scraper contract (shape (b), perBeach) ... }
       // matches(beach): /south haven/i.test(beach.name) === true, OR
       //   (beach.lat >= 42.35 && beach.lat <= 42.45 && beach.lon >= -86.32 && beach.lon <= -86.24)
       //   (covers South Beach / North Beach / Packard Park rows from OSM).
-      // scrape(nowIso): fetch SOUTH_HAVEN_URL (plain GET, default UA is fine — not an NWS
-      //   host), parseSouthHavenHtml, and on a color build:
-      //   reason: "Official flag reported by City of South Haven Beach Flag Program"
+      // scrape(nowIso): GET SOUTH_HAVEN_URL with a User-Agent (the .gov host 403s
+      //   without one) to discover the CSV href via extractSouthHavenCsvUrl (fallback
+      //   SOUTH_HAVEN_CSV_URL); GET that CSV with redirect:"follow" (the docs.google
+      //   pub URL 307s to a signed, single-use googleusercontent URL — never cache it);
+      //   parseSouthHavenCsv. Returns { perBeach: true, sites, source, sources, updated:
+      //   nowIso } or null when unparseable / every site gray. Per-site reason:
+      //   "Official flag reported by City of South Haven Beach Flag Program for <label>".
       // South Haven has no double-red tier; red means water closed. Map red -> "red".
+
+### Other registered scrapers (all multi-site shape (b); one module + one test file each)
+
+Every scraper below follows contract v2: pure exported parse function(s) tested
+against inline fixtures, scrape(nowIso) wrapped in try/catch returning null on
+ANY failure, and ambiguous / stale / unrecognized-status sites OMITTED (never a
+guessed color). Full color semantics are in README.md's official-sources table.
+
+- src/officialSources/lenawee.js (lenawee-mi) — Lenawee County Health Dept page,
+  Hayes State Park + Lake Hudson Rec Area. "No Advisory Posted" -> green; any
+  other status text logged + omitted; shared "Last Updated" older than 10 days
+  vs nowIso omits both sites. Per-site updated = the page's own Last Updated
+  timestamp (periodic source — never nowIso).
+- src/officialSources/metroparks.js (huron-clinton-metroparks) — Metroparks
+  park-closures page, panels scoped by id (Kensington / Stony Creek), 4 beaches.
+  CLOSURE-ONLY: "Closed" -> red; "Open" -> site omitted (never an asserted
+  green). Sites are name-resolved only (no lat/lon) so an open sibling beach
+  can never inherit its neighbor's red by proximity. Excludes Lake St. Clair
+  Metropark (that page entry defers to EGLE BeachGuard).
+- src/officialSources/michiganCity.js (michigan-city-in) — Washington Park
+  prose block with per-site E. coli readings; page's own thresholds <=235 green,
+  236-999 yellow, >=1000 red; reading date parsed from the page, >8 days stale
+  -> null; updated = reading date (honest, may trip the UI stale warning).
+- src/officialSources/ohioBeachGuard.js (ohio-beachguard) — ODH BeachGuard
+  public API, 4 hardcoded beach ids (162/153/154/148), one GET per id with
+  per-id failure isolation. Out-of-season -> omitted; current advisory -> red
+  for HAB_WARNING/severity>=4 else yellow; in-season with zero current
+  advisories -> affirmative green (BeachGuard is Ohio's official statewide
+  advisory system of record). Advisory sites carry per-site updated = the
+  advisory's issue date (startDate); monitored-and-clear greens have no
+  source-side record date, so they fall back to nowIso (the "no advisory"
+  state is live at query time).
+- src/officialSources/hdnwMichigan.js (hdnw-michigan) — Health Dept of NW
+  Michigan WQI table (~32 curated beach names, 4-county bbox). WQI 1/2/3/4 ->
+  green/yellow/red/double-red; samples >8 days old vs nowIso dropped; most
+  recent sample per beach wins; uncurated names skipped. Per-site updated =
+  the row's own sample date (periodic source — never nowIso).
+- src/officialSources/bldhd.js (bldhd-mi) — Benzie-Leelanau District Health
+  Dept weekly "Beach Report M/D/YYYY" table, 10 curated sites. Level 1 -> green;
+  Level 2/3 logged loudly + omitted (on-page semantics unconfirmed — never
+  guess); report older than 8 days (or future-dated) -> null.
+- src/officialSources/chicagoParkDistrict.js (chicago-park-district) — Chicago
+  Park District /flag-status JSON API (~23 lakefront beaches). Per-record 36h
+  staleness gate (payload mixes in prior-season rows); Green/Yellow/Red flag
+  prefixes map directly; "Afterhours" -> red (no-lifeguard closure, noted in
+  reason); unrecognized flags omitted.
+- src/officialSources/wisconsinDnr.js (wisconsin-dnr) — Wisconsin DNR Beach
+  Health ArcGIS layer (441 statewide rows). MAP_STATUS Open -> green, Advisory
+  -> yellow, Closed -> red; Closed For Season / No Data Available / Other
+  Status omitted; SAMPLEDATE older than 21 days vs nowIso omitted; per-site
+  updated = the row's own SAMPLEDATE (periodic source — never nowIso). Sites
+  carry lat/lon + radiusMi 1.0 and deliberately NO names[] (generic statewide names
+  like "North Beach" would win over proximity and mis-bind); its broad bbox
+  overlaps Michigan's western UP, which is safe because unresolved beaches just
+  get no official flag.
 
 ## 7. Cron design (INFRA — src/index.js)
 
 wrangler.toml triggers:
 
     [triggers]
-    crons = ["0 * * * *", "47 8 * * *"]
+    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
 
 scheduled(controller, env, ctx) dispatches on controller.cron:
-- "0 * * * *"  → runFlagRecompute(env)   (hourly)
-- "47 8 * * *" → runOverpassSync(env)    (daily, 08:47 UTC ≈ 3:47am EST / 4:47am EDT — off-peak
-                 for both US users and the Overpass API)
+- "0 * * * *"          → runFlagRecompute(env)  (hourly)
+- "47 8 * * *"         → runOverpassSync(env)   (daily, 08:47 UTC ≈ 3:47am EST / 4:47am EDT —
+                         off-peak for both US users and the Overpass API; discovery ONLY)
+- "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; the 09:17 run picks up rows the
+                         08:47 discovery just inserted)
+- "31 9 * * *"         → runWebcamSync(env)     (daily, shortly after discovery)
 
-Both handlers are invoked via ctx.waitUntil and wrapped in try/catch with console.log of a
-summary line (counts of beaches processed, per-source failure counts).
+The four jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
+independent and a failure in one never starves another (an aborted Overpass sync used to
+skip that night's NWS enrichment and webcam hydration entirely). All handlers are invoked
+via ctx.waitUntil and wrapped in try/catch with console.log of a summary line (counts of
+beaches processed, per-source failure counts).
 
 ### runFlagRecompute (hourly)
 
-Constants: MAX_BEACHES_PER_RUN = 250, OPEN_METEO_BATCH = 50, KV_TTL_SECONDS = 7200.
+Constants: MAX_BEACHES_PER_RUN = 1000, OPEN_METEO_BATCH = 50, KV_TTL_SECONDS = 7200.
+
+MAX_BEACHES_PER_RUN must cover the WHOLE beaches table in one run: the KV TTL is 2 h,
+so any beach not reached every other hourly run has its flag expire and shows "no data"
+until its next rotation turn (at 250 with ~613 pilot rows every beach was flagless
+~1 h out of every 3). 1000 covers the pilot with headroom; nationwide scale-out still
+needs real pagination (TODO.md).
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run).
-2. SELECT * FROM beaches ORDER BY id LIMIT 250 (deterministic order; pilot region fits —
-   nationwide scale-out via cursoring on id is a TODO.md item).
+2. SELECT * FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT 1000
+   (recompute_updated is migration 0004; NULLs sort first, so never-recomputed rows and
+   the longest-waiting rows always go first — a fair rotation if the table ever exceeds
+   the limit).
 3. Alerts: build the set of distinct non-null nws_zone values; fetchActiveAlertEvents once
    per zone; store in a Map. Zones whose fetch failed map to null.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
 5. Waves: fetchWaveHeightsFt in batches of 50 (Promise.allSettled across batches; a failed
    batch yields nulls for its beaches only).
-6. Wind: only for beaches whose waveHeightFt is null — fetchWinds in batches of 50.
+   5b. Great Lakes buoy gap-fill: for beaches STILL wave-null after step 5, one
+   fetchGlcfsWaveHeightsFt(points, nowIso) call (src/clients/glerl.js — it dedups
+   buoy fetches internally, <= 62 subrequests). Non-null readings overwrite the
+   beach's wave entry with { waveHeightFt, model: GLCFS_WAVE_MODEL }; where
+   Open-Meteo answered, behavior is unchanged. A null return (total failure) just
+   logs — the affected beaches fall through to wind as before.
+6. Wind: only for beaches whose waveHeightFt is null after steps 5 + 5b — fetchWinds
+   in batches of 50.
 7. Per beach: assemble inputs (nulls for anything missing), sources = array of
    { label, url } entries (section 1) for every source that returned data for THIS
    beach — alerts: "NWS active alerts for zone " + zone; SRF: "NWS Surf Zone Forecast
-   (" + productId + ")"; waves: waveSourceLabel(model) from WAVE_MODEL_LABELS; wind:
+   (" + productId + ")"; waves: waveSourceLabel(model) from WAVE_MODEL_LABELS
+   (GLCFS_WAVE_MODEL -> "GLOS Great Lakes Buoy Observations via Seagull") with url
+   waveSourceUrl(model) (Open-Meteo marine docs, or SEAGULL_INFO_URL for buoy
+   readings — always a human-readable page, never the raw API request); wind:
    "Wind Forecast via Open-Meteo" — updated = nowIso; call estimateFlag;
    env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate), { expirationTtl: 7200 }).
 8. Officials: group beaches by findScraper(beach) id; call each distinct scraper's
-   scrape(nowIso) ONCE per run; write the result to "official:" + beach.id for every
-   matched beach ({ expirationTtl: 7200 }). Null result → write nothing (old key expires
-   naturally).
+   scrape(nowIso) ONCE per run; for every matched beach resolve the shared result via
+   scrapeOfficialFlagFromResult(beach, scraper, result) and write the returned
+   OfficialFlag to "official:" + beach.id ({ expirationTtl: 7200 }). Null scrape result,
+   or a beach that resolves to no site (multi-site shape), → NO KV write for that beach
+   (old key expires naturally).
+   Scraper health monitoring (hourly path only): around each distinct MATCHED
+   scraper's single scrape(nowIso) call, read-modify-write a KV counter at
+   "scraperhealth:" + scraperId holding JSON { consecutiveNulls, lastSuccess,
+   lastFailure } written with NO expirationTtl (the streak must survive across
+   runs). Delegate the decision to the pure helper
+   updateScraperHealth(scraperId, prev, succeeded, nowIso) -> { next, alert }
+   in src/scraperHealth.js: on a usable result reset consecutiveNulls to 0 and
+   stamp lastSuccess = nowIso; on a null result increment consecutiveNulls and
+   stamp lastFailure = nowIso. When consecutiveNulls reaches
+   SCRAPER_HEALTH_ALERT_THRESHOLD (24, i.e. >= ~24h quiet) the helper returns a
+   LOUD alert string logged once per run:
+   "ALERT: official scraper <id> has returned null for <n> consecutive hourly
+   runs (last success <lastSuccess>)" (lastSuccess renders as "never" when the
+   scraper has never succeeded). Only scrapers with matched beaches are tracked
+   — a scraper that was never invoked is never counted as failing. Cost: one KV
+   get + one KV put per matched scraper per run (a handful of extra subrequests).
 
-Subrequest budget (paid plan, 1000/invocation): ~30 alert calls + ~2×10 SRF calls +
-5 marine + ≤5 wind + 1 official + ≤300 KV puts ≈ 360. Free plan (50 subrequests,
-1000 KV writes/day) is NOT sufficient at this cadence — README must state the paid-plan
-assumption; alternatively cap MAX_BEACHES_PER_RUN low for a free-plan demo (TODO.md).
+9. Stamp the rotation cursor: one env.DB.batch of
+   UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
+
+Subrequest budget (paid plan, 10,000/invocation): ~30-60 alert calls + ~2×15 SRF calls +
+~13 marine batches + ≤62 GLCFS buoy (2 catalogs + ≤60 deduped platform fetches, step 5b) +
+≤13 wind batches + ~15 official-scraper fetches (one scrape() per matched scraper; South
+Haven uses 2 fetches, Ohio BeachGuard 4, the rest 1 each) + ~2 scraper-health KV
+ops per matched scraper + ≤700 KV puts ≈ 900 at the full ~613-row pilot table. Free plan
+(50 subrequests, 1000 KV writes/day) is NOT sufficient at this cadence — README must state
+the paid-plan assumption; alternatively cap MAX_BEACHES_PER_RUN low for a free-plan demo
+(TODO.md).
 
 ### runOverpassSync (daily)
 
@@ -470,9 +803,16 @@ the Lower and eastern Upper Peninsula):
 Nationwide scale-out (tiled bboxes over CONUS coasts, queued) is explicitly a TODO.md item —
 do NOT attempt it now.
 
-1. const namedRows = await fetchBeaches(PILOT_BBOX); if null, log and abort (keep existing data).
-2. const parkBeaches = await fetchParkBeaches(PILOT_BBOX); if null, log and DEGRADE:
+1. const namedRows = await fetchBeaches(PILOT_BBOX); if null, log, await sleep(60000)
+   (exported sleep(ms) helper wrapping setTimeout in a Promise), then retry ONCE. If
+   the retry also returns null, log and abort (keep existing data).
+2. const parkBeaches = await fetchParkBeaches(PILOT_BBOX); if null, log, await
+   sleep(60000), then retry ONCE. If the retry also returns null, log and DEGRADE:
    continue with named rows only and leave every existing park_name untouched.
+   The fetchParkBeaches call (and its retry) only begins after fetchBeaches (and
+   its retry) has fully resolved -- the two Overpass queries are strictly
+   sequential and never run concurrently with each other, since overpass-api.de
+   allows only 2 slots per IP and 429s beyond that.
 3. mergeBeachRows(namedRows, parkBeaches) — pure, exported from src/index.js:
    - named beach also found inside a park -> parkName attached;
    - unnamed beach kept ONLY when park-associated, and only the LARGEST (by bbox
@@ -488,11 +828,54 @@ do NOT attempt it now.
    (nws_zone / nws_grid_url intentionally untouched on conflict.) When step 2
    failed, use the legacy statement WITHOUT park_name so stale associations
    survive an Overpass outage.
-5. NWS enrichment (rate-limited): SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL
-   ORDER BY id LIMIT 30; for each, fetchPointMetadata(lat, lon) sequentially; on success
-   UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?. 30/night drains the
-   backlog over successive nights; failures stay null and are retried next night.
-6. Write sync_meta rows last_overpass_sync (nowIso) and last_overpass_count.
+5. Write sync_meta rows last_overpass_sync (nowIso) and last_overpass_count.
+
+runOverpassSync is discovery ONLY — NWS point enrichment and webcam hydration run on
+their own cron triggers below, so an aborted Overpass run never costs an enrichment day.
+
+### runNwsEnrichment (4x daily: "17 3,9,15,21 * * *")
+
+Constants: NWS_ENRICHMENT_LIMIT = 75 (per run — up to 300 points/day),
+NWS_ENRICHMENT_MAX_ATTEMPTS = 5.
+
+A beach with nws_zone NULL silently skips rules steps 1-2 (alerts, SRF rip risk) in
+runFlagRecompute, so draining this queue quickly is a safety property, not just
+throughput. api.weather.gov publishes no numeric rate limit (it answers 429 +
+Retry-After when unhappy); 75 sequential polite requests per run, four times a day,
+is well within reasonable use.
+
+SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < 5
+ORDER BY enrichment_attempts ASC, RANDOM() LIMIT 75; for each, fetchPointMetadata(lat, lon)
+sequentially; on success UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?;
+on failure (fetchPointMetadata returns null, or throws) UPDATE beaches SET
+enrichment_attempts = enrichment_attempts + 1 WHERE id = ?. Ordering: fewest failed
+attempts first (fresh rows before retries), then RANDOM() — the old ORDER BY id drained
+every osm-node-* row before any osm-way-* row, leaving way-based beaches (Holland State
+Park) alert-blind for weeks. The attempts cap stops permanent failures — non-US points
+swept in by PILOT_BBOX (Ontario shoreline) that api.weather.gov 404s forever — from
+occupying the batch and starving US beaches; after 5 attempts a row is permanently parked
+and no longer requeued. The per-run summary log reports attempted / enriched / failures /
+parked (rows with nws_zone IS NULL AND enrichment_attempts >= 5).
+
+### runWebcamSync (daily: "31 9 * * *")
+
+Constants: WEBCAM_ENRICHMENT_LIMIT = 100 (deliberately NOT raised alongside the NWS
+limit — Windy's free tier publishes no quota and 100/night is polite guesswork; watch
+the logs for 429s per TODO.md), WEBCAM_RECHECK_MS = 14 days.
+
+Skipped entirely (with a log) when env.WINDY_WEBCAM_API_TOKEN is unset.
+SELECT id, lat, lon FROM beaches WHERE webcam_checked IS NULL OR
+webcam_checked < (nowIso - 14 days) ORDER BY webcam_checked ASC, id ASC LIMIT 100
+(SQLite sorts NULLs first ASC, so never-checked rows drain before rechecks; 100/night
+fills the pilot in a few nights and the 14-day recheck cadence stays ahead of the
+beach count). For each row sequentially, fetchNearestWebcam(lat, lon, token):
+- null (API failure) → row untouched; it stays at the front of the queue.
+- { webcam: null } (confirmed no cam) → clear webcam_id/webcam_title/
+  webcam_player_url, set webcam_checked = nowIso.
+- { webcam } → write webcamId/title/playerUrl + webcam_checked = nowIso.
+Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤201
+subrequests per run. The stored player URL is only ever dereferenced by the visitor's
+BROWSER on the detail page — never by the request path.
 
 ## 8. HTTP surface (INFRA — src/router.js, src/index.js)
 
@@ -542,7 +925,7 @@ Routing table (method GET only; anything else → 405):
     compatibility_date = "2026-06-01"
 
     [triggers]
-    crons = ["0 * * * *", "47 8 * * *"]
+    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
 
     [[d1_databases]]
     binding = "DB"
@@ -598,9 +981,13 @@ exporting a CSS string); render.js is the sole module the router imports.
 
 ### Flag rendering rules
 
-- Colors: green #1a7f37, yellow #d4a72c, red #cf222e, double-red #cf222e rendered as TWO
-  stacked flag icons plus the label "DOUBLE RED — water closed", unknown #6e7781 gray with
-  label "UNKNOWN".
+- Colors come from the Web Awesome palette tokens (mild palette; no custom hex values):
+  green var(--wa-color-green-50), yellow var(--wa-color-yellow-70), red
+  var(--wa-color-red-50), double-red = the red token rendered as TWO stacked flag icons
+  plus the label "DOUBLE RED — water closed", unknown var(--wa-color-gray-50) gray with
+  label "UNKNOWN". Yellow deliberately uses tint 70 (tint 50 in the mild palette reads
+  as olive/mustard, not caution yellow); if the palette ever changes, re-verify the four
+  flag colors remain visually distinct safety signals.
 - Every ESTIMATED flag shows: color swatch/flag icon, color name, an "ESTIMATE" badge,
   reason text, and "Updated " + estimate.updated + " UTC".
 - Estimate === null renders exactly like an unknown estimate with reason
@@ -642,10 +1029,21 @@ exporting a CSS string); render.js is the sole module the router imports.
   no estimate.
 - Wave map section: <wa-zoomable-frame loading="lazy" without-controls> (the Windy embed
   has its own zoom controls) embedding
-  "https://embed.windy.com/embed.html?...overlay=waves&product=ecmwfWaves..." centered on
+  "https://embed.windy.com/embed.html?...overlay=waves&product=ecmwfWaves&marker=true..." centered on
   the beach (lat/lon to 3 decimals). No caption — the embed carries Windy's own branding.
   Omitted entirely when the beach has no finite lat/lon. The iframe is fetched by the
   BROWSER — the request path still reads only D1/KV.
+- Nearby-webcam section (detail page only): rendered AFTER the estimate card when
+  beach.webcam_player_url is a non-empty string; nothing rendered otherwise (including
+  pre-migration rows where the webcam fields are undefined). Embeds the Windy player
+  URL in <wa-zoomable-frame loading="lazy" allowfullscreen without-controls> (same
+  wrapper as the wave map; without-controls only hides the zoom buttons — interaction
+  stays enabled so the player's own play/scrub/fullscreen controls work), 16:9
+  responsive, fetched by the BROWSER. Heading "Nearby webcam" — the caption must stay honest that the cam is
+  NEARBY, not necessarily the beach itself: it shows beach.webcam_title (when
+  non-empty) plus an attribution link to https://www.windy.com/webcams naming
+  Windy.com (free-tier attribution requirement). All dynamic values escape through
+  escapeHtml, including attribute positions.
 
 ## 10. Test plan (Vitest, node environment — default; vitest.config.js only if needed)
 
@@ -723,13 +1121,30 @@ e.g. a fixture containing lines like:
   names match or park_name is null, detail <title>/h1/subtitle, data-name carries
   both names for search.
 
-### test/officialSources.test.js (CLIENTS, optional)
+### test/officialSources.test.js (CLIENTS)
 
-- parseSouthHavenHtml with an HTML fixture containing "Red.png" → "red"; "Green.png" →
-  "green"; "Yellow.png" → "yellow"; "Grey2.png" → null; empty/null → null.
+- parseSouthHavenCsv with inline CSV fixtures: green/yellow/red sites; Gray/Grey
+  (unmonitored) sites omitted, mixed gray+color sites omitted; same-named flags
+  roll up to most severe; pier lines ignored; unknown colors / unrecognized
+  lines / HTML-instead-of-CSV / empty → null; all-gray → [] (distinct from null).
+- extractSouthHavenCsvUrl: pubhtml/pub hrefs with &amp;-encoded queries →
+  canonical CSV export URL; missing gid → null.
 - southHaven.matches: name "South Haven South Beach" → true; lat/lon inside box with
   unrelated name → true; Holland State Park coords → false.
 - findScraper returns southHaven for a matching BeachRow and null otherwise.
+- resolveSiteForBeach / scrapeOfficialFlagFromResult: name match beats proximity,
+  array-order first-match, radius default, invalid color → null, no site → null.
+
+Each additional registered scraper has its own test file
+(test/lenawee.test.js, test/metroparks.test.js, test/michiganCity.test.js,
+test/ohioBeachGuard.test.js, test/hdnwMichigan.test.js, test/bldhd.test.js,
+test/chicagoParkDistrict.test.js, test/wisconsinDnr.test.js) exercising its
+pure parse function(s) against inline fixtures — including
+ambiguous/unknown-status rows being OMITTED — plus matches() with matching and
+non-matching BeachRow fixtures. test/scraperHealth.test.js covers
+updateScraperHealth (increment/reset, 23-vs-24 boundary, exact alert strings,
+"never" fallback). test/glerl.test.js covers the GLOS buoy gap-fill client
+against a stubbed global fetch.
 
 ## 11. Integration review checklist (final reviewer)
 
@@ -745,8 +1160,9 @@ e.g. a fixture containing lines like:
 - [ ] Official objects have official: true and render in a visually distinct card;
       estimates have official: false and the footer disclaimer text matches section 9
       exactly.
-- [ ] scheduled handler dispatches on controller.cron matching wrangler.toml's two cron
-      strings exactly; hourly path never runs Overpass; daily path never writes flag keys.
+- [ ] scheduled handler dispatches on controller.cron matching wrangler.toml's four cron
+      strings exactly; hourly path never runs Overpass; the discovery, enrichment, and
+      webcam paths never write flag keys.
 - [ ] migrations/0001_init.sql matches section 2 exactly; upsert preserves nws_zone.
 - [ ] Wave client tolerates null model values per point (Great Lakes masking) and honors
       WAVE_MODEL_ORDER; wind fetched only for wave-null beaches.

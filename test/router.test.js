@@ -119,7 +119,7 @@ describe("renderListPage proximity output", () => {
     // Legacy bare-string sources render as their hostname.
     expect(html).toContain(">api.weather.gov</a>");
     expect(html).toContain(
-      "<div slot=\"footer\" class=\"card-updated\">Updated 2026-07-05T12:00:00.000Z UTC</div>"
+      "<div slot=\"footer\" class=\"wa-caption-s\">Updated 2026-07-05T12:00:00.000Z UTC</div>"
     );
     expect(html).not.toContain("Sources:");
     expect(html).toContain(
@@ -148,7 +148,7 @@ describe("renderListPage proximity output", () => {
     expect(officialCard).toContain("<div slot=\"header-actions\">");
     expect(officialCard).toContain(">www.southhavenmi.gov</a>");
     expect(officialCard).toContain(
-      "<div slot=\"footer\" class=\"card-updated\">Updated 2026-07-05T14:00:00.000Z UTC</div>"
+      "<div slot=\"footer\" class=\"wa-caption-s\">Updated 2026-07-05T14:00:00.000Z UTC</div>"
     );
     expect(officialCard).not.toContain("Source:");
   });
@@ -179,7 +179,7 @@ describe("renderListPage proximity output", () => {
     });
     expect(html).not.toContain("with-header-actions");
     expect(html).not.toContain("with-footer");
-    expect(html).not.toContain("card-updated\">");
+    expect(html).not.toContain("class=\"wa-caption-s\">Updated ");
   });
 
   it("omits the wave map when the beach has no usable coordinates", () => {

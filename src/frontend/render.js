@@ -108,10 +108,10 @@ function renderStaleWarning(updatedIso) {
 function renderFlagIcon(color, sizeClass, slotName) {
   const normalized = normalizeColor(color);
   const colorClass = "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
-  const iconClass = "flag-icon " + sizeClass + " " + colorClass;
+  const iconClass = sizeClass + " " + colorClass;
   const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
   if (normalized === "double-red") {
-    return "<span" + slotAttr + " class=\"flag-icon-stack\">" +
+    return "<span" + slotAttr + " class=\"wa-cluster wa-gap-3xs\">" +
       "<wa-icon name=\"flag\" variant=\"solid\" class=\"" + iconClass + "\"></wa-icon>" +
       "<wa-icon name=\"flag\" variant=\"solid\" class=\"" + iconClass + "\"></wa-icon>" +
       "</span>";
@@ -123,7 +123,7 @@ function renderFlagChip(estimate) {
   const color = estimate ? normalizeColor(estimate.color) : "unknown";
   const label = FLAG_LABELS[color];
   return "<wa-badge variant=\"neutral\" appearance=\"outlined\">" +
-    renderFlagIcon(color, "flag-icon-s", "start") +
+    renderFlagIcon(color, "wa-font-size-l", "start") +
     escapeHtml(label) +
     "</wa-badge>";
 }
@@ -164,14 +164,14 @@ function renderSourceLinks(sources) {
   if (items.length === 0) {
     return "";
   }
-  return "<span class=\"card-sources wa-cluster wa-gap-xs\">" + items.join("\n") + "</span>";
+  return "<span class=\"wa-cluster wa-gap-xs wa-font-size-s\">" + items.join("\n") + "</span>";
 }
 
 function renderFlagRow(color, reason) {
   return "<div class=\"wa-flank wa-gap-m\">" +
-    renderFlagIcon(color, "flag-icon-l") +
+    renderFlagIcon(color, "wa-font-size-4xl") +
     "<div class=\"wa-stack wa-gap-3xs\">" +
-    "<span class=\"flag-color-label\">" + escapeHtml(FLAG_LABELS[color]) + "</span>" +
+    "<span class=\"wa-font-size-xl wa-font-weight-bold\">" + escapeHtml(FLAG_LABELS[color]) + "</span>" +
     "<p>" + escapeHtml(reason) + "</p>" +
     "</div>" +
     "</div>";
@@ -192,11 +192,11 @@ const TRIGGER_DESCRIPTIONS = {
 function renderTriggerLine(estimate) {
   const description = TRIGGER_DESCRIPTIONS[estimate.trigger];
   if (description) {
-    return "<p class=\"card-trigger\">" + escapeHtml(description) + "</p>";
+    return "<p class=\"wa-caption-s\">" + escapeHtml(description) + "</p>";
   }
   // Older KV payloads (written before triggers existed) fall back to the
   // rules-version line for the remainder of their 2 h TTL.
-  return "<p class=\"card-trigger\">Rules version: " + escapeHtml(estimate.rules_version) + "</p>";
+  return "<p class=\"wa-caption-s\">Rules version: " + escapeHtml(estimate.rules_version) + "</p>";
 }
 
 // Shared flag-card skeleton used by both the official and the estimate card so
@@ -223,7 +223,7 @@ function renderFlagCard(options) {
     lines.push(renderStaleWarning(options.updated));
   }
   if (options.updated) {
-    lines.push("<div slot=\"footer\" class=\"card-updated\">Updated " +
+    lines.push("<div slot=\"footer\" class=\"wa-caption-s\">Updated " +
       escapeHtml(options.updated) + " UTC</div>");
   }
   lines.push("</wa-card>");
@@ -353,7 +353,7 @@ function renderBeachRow(entry) {
   const searchable = (beach.park_name ? beach.park_name + " " : "") + String(beach.name || "");
   const dataName = escapeHtml(searchable.toLowerCase());
   const href = "/beach/" + encodeURIComponent(beach.id);
-  const officialBadgeHtml = official ? (" " + renderOfficialBadge("badge-s")) : "";
+  const officialBadgeHtml = official ? (" " + renderOfficialBadge("wa-font-size-2xs")) : "";
   const milesLabel = formatMiles(entry.distanceMi);
   const distanceHtml = milesLabel ?
     ("<span class=\"beach-row-distance\">" + escapeHtml(milesLabel) + "</span>") : "";
@@ -366,7 +366,7 @@ function renderBeachRow(entry) {
   lines.push("<span class=\"beach-row-name\">" + escapeHtml(displayName(beach)) + distanceHtml +
     subtitleHtml + "</span>");
   lines.push("<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(estimate) + officialBadgeHtml + "</span>");
-  lines.push("<wa-icon name=\"chevron-right\" class=\"beach-row-chevron\"></wa-icon>");
+  lines.push("<wa-icon name=\"chevron-right\" class=\"wa-color-text-quiet\"></wa-icon>");
   lines.push("</a>");
   lines.push("</li>");
   return lines.join("\n");
@@ -423,12 +423,45 @@ function renderWaveMap(beach) {
   }
   const embedSrc = "https://embed.windy.com/embed.html?type=map&location=coordinates" +
     "&metricRain=default&metricTemp=default&metricWind=default" +
-    "&zoom=11&overlay=waves&product=ecmwfWaves&level=surface" +
+    "&zoom=11&overlay=waves&product=ecmwfWaves&level=surface&marker=true" +
     "&lat=" + lat.toFixed(3) + "&lon=" + lon.toFixed(3);
   return "<section class=\"wave-map\">" +
     "<wa-zoomable-frame class=\"wave-map-frame\" src=\"" + escapeHtml(embedSrc) + "\"" +
     " loading=\"lazy\" without-controls></wa-zoomable-frame>" +
     "</section>";
+}
+
+// Nearby-webcam player embedded from Windy's free webcam API, in the same
+// <wa-zoomable-frame without-controls> wrapper as the wave map. The zoom
+// BUTTONS are hidden, but interaction is left enabled (the default) so the
+// player's own play/scrub/fullscreen controls receive clicks normally. The
+// browser fetches the embed — the request path itself still reads only D1/KV.
+// Rendered only when webcam_player_url is a non-empty string; the columns are
+// null (no nearby cam) or undefined (pre-migration rows), so both are skipped.
+// The heading and caption stay honest that this is a NEARBY cam, and the free
+// tier requires the Windy.com attribution link-back.
+function renderWebcam(beach) {
+  const playerUrl = beach.webcam_player_url;
+  if (typeof playerUrl !== "string" || playerUrl.length === 0) {
+    return "";
+  }
+  const title = (typeof beach.webcam_title === "string") ? beach.webcam_title : "";
+  const frameTitle = title ? title : "Nearby webcam";
+  const captionParts = [];
+  if (title) {
+    captionParts.push("<span class=\"webcam-title\">" + escapeHtml(title) + "</span>");
+  }
+  captionParts.push("Webcam via <a href=\"https://www.windy.com/webcams\" " +
+    "rel=\"noopener noreferrer\">Windy.com</a>");
+  const lines = [];
+  lines.push("<section class=\"webcam-section wa-stack wa-gap-s\">");
+  lines.push("<h2 class=\"webcam-heading\">Nearby webcam</h2>");
+  lines.push("<wa-zoomable-frame class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
+    " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen" +
+    " without-controls></wa-zoomable-frame>");
+  lines.push("<p class=\"webcam-caption wa-caption-s\">" + captionParts.join(" &middot; ") + "</p>");
+  lines.push("</section>");
+  return lines.join("\n");
 }
 
 export function renderDetailPage(data) {
@@ -443,7 +476,7 @@ export function renderDetailPage(data) {
   // Title flag mirrors the best current reading: scraped official color when
   // available, otherwise the estimate (null-safe: no flag data renders gray).
   const titleColor = official ? official.color : (estimate ? estimate.color : null);
-  const titleFlagHtml = renderFlagIcon(titleColor, "flag-icon-l");
+  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl");
 
   const subtitle = subtitleName(beach);
   const subtitleHtml = subtitle ?
@@ -451,9 +484,9 @@ export function renderDetailPage(data) {
 
   const headerBlock = "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
-    "<h1 class=\"beach-title\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
+    "<h1 class=\"beach-title wa-cluster wa-gap-s\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
-    "<p class=\"beach-meta wa-cluster wa-gap-2xs\">" +
+    "<p class=\"wa-cluster wa-gap-2xs wa-color-text-quiet\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon +
     "</p>";
 
@@ -469,6 +502,10 @@ export function renderDetailPage(data) {
     stackParts.push(officialHtml);
   }
   stackParts.push(estimateHtml);
+  const webcamHtml = renderWebcam(beach);
+  if (webcamHtml) {
+    stackParts.push(webcamHtml);
+  }
 
   const mainHtml = headerBlock +
     "<div class=\"detail-stack wa-stack wa-gap-l\">" + stackParts.join("\n") + "</div>";
@@ -481,12 +518,12 @@ export function renderErrorPage(data) {
   const status = (data && data.status) ? data.status : 500;
   const message = (data && data.message) ? data.message : "Something went wrong.";
 
-  const mainHtml = "<div class=\"error-panel wa-stack wa-gap-m wa-align-items-center\">" +
-    "<wa-icon name=\"triangle-exclamation\" class=\"error-icon\"></wa-icon>" +
-    "<h1>" + escapeHtml(String(status)) + "</h1>" +
-    "<p>" + escapeHtml(message) + "</p>" +
+  const mainHtml = "<wa-callout variant=\"danger\">" +
+    "<wa-icon slot=\"icon\" name=\"triangle-exclamation\"></wa-icon>" +
+    "<strong>" + escapeHtml(String(status)) + "</strong><br>" +
+    escapeHtml(message) + "<br>" +
     "<a href=\"/\">Return to the beach list</a>" +
-    "</div>";
+    "</wa-callout>";
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter());
   return renderDocument("Swim Report — " + String(status), bodyHtml);

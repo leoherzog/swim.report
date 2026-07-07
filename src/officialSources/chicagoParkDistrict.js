@@ -1,0 +1,240 @@
+// src/officialSources/chicagoParkDistrict.js
+// Official scraper for the Chicago Park District lakefront beach flag program.
+// scrape() runs cron-side only; parseChicagoFlags is pure and exported for
+// tests. Contract v2 multi-site (per-beach) shape.
+//
+// Source: an undocumented but unauthenticated Drupal JSON view that powers the
+// CPD "flag-status" widget. It returns ~69 records (23 beaches x 3 categories:
+// Surf Conditions / Weather / Water Quality), each shaped
+//   { title, type, nid, date_1, date (unix seconds string), parent (beach
+//     name, sometimes with a trailing space), weight, flag, url, description }.
+//
+// Two product hazards this parser must defend against (both would surface a
+// WRONG official color, the worst possible bug):
+//   1. Stale prior-season rows are mixed in — an individual (beach, category)
+//      record can be ~1 year old while its siblings are fresh. We keep only the
+//      newest record per beach AND hard-discard it if older than 36 hours.
+//   2. "Red Afterhours - Swimming Prohibited" is CPD's blanket nightly
+//      no-lifeguard closure that fires at every beach outside 11am-7pm — it is
+//      a closure, not a hazard signal. We still report it as red (swimming IS
+//      prohibited) but the reason string preserves the after-hours distinction
+//      so it is never conflated with a genuine daytime hazard ban.
+//
+// Each beach carries THREE category rows: Surf Conditions (the real-time
+// hazard flag), Weather, and Water Quality (bacteria). These rows disagree and
+// carry independent timestamps. Water Quality is frequently the FRESHEST row
+// while reading "Green", even while the Surf/Weather rows say
+// "Red Afterhours - Swimming Prohibited". Picking the single newest row per
+// beach would therefore report an official GREEN for a beach where swimming is
+// prohibited — the worst possible bug. Instead we take the MOST SEVERE color
+// among the beach's fresh rows (double-red > red > yellow > green): a "green"
+// water-quality row can never override a "red" surf row, so we never
+// under-report a hazard. Over-reporting (a bacteria red while surf is green) is
+// safe and honest for a hazard product that must never emit a wrong green.
+
+export const CHICAGO_FLAG_STATUS_URL =
+  "https://www.chicagoparkdistrict.com/flag-status";
+
+export const CHICAGO_PROGRAM_LABEL =
+  "Chicago Park District Beach Flag Program";
+
+// The endpoint returns 200 to a browser-like User-Agent; Workers' fetch sends
+// none by default.
+export const CHICAGO_USER_AGENT =
+  "Mozilla/5.0 (swim.report; +https://swim.report)";
+
+// Records whose newest timestamp is older than this (relative to nowIso) are
+// treated as stale prior-season leftovers and dropped.
+export const CHICAGO_MAX_AGE_HOURS = 36;
+
+// Build the ?q= cachebust from the digits of nowIso — deterministic, and never
+// reads the wall clock.
+export function cachebustFromNowIso(nowIso) {
+  const digits = String(nowIso == null ? "" : nowIso).replace(/[^0-9]/g, "");
+  return digits.length > 0 ? digits : "0";
+}
+
+// Pure. Given a trimmed beach name, produce lowercase substring keys used by
+// resolveSiteForBeach: the full name and, when it ends in " beach", the name
+// with that suffix removed. Deduplicated, empty entries dropped.
+export function beachNameKeys(parentTrimmed) {
+  const keys = [];
+  const lower = String(parentTrimmed).trim().toLowerCase();
+  if (lower.length > 0) {
+    keys.push(lower);
+    if (/ beach$/.test(lower)) {
+      const shorter = lower.replace(/ beach$/, "").trim();
+      if (shorter.length > 0 && keys.indexOf(shorter) === -1) {
+        keys.push(shorter);
+      }
+    }
+  }
+  return keys;
+}
+
+// Severity ranking used to pick the most restrictive fresh row per beach.
+// Higher wins. CPD never flies double-red, but it is included for completeness.
+const FLAG_SEVERITY = { green: 1, yellow: 2, red: 3, "double-red": 4 };
+
+// Classify a single CPD flag string. Returns { color, afterhours } or null when
+// the string is not a confidently mappable green/yellow/red (anything
+// unexpected degrades to null -> that row is ignored, never guessed).
+function classifyFlag(flag) {
+  if (typeof flag !== "string" || flag.length === 0) {
+    return null;
+  }
+  // Double red = water fully closed, the most severe status. Checked FIRST so it
+  // can never be down-graded to a plain "red" (or dropped to no-data, which
+  // would let the beach fall back to a benign swim.report estimate — an
+  // effective under-report of an official water-closed).
+  if (/double[\s-]?red/i.test(flag)) {
+    return { color: "double-red", afterhours: /afterhours/i.test(flag) };
+  }
+  // After-hours no-lifeguard closure: swimming is prohibited (red), but flag it
+  // so the reason string can note it is a scheduling closure, not a hazard.
+  if (/afterhours/i.test(flag)) {
+    return { color: "red", afterhours: true };
+  }
+  if (/^green/i.test(flag)) {
+    return { color: "green", afterhours: false };
+  }
+  if (/^yellow/i.test(flag)) {
+    return { color: "yellow", afterhours: false };
+  }
+  if (/^red/i.test(flag)) {
+    return { color: "red", afterhours: false };
+  }
+  return null;
+}
+
+// Build the per-site reason string for a resolved beach color.
+function reasonForBeach(afterhours, parentTrimmed) {
+  if (afterhours) {
+    return "Official flag reported by " + CHICAGO_PROGRAM_LABEL + " for " +
+      parentTrimmed +
+      " (after-hours closure — swimming prohibited while lifeguards are off duty)";
+  }
+  return "Official flag reported by " + CHICAGO_PROGRAM_LABEL + " for " +
+    parentTrimmed;
+}
+
+// Pure, exported for tests. (text, nowIso) -> sites[] | null.
+// null only on malformed / non-array JSON or unparseable nowIso. Groups the
+// three category rows by trimmed parent, discards any INDIVIDUAL row older than
+// CHICAGO_MAX_AGE_HOURS relative to nowIso, and resolves each beach to the MOST
+// SEVERE color among its surviving fresh rows (so a fresh "green" water-quality
+// row can never override a "red" surf row). A beach with no fresh, confidently
+// classifiable row is omitted entirely — never assigned a guessed color.
+export function parseChicagoFlags(text, nowIso) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    console.log("chicagoParkDistrict: JSON parse failed: " + err.message);
+    return null;
+  }
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const nowMs = Date.parse(nowIso);
+  if (!isFinite(nowMs)) {
+    console.log("chicagoParkDistrict: unparseable nowIso: " + String(nowIso));
+    return null;
+  }
+  const minEpochSec = Math.floor(nowMs / 1000) - CHICAGO_MAX_AGE_HOURS * 3600;
+
+  // Per beach, track the most severe fresh classified row. On a severity tie,
+  // prefer a genuine (non-after-hours) row so a real daytime hazard is never
+  // relabeled as a mere after-hours closure.
+  const byBeach = Object.create(null);
+  for (const record of data) {
+    if (!record || typeof record.parent !== "string") {
+      continue;
+    }
+    const parentTrimmed = record.parent.trim();
+    if (parentTrimmed.length === 0) {
+      continue;
+    }
+    const epochSec = parseInt(record.date, 10);
+    if (!isFinite(epochSec)) {
+      continue;
+    }
+    // MANDATORY staleness gate, applied PER ROW: a stale prior-season row must
+    // never contribute a color (in either direction).
+    if (epochSec < minEpochSec) {
+      continue;
+    }
+    const classified = classifyFlag(record.flag);
+    if (!classified) {
+      continue;
+    }
+    const severity = FLAG_SEVERITY[classified.color];
+    const current = byBeach[parentTrimmed];
+    const better = !current ||
+      severity > current.severity ||
+      (severity === current.severity && current.afterhours && !classified.afterhours);
+    if (better) {
+      byBeach[parentTrimmed] = {
+        parent: parentTrimmed,
+        color: classified.color,
+        afterhours: classified.afterhours,
+        severity: severity
+      };
+    }
+  }
+
+  const sites = [];
+  const parents = Object.keys(byBeach);
+  for (const parent of parents) {
+    const entry = byBeach[parent];
+    sites.push({
+      siteId: parent.toLowerCase(),
+      color: entry.color,
+      reason: reasonForBeach(entry.afterhours, parent),
+      names: beachNameKeys(parent)
+    });
+  }
+  return sites;
+}
+
+function inChicagoBox(beach) {
+  return beach.lat >= 41.64 && beach.lat <= 42.10 &&
+    beach.lon >= -87.70 && beach.lon <= -87.50;
+}
+
+export const chicagoParkDistrict = {
+  id: "chicago-park-district",
+  label: CHICAGO_PROGRAM_LABEL,
+  url: CHICAGO_FLAG_STATUS_URL,
+  matches: function(beach) {
+    return inChicagoBox(beach);
+  },
+  scrape: async function(nowIso) {
+    const requestUrl = CHICAGO_FLAG_STATUS_URL + "?q=" + cachebustFromNowIso(nowIso);
+    try {
+      const response = await fetch(requestUrl, {
+        headers: { "User-Agent": CHICAGO_USER_AGENT }
+      });
+      if (!response.ok) {
+        console.log("chicagoParkDistrict: fetch failed: HTTP " + response.status);
+        return null;
+      }
+      const text = await response.text();
+      const sites = parseChicagoFlags(text, nowIso);
+      if (!sites || sites.length === 0) {
+        return null;
+      }
+      return {
+        perBeach: true,
+        sites: sites,
+        source: CHICAGO_FLAG_STATUS_URL,
+        sources: [CHICAGO_FLAG_STATUS_URL],
+        updated: nowIso
+      };
+    } catch (err) {
+      console.log("chicagoParkDistrict: fetch failed: " + err.message);
+      return null;
+    }
+  }
+};

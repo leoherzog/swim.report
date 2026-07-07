@@ -14,8 +14,12 @@ Every color shown by Swim Report is either:
   NWS alerts, NWS Surf Zone Forecast rip current risk, and Open-Meteo wave/wind data.
   It is not a substitute for the flag actually flying at the beach.
 - an **OFFICIAL** reading (`official: true`) — scraped directly from a municipality's
-  own published flag status page, when Swim Report has a working scraper for that
-  beach. Only South Haven, Michigan is supported today.
+  or health department's own published status page/API, when Swim Report has a
+  working scraper for that beach. Nine programs are supported today (see
+  "Official sources" below): South Haven MI, Lenawee County MI, Huron-Clinton
+  Metroparks MI, Michigan City IN, Ohio ODH BeachGuard, Health Dept of Northwest
+  Michigan, Benzie-Leelanau District Health Dept MI, Chicago Park District, and
+  Wisconsin DNR Beach Health.
 
 Estimates and official readings are rendered in visually distinct UI elements
 everywhere they appear, and the API always keeps them in separate fields so a client
@@ -158,6 +162,11 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 - Wind is used **only** as a fallback when every wave model returned null (common on
   the Great Lakes, where wave model grid points are frequently masked). It is never
   blended with wave data.
+- On the Great Lakes, a beach whose Open-Meteo wave reading is null may be
+  gap-filled from the nearest GLOS Seagull wave buoy (within 25 km, freshest
+  observation within 2 h — `src/clients/glerl.js`) before wind is considered.
+  The `sources` array on each estimate names whichever wave source was actually
+  used.
 - An empty alerts array (`[]`, i.e. a successful fetch with zero active alerts) does
   not by itself count as "usable data" — with everything else null the result is
   still `unknown`, not `green`.
@@ -186,11 +195,16 @@ Run tests (pure functions only, no network, no Workers runtime):
 
 ### Environment variables
 
-`.dev.vars` holds local secrets used by the Web Awesome Pro build tooling
-(`WEBAWESOME_NPM_TOKEN`) and is read by `npm install`/build steps, not by the Worker
-runtime. The Worker itself needs no runtime secrets today — the NWS and Open-Meteo
-clients are unauthenticated, and the South Haven scraper is a plain unauthenticated
-GET.
+`.dev.vars` holds local secrets: `WEBAWESOME_NPM_TOKEN` is used by the Web Awesome
+Pro build tooling (`npm install`, via `.npmrc`), and `WINDY_WEBCAM_API_TOKEN` is a
+Worker **runtime** secret — `wrangler dev` loads `.dev.vars` into `env`
+automatically. In production the webcam token must be set once with:
+
+    npx wrangler secret put WINDY_WEBCAM_API_TOKEN
+
+The webcam cron skips hydration (with a log line) when the token is unset;
+everything else — NWS, Open-Meteo, GLOS Seagull, and every official-source
+scraper — is unauthenticated.
 
 **Web Awesome Pro CDN kit**: the frontend `<head>` loads Web Awesome Pro from the
 account's version-pinned CDN kit (`WA_KIT_BASE` in `src/frontend/render.js`): the
@@ -205,14 +219,24 @@ resolve through the kit code set via `data-fa-kit-code` on the `<html>` element.
 
 ### Cron jobs
 
-Two scheduled triggers run in production (see `wrangler.toml`):
+Four scheduled triggers run in production (see `wrangler.toml`). They are separate
+crons on purpose: each upstream's rate-limit posture is independent, and a failure
+in one job never starves another (an aborted Overpass sync used to skip that
+night's NWS enrichment and webcam hydration entirely).
 
-- `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1, fetches NWS
-  alerts/SRF and Open-Meteo wave/wind data, runs them through `estimateFlag`, runs the
-  official-source scrapers, and writes both to KV (`flag:` + beachId,
-  `official:` + beachId) with a 7200 second TTL.
-- `47 8 * * *` (daily, ~03:47 America/New_York) — `runOverpassSync`: two Overpass
-  API queries over the pilot bbox — (1) named `natural=beach` /
+- `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
+  `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
+  the whole pilot table every run, so no flag ever outlives its 2 h KV TTL waiting
+  for a rotation turn), fetches NWS alerts/SRF and Open-Meteo wave/wind data, runs
+  them through `estimateFlag`, runs the official-source scrapers (once per distinct
+  matched scraper, resolved per beach, with KV-backed health monitoring), and
+  writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
+  TTL. Beaches whose Open-Meteo wave data comes back null (common on the Great
+  Lakes) get a second chance from `src/clients/glerl.js`: nearest GLOS Seagull
+  wave buoy within 25 km, freshest observation within 2 h, before falling back to
+  the wind-only estimate.
+- `47 8 * * *` (daily, ~03:47 America/New_York) — `runOverpassSync`, discovery
+  only: two Overpass API queries over the pilot bbox — (1) named `natural=beach` /
   `leisure=beach_resort` elements, and (2) every `natural=beach` element (named or
   not) that intersects a NAMED park polygon (`leisure=park`,
   `leisure=nature_reserve`, or `boundary=protected_area`), plus those park polygons'
@@ -220,33 +244,99 @@ Two scheduled triggers run in production (see `wrangler.toml`):
   overlapping park bbox and stored with that `park_name`; unnamed park beaches are
   kept one-per-park (the largest) and take the park's name, because most OSM
   mappers name the park polygon (Holland State Park) rather than the beach way
-  inside it. Results are upserted into D1, then up to 30 beaches/night are enriched
-  with their NWS zone + gridpoint URL. If the park query fails, the sync degrades
-  to named beaches only and existing `park_name` values are left untouched.
+  inside it. Results are upserted into D1. Each Overpass query gets a single
+  delayed retry (60 s) on failure; if the named-beaches query fails twice the sync
+  aborts (existing data kept), and if only the park query fails twice the sync
+  degrades to named beaches only with existing `park_name` values left untouched.
+- `17 3,9,15,21 * * *` (4x daily; the 09:17 run picks up rows the 08:47 discovery
+  just inserted) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
+  `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
+  api.weather.gov/points. A beach without `nws_zone` silently skips the alert and
+  rip-current rules in `runFlagRecompute`, so draining this queue fast is a safety
+  property — api.weather.gov publishes no numeric rate limit and 75 sequential
+  polite requests per run is well within reasonable use. Queue order is fewest
+  failed attempts first, then `RANDOM()` (the old `ORDER BY id` drained every
+  node-based beach before any way-based one). Failures bump a per-beach
+  `enrichment_attempts` counter (migration 0003); after 5 failed attempts a row is
+  parked and no longer requeued, so permanently-404ing non-US points (Ontario
+  shoreline swept in by the pilot bbox) can't starve US beaches.
+- `31 9 * * *` (daily) — `runWebcamSync`: hydrates each beach's nearest **Windy
+  webcam** (`src/clients/windyWebcams.js`, Webcams API v3 free tier): up to 100
+  beaches/night — never-checked rows first, then rows last checked more than
+  14 days ago — get one `nearby` lookup (5 km radius) and store the nearest
+  *active* cam's id, title, and embed **player** URL in D1 (migration 0005).
+  The 100/night cap is deliberately unchanged: Windy publishes no free-tier
+  quota, so it stays at polite guesswork. Only the player URL is kept:
+  free-tier still-image URLs expire in ~15 minutes, so images are useless under
+  the read-only request path, while the player embeds durably. The detail page
+  renders it in a browser-fetched embed frame (the same `wa-zoomable-frame`
+  wrapper as the wave map, zoom buttons hidden) labeled as a *nearby* webcam
+  with a Windy.com attribution link (free-tier requirement). An API failure
+  leaves the row untouched (retried next night); a confirmed
+  no-cam-within-radius answer clears the webcam columns and stamps the check
+  time.
 
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
 developing via the scheduled-handler endpoint:
 
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"   # daily discovery sync
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"    # hourly flag recompute
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"          # daily discovery sync
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"  # NWS point enrichment
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"          # webcam hydration
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"           # hourly flag recompute
 
-`npm run seed` / `npm run seed:flags` wrap these two commands. The local database
-starts empty — run `npm run seed` once after a fresh checkout (it queries the live
-Overpass API and takes a couple of minutes). The `--test-scheduled` flag and
-`/__scheduled` path from older wrangler versions no longer exist in wrangler 4.
+`npm run seed` / `npm run seed:enrich` / `npm run seed:webcams` / `npm run seed:flags`
+wrap these four commands. The local database starts empty — run `npm run seed` once
+after a fresh checkout (it queries the live Overpass API and takes a couple of
+minutes), then `npm run seed:enrich` a few times to give beaches their NWS zones.
+The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
+longer exist in wrangler 4.
 
-**Paid-plan assumption**: the hourly job's subrequest budget (~360 subrequests/run for
-the pilot region: alert + SRF + wave + wind fetches plus up to 250 KV writes) exceeds
-the free plan's 50-subrequest ceiling. Production deployment assumes the Workers Paid
+**Paid-plan assumption**: the hourly job's subrequest budget (~900 subrequests/run for
+the pilot region: alert + SRF + wave + GLOS buoy gap-fill + wind + scraper fetches plus
+up to ~700 KV reads/writes) exceeds the free plan's 50-subrequest ceiling (the paid
+plan allows 10,000 per invocation). Production deployment assumes the Workers Paid
 plan. See `TODO.md` for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
+
+## Official sources
+
+Official flag data (`official: true`) comes from `src/officialSources/`, a scraper
+registry implementing **scraper contract v2** (per-beach resolution — the
+authoritative spec is PLAN.md section 6). Every scraper obeys one hard product
+rule: **never report a wrong color**. Any ambiguity, unexpected markup, stale
+data, or unrecognized status degrades to `null` (no data), never a guessed color.
+
+Registered scrapers (registry order — most-specific match first, since
+`findScraper` returns the first scraper whose `matches(beach)` is true):
+
+| Scraper (id) | Source | Color semantics |
+|---|---|---|
+| South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version"; the page itself is only a static legend) | Real flag colors per site (~9 sites, multiple poles roll up to most severe); Gray = unmonitored → no data |
+| Lenawee County MI (`lenawee-mi`) | County health dept beach-monitoring page (Hayes SP, Lake Hudson RA) | "No Advisory Posted" → green; any other status omitted; >10-day-old report → no data |
+| Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion (never an inferred green) |
+| Michigan City IN (`michigan-city-in`) | Washington Park page's dated E. coli prose block | Page's own thresholds: ≤235 green, 236–999 yellow, ≥1000 red; reading >8 days old → no data |
+| Ohio ODH BeachGuard (`ohio-beachguard`) | Ohio Dept of Health BeachGuard public API, 4 hardcoded Lake Erie beach ids | Current advisory → red (HAB warning / high severity) or yellow; in-season, no advisory → green; out-of-season → no data |
+| HD of Northwest Michigan (`hdnw-michigan`) | nwhealth.org Water Quality Index table (~32 curated beaches, 4 counties) | WQI 1/2/3/4 → green/yellow/red/double-red; samples >8 days old dropped |
+| Benzie-Leelanau DHD (`bldhd-mi`) | bldhd.org weekly "Beach Report" table (10 curated sites) | Level 1 → green; Level 2/3 omitted (on-page semantics unconfirmed); report >8 days old → no data |
+| Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red (no-lifeguard closure); records >36 h old dropped |
+| Wisconsin DNR (`wisconsin-dnr`) | DNR Beach Health ArcGIS REST layer (441 statewide monitoring sites) | Open → green, Advisory → yellow, Closed → red; Closed For Season / No Data omitted; samples >21 days old dropped |
+
+Health-department sources report water-quality (E. coli) status, not literal
+beach flags — the `reason` string on each official reading says exactly what was
+reported and, for periodic-testing sources, when it was sampled.
+
+### Scraper health monitoring
+
+The hourly cron tracks every matched scraper's consecutive-null streak in KV
+(`scraperhealth:` + scraperId, no TTL — see `src/scraperHealth.js`). When a
+scraper that has matched beaches returns null for 24 consecutive hourly runs
+(~24 h quiet), the cron logs a LOUD `ALERT:` line naming the scraper and its
+last success, so a silently-broken source page surfaces in the logs instead of
+just going dark.
 
 ## How to add a new official-source scraper
 
-Official flag data (`official: true`) comes from `src/officialSources/`, a small
-scraper registry. To add support for a new city/park system:
-
-1. Create `src/officialSources/<yourScraper>.js` exporting an object matching the
-   scraper contract:
+1. Create `src/officialSources/<yourScraper>.js` exporting an object matching
+   scraper contract v2 (PLAN.md section 6 has the full spec):
 
        export const yourScraper = {
          id: "stable-kebab-case-id",
@@ -254,37 +344,56 @@ scraper registry. To add support for a new city/park system:
          url: "https://the-page-you-scrape",
          matches: function (beach) {
            // BeachRow -> boolean, pure. Match by name regex and/or a lat/lon
-           // bounding box that covers every OSM beach row for that town.
+           // bounding box that covers every OSM beach row for that area.
          },
          scrape: async function (nowIso) {
-           // Fetch the page, parse it, and return either:
+           // Fetch and parse the source, then return ONE of:
+           // (a) single-color (applied to every matched beach):
            //   { color, reason, official: true, scraperId: id, source: url,
            //     sources: [url], updated: nowIso }
-           // or null on any fetch/parse failure. NEVER throw.
+           // (b) multi-site (each matched beach resolves to at most one site):
+           //   { perBeach: true, sites: [{ siteId, color, reason,
+           //     names: ["lowercase substrings"], lat, lon, radiusMi,
+           //     updated /* optional ISO; overrides result updated */ }],
+           //     source: url, sources: [url], updated: nowIso }
+           // or null on any fetch/parse failure. NEVER throw, NEVER guess a
+           // color — omit ambiguous sites instead.
+           // updated honesty: only real-time sources may stamp nowIso.
+           // Periodic sources (water sampling, weekly reports) must stamp
+           // the source's own report/sample date — result-level when the
+           // page shares one date, per-site `updated` when readings differ
+           // per beach — so the UI's stale-data warning stays honest.
          }
        };
 
-   Keep any HTML-parsing logic in a separate, pure, exported function (see
-   `parseSouthHavenHtml` in `src/officialSources/southHaven.js`) so it can be unit
-   tested with fixture HTML strings and no network access.
+   With shape (b), each matched beach is resolved to a site by
+   `resolveSiteForBeach` in `src/officialSources/index.js`: name substrings
+   win over proximity, then nearest site within its `radiusMi` (default
+   1.5 mi). A beach that resolves to no site gets no official flag — that is
+   the correct outcome, not an error. Sites without a confirmed
+   green/yellow/red/double-red color must be omitted from `sites`.
 
-2. Register it in `src/officialSources/index.js`:
+   Keep parsing logic in separate, pure, exported functions (see
+   `parseSouthHavenCsv` in `src/officialSources/southHaven.js`) so they can be
+   unit tested with fixture strings and no network access. `scrape(nowIso)`
+   receives its timestamp — never call `Date.now()` or `new Date()`.
 
-       import { yourScraper } from "./yourScraper.js";
-       export const scrapers = [southHaven, yourScraper];
+2. Register it in the `scrapers` array in `src/officialSources/index.js`,
+   keeping the most-specific `matches()` earliest — `findScraper(beach)`
+   returns the first match, so tight city boxes go before broad statewide
+   bboxes.
 
-   `findScraper(beach)` returns the first scraper (in registry order) whose
-   `matches(beach)` is true, so put more specific matchers earlier if bounding boxes
-   could ever overlap.
-
-3. Add tests under `test/` covering the pure parse function and `matches()` with a
-   few representative `BeachRow` fixtures (matching name, matching bbox, and a
+3. Add tests under `test/` covering the pure parse function (including
+   ambiguous/unknown-status rows being omitted) and `matches()` with
+   representative `BeachRow` fixtures (matching name, matching bbox, and a
    beach that should NOT match).
 
-4. That's it — the hourly cron (`runFlagRecompute` in `src/index.js`) automatically
-   discovers every beach matched by your scraper, calls `scrape(nowIso)` once per
-   distinct scraper per run, and writes `official:` + beachId to KV for every matched
-   beach. No other code changes are required.
+4. That's it — the hourly cron (`runFlagRecompute` in `src/index.js`)
+   automatically discovers every beach matched by your scraper, calls
+   `scrape(nowIso)` **once per distinct scraper per run** (not once per
+   beach), resolves the shared result per beach, and writes
+   `official:` + beachId to KV for every beach that resolved. Scraper health
+   monitoring picks the new scraper up automatically.
 
 Official scrapes, like estimates, run cron-side only and are cached in KV — the
 request path never scrapes a page live.

@@ -2,8 +2,13 @@ name = "swim-report"
 main = "src/index.js"
 compatibility_date = "2026-06-01"
 
+# 0 * * * *        — hourly flag recompute (estimates + official scrapes -> KV)
+# 47 8 * * *       — daily Overpass beach discovery (D1 upserts)
+# 17 3,9,15,21 * * * — NWS point enrichment, 4x daily (the 9:17 run picks up
+#                    rows the 8:47 discovery just inserted)
+# 31 9 * * *       — daily Windy webcam hydration
 [triggers]
-crons = ["0 * * * *", "47 8 * * *"]
+crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
 
 [[d1_databases]]
 binding = "DB"

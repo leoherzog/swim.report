@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm test` — run the full Vitest suite
 - `npx vitest run test/rules.test.js` — run a single test file
 - `npm run dev` — local dev server (`wrangler dev`; `predev` auto-applies migrations to local D1). Starts with an EMPTY local database — populate it explicitly with `npm run seed`.
-- `npm run seed` — with the dev server running, trigger the daily Overpass discovery cron locally (`curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"`). Hits the live Overpass API and takes ~2 minutes; run it once per fresh database, not on every dev start. `npm run seed:flags` triggers the hourly flag-recompute cron the same way.
+- `npm run seed` — with the dev server running, trigger the daily Overpass discovery cron locally (`curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"`). Hits the live Overpass API and takes ~2 minutes; run it once per fresh database, not on every dev start. `npm run seed:enrich` (NWS point enrichment, 75 beaches/run — repeat to drain the queue), `npm run seed:webcams` (Windy webcam hydration), and `npm run seed:flags` (hourly flag recompute) trigger the other three crons the same way.
 - Cron triggering in local dev goes through `/cdn-cgi/handler/scheduled?cron=<urlencoded cron>` — the old `--test-scheduled` flag and `/__scheduled` path are obsolete in wrangler 4.
 - `npm run deploy` — deploy (`wrangler deploy`); `npx wrangler deploy --dry-run` to validate config without deploying
 - `npx wrangler d1 migrations apply swim-report` — apply `migrations/` to D1
@@ -31,9 +31,11 @@ Single Cloudflare Worker (`wrangler.toml`, modules syntax) that **estimates** be
 ### The two-path rule (never violate)
 
 1. **Request path** (`fetch` → `src/router.js` → `src/frontend/render.js`): reads **only** D1 and KV. No upstream `fetch()` may ever be reachable from here.
-2. **Cron path** (`scheduled` in `src/index.js`, dispatched on `controller.cron`): all upstream fetching happens here.
+2. **Cron path** (`scheduled` in `src/index.js`, dispatched on `controller.cron`): all upstream fetching happens here, split across four independent triggers so one upstream's failure or rate limit never starves another.
    - `"0 * * * *"` (hourly): reads beaches from D1, gathers inputs via `src/clients/*`, computes estimates, scrapes official sources, writes KV `"flag:" + beachId` and `"official:" + beachId` with `expirationTtl: 7200`.
-   - `"47 8 * * *"` (daily): Overpass beach discovery (pilot bbox: Michigan/Great Lakes) upserted into the D1 `beaches` table, enriched with `nws_zone`/`nws_grid_url` via api.weather.gov/points.
+   - `"47 8 * * *"` (daily): Overpass beach discovery (pilot bbox: Michigan/Great Lakes) upserted into the D1 `beaches` table.
+   - `"17 3,9,15,21 * * *"` (4x daily): NWS point enrichment — beaches with `nws_zone` NULL get `nws_zone`/`nws_grid_url` via api.weather.gov/points, 75 per run.
+   - `"31 9 * * *"` (daily): Windy webcam hydration, 100 lookups per run.
 
 ### Single source of color
 

@@ -2,13 +2,6 @@
 // No fetch, no Date, no DOM APIs. String built with array + join, never backticks.
 
 const RULES = [
-  ":root {",
-  "  --flag-color-green: #1a7f37;",
-  "  --flag-color-yellow: #d4a72c;",
-  "  --flag-color-red: #cf222e;",
-  "  --flag-color-unknown: #6e7781;",
-  "}",
-
   "html, body {",
   "  min-height: 100%;",
   "  margin: 0;",
@@ -89,38 +82,41 @@ const RULES = [
   "  margin: 0;",
   "}",
 
-  ".beach-row-chevron {",
-  "  color: var(--wa-color-text-quiet);",
-  "}",
-
   ".empty-state {",
   "  color: var(--wa-color-text-quiet);",
   "  text-align: center;",
   "  padding: var(--wa-space-xl);",
   "}",
 
-  ".flag-icon-s { font-size: var(--wa-font-size-l); }",
-  ".flag-icon-l { font-size: var(--wa-font-size-4xl); }",
-
-  ".flag-icon-green { color: var(--flag-color-green); }",
-  ".flag-icon-yellow { color: var(--flag-color-yellow); }",
-  ".flag-icon-red { color: var(--flag-color-red); }",
-  ".flag-icon-unknown { color: var(--flag-color-unknown); }",
-
-  ".flag-icon-stack {",
-  "  display: inline-flex;",
-  "  gap: var(--wa-space-3xs);",
-  "}",
-
-  ".badge-s {",
-  "  font-size: var(--wa-font-size-2xs);",
-  "}",
+  ".flag-icon-green { color: var(--wa-color-green-50); }",
+  ".flag-icon-yellow { color: var(--wa-color-yellow-70); }",
+  ".flag-icon-red { color: var(--wa-color-red-50); }",
+  ".flag-icon-unknown { color: var(--wa-color-gray-50); }",
 
   ".wave-map-frame {",
   "  aspect-ratio: 4 / 3;",
   "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
   "  border-radius: var(--wa-border-radius-m);",
   "  overflow: hidden;",
+  "}",
+
+  ".webcam-heading {",
+  "  margin: 0;",
+  "  font-size: var(--wa-font-size-l);",
+  "}",
+
+  ".webcam-frame {",
+  "  display: block;",
+  "  width: 100%;",
+  "  max-width: 100%;",
+  "  aspect-ratio: 16 / 9;",
+  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
+  "  border-radius: var(--wa-border-radius-m);",
+  "  overflow: hidden;",
+  "}",
+
+  ".webcam-caption {",
+  "  margin: 0;",
   "}",
 
   ".back-link {",
@@ -133,9 +129,6 @@ const RULES = [
 
   ".beach-title {",
   "  margin-block: var(--wa-space-xs) 0;",
-  "  display: flex;",
-  "  align-items: center;",
-  "  gap: var(--wa-space-s);",
   "}",
 
   ".beach-subtitle {",
@@ -144,40 +137,8 @@ const RULES = [
   "  font-size: var(--wa-font-size-l);",
   "}",
 
-  ".beach-meta {",
-  "  color: var(--wa-color-text-quiet);",
-  "}",
-
-  ".flag-color-label {",
-  "  font-size: var(--wa-font-size-xl);",
-  "  font-weight: var(--wa-font-weight-bold);",
-  "}",
-
-  ".card-trigger, .card-source, .card-updated {",
-  "  color: var(--wa-color-text-quiet);",
-  "  font-size: var(--wa-font-size-s);",
-  "}",
-
-  ".card-source {",
-  "  margin-block-end: var(--wa-space-3xs);",
-  "}",
-
-  ".card-sources {",
-  "  font-size: var(--wa-font-size-s);",
-  "}",
-
   ".official-card {",
   "  border: var(--wa-border-width-l) solid var(--wa-color-success-border-loud);",
-  "}",
-
-  ".error-panel {",
-  "  padding: var(--wa-space-3xl);",
-  "  text-align: center;",
-  "}",
-
-  ".error-icon {",
-  "  font-size: var(--wa-font-size-4xl);",
-  "  color: var(--wa-color-warning-fill-loud);",
   "}"
 ];
 
