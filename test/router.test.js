@@ -3,8 +3,42 @@
 // and the distance/sort-note rendering in src/frontend/render.js.
 
 import { describe, it, expect } from "vitest";
-import { distanceMi, resolveUserLocation } from "../src/router.js";
+import { distanceMi, resolveUserLocation, escapeLike, handleRequest } from "../src/router.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
+
+// Minimal D1/KV stand-in: records every prepared statement (sql + bound params)
+// so tests can assert on the query the router built. all()/first() resolve to
+// the supplied rows; KV always returns null.
+function makeEnv(rows) {
+  const statements = [];
+  const db = {
+    prepare: function (sql) {
+      const st = {
+        sql: sql,
+        params: null,
+        bind: function () {
+          st.params = Array.prototype.slice.call(arguments);
+          return st;
+        },
+        all: function () {
+          statements.push(st);
+          return Promise.resolve({ results: rows });
+        },
+        first: function () {
+          statements.push(st);
+          return Promise.resolve(rows[0] || null);
+        }
+      };
+      return st;
+    }
+  };
+  const flags = { get: function () { return Promise.resolve(null); } };
+  return { env: { DB: db, FLAGS: flags }, statements: statements };
+}
+
+function homeRequest(search) {
+  return { method: "GET", url: "https://swim.report/" + (search || ""), cf: {} };
+}
 
 function urlWith(search) {
   return new URL("https://swim.report/" + (search || ""));
@@ -51,6 +85,144 @@ describe("resolveUserLocation", () => {
     expect(resolveUserLocation(request, urlWith("?near=1,2,3"))).toBeNull();
     expect(resolveUserLocation(request, urlWith("?near=99,0"))).toBeNull();
     expect(resolveUserLocation(request, urlWith("?near=0,181"))).toBeNull();
+  });
+});
+
+describe("escapeLike", () => {
+  it("escapes the LIKE wildcards and the escape character itself", () => {
+    expect(escapeLike("50% off")).toBe("50\\% off");
+    expect(escapeLike("a_b")).toBe("a\\_b");
+    expect(escapeLike("c\\d")).toBe("c\\\\d");
+    expect(escapeLike("%_\\")).toBe("\\%\\_\\\\");
+  });
+
+  it("leaves ordinary text untouched", () => {
+    expect(escapeLike("Oval Beach")).toBe("Oval Beach");
+  });
+});
+
+describe("handleHome ?q= search over the full table", () => {
+  const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
+
+  it("filters D1 with a LIKE on both names when q is present (no location)", async () => {
+    const { env, statements } = makeEnv(rows);
+    const res = await handleRequest(homeRequest("?q=oval"), env);
+    const stmt = statements[0];
+    expect(stmt.sql).toContain("COALESCE(park_name, name) LIKE ?1 ESCAPE '\\'");
+    expect(stmt.sql).toContain("OR name LIKE ?1 ESCAPE '\\'");
+    expect(stmt.sql).toContain("ORDER BY COALESCE(park_name, name), name");
+    expect(stmt.params).toEqual(["%oval%"]);
+    const html = await res.text();
+    expect(html).toContain("value=\"oval\"");
+    expect(html).toContain("Showing results for <strong>oval</strong>");
+  });
+
+  it("escapes LIKE wildcards in the bound pattern", async () => {
+    const { env, statements } = makeEnv(rows);
+    await handleRequest(homeRequest("?q=50%25_x"), env);
+    // %25 decodes to "%", so the raw term is "50%_x".
+    expect(statements[0].params).toEqual(["%50\\%\\_x%"]);
+  });
+
+  it("combines q with near: filters first, then keeps the proximity query shape", async () => {
+    const { env, statements } = makeEnv(rows);
+    const res = await handleRequest(homeRequest("?q=oval&near=42.4,-86.28"), env);
+    const stmt = statements[0];
+    expect(stmt.sql).toContain("LIKE ?1 ESCAPE '\\'");
+    expect(stmt.sql).toContain("LIMIT 500");
+    expect(stmt.sql).not.toContain("ORDER BY");
+    expect(stmt.params).toEqual(["%oval%"]);
+    const html = await res.text();
+    // The near param rides along in a hidden input so proximity survives submit.
+    expect(html).toContain("<input type=\"hidden\" name=\"near\" value=\"42.4,-86.28\">");
+    expect(html).toContain("Sorted by approximate distance");
+  });
+
+  it("ignores an empty or whitespace-only q (no LIKE clause, no bound pattern)", async () => {
+    const blank = makeEnv(rows);
+    await handleRequest(homeRequest("?q=%20%20"), blank.env);
+    expect(blank.statements[0].sql).not.toContain("LIKE");
+    expect(blank.statements[0].params).toBeNull();
+
+    const missing = makeEnv(rows);
+    await handleRequest(homeRequest(""), missing.env);
+    expect(missing.statements[0].sql).not.toContain("LIKE");
+    expect(missing.statements[0].params).toBeNull();
+  });
+});
+
+describe("renderListPage search form", () => {
+  it("wraps the search input in a GET form posting name=q, preserving near", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z",
+      near: "42.4,-86.28"
+    });
+    expect(html).toContain("<form id=\"beach-search-form\"");
+    expect(html).toContain("method=\"get\"");
+    expect(html).toContain("action=\"/\"");
+    expect(html).toContain("name=\"q\"");
+    expect(html).toContain("<input type=\"hidden\" name=\"near\" value=\"42.4,-86.28\">");
+  });
+
+  it("shows the no-match empty state (not the empty-database copy) on a q-filtered page with zero results", () => {
+    // Regression: a search miss against a populated table used to fall through
+    // to "No beaches found yet. Check back soon.", telling the searcher the
+    // site has no beaches at all.
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z",
+      query: "xyzzy"
+    });
+    expect(html).toContain("No beaches match your search.");
+    expect(html).not.toContain("No beaches found yet");
+  });
+
+  it("keeps the empty-database copy on the default listing with zero rows", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z"
+    });
+    expect(html).toContain("No beaches found yet. Check back soon.");
+  });
+
+  it("shows the active query and a clear-search link on a q-filtered page", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z",
+      query: "oval",
+      near: "42.4,-86.28"
+    });
+    expect(html).toContain("value=\"oval\"");
+    expect(html).toContain("Showing results for <strong>oval</strong>");
+    expect(html).toContain("href=\"/?near=42.4%2C-86.28\"");
+  });
+
+  it("offers a submit-to-server button in the empty state only when more beaches exist and no query is active", () => {
+    const withMore = renderListPage({
+      entries: [{ beach: { id: "b", name: "A", lat: 42, lon: -86 }, estimate: null, official: null, distanceMi: null }],
+      nowIso: "2026-07-05T12:00:00.000Z",
+      hasMore: true
+    });
+    expect(withMore).toContain("form=\"beach-search-form\"");
+    expect(withMore).toContain("Search all beaches");
+
+    // On a q-filtered page the rendered rows are already whole-table matches.
+    const onQueryPage = renderListPage({
+      entries: [{ beach: { id: "b", name: "A", lat: 42, lon: -86 }, estimate: null, official: null, distanceMi: null }],
+      nowIso: "2026-07-05T12:00:00.000Z",
+      hasMore: true,
+      query: "oval"
+    });
+    expect(onQueryPage).not.toContain("Search all beaches");
+
+    // No extra beaches beyond those rendered: nothing to offer.
+    const noMore = renderListPage({
+      entries: [{ beach: { id: "b", name: "A", lat: 42, lon: -86 }, estimate: null, official: null, distanceMi: null }],
+      nowIso: "2026-07-05T12:00:00.000Z",
+      hasMore: false
+    });
+    expect(noMore).not.toContain("Search all beaches");
   });
 });
 

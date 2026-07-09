@@ -31,6 +31,17 @@
 // water-quality row can never override a "red" surf row, so we never
 // under-report a hazard. Over-reporting (a bacteria red while surf is green) is
 // safe and honest for a hazard product that must never emit a wrong green.
+//
+// CATEGORY-AWARE STALENESS (the residual false-green path): most-severe-wins
+// protects a fresh RED surf row, but not a STALE one. If a beach's Surf row
+// goes >36h stale (dropped by the per-row gate) while its Water Quality row
+// stays fresh and green, most-severe among the survivors is that lone green —
+// a false official green for a beach whose actual surf state is unknown. So a
+// beach may report GREEN only when its OWN Surf/flag row is fresh and
+// classifiable. A fresh green Water Quality (or Weather) row alone, with the
+// Surf row stale or missing, yields NO DATA for that beach rather than green.
+// Red/yellow/double-red resolutions keep the plain most-severe gate — those are
+// the safe direction. We always fail toward no-data, never toward a wrong color.
 
 export const CHICAGO_FLAG_STATUS_URL =
   "https://www.chicagoparkdistrict.com/flag-status";
@@ -107,6 +118,17 @@ function classifyFlag(flag) {
   return null;
 }
 
+// True when a record is the beach's Surf Conditions (real-time hazard flag)
+// category — the only row that can justify a GREEN resolution. CPD labels the
+// category in both the title (" - Surf Conditions") and type fields; match
+// either defensively so a label change on one field still classifies. Weather
+// and Water Quality rows return false and can never, on their own, produce green.
+function isSurfCategory(record) {
+  const title = typeof record.title === "string" ? record.title : "";
+  const type = typeof record.type === "string" ? record.type : "";
+  return /surf/i.test(title) || /surf/i.test(type);
+}
+
 // Build the per-site reason string for a resolved beach color.
 function reasonForBeach(afterhours, parentTrimmed) {
   if (afterhours) {
@@ -124,7 +146,10 @@ function reasonForBeach(afterhours, parentTrimmed) {
 // CHICAGO_MAX_AGE_HOURS relative to nowIso, and resolves each beach to the MOST
 // SEVERE color among its surviving fresh rows (so a fresh "green" water-quality
 // row can never override a "red" surf row). A beach with no fresh, confidently
-// classifiable row is omitted entirely — never assigned a guessed color.
+// classifiable row is omitted entirely — never assigned a guessed color. A beach
+// that resolves to GREEN is ALSO omitted unless its own Surf row is among the
+// fresh classified rows: a green resting only on a fresh Water Quality/Weather
+// row (Surf row stale or missing) is no-data, never a false official green.
 export function parseChicagoFlags(text, nowIso) {
   let data;
   try {
@@ -169,18 +194,31 @@ export function parseChicagoFlags(text, nowIso) {
     if (!classified) {
       continue;
     }
+    // This row is fresh AND confidently classified. Ensure a beach entry exists
+    // so hasFreshSurf can accumulate independently of which row wins on severity.
+    let current = byBeach[parentTrimmed];
+    if (!current) {
+      current = {
+        parent: parentTrimmed,
+        color: null,
+        afterhours: false,
+        severity: 0,
+        hasFreshSurf: false
+      };
+      byBeach[parentTrimmed] = current;
+    }
+    // A fresh, classifiable Surf row is the sole license for a GREEN resolution.
+    if (isSurfCategory(record)) {
+      current.hasFreshSurf = true;
+    }
     const severity = FLAG_SEVERITY[classified.color];
-    const current = byBeach[parentTrimmed];
-    const better = !current ||
+    const better = current.color === null ||
       severity > current.severity ||
       (severity === current.severity && current.afterhours && !classified.afterhours);
     if (better) {
-      byBeach[parentTrimmed] = {
-        parent: parentTrimmed,
-        color: classified.color,
-        afterhours: classified.afterhours,
-        severity: severity
-      };
+      current.color = classified.color;
+      current.afterhours = classified.afterhours;
+      current.severity = severity;
     }
   }
 
@@ -188,6 +226,14 @@ export function parseChicagoFlags(text, nowIso) {
   const parents = Object.keys(byBeach);
   for (const parent of parents) {
     const entry = byBeach[parent];
+    // Category-aware staleness: a GREEN resolution is trustworthy only when the
+    // beach's own Surf/flag row is fresh. If green rests solely on a fresh Water
+    // Quality / Weather row while the Surf row is stale or missing, the real surf
+    // state is unknown — omit the beach (no data) rather than emit a false green.
+    // Yellow/red/double-red keep the plain gate: those are the safe direction.
+    if (entry.color === "green" && !entry.hasFreshSurf) {
+      continue;
+    }
     sites.push({
       siteId: parent.toLowerCase(),
       color: entry.color,

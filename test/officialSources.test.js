@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseSouthHavenCsv,
   extractSouthHavenCsvUrl,
+  isSouthHavenMonitored,
   southHaven,
   SOUTH_HAVEN_CSV_URL
 } from "../src/officialSources/southHaven.js";
@@ -139,43 +140,84 @@ describe("parseSouthHavenCsv", function() {
     expect(sites[0].siteId).toBe("south-beach");
   });
 
-  it("returns null for an unrecognized line", function() {
+  it("skips a single unrecognized line without discarding the rest of the feed", function() {
+    // A novel/garbage line must not null the whole feed (which would strip
+    // every South Haven site of official data exactly when a new format
+    // appears). The recognized sites still come through; only the bad line
+    // drops. Never guesses a color from the skipped line.
     const csv = southHavenCsv([
       "Flag #6 North Beach is Green",
-      "Something unexpected appeared"
+      "Something unexpected appeared",
+      "Flag #10 South Beach is Red"
+    ]);
+    const sites = parseSouthHavenCsv(csv);
+    expect(sites.length).toBe(2);
+    expect(siteById(sites, "north-beach").color).toBe("green");
+    expect(siteById(sites, "south-beach").color).toBe("red");
+  });
+
+  it("returns null when NOTHING in the feed is recognized", function() {
+    // Skipping bad lines never becomes "all clear": a feed with no recognizable
+    // line at all is unusable and must return null, not an empty site list.
+    const csv = southHavenCsv([
+      "Something unexpected appeared",
+      "Another mystery row"
     ]);
     expect(parseSouthHavenCsv(csv)).toBe(null);
   });
 
-  it("returns null for an unrecognized flag color instead of guessing", function() {
+  it("parses Double Red wording variants to the double-red color", function() {
+    // The published sheet has no double-red tier today, but the parser must be
+    // ready for it: the color capture must handle the two-word spacing and the
+    // hyphenated/joined variants, never truncating to "Red".
+    expect(parseSouthHavenCsv("Flag #6 North Beach is Double Red")[0].color)
+      .toBe("double-red");
+    expect(parseSouthHavenCsv("Flag #6 North Beach is Double-Red")[0].color)
+      .toBe("double-red");
+    expect(parseSouthHavenCsv("Flag #6 North Beach is DoubleRed")[0].color)
+      .toBe("double-red");
+    // double-red outranks red in the same-site rollup.
     const csv = southHavenCsv([
-      "Flag #6 North Beach is Purple"
+      "Flag #6 North Beach is Red",
+      "Flag #7 North Beach is Double Red",
+      "Flag #8 North Beach is Green"
     ]);
-    expect(parseSouthHavenCsv(csv)).toBe(null);
-    // A multi-word color must not truncate to its last word.
-    expect(parseSouthHavenCsv("Flag #6 North Beach is Double Red")).toBe(null);
-    // A single-token hyphenated color passes the line regex but must still fail
-    // the color lookup (South Haven has no double-red tier) rather than mapping
-    // to red — never invent a more/less severe color than the source states.
-    expect(parseSouthHavenCsv("Flag #6 North Beach is Double-Red")).toBe(null);
+    expect(siteById(parseSouthHavenCsv(csv), "north-beach").color).toBe("double-red");
+  });
+
+  it("skips an unrecognized flag color instead of guessing", function() {
+    // An unknown single-word color: the only line, so nothing is recognized and
+    // the parse returns null (never a guessed color).
+    expect(parseSouthHavenCsv("Flag #6 North Beach is Purple")).toBe(null);
     // Trailing punctuation must not be tolerated into a valid color either.
     expect(parseSouthHavenCsv("Flag #6 North Beach is Green.")).toBe(null);
     // "Constructor" (and other Object.prototype property names) must be treated
-    // as an unknown color and fail the parse, NOT slip past a prototype-chain
-    // membership check and get silently ignored during rollup.
+    // as an unknown color, NOT slip past a prototype-chain membership check.
     expect(parseSouthHavenCsv("Flag #6 North Beach is Constructor")).toBe(null);
   });
 
   it("does not let a prototype-name color smuggle a green past the rollup", function() {
-    // Before the hasOwnProperty fix, "Constructor" passed a "colorWord in
-    // SEVERITY" check, was pushed as a member of the group, then compared as a
-    // function during rollup (NaN) so the green won — reporting official green
-    // for a site the source did not actually flag green. It must fail instead.
+    // "Constructor" must never be treated as a color. It taints North Beach
+    // (unconfirmable flag), so the site is omitted rather than reporting the
+    // sibling's green. With no other site, the feed collapses to no data ([]),
+    // never an official green the source did not confirm for the whole site.
     const csv = southHavenCsv([
       "Flag #6 North Beach is Green",
       "Flag #7 North Beach is Constructor"
     ]);
-    expect(parseSouthHavenCsv(csv)).toBe(null);
+    expect(parseSouthHavenCsv(csv)).toEqual([]);
+  });
+
+  it("keeps other sites when one site is tainted by an unconfirmable color", function() {
+    const csv = southHavenCsv([
+      "Flag #6 North Beach is Green",
+      "Flag #7 North Beach is Constructor",
+      "Flag #10 South Beach is Yellow"
+    ]);
+    const sites = parseSouthHavenCsv(csv);
+    expect(sites.length).toBe(1);
+    expect(sites[0].siteId).toBe("south-beach");
+    expect(sites[0].color).toBe("yellow");
   });
 
   it("returns [] for the real off-season feed (every named flag Gray)", function() {
@@ -203,6 +245,23 @@ describe("parseSouthHavenCsv", function() {
     expect(parseSouthHavenCsv(csv)).toEqual([]);
   });
 
+  it("drops colored output to no-data for an out-of-season timestamp", function() {
+    // The published sheet carries no timestamp; outside the monitored window it
+    // is unattended and any color it still shows is stale. A colored feed must
+    // collapse to [] (no data) when the cron timestamp is out of season, and
+    // parse normally when it is in season.
+    const csv = southHavenCsv([
+      "Flag #6 North Beach is Green",
+      "Flag #10 South Beach is Red"
+    ]);
+    // 2026-01-15 13:00 America/Detroit — deep off-season (Sept 15 - May 15).
+    expect(parseSouthHavenCsv(csv, "2026-01-15T18:00:00.000Z")).toEqual([]);
+    // 2026-07-09 02:00 America/Detroit — in season but outside 9am-9pm hours.
+    expect(parseSouthHavenCsv(csv, "2026-07-09T06:00:00.000Z")).toEqual([]);
+    // 2026-07-09 14:00 America/Detroit — in season, monitored hours.
+    expect(parseSouthHavenCsv(csv, "2026-07-09T18:00:00.000Z").length).toBe(2);
+  });
+
   it("skips a flag line for an unknown beach without failing known sites", function() {
     const csv = southHavenCsv([
       "Flag #10 South Beach is Green",
@@ -224,6 +283,49 @@ describe("parseSouthHavenCsv", function() {
     expect(parseSouthHavenCsv("")).toBe(null);
     expect(parseSouthHavenCsv(null)).toBe(null);
     expect(parseSouthHavenCsv(undefined)).toBe(null);
+  });
+});
+
+describe("isSouthHavenMonitored", function() {
+  // All timestamps are UTC; America/Detroit is UTC-4 (EDT) in summer and
+  // UTC-5 (EST) in winter, handled by Intl.
+  it("is monitored in season during 9am-9pm local", function() {
+    // 2026-07-09 14:00 America/Detroit (EDT).
+    expect(isSouthHavenMonitored("2026-07-09T18:00:00.000Z")).toBe(true);
+  });
+
+  it("is not monitored deep in the off-season", function() {
+    // 2026-01-15 13:00 America/Detroit (EST).
+    expect(isSouthHavenMonitored("2026-01-15T18:00:00.000Z")).toBe(false);
+  });
+
+  it("is not monitored before 9am local, even in season", function() {
+    // 2026-07-09 08:00 America/Detroit.
+    expect(isSouthHavenMonitored("2026-07-09T12:00:00.000Z")).toBe(false);
+  });
+
+  it("is not monitored at/after 9pm local, even in season", function() {
+    // 2026-07-08 22:00 America/Detroit.
+    expect(isSouthHavenMonitored("2026-07-09T02:00:00.000Z")).toBe(false);
+  });
+
+  it("treats the season boundaries inclusively (Sept 15 in, Sept 16 out)", function() {
+    expect(isSouthHavenMonitored("2026-09-15T18:00:00.000Z")).toBe(true);  // Sept 15 14:00 local
+    expect(isSouthHavenMonitored("2026-09-16T18:00:00.000Z")).toBe(false); // Sept 16 14:00 local
+  });
+
+  it("treats the season start inclusively (May 15 in, May 14 out)", function() {
+    expect(isSouthHavenMonitored("2026-05-15T18:00:00.000Z")).toBe(true);  // May 15 14:00 local
+    expect(isSouthHavenMonitored("2026-05-14T18:00:00.000Z")).toBe(false); // May 14 14:00 local
+  });
+
+  it("does not gate when the timestamp is missing or unparseable", function() {
+    // scrape always supplies a real ISO string; absence must not silently
+    // suppress the feed, and the pure CSV tests run without a clock.
+    expect(isSouthHavenMonitored(undefined)).toBe(true);
+    expect(isSouthHavenMonitored("")).toBe(true);
+    expect(isSouthHavenMonitored(null)).toBe(true);
+    expect(isSouthHavenMonitored("not-a-date")).toBe(true);
   });
 });
 

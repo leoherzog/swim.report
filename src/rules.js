@@ -4,7 +4,14 @@
 // complete FlagEstimate object out. This is the ONLY place in the codebase
 // where a flag color is decided for an estimate.
 
-export const RULES_VERSION = "1.1.0";
+export const RULES_VERSION = "1.2.0";
+
+// Caveat appended to the reason when the cron reports that NWS alerts were
+// not checkable for this beach (nws_zone still NULL — the beach has not been
+// through NWS point enrichment yet). Distinguishes "alerts checked, none
+// active" from "alerts never checked" so a wave-only green can never present
+// itself as alert-verified.
+export const ALERTS_UNAVAILABLE_CAVEAT = "NWS alerts not yet available for this beach";
 
 export const ALERT_PRECEDENCE = [
   "High Surf Warning",
@@ -38,6 +45,10 @@ export function estimateFlag(inputs) {
   const windGustMph = source.windGustMph !== undefined ? source.windGustMph : null;
   const sources = source.sources !== undefined ? source.sources : [];
   const updated = source.updated !== undefined ? source.updated : null;
+  // alertsCheckable: true when the cron could look up alerts for this beach
+  // (it has an nws_zone), false when it could not (not yet NWS-enriched),
+  // null/undefined for legacy callers (treated as "no caveat").
+  const alertsCheckable = source.alertsCheckable !== undefined ? source.alertsCheckable : null;
 
   let color = null;
   let reason = null;
@@ -123,6 +134,15 @@ export function estimateFlag(inputs) {
       reason = "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models";
       trigger = "no-data";
     }
+  }
+
+  // Honesty caveat: when alerts were not checkable for this beach (nws_zone
+  // still NULL), say so explicitly so a wave/wind/no-data estimate is never
+  // read as "alerts were checked and none were active". Skipped only when an
+  // alert itself decided the color (contradictory input — alerts were
+  // evidently available).
+  if (alertsCheckable === false && trigger !== "nws-alert") {
+    reason = reason + " (" + ALERTS_UNAVAILABLE_CAVEAT + ")";
   }
 
   return {

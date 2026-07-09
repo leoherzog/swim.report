@@ -44,6 +44,20 @@ const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // risking overlap, since the retry always fully resolves before the next query
 // starts (TODO.md "No Overpass retry inside the daily sync").
 const OVERPASS_RETRY_DELAY_MS = 60000;
+// Mass-delete rail for the stale park-beach reconciliation: a partial Overpass
+// result (the client already rejects bodies carrying a truncation "remark",
+// but this is defense in depth against any other partial-success mode) would
+// make every missing park's rows look stale. Normal OSM churn orphans at most
+// a handful of rows per day, so refuse to delete anything when the stale set
+// exceeds max(OVERPASS_RECONCILE_MAX_DELETES, 25% of the candidate rows) —
+// a legitimate wholesale change just waits for a human to raise the cap.
+const OVERPASS_RECONCILE_MAX_DELETES = 10;
+const OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25;
+// flag_history (migration 0006) retention: the calibration table pairs
+// estimated vs official colors and only needs a recent window for threshold
+// tuning; without pruning it grows unbounded (~1M rows/year in season). The
+// daily sync deletes rows older than this many days.
+const FLAG_HISTORY_RETENTION_DAYS = 90;
 // Webcam hydration (daily webcam cron): nearest Windy webcam player per
 // beach. Webcams appear and disappear slowly, so rows are rechecked on a
 // 14-day cadence; 100 lookups per night drains the pilot backlog in a few
@@ -95,6 +109,14 @@ async function runFlagRecompute(env) {
   let estimateCount = 0;
   let officialCount = 0;
   let failureCount = 0;
+
+  // Calibration signal (migration 0006): capture per-beach estimate and
+  // official readings THIS run, then log a flag_history row only where BOTH
+  // exist. estimate map -> { color, rulesVersion }; official map -> { color,
+  // source }. Estimate-only beaches are never logged, so the table records
+  // estimated-vs-official pairs instead of growing with all ~613 beaches.
+  const estimatesByBeach = new Map();
+  const officialsByBeach = new Map();
 
   try {
     const beachesResult = await env.DB.prepare(
@@ -297,9 +319,17 @@ async function runFlagRecompute(env) {
           });
         }
 
+        // alertsCheckable distinguishes "alerts checked, none active"
+        // (alerts === []) from "alerts not checkable" (nws_zone still NULL —
+        // beach not yet NWS-enriched). When false, estimateFlag appends an
+        // explicit "NWS alerts not yet available for this beach" caveat to
+        // the reason so a wave-only green is never presentable as
+        // alert-verified. A transient alerts-fetch failure for an enriched
+        // beach stays alertsCheckable: true (no caveat).
         const inputs = {
           beachId: beach.id,
           alerts: alerts,
+          alertsCheckable: beach.nws_zone ? true : false,
           ripCurrentRisk: ripCurrentRisk,
           waveHeightFt: waveHeightFt,
           windSpeedMph: windSpeedMph,
@@ -314,6 +344,10 @@ async function runFlagRecompute(env) {
           JSON.stringify(estimate),
           { expirationTtl: KV_TTL_SECONDS }
         );
+        estimatesByBeach.set(beach.id, {
+          color: estimate.color,
+          rulesVersion: estimate.rules_version
+        });
         estimateCount = estimateCount + 1;
       } catch (err) {
         failureCount = failureCount + 1;
@@ -384,12 +418,52 @@ async function runFlagRecompute(env) {
               JSON.stringify(flag),
               { expirationTtl: KV_TTL_SECONDS }
             );
+            officialsByBeach.set(beach.id, {
+              color: flag.color,
+              source: flag.scraperId || group.scraper.id
+            });
             officialCount = officialCount + 1;
           }
         }
       } catch (err) {
         console.log("index: official scrape failed: " + err.message);
       }
+    }
+
+    // Step 9: calibration history (migration 0006). One row per beach that has
+    // BOTH a fresh estimate AND a scraped official color this run — the paired
+    // signal used to tune wave/wind thresholds in src/rules.js. Estimate-only
+    // beaches are skipped so the table does not grow with all ~613 rows hourly.
+    // Written in a single D1 batch to stay within the subrequest budget
+    // (PLAN.md section 7); a failure here never poisons the run.
+    let historyCount = 0;
+    try {
+      const historyStatements = [];
+      for (const beach of beaches) {
+        const estimateEntry = estimatesByBeach.get(beach.id);
+        const officialEntry = officialsByBeach.get(beach.id);
+        if (estimateEntry && officialEntry) {
+          historyStatements.push(
+            env.DB.prepare(
+              "INSERT INTO flag_history (beach_id, observed_at, estimated_color, official_color, rules_version, official_source) " +
+              "VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            ).bind(
+              beach.id,
+              nowIso,
+              estimateEntry.color,
+              officialEntry.color,
+              estimateEntry.rulesVersion,
+              officialEntry.source
+            )
+          );
+        }
+      }
+      if (historyStatements.length > 0) {
+        await env.DB.batch(historyStatements);
+        historyCount = historyStatements.length;
+      }
+    } catch (err) {
+      console.log("index: failed to write flag_history rows: " + err.message);
     }
 
     if (beaches.length > 0) {
@@ -409,6 +483,7 @@ async function runFlagRecompute(env) {
       "index: flag recompute complete, beaches=" + String(beaches.length) +
       " estimates=" + String(estimateCount) +
       " officials=" + String(officialCount) +
+      " history=" + String(historyCount) +
       " failures=" + String(failureCount)
     );
   } catch (err) {
@@ -416,14 +491,100 @@ async function runFlagRecompute(env) {
   }
 }
 
+// Eight-point compass labels, indexed by round(bearing / 45) with bearing in
+// degrees clockwise from due north.
+const COMPASS_POINTS = [
+  "North", "Northeast", "East", "Southeast",
+  "South", "Southwest", "West", "Northwest"
+];
+
+// Two unnamed beaches in the same park must be at least this far apart before
+// we distinguish them by compass direction. Polygons a few dozen metres apart
+// are effectively the same spot, and a direction label there would be noise,
+// not signal — those fall back to keeping the largest only.
+const COMPASS_MIN_SEPARATION_KM = 0.2;
+
+function toRadians(deg) {
+  return deg * Math.PI / 180;
+}
+
+// Great-circle distance in kilometres between two lat/lon points.
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLon = Math.sin(dLon / 2);
+  const a = sinLat * sinLat +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * sinLon * sinLon;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Initial bearing (degrees, 0 = north, clockwise) from one point to another,
+// mapped to its eight-point compass label.
+function compassDirection(fromLat, fromLon, toLat, toLon) {
+  const dLon = toRadians(toLon - fromLon);
+  const y = Math.sin(dLon) * Math.cos(toRadians(toLat));
+  const x = Math.cos(toRadians(fromLat)) * Math.sin(toRadians(toLat)) -
+    Math.sin(toRadians(fromLat)) * Math.cos(toRadians(toLat)) * Math.cos(dLon);
+  const brng = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  return COMPASS_POINTS[Math.round(brng / 45) % 8];
+}
+
+// Derive a human-meaningful suffix that distinguishes a secondary unnamed beach
+// from the park's largest ("primary") unnamed beach, in priority order:
+//   (a) a water-body / locality name carried on the beach element's OWN OSM
+//       tags — the optional string beach.locality, populated by the Overpass
+//       client (parseParkBeachElements) from the element's loc_name tag;
+//   (b) a compass-direction label relative to the primary beach, but only when
+//       the two are clearly separated (>= COMPASS_MIN_SEPARATION_KM);
+//   (c) null — no meaningful distinction is derivable, so the caller keeps the
+//       largest only (previous behavior).
+// Never returns a label that implies official signage — (b) yields plain
+// wayfinding like "East Beach", not an official beach name.
+function deriveUnnamedSuffix(beach, primary) {
+  if (typeof beach.locality === "string" && beach.locality.trim() !== "") {
+    return beach.locality.trim();
+  }
+  const km = haversineKm(primary.lat, primary.lon, beach.lat, beach.lon);
+  if (km >= COMPASS_MIN_SEPARATION_KM) {
+    return compassDirection(primary.lat, primary.lon, beach.lat, beach.lon) + " Beach";
+  }
+  return null;
+}
+
+// Adds an unnamed-origin park beach row whose display name AND park_name are
+// both displayName. Unnamed-origin rows are identified downstream (render's
+// park-name-first treatment, the sync's stale-row reconciliation) by
+// name === park_name, so both fields must carry the same value — whether it is
+// the plain park name (the primary row) or "<Park> — <suffix>" (a distinguished
+// secondary). The !has guard mirrors the named path: a pre-existing row wins.
+function addUnnamedParkRow(byId, beach, displayName) {
+  const id = "osm-" + beach.osmType + "-" + String(beach.osmId);
+  if (!byId.has(id)) {
+    byId.set(id, {
+      id: id,
+      name: displayName,
+      lat: beach.lat,
+      lon: beach.lon,
+      osmId: beach.osmType + "/" + String(beach.osmId),
+      parkName: displayName
+    });
+  }
+}
+
 // Pure; exported for tests. Merges the named-beach rows with the
 // park-contained beaches (which include unnamed elements):
 // - a named beach inside a park gains that park's name as parkName;
-// - unnamed beaches are kept only when a park was associated, and only the
-//   LARGEST (by bounding-box area) unnamed beach per park element survives —
-//   several identical "X State Park" rows would be indistinguishable in the
-//   UI, so the pilot keeps one per park (TODO.md notes the limitation). Its
-//   display name becomes the park name.
+// - unnamed beaches are kept only when a park was associated. The LARGEST (by
+//   bounding-box area) unnamed beach per park element keeps the park's name as
+//   its display name (its id and name derivation are unchanged — existing KV
+//   flags key off beach id). Each ADDITIONAL unnamed beach is kept only when
+//   deriveUnnamedSuffix produces a distinct, human-meaningful label; that row's
+//   display name (and park_name) becomes "<Park> — <suffix>" so no two rows are
+//   indistinguishable. Beaches with no derivable distinction — or one that
+//   collides with a sibling already kept — fall back to skipped (counted in
+//   skippedUnnamed), preserving the previous largest-only behavior.
 // Returns { rows: [{ id, name, lat, lon, osmId, parkName }], skippedUnnamed }.
 export function mergeBeachRows(namedRows, parkBeaches) {
   const byId = new Map();
@@ -440,7 +601,7 @@ export function mergeBeachRows(namedRows, parkBeaches) {
   }
 
   let skippedUnnamed = 0;
-  const largestUnnamedByPark = new Map();
+  const unnamedByPark = new Map();
   for (const beach of parkBeaches) {
     const id = "osm-" + beach.osmType + "-" + String(beach.osmId);
     if (beach.name) {
@@ -463,28 +624,43 @@ export function mergeBeachRows(namedRows, parkBeaches) {
       skippedUnnamed = skippedUnnamed + 1;
       continue;
     }
-    const current = largestUnnamedByPark.get(beach.parkKey);
-    if (!current || beach.areaDeg2 > current.areaDeg2) {
-      if (current) {
-        skippedUnnamed = skippedUnnamed + 1;
-      }
-      largestUnnamedByPark.set(beach.parkKey, beach);
-    } else {
-      skippedUnnamed = skippedUnnamed + 1;
+    if (!unnamedByPark.has(beach.parkKey)) {
+      unnamedByPark.set(beach.parkKey, []);
     }
+    unnamedByPark.get(beach.parkKey).push(beach);
   }
 
-  for (const beach of largestUnnamedByPark.values()) {
-    const id = "osm-" + beach.osmType + "-" + String(beach.osmId);
-    if (!byId.has(id)) {
-      byId.set(id, {
-        id: id,
-        name: beach.parkName,
-        lat: beach.lat,
-        lon: beach.lon,
-        osmId: beach.osmType + "/" + String(beach.osmId),
-        parkName: beach.parkName
-      });
+  for (const group of unnamedByPark.values()) {
+    // Primary = largest by bbox area, first-seen winning ties (matches the
+    // previous single-row policy exactly so its id/name — and its KV flag —
+    // stay stable).
+    let primary = group[0];
+    for (const beach of group) {
+      if (beach.areaDeg2 > primary.areaDeg2) {
+        primary = beach;
+      }
+    }
+    const usedNames = new Set();
+    addUnnamedParkRow(byId, primary, primary.parkName);
+    usedNames.add(primary.parkName);
+    for (const beach of group) {
+      if (beach === primary) {
+        continue;
+      }
+      const suffix = deriveUnnamedSuffix(beach, primary);
+      if (suffix === null) {
+        skippedUnnamed = skippedUnnamed + 1;
+        continue;
+      }
+      const displayName = primary.parkName + " — " + suffix;
+      if (usedNames.has(displayName)) {
+        // Another sibling already claimed this exact label (e.g. two beaches in
+        // the same compass direction) — keeping both would be indistinguishable.
+        skippedUnnamed = skippedUnnamed + 1;
+        continue;
+      }
+      usedNames.add(displayName);
+      addUnnamedParkRow(byId, beach, displayName);
     }
   }
 
@@ -500,6 +676,20 @@ export function sleep(ms) {
 async function runOverpassSync(env) {
   const nowIso = new Date().toISOString();
   let processed = 0;
+
+  // flag_history retention sweep (daily). Runs BEFORE the Overpass fetches so
+  // an aborted discovery run never skips pruning, and in its own try/catch so
+  // a pruning failure never costs a discovery day.
+  try {
+    const cutoffIso = new Date(
+      Date.parse(nowIso) - FLAG_HISTORY_RETENTION_DAYS * 86400000
+    ).toISOString();
+    await env.DB.prepare(
+      "DELETE FROM flag_history WHERE observed_at < ?1"
+    ).bind(cutoffIso).run();
+  } catch (err) {
+    console.log("index: flag_history retention sweep failed: " + err.message);
+  }
 
   try {
     let namedRows = await fetchBeaches(PILOT_BBOX);
@@ -564,11 +754,88 @@ async function runOverpassSync(env) {
       "ON CONFLICT(key) DO UPDATE SET value = ?2, updated = ?3"
     ).bind("last_overpass_count", String(processed), nowIso).run();
 
+    // Stale park-beach reconciliation. The upsert above never deletes, so when
+    // OSM edits make a DIFFERENT unnamed beach the largest in a park, the
+    // previously-kept row lingers next to the newly-kept one (same park name,
+    // both rows). This pass deletes such orphaned park-containment rows.
+    //
+    // Runs ONLY after a fully successful sync (both Overpass queries returned):
+    // a degraded named-only run (parkBeaches === null) leaves park associations
+    // untouched, so it must never delete park rows. Identification: a
+    // park-containment row from mergeBeachRows is an UNNAMED-origin row whose
+    // display name IS its park name (name = park_name); a named beach that
+    // merely sits inside a park keeps its own OSM name (name != park_name) and
+    // is therefore never a deletion candidate. Safety rails:
+    //   - never delete a row with its own OSM beach name (SQL requires
+    //     name = park_name AND the row not being produced this run);
+    //   - never delete anything if this run produced ZERO park-containment rows
+    //     (a wholesale upstream change / empty park query must not mass-delete).
+    let deleted = 0;
+    if (parkBeaches !== null) {
+      const producedParkRows = merged.rows.filter(function (r) {
+        return r.parkName !== null && r.name === r.parkName;
+      });
+      if (producedParkRows.length === 0) {
+        console.log(
+          "index: overpass reconciliation skipped, run produced 0 park-containment rows"
+        );
+      } else {
+        try {
+          const producedIds = new Set(merged.rows.map(function (r) { return r.id; }));
+          const existing = await env.DB.prepare(
+            "SELECT id, name, lat, lon FROM beaches " +
+            "WHERE park_name IS NOT NULL AND name = park_name " +
+            "AND lat >= ?1 AND lat <= ?2 AND lon >= ?3 AND lon <= ?4"
+          ).bind(
+            PILOT_BBOX.minLat, PILOT_BBOX.maxLat, PILOT_BBOX.minLon, PILOT_BBOX.maxLon
+          ).all();
+          const existingRows = existing.results || [];
+          const staleRows = existingRows.filter(function (row) {
+            return !producedIds.has(row.id);
+          });
+          // Proportional safety rail: too many stale rows at once means a
+          // partial/truncated upstream result, not real OSM churn — skip the
+          // whole deletion rather than mass-delete enriched beach rows.
+          const deleteAllowance = Math.max(
+            OVERPASS_RECONCILE_MAX_DELETES,
+            Math.ceil(existingRows.length * OVERPASS_RECONCILE_MAX_DELETE_FRACTION)
+          );
+          if (staleRows.length > deleteAllowance) {
+            console.log(
+              "index: overpass reconciliation REFUSING to delete " +
+              String(staleRows.length) + " stale rows (allowance " +
+              String(deleteAllowance) + " of " + String(existingRows.length) +
+              " candidates) — probable partial Overpass response, keeping all rows"
+            );
+          } else if (staleRows.length > 0) {
+            const deleteStatements = staleRows.map(function (row) {
+              console.log(
+                "index: overpass reconciliation deleting stale park-beach row id=" +
+                row.id + " name=" + row.name
+              );
+              return env.DB.prepare("DELETE FROM beaches WHERE id = ?1").bind(row.id);
+            });
+            await env.DB.batch(deleteStatements);
+            deleted = staleRows.length;
+          }
+          console.log(
+            "index: overpass reconciliation complete, produced_park_rows=" +
+            String(producedParkRows.length) +
+            " candidates=" + String(existingRows.length) +
+            " deleted=" + String(deleted)
+          );
+        } catch (err) {
+          console.log("index: overpass reconciliation failed: " + err.message);
+        }
+      }
+    }
+
     const withPark = merged.rows.filter(function (r) { return r.parkName !== null; }).length;
     console.log(
       "index: overpass sync complete, processed=" + String(processed) +
       " with_park=" + String(withPark) +
-      " skipped_unnamed=" + String(merged.skippedUnnamed)
+      " skipped_unnamed=" + String(merged.skippedUnnamed) +
+      " deleted_stale=" + String(deleted)
     );
   } catch (err) {
     console.log("index: overpass sync failed: " + err.message);
@@ -577,9 +844,11 @@ async function runOverpassSync(env) {
 
 // NWS point enrichment (own cron, 4x daily): beaches with nws_zone NULL get
 // their forecast zone + gridpoint URL from api.weather.gov/points. A beach
-// without nws_zone silently skips rules steps 1-2 (alerts, SRF rip risk) in
-// runFlagRecompute, so draining this queue fast is a safety property, not
-// just throughput. Ordering: fresh rows (fewest failed attempts) first, then
+// without nws_zone skips rules steps 1-2 (alerts, SRF rip risk) in
+// runFlagRecompute — its estimate now carries an explicit "NWS alerts not
+// yet available for this beach" caveat (alertsCheckable: false into
+// estimateFlag), but draining this queue fast is still a safety property,
+// not just throughput. Ordering: fresh rows (fewest failed attempts) first, then
 // RANDOM() — the old ORDER BY id drained every osm-node-* row before any
 // osm-way-* row, which left way-based beaches (Holland State Park) blind to
 // active alerts for weeks (TODO.md).

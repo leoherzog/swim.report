@@ -12,19 +12,28 @@
 // more than BLDHD_STALE_DAYS old (the health department has simply stopped
 // updating it, e.g. off-season).
 //
-// IMPORTANT color-mapping caveat: the source page's table reports a numeric
-// "Level 1/2/3" per beach with NO on-page (or on-site, in the linked
-// /publications/ page) definition of what Level 2 or Level 3 mean. Only
-// Level 1 has ever been observed live (see docs/official-sources-verified.json
-// survey notes). Level 1 -> green is the only mapping this file asserts.
-// Level 2 and Level 3 are treated as UNCONFIRMED: rather than guess whether
-// they mean yellow/red or red/double-red, the affected beach's site is
-// omitted entirely (logged, never reported) until a live Level 2 or 3 reading
-// is actually observed and its severity can be cross-checked against another
-// source (e.g. EGLE's beach site at https://www.egle.state.mi.us/beach/, or a
-// local news report of a closure). Reporting a wrong official color is the
-// worst possible bug in this product, so "no data" is always preferred over a
-// guess.
+// Color-mapping legend (CONFIRMED 2026-07-09): the beach-monitoring page's
+// table reports a numeric "Water Quality Index" Level per beach. That page
+// itself carries no definition of the Levels, but the SAME SITE's weekly PDF
+// press release (linked from bldhd.org/publications/, e.g. the July 9 2026
+// "Weekly Benzie and Leelanau Beach Report") publishes an authoritative Water
+// Quality Index legend defining Levels 1-4 with exact E. coli thresholds and
+// swim-safety meanings. BLDHD is the authority for its own index, so those
+// verbatim meanings are the mapping source of record:
+//   Level 1 = "E. coli levels meet EGLE swimming standards for full body
+//             contact"                                              -> green
+//   Level 2 = "contact above the waist not advised" (wading/fishing/boating
+//             ok; an advisory is triggered)                         -> yellow
+//   Level 3 = "E. coli levels exceed EGLE standards, no body contact
+//             advised"                                              -> red
+//   Level 4 = "Health Alert. ... Avoid contact with beach waters" (the most
+//             severe index level)                              -> double-red
+// A related Grand Traverse County release corroborates the semantics: media
+// releases/advisories are issued only when a beach reaches "Level 2 or higher".
+// Any Level number NOT in this legend (e.g. a future Level 5, or an
+// unparseable cell) stays UNCONFIRMED and is omitted (logged, never reported)
+// rather than guessed. Reporting a wrong official color is the worst possible
+// bug in this product, so "no data" is always preferred over a guess.
 
 export const BLDHD_URL = "https://www.bldhd.org/beach-monitoring/";
 
@@ -44,6 +53,16 @@ export const BLDHD_STALE_DAYS = 8;
 export const BLDHD_FUTURE_SLACK_DAYS = 1;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+// BLDHD Water Quality Index Level -> estimated official flag color, taken
+// verbatim from the health department's own weekly-report legend (see file
+// header). A Level not present here is UNCONFIRMED and omitted, never guessed.
+const LEVEL_COLORS = {
+  1: "green",
+  2: "yellow",
+  3: "red",
+  4: "double-red"
+};
 
 // Curated from the 10 rows observed live in the BLDHD weekly table (see
 // docs/official-sources-verified.json). matchKey is a normalized substring
@@ -253,24 +272,24 @@ export function parseBldhdHtml(html, nowIso) {
       rowMatch = rowRegex.exec(tableHtml);
       continue;
     }
-    if (level === 1) {
+    const color = LEVEL_COLORS[level];
+    if (color) {
       sites.push({
         siteId: known.siteId,
-        color: "green",
+        color: color,
         reason: "Official flag reported by Benzie-Leelanau District Health Department " +
-          "(Level 1, report dated " + reportDate.raw + ")",
+          "(Level " + level + ", report dated " + reportDate.raw + ")",
         names: known.names,
         lat: known.lat,
         lon: known.lon
       });
     } else {
-      // Level 2/3 -> yellow/red mapping is UNCONFIRMED (see file header
-      // comment and docs/official-sources-verified.json) -- omit rather than
-      // guess.
+      // A Level outside the confirmed 1-4 legend (e.g. a future Level 5 or a
+      // malformed cell) has no authoritative meaning -- omit rather than guess.
       console.log(
         "bldhd: beach \"" + name + "\" reported Level " + level +
-        " -- color mapping for Level 2/3 is UNCONFIRMED (no on-page or " +
-        "cross-checked definition found), omitting rather than guessing"
+        " which is not in the confirmed BLDHD Water Quality Index legend " +
+        "(Levels 1-4), omitting rather than guessing"
       );
     }
     rowMatch = rowRegex.exec(tableHtml);

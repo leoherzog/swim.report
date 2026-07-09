@@ -376,8 +376,27 @@ export function renderListPage(data) {
   const entries = (data && Array.isArray(data.entries)) ? data.entries : [];
   const rowsHtml = entries.map(renderBeachRow).join("\n");
   const hasEntries = entries.length > 0;
-  const emptyMessage = hasEntries ? "No beaches match your search." : "No beaches found yet. Check back soon.";
+  // Active server-side search query (the ?q= parameter), if any. On a q-filtered
+  // page the rendered rows are already the full-table matches, so the empty
+  // state only needs the plain "no match" copy; on the default listing (no
+  // query) it also offers to submit the search server-side when more beaches
+  // exist than were rendered (hasMore).
+  const query = data && data.query ? String(data.query) : "";
+  const nearParam = data && data.near ? String(data.near) : "";
+  const hasMore = !!(data && data.hasMore);
+  const offerSearchAll = hasMore && query.length === 0;
+
+  // A q-filtered page with zero rows is a search miss, not an empty database —
+  // it must get the no-match copy, same as the client-side filter miss.
+  const emptyMessage = (hasEntries || query.length > 0)
+    ? "No beaches match your search."
+    : "No beaches found yet. Check back soon.";
   const emptyStyle = hasEntries ? " style=\"display: none;\"" : "";
+  // Submits the same GET form (by id) with the current search value so the
+  // filter runs against the whole beaches table, not just the rendered rows.
+  const searchAllHtml = offerSearchAll ?
+    ("<wa-button class=\"search-all-btn\" type=\"submit\" form=\"beach-search-form\" " +
+      "appearance=\"outlined\" size=\"small\">Search all beaches</wa-button>") : "";
 
   const sortNoteHtml = data && data.sortedByProximity ?
     ("<p class=\"list-sort-note wa-color-text-quiet\">" +
@@ -391,20 +410,38 @@ export function renderListPage(data) {
     sortNoteHtml +
     "</section>";
 
-  const searchHtml = "<section class=\"list-search\">" +
-    "<wa-input id=\"beach-search\" type=\"search\" label=\"Search beaches\" " +
-    "placeholder=\"Search by beach or park name\" with-clear>" +
+  // The search box submits to the server (method GET, name=q) so results cover
+  // the whole table, while the inline script keeps filtering rendered rows as
+  // the user types. Any active "near" param rides along in a hidden input so
+  // proximity sorting survives the submit.
+  const nearHiddenHtml = nearParam ?
+    ("<input type=\"hidden\" name=\"near\" value=\"" + escapeHtml(nearParam) + "\">") : "";
+  const searchHtml = "<form id=\"beach-search-form\" class=\"list-search\" method=\"get\" " +
+    "action=\"/\" role=\"search\">" +
+    "<wa-input id=\"beach-search\" name=\"q\" type=\"search\" value=\"" + escapeHtml(query) + "\" " +
+    "label=\"Search beaches\" placeholder=\"Search by beach or park name\" with-clear>" +
     "<wa-icon slot=\"start\" name=\"magnifying-glass\"></wa-icon>" +
     "</wa-input>" +
-    "</section>";
+    nearHiddenHtml +
+    "</form>";
+
+  // On a q-filtered page, surface the active query and a way back to the full
+  // list (preserving any near param).
+  const backHref = "/" + (nearParam ? ("?near=" + encodeURIComponent(nearParam)) : "");
+  const activeQueryHtml = query.length > 0 ?
+    ("<p class=\"list-active-query wa-color-text-quiet\">Showing results for <strong>" +
+      escapeHtml(query) + "</strong>. " +
+      "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
 
   const listHtml = "<section class=\"beach-list-section\">" +
     "<ul class=\"beach-list wa-stack wa-gap-xs\" id=\"beach-list-items\">" + rowsHtml + "</ul>" +
     "<p id=\"beach-list-empty\"" + emptyStyle + " class=\"empty-state\">" +
-    escapeHtml(emptyMessage) + "</p>" +
+    "<span class=\"empty-state-message\">" + escapeHtml(emptyMessage) + "</span>" +
+    searchAllHtml +
+    "</p>" +
     "</section>";
 
-  const mainHtml = introHtml + searchHtml + listHtml;
+  const mainHtml = introHtml + searchHtml + activeQueryHtml + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
     "<script>" + LIST_SEARCH_SCRIPT + "</script>";
 

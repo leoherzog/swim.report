@@ -89,7 +89,7 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.1.0",
+        "rules_version": "1.2.0",
         "official": false,
         "sources": [
           { "label": "ECMWF Wave Forecast via Open-Meteo",
@@ -122,6 +122,15 @@ back to alphabetical order. `GET /?near=lat,lon` overrides the detected location
 (useful in local dev, where `request.cf` has no coordinates); an invalid `near` value
 falls back to alphabetical order. Nothing about the visitor's location is stored.
 
+`GET /?q=term` runs a case-insensitive substring search over the **entire** beach
+directory server-side (not just the ~100 rows the page renders), matching both the
+display name (`COALESCE(park_name, name)`) and the beach's own name; user-supplied
+`LIKE` wildcards are escaped so the term is matched literally. Results are still
+capped at 100 rows and combine with `near=` — when a location resolves, matches are
+filtered first and then distance-sorted. Empty or whitespace-only `q` is ignored. The
+on-page search box submits this parameter as a `GET` form while also filtering the
+rendered rows instantly client-side as you type.
+
 All `/api/*` responses set `content-type: application/json` and
 `cache-control: public, max-age=60`. HTML responses set
 `content-type: text/html; charset=utf-8`.
@@ -130,7 +139,7 @@ All `/api/*` responses set `content-type: application/json` and
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.1.0`. Given the same inputs it always returns the same output.
+`rules_version` is `1.2.0`. Given the same inputs it always returns the same output.
 
 Precedence is strict: the first matching rule wins, evaluated top to bottom.
 
@@ -170,6 +179,13 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 - An empty alerts array (`[]`, i.e. a successful fetch with zero active alerts) does
   not by itself count as "usable data" — with everything else null the result is
   still `unknown`, not `green`.
+- A beach not yet through NWS point enrichment (its `nws_zone` is still `NULL`, so
+  alerts and rip-current risk were never checkable) carries an explicit caveat
+  appended to its `reason`: ` (NWS alerts not yet available for this beach)`. This
+  adds no new color or table row — it only distinguishes "alerts checked, none
+  active" from "alerts never checked" so a wave/wind-only estimate is never
+  presentable as alert-verified. The caveat is omitted once the beach is enriched
+  (and whenever an NWS alert itself decided the color).
 
 Every `FlagEstimate` carries: `color`, a human-readable `reason`, `trigger` (which
 precedence branch decided the color: `nws-alert`, `rip-current`, `wave-height`,
@@ -291,9 +307,10 @@ minutes), then `npm run seed:enrich` a few times to give beaches their NWS zones
 The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
 longer exist in wrangler 4.
 
-**Paid-plan assumption**: the hourly job's subrequest budget (~900 subrequests/run for
-the pilot region: alert + SRF + wave + GLOS buoy gap-fill + wind + scraper fetches plus
-up to ~700 KV reads/writes) exceeds the free plan's 50-subrequest ceiling (the paid
+**Paid-plan assumption**: the hourly job's subrequest budget (~950 subrequests/run for
+the pilot region: alert + SRF + wave + GLOS buoy gap-fill + wind + scraper fetches —
+Ohio BeachGuard alone is now 51 per-id GETs — plus up to ~700 KV reads/writes) exceeds
+the free plan's 50-subrequest ceiling (the paid
 plan allows 10,000 per invocation). Production deployment assumes the Workers Paid
 plan. See `TODO.md` for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
 
@@ -314,10 +331,10 @@ Registered scrapers (registry order — most-specific match first, since
 | Lenawee County MI (`lenawee-mi`) | County health dept beach-monitoring page (Hayes SP, Lake Hudson RA) | "No Advisory Posted" → green; any other status omitted; >10-day-old report → no data |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion (never an inferred green) |
 | Michigan City IN (`michigan-city-in`) | Washington Park page's dated E. coli prose block | Page's own thresholds: ≤235 green, 236–999 yellow, ≥1000 red; reading >8 days old → no data |
-| Ohio ODH BeachGuard (`ohio-beachguard`) | Ohio Dept of Health BeachGuard public API, 4 hardcoded Lake Erie beach ids | Current advisory → red (HAB warning / high severity) or yellow; in-season, no advisory → green; out-of-season → no data |
+| Ohio ODH BeachGuard (`ohio-beachguard`) | Ohio Dept of Health BeachGuard public API, 51 curated Lake Erie public-beach ids | Current advisory → red (any HAB advisory — warning or watch — / high severity) or yellow (bacteria contamination); in-season, no advisory → green; out-of-season → no data. `matches()` is geographically gated to Ohio's Lake Erie shore so a same-named out-of-state beach can't inherit a flag |
 | HD of Northwest Michigan (`hdnw-michigan`) | nwhealth.org Water Quality Index table (~32 curated beaches, 4 counties) | WQI 1/2/3/4 → green/yellow/red/double-red; samples >8 days old dropped |
-| Benzie-Leelanau DHD (`bldhd-mi`) | bldhd.org weekly "Beach Report" table (10 curated sites) | Level 1 → green; Level 2/3 omitted (on-page semantics unconfirmed); report >8 days old → no data |
-| Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red (no-lifeguard closure); records >36 h old dropped |
+| Benzie-Leelanau DHD (`bldhd-mi`) | bldhd.org weekly "Beach Report" table (10 curated sites) | WQI Level 1/2/3/4 → green/yellow/red/double-red (mapped from BLDHD's own weekly-report legend); a Level outside 1–4 omitted; report >8 days old → no data |
+| Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red (no-lifeguard closure); records >36 h old dropped; a beach reports green only when its own Surf row is fresh (a green resting solely on a fresh water-quality row → no data, never a false green) |
 | Wisconsin DNR (`wisconsin-dnr`) | DNR Beach Health ArcGIS REST layer (441 statewide monitoring sites) | Open → green, Advisory → yellow, Closed → red; Closed For Season / No Data omitted; samples >21 days old dropped |
 
 Health-department sources report water-quality (E. coli) status, not literal

@@ -33,6 +33,18 @@ async function runQuery(query, label) {
       return null;
     }
     const json = await response.json();
+    // Overpass reports server-side runtime failures (most commonly the query
+    // hitting its [timeout:N] mid-output) via a "remark" field on an otherwise
+    // HTTP-200 body — and the elements array is then silently TRUNCATED. A
+    // partial element set must be treated as a failed fetch, never success:
+    // the sync's reconciliation pass would read every missing element as
+    // "gone from OSM" and delete legitimate beach rows.
+    if (typeof json.remark === "string" && json.remark.length > 0) {
+      console.log(
+        "overpass: " + label + " query returned remark (treating as failure): " + json.remark
+      );
+      return null;
+    }
     return Array.isArray(json.elements) ? json.elements : [];
   } catch (err) {
     console.log("overpass: " + label + " fetch failed: " + err.message);
@@ -156,6 +168,14 @@ export function parseParkBeachElements(elements) {
         osmType: element.type,
         osmId: element.id,
         name: tags.name || null,
+        // Secondary locality label carried on the beach element's OWN tags
+        // (loc_name — a local/unofficial name like "Hamlin Lake"). Feeds
+        // deriveUnnamedSuffix in src/index.js so a park's secondary unnamed
+        // beach can be labeled by its water body instead of a bare compass
+        // direction. Never substitutes for tags.name.
+        locality: (typeof tags.loc_name === "string" && tags.loc_name.trim() !== "")
+          ? tags.loc_name.trim()
+          : null,
         lat: (bounds.minLat + bounds.maxLat) / 2,
         lon: (bounds.minLon + bounds.maxLon) / 2,
         bounds: bounds,
@@ -196,10 +216,11 @@ export function associateParkForBeach(beach, parks) {
 
 // Fetches beaches that intersect named park polygons (unnamed beaches
 // included) and attaches the containing park. Returns an array of
-//   { osmType, osmId, name: string|null, lat, lon, areaDeg2,
-//     parkName: string|null, parkKey: string|null }
+//   { osmType, osmId, name: string|null, locality: string|null, lat, lon,
+//     areaDeg2, parkName: string|null, parkKey: string|null }
 // (parkKey identifies the park ELEMENT — two same-named parks in different
-// towns stay distinct) or null on any failure.
+// towns stay distinct; locality is the element's own loc_name tag, if any)
+// or null on any failure.
 export async function fetchParkBeaches(bbox) {
   const elements = await runQuery(buildParkBeachQuery(bbox), "park beaches");
   if (elements === null) {
@@ -214,6 +235,7 @@ export async function fetchParkBeaches(bbox) {
       osmType: beach.osmType,
       osmId: beach.osmId,
       name: beach.name,
+      locality: beach.locality,
       lat: beach.lat,
       lon: beach.lon,
       areaDeg2: beach.areaDeg2,

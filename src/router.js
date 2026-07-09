@@ -12,6 +12,17 @@ function toRadians(deg) {
   return deg * Math.PI / 180;
 }
 
+// Escapes the LIKE wildcards (% and _) plus the escape character itself so a
+// user's search term is matched literally, not as a pattern. The result is
+// meant to be wrapped in "%" ... "%" and bound to a "LIKE ?n ESCAPE '\'"
+// clause. Pure; exported for tests.
+export function escapeLike(term) {
+  return String(term)
+    .split("\\").join("\\\\")
+    .split("%").join("\\%")
+    .split("_").join("\\_");
+}
+
 // Great-circle distance (haversine) in statute miles. Pure; exported for tests.
 export function distanceMi(lat1, lon1, lat2, lon2) {
   const dLat = toRadians(lat2 - lat1);
@@ -91,27 +102,62 @@ async function readFlagAndOfficial(env, beachId) {
   return { estimate: estimate, official: official };
 }
 
-async function handleHome(env, location) {
+// Optional ?q= search covers the ENTIRE beaches table, not just the rendered
+// rows: a case-insensitive LIKE against both the display name
+// (COALESCE(park_name, name)) and the beach's own name, with user wildcards
+// escaped. When a user location resolves we filter first, then distance-sort
+// the matches, so proximity ordering is preserved for searches too. Stays on
+// the request path's D1+KV-only contract.
+const LIKE_WHERE =
+  " WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\\' OR name LIKE ?1 ESCAPE '\\')";
+
+async function handleHome(env, location, rawQuery, nearParam) {
+  const query = (typeof rawQuery === "string") ? rawQuery.trim() : "";
+  const hasQuery = query.length > 0;
+  const pattern = hasQuery ? "%" + escapeLike(query) + "%" : null;
   let rows;
+  let hasMore = false;
   if (location) {
-    const result = await env.DB.prepare(
-      "SELECT * FROM beaches LIMIT " + String(HOME_GEO_FETCH_LIMIT)
-    ).all();
+    let stmt;
+    if (hasQuery) {
+      stmt = env.DB.prepare(
+        "SELECT * FROM beaches" + LIKE_WHERE + " LIMIT " + String(HOME_GEO_FETCH_LIMIT)
+      ).bind(pattern);
+    } else {
+      stmt = env.DB.prepare("SELECT * FROM beaches LIMIT " + String(HOME_GEO_FETCH_LIMIT));
+    }
+    const result = await stmt.all();
     rows = result.results || [];
     for (const beach of rows) {
       beach.distance_mi = distanceMi(location.lat, location.lon, beach.lat, beach.lon);
     }
     rows.sort(function (a, b) { return a.distance_mi - b.distance_mi; });
+    hasMore = rows.length > HOME_LIST_LIMIT;
     rows = rows.slice(0, HOME_LIST_LIMIT);
   } else {
     // Alphabetical by DISPLAY name: rows inside a park render under the park
     // name, so they must sort under it too (COALESCE matches the frontend's
-    // displayName()).
-    const result = await env.DB.prepare(
-      "SELECT * FROM beaches ORDER BY COALESCE(park_name, name), name LIMIT " +
-      String(HOME_LIST_LIMIT)
-    ).all();
+    // displayName()). Fetch one extra row to detect whether more beaches exist
+    // beyond the cap (drives the "search all beaches" empty-state affordance).
+    const detectLimit = HOME_LIST_LIMIT + 1;
+    let stmt;
+    if (hasQuery) {
+      stmt = env.DB.prepare(
+        "SELECT * FROM beaches" + LIKE_WHERE +
+        " ORDER BY COALESCE(park_name, name), name LIMIT " + String(detectLimit)
+      ).bind(pattern);
+    } else {
+      stmt = env.DB.prepare(
+        "SELECT * FROM beaches ORDER BY COALESCE(park_name, name), name LIMIT " +
+        String(detectLimit)
+      );
+    }
+    const result = await stmt.all();
     rows = result.results || [];
+    hasMore = rows.length > HOME_LIST_LIMIT;
+    if (hasMore) {
+      rows = rows.slice(0, HOME_LIST_LIMIT);
+    }
   }
   const entries = [];
   for (const beach of rows) {
@@ -127,7 +173,10 @@ async function handleHome(env, location) {
   const html = renderListPage({
     entries: entries,
     nowIso: nowIso,
-    sortedByProximity: !!location
+    sortedByProximity: !!location,
+    query: hasQuery ? query : "",
+    hasMore: hasMore,
+    near: (typeof nearParam === "string") ? nearParam : ""
   });
   return htmlResponse(html, 200);
 }
@@ -192,7 +241,12 @@ export async function handleRequest(request, env) {
   }
 
   if (path === "/") {
-    return handleHome(env, resolveUserLocation(request, url));
+    return handleHome(
+      env,
+      resolveUserLocation(request, url),
+      url.searchParams.get("q"),
+      url.searchParams.get("near")
+    );
   }
 
   if (path === "/api/beaches") {

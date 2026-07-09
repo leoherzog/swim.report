@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { RULES_VERSION, ALERT_PRECEDENCE, metersToFeet, estimateFlag } from "../src/rules.js";
+import {
+  RULES_VERSION,
+  ALERT_PRECEDENCE,
+  ALERTS_UNAVAILABLE_CAVEAT,
+  metersToFeet,
+  estimateFlag
+} from "../src/rules.js";
 
 function baseInputs(overrides) {
   const merged = {
@@ -222,6 +228,83 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
     expect(result.color).toBe("green");
     expect(result.reason).toBe(
       "NWS surf zone forecast rip current risk: LOW; no wave or wind data available"
+    );
+  });
+});
+
+describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
+  it("bumped RULES_VERSION for the reason-format change", function () {
+    expect(RULES_VERSION).toBe("1.2.0");
+  });
+
+  it("wave-only green with alertsCheckable false appends the caveat", function () {
+    const result = estimateFlag(baseInputs({
+      alertsCheckable: false,
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("green");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.reason).toBe(
+      "Estimated wave height 1.0 ft (below 2 ft) (" + ALERTS_UNAVAILABLE_CAVEAT + ")"
+    );
+  });
+
+  it("wind fallback with alertsCheckable false appends the caveat", function () {
+    const result = estimateFlag(baseInputs({
+      alertsCheckable: false,
+      windSpeedMph: 10,
+      windGustMph: 10
+    }));
+    expect(result.color).toBe("green");
+    expect(result.reason).toBe(
+      "No wave data; wind 10 mph sustained, 10 mph gusts (below advisory thresholds) (" +
+      ALERTS_UNAVAILABLE_CAVEAT + ")"
+    );
+  });
+
+  it("no-data unknown with alertsCheckable false appends the caveat", function () {
+    const result = estimateFlag(baseInputs({ alertsCheckable: false }));
+    expect(result.color).toBe("unknown");
+    expect(result.trigger).toBe("no-data");
+    expect(result.reason).toBe(
+      "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models (" +
+      ALERTS_UNAVAILABLE_CAVEAT + ")"
+    );
+  });
+
+  it("alertsCheckable true (alerts checked, none active) gets NO caveat", function () {
+    const result = estimateFlag(baseInputs({
+      alertsCheckable: true,
+      alerts: [],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("green");
+    expect(result.reason).toBe("Estimated wave height 1.0 ft (below 2 ft)");
+  });
+
+  it("alertsCheckable omitted (legacy caller) gets NO caveat", function () {
+    const result = estimateFlag(baseInputs({ waveHeightFt: 1.0 }));
+    expect(result.reason).toBe("Estimated wave height 1.0 ft (below 2 ft)");
+  });
+
+  it("contradictory input: alert decided the color, caveat suppressed", function () {
+    const result = estimateFlag(baseInputs({
+      alertsCheckable: false,
+      alerts: ["High Surf Warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: High Surf Warning");
+  });
+
+  it("rip-current color still carries the caveat when alerts were not checkable", function () {
+    const result = estimateFlag(baseInputs({
+      alertsCheckable: false,
+      ripCurrentRisk: "MODERATE"
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.reason).toBe(
+      "NWS surf zone forecast rip current risk: MODERATE (" + ALERTS_UNAVAILABLE_CAVEAT + ")"
     );
   });
 });

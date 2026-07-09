@@ -32,18 +32,40 @@ export const OHIO_BEACHGUARD_API =
 // against this internal-looking ODH host.
 export const OHIO_USER_AGENT = "swim.report (hello@swim.report)";
 
-// Hardcoded ODH BeachGuard numeric ids for the four western Lake Erie beaches
-// in scope, with coordinates and name substrings taken from the live payloads.
+// Hardcoded ODH BeachGuard beach ids for Ohio's Lake Erie public beaches, with
+// coordinates and (where safe) name substrings taken from the live payloads.
+//
+// This is a CURATED literal table, not a runtime registry fetch. The registry's
+// bulk enumeration endpoint (GET /beachguardpublic/api/beacheslist, no id)
+// returns all ~192 beaches in one call, but its per-beach monitorings/advisories
+// are always null (a summary projection), so the color-bearing detail still
+// requires one per-id fetch each — the table is curated here so the hourly
+// scrape stays a fixed, budgeted set of subrequests (see PLAN.md section 7).
+//
+// Selection rule (conservative, objective): every beach whose waterbodyName is
+// "Lake Erie" AND beachAccessTypeId is "PUB_PUB_ACC" (genuinely public access)
+// AND whose id is a small registry integer. That rule drops (a) ODH's
+// NOT_BEACH monitoring/reference stations, (b) PRV_PRV_ACC private beaches, and
+// (c) the ~17 Ottawa County residential condo/marina "associations" (which
+// carry huge 64-bit opaque ids). A few real public beaches also carry 64-bit
+// ids (e.g. Conneaut Sandbar, the Bay Point beaches) and are therefore omitted
+// here — under-claiming coverage is the safe direction; they can be added
+// explicitly later. beach ids are treated as opaque strings throughout.
+//
 // beachName in the source has formatting quirks (e.g. a stray extra paren in
-// "Maumee Bay State Park (ERIE))"), so we match on stable lowercase substrings.
-// 162 also covers South Bass Island's "Stone Beach", but ONLY by proximity —
-// "stone beach" is deliberately NOT in names[] because it is a generic label
-// that recurs across the Great Lakes; matching it as a name substring would
-// attribute South Bass Island's official flag to any unrelated "Stone Beach".
-// The two Maumee Bay entries (ERIE lake shore vs INLAND lake) sit ~0.2 mi
-// apart; ERIE is listed first and carries the generic "maumee bay" name so a
+// "Maumee Bay State Park (ERIE))" and an escaped backslash in
+// "Port Clinton (Deep\\Lakeview))"), so we match on stable lowercase
+// substrings, and only DISTINCTIVE, low-collision names go in names[]. Generic
+// or common names (e.g. "Battery Park", "Main Street Beach", "Lakeview Beach",
+// "Huntington Beach") get an empty names[] and resolve by proximity only —
+// putting a generic label in names[] would risk attributing an official flag to
+// an unrelated same-named beach (a potential false color, including a false
+// green). 162 likewise covers South Bass Island's "Stone Beach" ONLY by
+// proximity. The two Maumee Bay entries (ERIE lake shore vs INLAND lake) sit
+// ~0.2 mi apart; ERIE is listed first and carries the "maumee bay" name so a
 // lake-shore beach name-matches the correct (Lake Erie) site, with INLAND
-// resolvable only by proximity.
+// resolvable only by proximity. The original four sites are listed first, in
+// their original order, so downstream code referencing them by index is stable.
 export const OHIO_SITES = [
   {
     id: "162",
@@ -76,19 +98,426 @@ export const OHIO_SITES = [
     lat: 41.613113,
     lon: -82.70105,
     names: ["kelleys island"]
+  },
+  {
+    id: "132",
+    siteId: "conneaut-township-park",
+    beachName: "Conneaut Township Park",
+    lat: 41.964471,
+    lon: -80.564447,
+    names: ["conneaut township park"]
+  },
+  {
+    id: "141",
+    siteId: "geneva-state-park",
+    beachName: "Geneva State Park",
+    lat: 41.857822,
+    lon: -80.976639,
+    names: ["geneva state park"]
+  },
+  {
+    id: "149",
+    siteId: "lakeshore-park",
+    beachName: "Lakeshore Park",
+    lat: 41.908371,
+    lon: -80.774368,
+    names: []
+  },
+  {
+    id: "167",
+    siteId: "walnut-beach",
+    beachName: "Walnut Beach",
+    lat: 41.901466,
+    lon: -80.809662,
+    names: []
+  },
+  {
+    id: "173",
+    siteId: "columbia-park-beach",
+    beachName: "Columbia Park Beach",
+    lat: 41.487000,
+    lon: -81.902000,
+    names: []
+  },
+  {
+    id: "136",
+    siteId: "edgewater-state-park",
+    beachName: "Edgewater State Park",
+    lat: 41.489300,
+    lon: -81.739197,
+    names: ["edgewater state park"]
+  },
+  {
+    id: "138",
+    siteId: "euclid-state-park",
+    beachName: "Euclid State Park",
+    lat: 41.584301,
+    lon: -81.568604,
+    names: ["euclid state park"]
+  },
+  {
+    id: "145",
+    siteId: "huntington-beach",
+    beachName: "Huntington Beach",
+    lat: 41.490940,
+    lon: -81.934143,
+    names: []
+  },
+  {
+    id: "177",
+    siteId: "parklawn-beach",
+    beachName: "Parklawn Beach",
+    lat: 41.483521,
+    lon: -81.860649,
+    names: []
+  },
+  {
+    id: "185",
+    siteId: "sims-beach",
+    beachName: "Sims Beach",
+    lat: 41.616081,
+    lon: -81.524223,
+    names: []
+  },
+  {
+    id: "166",
+    siteId: "villa-angela-state-park",
+    beachName: "Villa Angela State Park",
+    lat: 41.585098,
+    lon: -81.567703,
+    names: ["villa angela"]
+  },
+  {
+    id: "168",
+    siteId: "battery-park",
+    beachName: "Battery Park",
+    lat: 41.451847,
+    lon: -82.673691,
+    names: []
+  },
+  {
+    id: "125",
+    siteId: "bay-view-east",
+    beachName: "Bay View East",
+    lat: 41.468971,
+    lon: -82.819023,
+    names: []
+  },
+  {
+    id: "126",
+    siteId: "bay-view-west",
+    beachName: "Bay View West",
+    lat: 41.473484,
+    lon: -82.826935,
+    names: []
+  },
+  {
+    id: "131",
+    siteId: "beulah-beach",
+    beachName: "Beulah Beach",
+    lat: 41.394360,
+    lon: -82.441200,
+    names: []
+  },
+  {
+    id: "129",
+    siteId: "cedar-point-chausee",
+    beachName: "Cedar Point Chausee",
+    lat: 41.472710,
+    lon: -82.670357,
+    names: []
+  },
+  {
+    id: "133",
+    siteId: "cranberry-creek",
+    beachName: "Cranberry Creek",
+    lat: 41.383141,
+    lon: -82.473312,
+    names: []
+  },
+  {
+    id: "170",
+    siteId: "crystal-rock",
+    beachName: "Crystal Rock",
+    lat: 41.449081,
+    lon: -82.842499,
+    names: []
+  },
+  {
+    id: "134",
+    siteId: "darby-creek",
+    beachName: "Darby Creek",
+    lat: 41.413155,
+    lon: -82.398567,
+    names: []
+  },
+  {
+    id: "140",
+    siteId: "heidelberg-beach",
+    beachName: "Heidelberg Beach",
+    lat: 41.389469,
+    lon: -82.455460,
+    names: []
+  },
+  {
+    id: "164",
+    siteId: "lagoons-beach",
+    beachName: "Lagoons Beach",
+    lat: 41.428600,
+    lon: -82.358543,
+    names: []
+  },
+  {
+    id: "147",
+    siteId: "lake-front-park",
+    beachName: "Lake Front Park",
+    lat: 41.398251,
+    lon: -82.553787,
+    names: []
+  },
+  {
+    id: "1290",
+    siteId: "linwood-beach",
+    beachName: "Linwood Beach",
+    lat: 41.427071,
+    lon: -82.356827,
+    names: []
+  },
+  {
+    id: "152",
+    siteId: "lions-park",
+    beachName: "Lion's Park",
+    lat: 41.448376,
+    lon: -82.747246,
+    names: []
+  },
+  {
+    id: "165",
+    siteId: "main-street-beach",
+    beachName: "Main Street Beach",
+    lat: 41.425282,
+    lon: -82.366257,
+    names: []
+  },
+  {
+    id: "146",
+    siteId: "nickel-plate-beach",
+    beachName: "Nickel Plate Beach",
+    lat: 41.396881,
+    lon: -82.543808,
+    names: ["nickel plate"]
+  },
+  {
+    id: "284",
+    siteId: "nokomis-park",
+    beachName: "Nokomis Park",
+    lat: 41.427280,
+    lon: -82.352638,
+    names: []
+  },
+  {
+    id: "155",
+    siteId: "oberlin-beach",
+    beachName: "Oberlin Beach",
+    lat: 41.383930,
+    lon: -82.512543,
+    names: []
+  },
+  {
+    id: "156",
+    siteId: "old-woman-creek-beach",
+    beachName: "Old Woman Creek Beach",
+    lat: 41.384560,
+    lon: -82.514717,
+    names: ["old woman creek"]
+  },
+  {
+    id: "1289",
+    siteId: "orchard-beach",
+    beachName: "Orchard Beach",
+    lat: 41.407936,
+    lon: -82.408676,
+    names: []
+  },
+  {
+    id: "157",
+    siteId: "pickerel-creek",
+    beachName: "Pickerel Creek",
+    lat: 41.437355,
+    lon: -82.888077,
+    names: []
+  },
+  {
+    id: "169",
+    siteId: "pipe-creek-wildlife-area",
+    beachName: "Pipe Creek Wildlife Area",
+    lat: 41.451809,
+    lon: -82.673698,
+    names: ["pipe creek"]
+  },
+  {
+    id: "159",
+    siteId: "sawmill-creek",
+    beachName: "Sawmill Creek",
+    lat: 41.413715,
+    lon: -82.588402,
+    names: []
+  },
+  {
+    id: "160",
+    siteId: "sherod-park-beach",
+    beachName: "Sherod Park Beach",
+    lat: 41.416969,
+    lon: -82.389671,
+    names: ["sherod park"]
+  },
+  {
+    id: "161",
+    siteId: "showse-park",
+    beachName: "Showse Park",
+    lat: 41.430000,
+    lon: -82.309998,
+    names: ["showse park"]
+  },
+  {
+    id: "171",
+    siteId: "whites-landing",
+    beachName: "Whites Landing",
+    lat: 41.430901,
+    lon: -82.901520,
+    names: []
+  },
+  {
+    id: "139",
+    siteId: "fairport-harbor",
+    beachName: "Fairport Harbor",
+    lat: 41.758877,
+    lon: -81.274658,
+    names: ["fairport harbor"]
+  },
+  {
+    id: "143",
+    siteId: "headlands-state-park",
+    beachName: "Headlands State Park",
+    lat: 41.758127,
+    lon: -81.291788,
+    names: ["headlands"]
+  },
+  {
+    id: "130",
+    siteId: "century-beach",
+    beachName: "Century Beach",
+    lat: 41.477936,
+    lon: -82.154121,
+    names: []
+  },
+  {
+    id: "262",
+    siteId: "community-park-beach",
+    beachName: "Community Park Beach",
+    lat: 41.490640,
+    lon: -82.112300,
+    names: []
+  },
+  {
+    id: "151",
+    siteId: "lakeview-beach",
+    beachName: "Lakeview Beach",
+    lat: 41.463783,
+    lon: -82.196075,
+    names: []
+  },
+  {
+    id: "261",
+    siteId: "lakewood-beach-park",
+    beachName: "Lakewood Beach Park",
+    lat: 41.487560,
+    lon: -82.122610,
+    names: []
+  },
+  {
+    id: "254",
+    siteId: "miller-beach",
+    beachName: "Miller Beach",
+    lat: 41.502499,
+    lon: -82.061394,
+    names: []
+  },
+  {
+    id: "128",
+    siteId: "catawba-island-state-park",
+    beachName: "Catawba Island State Park",
+    lat: 41.573357,
+    lon: -82.857498,
+    names: ["catawba island"]
+  },
+  {
+    id: "135",
+    siteId: "east-harbor-state-park",
+    beachName: "East Harbor State Park",
+    lat: 41.557709,
+    lon: -82.803314,
+    names: ["east harbor"]
+  },
+  {
+    id: "150",
+    siteId: "lakeside-beach",
+    beachName: "Lakeside Beach",
+    lat: 41.546539,
+    lon: -82.750572,
+    names: []
+  },
+  {
+    id: "158",
+    siteId: "port-clinton",
+    beachName: "Port Clinton (Deep\\Lakeview))",
+    lat: 41.514610,
+    lon: -82.925056,
+    names: []
   }
 ];
 
 // matches() and resolution both treat a site as covering ~2 mi of shoreline.
 export const OHIO_SITE_RADIUS_MI = 2;
 
-// ODH's "Recreational Public Health Advisory" issued at the warning level
-// (HAB_WARNING_ADV, typeSeverityLevel 4) tells the public to avoid all contact
-// with the water — a no-swim / closure-equivalent condition -> red. Every other
-// active advisory (bacteria contamination advisory, HAB watch, or any
-// unrecognized current advisory) is a non-green caution -> yellow. A current
+// Geographic gate for matches(): every BeachGuard site sits on Ohio's Lake
+// Erie shoreline, so a beach outside this box can never be one of ours — no
+// matter what its name contains. Without this gate the names[] substrings are
+// UNBOUNDED and collide with same-named places elsewhere on the Great Lakes
+// (real in-pilot examples: Headlands International Dark Sky Park in Mackinaw
+// City MI vs "headlands"; Fairport on Michigan's Garden Peninsula vs
+// "fairport harbor"), which would attribute an Ohio OFFICIAL flag — including
+// an affirmative green — to a beach hundreds of miles away. The box spans the
+// full Ohio Lake Erie shore (Toledo to Conneaut) with margin, and stays well
+// south of Michigan/Ontario shorelines.
+export const OHIO_MATCH_BBOX = {
+  minLat: 41.2,
+  maxLat: 42.1,
+  minLon: -83.6,
+  maxLon: -80.4
+};
+
+// Advisory typeId -> color, anchored to ODH BeachGuard's OWN published legend
+// (reverse-engineered from the BeachGuardPublic SPA's advisory-marker color
+// switch, which is literally how ODH renders each advisory type to the public):
+//   HAB_WARNING_ADV  (typeSeverityLevel 4) -> ODH red    (#B30000)
+//   HAB_WATCH_ADV    (typeSeverityLevel 3) -> ODH orange (#ff8000)
+//   CONTAM_ADV       (typeSeverityLevel 1) -> ODH yellow (#e5e500)
+//   HAB_CAUTION                            -> ODH blue   (never issued in
+//                                             practice; treated as a caution)
+//   (no current advisory)                  -> ODH green
+// BOTH HAB_* advisories are "Recreational Public Health Advisory" records that
+// tell the public to avoid recreational contact with the water — a no-swim /
+// closure-equivalent condition. swim.report has only four flag colors
+// (green/yellow/red/double-red), so ODH's distinct orange "watch" tier has no
+// exact analog; per the project's "only ever more cautious, never a false
+// green" bias we collapse it UP to red rather than down to yellow. That keeps a
+// HAB watch from being presented as merely a bacteria-level caution. CONTAM_ADV
+// (bacteria contamination advisory) is ODH's own lowest / yellow tier by
+// design, so it stays yellow — that matches the source of truth, not a guess.
+// Any other current advisory is a non-green caution -> yellow. A current
 // advisory of ANY kind can never be green.
-const RED_ADVISORY_TYPE_IDS = ["HAB_WARNING_ADV"];
+const RED_ADVISORY_TYPE_IDS = ["HAB_WARNING_ADV", "HAB_WATCH_ADV"];
 
 // Pure. Haversine great-circle distance in statute miles.
 function distanceMi(lat1, lon1, lat2, lon2) {
@@ -277,9 +706,11 @@ export function selectCurrentAdvisory(advisories) {
   return best;
 }
 
-// Pure. Maps a current advisory to a flag color. HAB_WARNING_ADV (or any
-// severity >= 4) means avoid-all-contact / no-swim -> red; every other active
-// advisory is a non-green caution -> yellow. Never returns green.
+// Pure. Maps a current advisory to a flag color. Any HAB advisory
+// (HAB_WARNING_ADV or HAB_WATCH_ADV — both advise against water contact — or
+// any severity >= 4) means avoid-all-contact / no-swim -> red; every other
+// active advisory (bacteria contamination, or an unrecognized current advisory)
+// is a non-green caution -> yellow. Never returns green.
 export function advisoryColor(advisory) {
   if (!advisory) {
     return null;
@@ -411,6 +842,16 @@ export const ohioBeachGuard = {
     if (!beach) {
       return false;
     }
+    // Hard geographic gate FIRST: name substrings only apply to beaches that
+    // are physically on Ohio's Lake Erie shore. A Michigan/Ontario beach whose
+    // (park) name happens to contain an Ohio site substring must never claim
+    // this scraper — resolveSiteForBeach's name pass would then bind it to the
+    // Ohio site and publish a wrong official color (possibly a false green).
+    if (typeof beach.lat !== "number" || typeof beach.lon !== "number" ||
+        beach.lat < OHIO_MATCH_BBOX.minLat || beach.lat > OHIO_MATCH_BBOX.maxLat ||
+        beach.lon < OHIO_MATCH_BBOX.minLon || beach.lon > OHIO_MATCH_BBOX.maxLon) {
+      return false;
+    }
     const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
     for (const site of OHIO_SITES) {
       for (const name of site.names) {
@@ -418,18 +859,18 @@ export const ohioBeachGuard = {
           return true;
         }
       }
-      if (typeof beach.lat === "number" && typeof beach.lon === "number") {
-        if (distanceMi(beach.lat, beach.lon, site.lat, site.lon) <= OHIO_SITE_RADIUS_MI) {
-          return true;
-        }
+      if (distanceMi(beach.lat, beach.lon, site.lat, site.lon) <= OHIO_SITE_RADIUS_MI) {
+        return true;
       }
     }
     return false;
   },
   scrape: async function(nowIso) {
     const sites = [];
-    // Fetch each beach detail once (4 subrequests); isolate failures per id so
-    // one bad upstream never poisons the others.
+    // Fetch each beach detail once (one subrequest per OHIO_SITES entry — the
+    // bulk listing endpoint omits monitorings/advisories, so per-id detail is
+    // required; see PLAN.md section 7 for the budget). Isolate failures per id
+    // so one bad upstream never poisons the others.
     for (const site of OHIO_SITES) {
       try {
         const response = await fetch(OHIO_BEACHGUARD_API + site.id, {

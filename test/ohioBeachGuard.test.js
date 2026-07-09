@@ -49,6 +49,38 @@ function currentMonitorings() {
 
 const SITE_162 = OHIO_SITES[0];
 
+describe("OHIO_SITES coverage", function() {
+  it("keeps South Bass Island as the first entry (stable index for tests)", function() {
+    expect(OHIO_SITES[0].id).toBe("162");
+    expect(OHIO_SITES[0].siteId).toBe("south-bass-island");
+  });
+
+  it("covers the full curated Lake Erie public-beach set (well beyond the original 4)", function() {
+    expect(OHIO_SITES.length).toBeGreaterThanOrEqual(50);
+  });
+
+  it("has a unique id and unique siteId for every entry", function() {
+    const ids = OHIO_SITES.map(function(s) { return s.id; });
+    const siteIds = OHIO_SITES.map(function(s) { return s.siteId; });
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(siteIds).size).toBe(siteIds.length);
+  });
+
+  it("only ever puts distinctive, lowercase, non-generic names in names[]", function() {
+    // A bare generic token as a name substring would risk cross-attributing an
+    // official flag to an unrelated same-named beach (a potential false color).
+    const generic = ["beach", "park", "state park", "lakeview", "main street", "battery park", "lakeside"];
+    for (const site of OHIO_SITES) {
+      for (const name of site.names) {
+        expect(typeof name).toBe("string");
+        expect(name.length).toBeGreaterThan(4);
+        expect(name).toBe(name.toLowerCase());
+        expect(generic.indexOf(name)).toBe(-1);
+      }
+    }
+  });
+});
+
 describe("parseIsoToEpoch", function() {
   it("parses a 7-digit-fractional offset timestamp", function() {
     // 2026-05-23T12:34:57.937-04:00 == 2026-05-23T16:34:57.937Z
@@ -185,6 +217,14 @@ describe("advisoryColor", function() {
   it("maps an unrecognized current advisory to yellow (never green)", function() {
     expect(advisoryColor({ typeId: "SOMETHING_NEW", typeSeverityLevel: 2 })).toBe("yellow");
   });
+
+  it("maps a HAB watch (severity 3, avoid-contact) UP to red, not yellow", function() {
+    // ODH renders HAB_WATCH_ADV as its distinct orange tier and it advises
+    // against water contact. swim.report has no orange, so we collapse it up to
+    // red (only ever more cautious) rather than down to yellow — it must not be
+    // presented as merely a bacteria-level caution.
+    expect(advisoryColor({ typeId: "HAB_WATCH_ADV", typeSeverityLevel: 3 })).toBe("red");
+  });
 });
 
 describe("parseOhioBeach", function() {
@@ -273,6 +313,24 @@ describe("parseOhioBeach", function() {
     const site = parseOhioBeach(record, SITE_162, NOW_IN_SEASON);
     expect(site.color).toBe("green");
     expect(site.updated).toBe(undefined);
+  });
+
+  it("returns red for an active HAB watch advisory (avoid-contact, no orange tier)", function() {
+    const record = {
+      beachName: "South Bass Island State Park",
+      monitorings: currentMonitorings(),
+      advisories: [
+        {
+          isCurrentAdvisory: true,
+          typeId: "HAB_WATCH_ADV",
+          typeText: "Recreational Public Health Advisory",
+          typeSeverityLevel: 3,
+          reasonTypeText: "Algal Bloom/Toxin",
+          startDate: "07/01/2026 8:51 AM"
+        }
+      ]
+    };
+    expect(parseOhioBeach(record, SITE_162, NOW_IN_SEASON).color).toBe("red");
   });
 
   it("returns red for an active HAB warning advisory", function() {
@@ -428,6 +486,101 @@ describe("ohioBeachGuard.matches", function() {
       osm_id: "node/100"
     };
     expect(ohioBeachGuard.matches(beach)).toBe(true);
+  });
+
+  it("matches a newly-covered Erie-county beach by proximity", function() {
+    // Nickel Plate Beach (id 146) is one of the expanded sites.
+    const beach = {
+      id: "osm-nickel",
+      name: "Some Swimming Spot",
+      park_name: null,
+      lat: 41.3969,
+      lon: -82.5438,
+      nws_zone: null,
+      nws_grid_url: null,
+      osm_id: "node/146"
+    };
+    expect(ohioBeachGuard.matches(beach)).toBe(true);
+  });
+
+  it("matches a newly-covered beach by its distinctive name substring (inside the Ohio shore box)", function() {
+    // In the Ohio Lake Erie bbox but beyond the 2 mi proximity radius of the
+    // Geneva site, so only the names[] pass can produce this match.
+    const beach = {
+      id: "osm-geneva",
+      name: "Geneva State Park Beach",
+      park_name: null,
+      lat: 41.9,
+      lon: -80.9,
+      nws_zone: null,
+      nws_grid_url: null,
+      osm_id: "node/141"
+    };
+    expect(ohioBeachGuard.matches(beach)).toBe(true);
+  });
+
+  it("never lets a name substring match a beach outside the Ohio Lake Erie box", function() {
+    // Regression: names[] used to be geographically unbounded, so an
+    // out-of-state beach whose name contained an Ohio site substring inherited
+    // that Ohio site's OFFICIAL flag — potentially a false affirmative green.
+    const ontarioGeneva = {
+      id: "osm-geneva-on",
+      name: "Geneva State Park Beach",
+      park_name: null,
+      lat: 43.0,
+      lon: -80.0,
+      nws_zone: null,
+      nws_grid_url: null,
+      osm_id: "node/900"
+    };
+    expect(ohioBeachGuard.matches(ontarioGeneva)).toBe(false);
+  });
+
+  it("does not claim the Michigan Headlands dark-sky park despite the 'headlands' name substring", function() {
+    // Headlands International Dark Sky Park (Mackinaw City, MI) is inside the
+    // discovery pilot bbox; an unnamed OSM beach there gets
+    // name = park_name containing "headlands" via the daily sync. It must
+    // never receive Headlands Beach State Park OH's official color.
+    const beach = {
+      id: "osm-headlands-mi",
+      name: "Headlands International Dark Sky Park",
+      park_name: "Headlands International Dark Sky Park",
+      lat: 45.78,
+      lon: -84.77,
+      nws_zone: null,
+      nws_grid_url: null,
+      osm_id: "way/901"
+    };
+    expect(ohioBeachGuard.matches(beach)).toBe(false);
+  });
+
+  it("does not claim a beach near Fairport, Michigan despite the 'fairport harbor' substring risk", function() {
+    // Fairport on Michigan's Garden Peninsula is also in the pilot bbox.
+    const beach = {
+      id: "osm-fairport-mi",
+      name: "Fairport Harbor Beach",
+      park_name: null,
+      lat: 45.63,
+      lon: -86.66,
+      nws_zone: null,
+      nws_grid_url: null,
+      osm_id: "node/902"
+    };
+    expect(ohioBeachGuard.matches(beach)).toBe(false);
+  });
+
+  it("does not match a beach without numeric coordinates (the geographic gate requires them)", function() {
+    const beach = {
+      id: "osm-nocoords",
+      name: "Geneva State Park Beach",
+      park_name: null,
+      lat: null,
+      lon: null,
+      nws_zone: null,
+      nws_grid_url: null,
+      osm_id: "node/903"
+    };
+    expect(ohioBeachGuard.matches(beach)).toBe(false);
   });
 
   it("does not match a far-away beach", function() {

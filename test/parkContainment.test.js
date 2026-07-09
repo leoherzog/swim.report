@@ -37,6 +37,24 @@ describe("parseParkBeachElements", () => {
     expect(parsed.parks[1].name).toBe("Van Buren State Park");
   });
 
+  it("populates locality from the beach element's own loc_name tag", () => {
+    // Feeds deriveUnnamedSuffix in src/index.js: an unnamed secondary polygon
+    // carrying loc_name (e.g. "Hamlin Lake") is labeled by its water body
+    // instead of a bare compass direction.
+    const parsed = parseParkBeachElements([
+      { type: "way", id: 1, tags: { natural: "beach", loc_name: "Hamlin Lake" },
+        bounds: bounds(43.95, -86.49, 43.97, -86.47) },
+      { type: "way", id: 2, tags: { natural: "beach", loc_name: "   " },
+        bounds: bounds(43.90, -86.49, 43.92, -86.47) },
+      { type: "way", id: 3, tags: { natural: "beach" },
+        bounds: bounds(43.80, -86.49, 43.82, -86.47) }
+    ]);
+    expect(parsed.beaches[0].locality).toBe("Hamlin Lake");
+    // Whitespace-only and absent loc_name both normalize to null.
+    expect(parsed.beaches[1].locality).toBe(null);
+    expect(parsed.beaches[2].locality).toBe(null);
+  });
+
   it("skips park elements without a name and elements without coordinates", () => {
     const parsed = parseParkBeachElements([
       { type: "way", id: 1, tags: { leisure: "park" }, bounds: bounds(1, 1, 2, 2) },
@@ -104,11 +122,14 @@ describe("mergeBeachRows", () => {
     expect(weko.parkName).toBe(null);
   });
 
-  it("keeps only the largest unnamed beach per park, named after the park", () => {
+  it("keeps only the largest when secondaries have no derivable distinction", () => {
+    // Two unnamed beaches in one park whose centroids coincide (below the
+    // compass separation threshold) and carry no locality — the smaller falls
+    // back to skipped, the largest survives named after the park.
     const merged = mergeBeachRows([], [
       { osmType: "way", osmId: 1, name: null, lat: 41.90, lon: -86.60,
         areaDeg2: 0.0004, parkName: "Warren Dunes State Park", parkKey: "relation/99" },
-      { osmType: "way", osmId: 2, name: null, lat: 41.91, lon: -86.61,
+      { osmType: "way", osmId: 2, name: null, lat: 41.90, lon: -86.60,
         areaDeg2: 0.0001, parkName: "Warren Dunes State Park", parkKey: "relation/99" },
       { osmType: "way", osmId: 3, name: null, lat: 43.66, lon: -86.49,
         areaDeg2: 0.0002, parkName: "Silver Lake State Park", parkKey: "way/50" }
@@ -119,6 +140,66 @@ describe("mergeBeachRows", () => {
     expect(warren.name).toBe("Warren Dunes State Park");
     expect(warren.parkName).toBe("Warren Dunes State Park");
     expect(merged.rows.find(function (r) { return r.id === "osm-way-2"; })).toBe(undefined);
+  });
+
+  it("keeps separated secondary unnamed beaches with a compass-direction suffix", () => {
+    // Ludington State Park: a Lake Michigan primary plus two more clearly
+    // separated unnamed polygons (real park with 4 unnamed shore polygons).
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 10, name: null, lat: 43.96, lon: -86.51,
+        areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 11, name: null, lat: 43.98, lon: -86.51,
+        areaDeg2: 0.0004, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 12, name: null, lat: 43.94, lon: -86.51,
+        areaDeg2: 0.0003, parkName: "Ludington State Park", parkKey: "relation/123" }
+    ]);
+    expect(merged.rows.length).toBe(3);
+    expect(merged.skippedUnnamed).toBe(0);
+    const primary = merged.rows.find(function (r) { return r.id === "osm-way-10"; });
+    const north = merged.rows.find(function (r) { return r.id === "osm-way-11"; });
+    const south = merged.rows.find(function (r) { return r.id === "osm-way-12"; });
+    // Largest keeps the bare park name (id + name derivation unchanged).
+    expect(primary.name).toBe("Ludington State Park");
+    expect(primary.parkName).toBe("Ludington State Park");
+    // Secondaries carry a compass suffix in BOTH name and parkName so the
+    // unnamed-origin (name === park_name) invariant holds for render/reconcile.
+    expect(north.name).toBe("Ludington State Park — North Beach");
+    expect(north.parkName).toBe("Ludington State Park — North Beach");
+    expect(south.name).toBe("Ludington State Park — South Beach");
+    expect(south.parkName).toBe("Ludington State Park — South Beach");
+  });
+
+  it("prefers a locality name from the beach's own tags over compass direction", () => {
+    // The Hamlin Lake polygon in Ludington SP carries its own locality tag.
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 10, name: null, lat: 43.96, lon: -86.51,
+        areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 13, name: null, lat: 43.96, lon: -86.48,
+        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123",
+        locality: "Hamlin Lake" }
+    ]);
+    expect(merged.rows.length).toBe(2);
+    const hamlin = merged.rows.find(function (r) { return r.id === "osm-way-13"; });
+    expect(hamlin.name).toBe("Ludington State Park — Hamlin Lake");
+    expect(hamlin.parkName).toBe("Ludington State Park — Hamlin Lake");
+  });
+
+  it("skips a secondary whose suffix collides with a sibling already kept", () => {
+    // Two secondaries both due north of the primary would both derive
+    // "North Beach"; only the first is kept, the colliding one is skipped.
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 10, name: null, lat: 43.96, lon: -86.51,
+        areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 11, name: null, lat: 43.98, lon: -86.51,
+        areaDeg2: 0.0004, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 14, name: null, lat: 44.00, lon: -86.51,
+        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123" }
+    ]);
+    expect(merged.rows.length).toBe(2);
+    expect(merged.skippedUnnamed).toBe(1);
+    expect(merged.rows.find(function (r) { return r.id === "osm-way-11"; }).name)
+      .toBe("Ludington State Park — North Beach");
+    expect(merged.rows.find(function (r) { return r.id === "osm-way-14"; })).toBe(undefined);
   });
 
   it("keeps same-named parks distinct via parkKey", () => {

@@ -102,10 +102,51 @@ describe("parseBldhdHtml", function() {
     expect(result.sites[0].siteId).toBe("greilickville-harbor-park");
   });
 
-  it("omits Level 2 rows rather than guessing a color (unconfirmed mapping)", function() {
+  it("maps Level 2 to yellow per the confirmed BLDHD Water Quality Index legend", function() {
+    // Level 2 = "contact above the waist not advised" -> yellow (advisory).
     const html = buildFixture("7/2/2026", [
       { name: "Frankfort Beach", levelCell: "Level 1&nbsp; &nbsp;&nbsp;" },
       { name: "Omena Beach", levelCell: "Level 2&nbsp; &nbsp;&nbsp;" }
+    ]);
+    const result = parseBldhdHtml(html, NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.sites.length).toBe(2);
+    const frankfort = result.sites.filter(function(s) { return s.siteId === "frankfort-beach"; })[0];
+    const omena = result.sites.filter(function(s) { return s.siteId === "omena-beach"; })[0];
+    expect(frankfort.color).toBe("green");
+    expect(omena.color).toBe("yellow");
+    expect(omena.reason.indexOf("Level 2")).toBeGreaterThan(-1);
+  });
+
+  it("maps Level 3 to red per the confirmed legend (no body contact advised)", function() {
+    const html = buildFixture("7/2/2026", [
+      { name: "Northport Marina", levelCell: "Level 3&nbsp; &nbsp;&nbsp;" }
+    ]);
+    const result = parseBldhdHtml(html, NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.sites.length).toBe(1);
+    expect(result.sites[0].siteId).toBe("northport-marina");
+    expect(result.sites[0].color).toBe("red");
+    expect(result.sites[0].reason.indexOf("Level 3")).toBeGreaterThan(-1);
+  });
+
+  it("maps Level 4 to double-red per the confirmed legend (Health Alert, avoid contact)", function() {
+    const html = buildFixture("7/2/2026", [
+      { name: "South Bar Lake", levelCell: "Level 4&nbsp; &nbsp;&nbsp;" }
+    ]);
+    const result = parseBldhdHtml(html, NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.sites.length).toBe(1);
+    expect(result.sites[0].siteId).toBe("south-bar-lake");
+    expect(result.sites[0].color).toBe("double-red");
+    expect(result.sites[0].reason.indexOf("Level 4")).toBeGreaterThan(-1);
+  });
+
+  it("omits a Level outside the confirmed 1-4 legend rather than guessing", function() {
+    // A future/unknown Level (e.g. 5) has no authoritative meaning.
+    const html = buildFixture("7/2/2026", [
+      { name: "Frankfort Beach", levelCell: "Level 1&nbsp; &nbsp;&nbsp;" },
+      { name: "Suttons Bay Park", levelCell: "Level 5&nbsp; &nbsp;&nbsp;" }
     ]);
     const result = parseBldhdHtml(html, NOW_ISO);
     expect(result).not.toBe(null);
@@ -113,18 +154,10 @@ describe("parseBldhdHtml", function() {
     expect(result.sites[0].siteId).toBe("frankfort-beach");
   });
 
-  it("omits Level 3 rows rather than guessing a color (unconfirmed mapping)", function() {
+  it("returns null when every row is an out-of-legend level (no site survives)", function() {
     const html = buildFixture("7/2/2026", [
-      { name: "Northport Marina", levelCell: "Level 3&nbsp; &nbsp;&nbsp;" }
-    ]);
-    const result = parseBldhdHtml(html, NOW_ISO);
-    expect(result).toBe(null);
-  });
-
-  it("returns null when every row is an unconfirmed level (no site survives)", function() {
-    const html = buildFixture("7/2/2026", [
-      { name: "South Bar Lake", levelCell: "Level 2&nbsp; &nbsp;&nbsp;" },
-      { name: "Suttons Bay Park", levelCell: "Level 3&nbsp; &nbsp;&nbsp;" }
+      { name: "South Bar Lake", levelCell: "Level 5&nbsp; &nbsp;&nbsp;" },
+      { name: "Suttons Bay Park", levelCell: "Level 9&nbsp; &nbsp;&nbsp;" }
     ]);
     expect(parseBldhdHtml(html, NOW_ISO)).toBe(null);
   });

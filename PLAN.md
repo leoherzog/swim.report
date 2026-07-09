@@ -1,10 +1,10 @@
 # PLAN.md — Swim Report (swim.report)
 
-Authoritative implementation plan. Four implementation agents (RULES, CLIENTS, FRONTEND, INFRA)
-work in parallel from this document WITHOUT talking to each other. Every signature and shape
-below is a contract — match it exactly.
+Authoritative implementation contract. Every signature and shape below is a
+contract — match it exactly, and update this document when changing any
+cross-module interface.
 
-## 0. Global constraints (all agents)
+## 0. Global constraints
 
 - Single Cloudflare Worker, modules syntax (export default { fetch, scheduled }).
 - Plain JavaScript ES modules. No TypeScript.
@@ -22,17 +22,6 @@ below is a contract — match it exactly.
   orchestrator (src/index.js) and passed DOWN into pure functions. Pure modules
   (src/rules.js, src/clients/srfParser.js, src/frontend/render.js,
   southHaven parse helper) never call Date.now() or new Date().
-
-### File ownership (do not touch files you do not own)
-
-- RULES:    src/rules.js, test/rules.test.js
-- CLIENTS:  src/clients/nws.js, src/clients/srfParser.js, src/clients/openMeteo.js,
-            src/clients/overpass.js, src/officialSources/index.js,
-            src/officialSources/southHaven.js, test/srfParser.test.js,
-            test/officialSources.test.js (optional)
-- FRONTEND: src/frontend/render.js (plus additional files under src/frontend/ only)
-- INFRA:    wrangler.toml, migrations/0001_init.sql, src/index.js, src/router.js,
-            README.md, TODO.md, vitest.config.js (only if needed)
 
 ## 1. Shared data shapes (referenced everywhere below)
 
@@ -70,7 +59,7 @@ below is a contract — match it exactly.
       "color": "yellow",             // "green" | "yellow" | "red" | "double-red" | "unknown"
       "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
       "trigger": "wave-height",      // which precedence branch decided the color — see section 4
-      "rules_version": "1.1.0",
+      "rules_version": "1.2.0",
       "official": false,
       "sources": [
         { "label": "NWS active alerts for zone MIZ071",
@@ -103,7 +92,7 @@ before this shape existed.
       "updated": "2026-07-04T15:00:04.000Z"
     }
 
-## 2. D1 schema — migrations/ (INFRA)
+## 2. D1 schema — migrations/
 
 migrations/0001_init.sql, exact SQL:
 
@@ -163,6 +152,29 @@ migrations/0005_webcams.sql:
   success AND on a confirmed "no cam within radius"; left untouched on API
   failure so the row stays at the front of the recheck queue).
 
+migrations/0006_flag_history.sql:
+
+    CREATE TABLE flag_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      beach_id TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      estimated_color TEXT NOT NULL,
+      official_color TEXT NOT NULL,
+      rules_version TEXT NOT NULL,
+      official_source TEXT
+    );
+
+    CREATE INDEX idx_flag_history_beach_observed ON flag_history(beach_id, observed_at);
+
+  Calibration signal for wave/wind threshold tuning in src/rules.js against real
+  official flag history (South Haven, Chicago publish true flags). runFlagRecompute
+  step 9 writes ONE row per beach that has BOTH a fresh estimate AND a scraped
+  official color in the same run (estimate-only beaches are NOT logged, so the table
+  records estimated-vs-official PAIRS and never grows with all ~613 beaches hourly).
+  official_source = the resolving scraper id. Retention: the daily runOverpassSync
+  deletes rows older than FLAG_HISTORY_RETENTION_DAYS (90) at the top of the run
+  (section 7).
+
 - idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
   key "last_overpass_count" (value = String(count)).
@@ -186,11 +198,15 @@ Never written from the fetch handler. Absent/expired key means "no data": API re
 for that slot; frontend renders gray "unknown" for a missing estimate and simply omits the
 official card when official is null.
 
-## 4. Rules engine — src/rules.js (RULES)
+## 4. Rules engine — src/rules.js
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.1.0";
+    export const RULES_VERSION = "1.2.0";
+
+    export const ALERTS_UNAVAILABLE_CAVEAT = "NWS alerts not yet available for this beach";
+      // Appended to the reason (see the caveat rule after step 5) when the cron
+      // reports alerts were not checkable for this beach (nws_zone still NULL).
 
     export const ALERT_PRECEDENCE = [
       "High Surf Warning",        // -> double-red
@@ -209,6 +225,13 @@ Pure module. No fetch, no Date, no env. Exports:
       beachId: "osm-node-123456",       // string
       alerts: ["Rip Current Statement"],// array of NWS event-name strings, [] if fetch OK
                                         // but no alerts, or null if the alerts fetch failed
+      alertsCheckable: true,            // true | false | null (missing/undefined -> null):
+                                        // true when the cron could look up alerts (beach
+                                        // has an nws_zone; a transient fetch failure this
+                                        // run still counts as true), false when nws_zone is
+                                        // NULL (not yet NWS-enriched, so alerts/SRF are
+                                        // never checkable), null for legacy callers (no
+                                        // caveat). Drives the reason caveat after step 5.
       ripCurrentRisk: "HIGH",           // "HIGH" | "MODERATE" | "LOW" | null
       waveHeightFt: 3.2,                // number (feet, already converted) or null
       windSpeedMph: 18,                 // number (mph, sustained) or null
@@ -263,6 +286,16 @@ must NOT be mutated.
    Note: alerts === [] (successful fetch, zero alerts) does NOT count as usable data on its
    own; with everything else null the result is "unknown".
 
+### Alerts-unavailable caveat (applied AFTER the color/reason are decided)
+
+When inputs.alertsCheckable === false AND the deciding trigger is NOT "nws-alert", append
+" (" + ALERTS_UNAVAILABLE_CAVEAT + ")" to the final reason, e.g.
+"Estimated wave height 1.0 ft (below 2 ft) (NWS alerts not yet available for this beach)".
+This distinguishes "alerts checked, none active" from "alerts never checkable" so a
+wave/wind/no-data estimate can never present as alert-verified. Skipped when an alert
+itself decided the color (contradictory input) and when alertsCheckable is true/null.
+Colors, triggers, thresholds, precedence, and sources are otherwise UNCHANGED.
+
 Return value: a FlagEstimate (section 1) with beachId, color, reason as above, trigger
 (the branch that decided the color: step 1 → "nws-alert", step 2 → "rip-current",
 step 3 → "wave-height", step 4 → "wind", step 5 LOW → "rip-current-low",
@@ -270,7 +303,7 @@ step 5 otherwise → "no-data"), rules_version: RULES_VERSION, official: false,
 sources: inputs.sources (or []), updated: inputs.updated. Two calls with the same
 inputs return deeply-equal objects.
 
-## 5. Upstream clients (CLIENTS)
+## 5. Upstream clients
 
 All fetching functions: async, take structured args, return data or null, NEVER throw.
 On any HTTP error, non-2xx status, JSON parse failure, or timeout: console.log the error
@@ -481,22 +514,33 @@ entirely when it is unset.
       // locally, NOT via Overpass is_in (is_in only accepts nodes) and NEVER via
       // name-based area lookup (name collisions across states: Silver Lake State
       // Park exists in MI, NH, and VT).
-      // Return: array of { osmType, osmId, name: string|null, lat, lon,
-      //                    areaDeg2: number (beach bbox area, ranking only),
+      // Return: array of { osmType, osmId, name: string|null, locality: string|null,
+      //                    lat, lon, areaDeg2: number (beach bbox area, ranking only),
       //                    parkName: string|null, parkKey: "relation/8550215"|null }
-      // (lat/lon = bbox center for ways/relations). Failure -> null.
+      // (lat/lon = bbox center for ways/relations). locality is the beach element's
+      // OWN loc_name tag (a local/unofficial water-body label, e.g. "Hamlin Lake"),
+      // null when absent — consumed by deriveUnnamedSuffix / mergeBeachRows in
+      // src/index.js to distinguish a park's secondary unnamed beaches (section 7).
+      // Never substitutes for name. Failure -> null.
 
     export function parseParkBeachElements(elements)
       // Pure, exported for tests. Raw Overpass elements -> { beaches, parks }.
-      // Element with natural=beach -> beach (even when also park-tagged); named
-      // element with a park tag -> park; no usable coords -> skipped.
+      // Element with natural=beach -> beach (even when also park-tagged), carrying
+      // its optional locality (loc_name tag); named element with a park tag ->
+      // park; no usable coords -> skipped.
+
+    // runQuery internal note: an HTTP-200 Overpass body carrying a non-empty
+    // "remark" field is a server-side timeout that TRUNCATED the elements array;
+    // both fetchBeaches and fetchParkBeaches treat it as a FAILURE (return null),
+    // never a partial success — a truncated result would make the sync's
+    // reconciliation pass (section 7) read every missing element as deleted.
 
     export function associateParkForBeach(beach, parks)
       // Pure, exported for tests. Smallest-bbox-area park whose bounding box
       // OVERLAPS the beach's bounding box (overlap, not center containment —
       // shoreline beach polygons bulge lakeward past the park boundary), or null.
 
-## 6. Official sources (CLIENTS)
+## 6. Official sources
 
 ### src/officialSources/index.js
 
@@ -511,7 +555,7 @@ entirely when it is unset.
       lenawee,             // lenawee-mi            — 2 fixed county HD sites
       metroparks,          // huron-clinton-metroparks — 4 fixed beaches, closure-only
       michiganCity,        // michigan-city-in      — 2 fixed sites, E. coli prose
-      ohioBeachGuard,      // ohio-beachguard       — 4 hardcoded ODH BeachGuard ids
+      ohioBeachGuard,      // ohio-beachguard       — 51 curated ODH BeachGuard ids (bbox-gated)
       hdnwMichigan,        // hdnw-michigan         — 4-county WQI table (~32 beaches)
       bldhd,               // bldhd-mi              — Benzie/Leelanau weekly report
       chicagoParkDistrict, // chicago-park-district — lakefront flag JSON (~23 beaches)
@@ -614,16 +658,31 @@ entirely when it is unset.
     // severe color. Gray/Grey = unmonitored (9pm-9am local / Sept 15 - May 15
     // off-season) and maps to NO DATA for that site, never a color.
 
-    export function parseSouthHavenCsv(text)
-      // Pure, exported for tests. CSV string -> multi-site sites[] (shape (b)) or null.
-      // Every non-empty line must match /^Flag #(\d+) (.+?) is ([A-Za-z-]+)$/ or the
-      // pier line /^(North|South) Pier is (Open|Closed)$/, else the WHOLE parse
-      // returns null (never guess around a new format). A color outside
-      // green/yellow/red/gray/grey fails the whole parse. Gray/Grey flags are
-      // unmonitored: a site whose flags are all gray, or that mixes gray with real
-      // colors, is OMITTED (no data). Same-named flags roll up to red > yellow >
-      // green. A flag line naming a beach not in SITE_DEFS is skipped. Returns [] when
-      // every site is gray (distinct from null = unparseable).
+    export function isSouthHavenMonitored(nowIso)
+      // Pure, exported for tests. nowIso -> boolean. True when nowIso falls in the
+      // monitored season (~May 15 - Sept 15 inclusive) AND monitored hours (9am-9pm
+      // as [9, 21)) in America/Detroit local time. A missing/unparseable timestamp
+      // returns true (no gate — fail open rather than suppress live data on a parse
+      // bug). Implements the Gray/unmonitored convention as an explicit time gate.
+
+    export function parseSouthHavenCsv(text, nowIso)
+      // Pure, exported for tests. CSV string (+ the cron ISO timestamp) -> multi-site
+      // sites[] (shape (b)), [] when there is no reportable data, or null when the
+      // feed is unusable/unparseable. FRESHNESS GATE: when !isSouthHavenMonitored(nowIso)
+      // the sheet is unattended and any color it still shows is stale, so return []
+      // (no data), never a color. A non-empty line matches /^Flag #(\d+) (.+?) is
+      // ([A-Za-z-]+)$/ or the pier line /^(North|South) Pier is (Open|Closed)$/;
+      // a line matching NEITHER is now LOGGED and SKIPPED (only that line drops) so
+      // one novel line never discards every site — but if NOTHING in the feed is
+      // recognized the parse returns null. A flag line whose color is unrecognized
+      // is skipped and TAINTS its named site (that site is omitted; every other
+      // site still comes through). "Double Red"/"Double-Red"/"DoubleRed" normalize
+      // to "double-red" (the most severe tier). Gray/Grey flags are unmonitored: a
+      // site whose flags are all gray, or that mixes gray with real colors, is
+      // OMITTED (no data). Same-named flags roll up MOST-SEVERE (double-red > red >
+      // yellow > green). A flag line naming a beach not in SITE_DEFS is skipped.
+      // Returns [] when every site is gray or outside the monitored window
+      // (distinct from null = unparseable).
 
     export function extractSouthHavenCsvUrl(html)
       // Pure, exported for tests. Flag-page HTML -> canonical pub?gid=...&single=true
@@ -639,10 +698,14 @@ entirely when it is unset.
       //   without one) to discover the CSV href via extractSouthHavenCsvUrl (fallback
       //   SOUTH_HAVEN_CSV_URL); GET that CSV with redirect:"follow" (the docs.google
       //   pub URL 307s to a signed, single-use googleusercontent URL — never cache it);
-      //   parseSouthHavenCsv. Returns { perBeach: true, sites, source, sources, updated:
-      //   nowIso } or null when unparseable / every site gray. Per-site reason:
+      //   parseSouthHavenCsv(text, nowIso) — scrape() passes nowIso down for the
+      //   freshness gate. Returns { perBeach: true, sites, source, sources, updated:
+      //   nowIso } or null when unparseable; sites is [] outside the monitored window
+      //   or when every site is gray. Per-site reason:
       //   "Official flag reported by City of South Haven Beach Flag Program for <label>".
-      // South Haven has no double-red tier; red means water closed. Map red -> "red".
+      // South Haven now recognizes a double-red tier ("Double Red" line -> "double-red",
+      //   which outranks red in the same-site rollup, matching OFFICIAL_COLORS in
+      //   officialSources/index.js); a plain red still means water closed.
 
 ### Other registered scrapers (all multi-site shape (b); one module + one test file each)
 
@@ -655,7 +718,11 @@ guessed color). Full color semantics are in README.md's official-sources table.
   Hayes State Park + Lake Hudson Rec Area. "No Advisory Posted" -> green; any
   other status text logged + omitted; shared "Last Updated" older than 10 days
   vs nowIso omits both sites. Per-site updated = the page's own Last Updated
-  timestamp (periodic source — never nowIso).
+  timestamp (periodic source — never nowIso). Active-advisory status wording is
+  still UNCONFIRMED (only "No Advisory Posted" ever observed live), so the
+  unrecognized-status log emits the verbatim status text with a greppable
+  "lenawee: UNMAPPED STATUS" marker to capture the real wording the first time an
+  advisory posts (to be mapped then — never guessed).
 - src/officialSources/metroparks.js (huron-clinton-metroparks) — Metroparks
   park-closures page, panels scoped by id (Kensington / Stony Creek), 4 beaches.
   CLOSURE-ONLY: "Closed" -> red; "Open" -> site omitted (never an asserted
@@ -667,28 +734,44 @@ guessed color). Full color semantics are in README.md's official-sources table.
   236-999 yellow, >=1000 red; reading date parsed from the page, >8 days stale
   -> null; updated = reading date (honest, may trip the UI stale warning).
 - src/officialSources/ohioBeachGuard.js (ohio-beachguard) — ODH BeachGuard
-  public API, 4 hardcoded beach ids (162/153/154/148), one GET per id with
-  per-id failure isolation. Out-of-season -> omitted; current advisory -> red
-  for HAB_WARNING/severity>=4 else yellow; in-season with zero current
-  advisories -> affirmative green (BeachGuard is Ohio's official statewide
-  advisory system of record). Advisory sites carry per-site updated = the
-  advisory's issue date (startDate); monitored-and-clear greens have no
-  source-side record date, so they fall back to nowIso (the "no advisory"
-  state is live at query time).
+  public API, 51 curated Lake Erie public-beach ids (OHIO_SITES; expanded from
+  the original 4 — the registry bulk endpoint returns null monitorings/advisories,
+  so each id still needs its own detail GET), one GET per id with per-id failure
+  isolation. matches() is HARD-GATED by OHIO_MATCH_BBOX (lat 41.2-42.1,
+  lon -83.6..-80.4) BEFORE any names[]/proximity check, so a same-named
+  Michigan/Ontario beach can never inherit an Ohio official flag; only distinctive,
+  low-collision names go in names[] (generic labels resolve by proximity only).
+  Out-of-season -> omitted; current advisory -> red for any HAB advisory
+  (HAB_WARNING_ADV OR HAB_WATCH_ADV — both advise against water contact, watch
+  collapsed UP to red per the never-a-false-green bias — or severity >= 4) else
+  yellow (CONTAM_ADV is ODH's own lowest tier); in-season with zero current
+  advisories -> affirmative green (BeachGuard is Ohio's official statewide advisory
+  system of record). Advisory sites carry per-site updated = the advisory's issue
+  date (startDate); monitored-and-clear greens have no source-side record date, so
+  they fall back to nowIso (the "no advisory" state is live at query time).
 - src/officialSources/hdnwMichigan.js (hdnw-michigan) — Health Dept of NW
   Michigan WQI table (~32 curated beach names, 4-county bbox). WQI 1/2/3/4 ->
   green/yellow/red/double-red; samples >8 days old vs nowIso dropped; most
   recent sample per beach wins; uncurated names skipped. Per-site updated =
   the row's own sample date (periodic source — never nowIso).
 - src/officialSources/bldhd.js (bldhd-mi) — Benzie-Leelanau District Health
-  Dept weekly "Beach Report M/D/YYYY" table, 10 curated sites. Level 1 -> green;
-  Level 2/3 logged loudly + omitted (on-page semantics unconfirmed — never
-  guess); report older than 8 days (or future-dated) -> null.
+  Dept weekly "Beach Report M/D/YYYY" table, 10 curated sites. Water Quality Index
+  Level 1/2/3/4 -> green/yellow/red/double-red, mapped from BLDHD's OWN legend
+  published in its weekly PDF press release (Level 2 "contact above the waist not
+  advised", Level 3 "no body contact advised", Level 4 "Health Alert … avoid
+  contact"). Any Level NOT in the 1-4 legend (e.g. a future Level 5, a malformed
+  cell) is logged + omitted (never guessed); report older than 8 days (or
+  future-dated) -> null.
 - src/officialSources/chicagoParkDistrict.js (chicago-park-district) — Chicago
   Park District /flag-status JSON API (~23 lakefront beaches). Per-record 36h
-  staleness gate (payload mixes in prior-season rows); Green/Yellow/Red flag
-  prefixes map directly; "Afterhours" -> red (no-lifeguard closure, noted in
-  reason); unrecognized flags omitted.
+  staleness gate (CHICAGO_MAX_AGE_HOURS = 36; payload mixes in prior-season rows);
+  Green/Yellow/Red flag prefixes map directly; "Afterhours" -> red (no-lifeguard
+  closure, noted in reason); unrecognized flags omitted. CATEGORY-AWARE STALENESS:
+  a beach resolves to GREEN only when its OWN Surf Conditions row is fresh and
+  classifiable (isSurfCategory) — a green resting solely on a fresh Water
+  Quality/Weather row while the Surf row is stale or missing yields NO data
+  (never a false official green); red/yellow/double-red keep the plain
+  most-severe-fresh-row gate.
 - src/officialSources/wisconsinDnr.js (wisconsin-dnr) — Wisconsin DNR Beach
   Health ArcGIS layer (441 statewide rows). MAP_STATUS Open -> green, Advisory
   -> yellow, Closed -> red; Closed For Season / No Data Available / Other
@@ -699,7 +782,7 @@ guessed color). Full color semantics are in README.md's official-sources table.
   overlaps Michigan's western UP, which is safe because unresolved beaches just
   get no official flag.
 
-## 7. Cron design (INFRA — src/index.js)
+## 7. Cron design (src/index.js)
 
 wrangler.toml triggers:
 
@@ -726,9 +809,8 @@ Constants: MAX_BEACHES_PER_RUN = 1000, OPEN_METEO_BATCH = 50, KV_TTL_SECONDS = 7
 
 MAX_BEACHES_PER_RUN must cover the WHOLE beaches table in one run: the KV TTL is 2 h,
 so any beach not reached every other hourly run has its flag expire and shows "no data"
-until its next rotation turn (at 250 with ~613 pilot rows every beach was flagless
-~1 h out of every 3). 1000 covers the pilot with headroom; nationwide scale-out still
-needs real pagination (TODO.md).
+until its next rotation turn. 1000 covers the pilot with headroom; nationwide scale-out
+still needs real pagination (TODO.md).
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run).
 2. SELECT * FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT 1000
@@ -749,7 +831,10 @@ needs real pagination (TODO.md).
    logs — the affected beaches fall through to wind as before.
 6. Wind: only for beaches whose waveHeightFt is null after steps 5 + 5b — fetchWinds
    in batches of 50.
-7. Per beach: assemble inputs (nulls for anything missing), sources = array of
+7. Per beach: assemble inputs (nulls for anything missing), including
+   alertsCheckable: beach.nws_zone ? true : false (section 4 — a still-unenriched
+   beach with nws_zone NULL gets the honesty caveat instead of a silent wave-only
+   green); sources = array of
    { label, url } entries (section 1) for every source that returned data for THIS
    beach — alerts: "NWS active alerts for zone " + zone; SRF: "NWS Surf Zone Forecast
    (" + productId + ")"; waves: waveSourceLabel(model) from WAVE_MODEL_LABELS
@@ -781,14 +866,26 @@ needs real pagination (TODO.md).
    — a scraper that was never invoked is never counted as failing. Cost: one KV
    get + one KV put per matched scraper per run (a handful of extra subrequests).
 
-9. Stamp the rotation cursor: one env.DB.batch of
+9. Calibration history (migration 0006): during steps 7-8, record each beach's
+   estimate in a per-run map estimatesByBeach (beachId -> { color, rulesVersion })
+   and each resolved official in officialsByBeach (beachId -> { color,
+   source = flag.scraperId }). After step 8, write ONE flag_history row per beach
+   present in BOTH maps (a fresh estimate AND a scraped official color this run) via
+   a single env.DB.batch INSERT; official_source = the scraper id. Estimate-only
+   beaches are deliberately NOT logged, so the table records estimated-vs-official
+   pairs instead of all ~613 beaches hourly. Wrapped in its own try/catch (a failure
+   here never poisons the run); the summary log line gains a history=<n> field. Cost:
+   at most 1 extra D1 batch call per run (only when >= 1 pair exists).
+10. Stamp the rotation cursor: one env.DB.batch of
    UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
 
 Subrequest budget (paid plan, 10,000/invocation): ~30-60 alert calls + ~2×15 SRF calls +
 ~13 marine batches + ≤62 GLCFS buoy (2 catalogs + ≤60 deduped platform fetches, step 5b) +
-≤13 wind batches + ~15 official-scraper fetches (one scrape() per matched scraper; South
-Haven uses 2 fetches, Ohio BeachGuard 4, the rest 1 each) + ~2 scraper-health KV
-ops per matched scraper + ≤700 KV puts ≈ 900 at the full ~613-row pilot table. Free plan
+≤13 wind batches + ~62 official-scraper fetches (one scrape() per matched scraper; South
+Haven uses 2 fetches, Ohio BeachGuard now issues ONE GET per OHIO_SITES entry = 51, the
+rest 1 each) + ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch
+(step 9, only when >= 1 estimate/official pair exists) + ≤700 KV puts ≈ 950 at the full
+~613-row pilot table. Free plan
 (50 subrequests, 1000 KV writes/day) is NOT sufficient at this cadence — README must state
 the paid-plan assumption; alternatively cap MAX_BEACHES_PER_RUN low for a free-plan demo
 (TODO.md).
@@ -815,11 +912,21 @@ do NOT attempt it now.
    allows only 2 slots per IP and 429s beyond that.
 3. mergeBeachRows(namedRows, parkBeaches) — pure, exported from src/index.js:
    - named beach also found inside a park -> parkName attached;
-   - unnamed beach kept ONLY when park-associated, and only the LARGEST (by bbox
-     area) unnamed beach per park ELEMENT (parkKey, so two same-named parks in
-     different towns stay distinct) survives; its name becomes the park name
-     (several identical "X State Park" rows would be indistinguishable in the UI —
-     TODO.md records the limitation);
+   - unnamed beach kept ONLY when park-associated. The LARGEST (by bbox area)
+     unnamed beach per park ELEMENT (parkKey, so two same-named parks in different
+     towns stay distinct) is the "primary" and keeps the bare park name as its
+     display name (id/name derivation unchanged so existing KV flags stay keyed);
+   - each ADDITIONAL unnamed beach in the same park is kept only when
+     deriveUnnamedSuffix(beach, primary) yields a distinct, human-meaningful label —
+     (a) beach.locality (the loc_name tag from the Overpass client), else (b) a
+     compass direction relative to the primary when they are at least
+     COMPASS_MIN_SEPARATION_KM (0.2) km apart; that row's display name AND park_name
+     both become "<Park> — <suffix>". A beach with no derivable distinction, or one
+     whose label collides with a sibling already kept, falls back to skipped
+     (counted in skippedUnnamed) — the previous largest-only behavior;
+   - UNNAMED-ORIGIN INVARIANT (relied on by the reconciliation pass below and by
+     render's park-name-first treatment): every unnamed-origin row has
+     name === park_name, whether the bare park name or park-name-plus-suffix;
    - returns { rows: [{ id, name, lat, lon, osmId, parkName }], skippedUnnamed }.
 4. Upsert every merged row via env.DB.batch of prepared statements:
      INSERT INTO beaches (id, name, lat, lon, osm_id, park_name)
@@ -829,6 +936,26 @@ do NOT attempt it now.
    failed, use the legacy statement WITHOUT park_name so stale associations
    survive an Overpass outage.
 5. Write sync_meta rows last_overpass_sync (nowIso) and last_overpass_count.
+6. Stale park-beach reconciliation (runs ONLY when BOTH Overpass queries succeeded —
+   parkBeaches !== null — AND this run produced >= 1 park-containment row, i.e. a row
+   with r.name === r.parkName). The upsert never deletes, so when OSM edits make a
+   DIFFERENT unnamed beach the largest in a park the previously-kept row lingers next
+   to the new one. This pass SELECTs existing unnamed-origin park rows
+   (park_name IS NOT NULL AND name = park_name) within PILOT_BBOX and DELETEs any
+   whose id was NOT produced this run. Named beaches (name != park_name) are never
+   candidates. A proportional safety rail refuses the whole deletion when the stale
+   set exceeds max(OVERPASS_RECONCILE_MAX_DELETES = 10,
+   ceil(OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25 * candidates)) — a partial
+   upstream response would otherwise mass-delete enriched rows (defense in depth
+   behind runQuery's remark check, section 5). Each deletion is logged (id, name); the
+   sync-complete summary line gains a deleted_stale=<n> field. Internal to
+   runOverpassSync (not exported).
+
+In addition, the daily run prunes flag_history (migration 0006) BEFORE the Overpass
+fetches, in its own try/catch (so a pruning failure never costs a discovery day):
+DELETE FROM flag_history WHERE observed_at < nowIso - FLAG_HISTORY_RETENTION_DAYS
+(90 days). Without this the calibration table grows unbounded (~1M rows/year in
+season).
 
 runOverpassSync is discovery ONLY — NWS point enrichment and webcam hydration run on
 their own cron triggers below, so an aborted Overpass run never costs an enrichment day.
@@ -877,7 +1004,7 @@ Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤
 subrequests per run. The stored player URL is only ever dereferenced by the visitor's
 BROWSER on the detail page — never by the request path.
 
-## 8. HTTP surface (INFRA — src/router.js, src/index.js)
+## 8. HTTP surface (src/router.js, src/index.js)
 
 src/index.js:
 
@@ -893,6 +1020,11 @@ src/router.js:
     export function distanceMi(lat1, lon1, lat2, lon2)
       // Pure haversine great-circle distance in statute miles.
 
+    export function escapeLike(term)
+      // Pure; exported for tests. Escapes the LIKE wildcards % and _ plus the
+      // backslash escape char, so a user's ?q= term is matched literally. The
+      // result is wrapped in "%" ... "%" and bound to a "LIKE ?n ESCAPE '\'" clause.
+
     export function resolveUserLocation(request, url)
       // -> { lat, lon } | null. A valid "near" query param ("lat,lon", finite,
       // in range) wins over request.cf.latitude/longitude (IP-derived strings;
@@ -902,7 +1034,7 @@ Routing table (method GET only; anything else → 405):
 
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
-| GET /?near=lat,lon        | handleHome     | With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches ORDER BY COALESCE(park_name, name), name LIMIT 100 (alphabetical by DISPLAY name — section 9). KV: flag:/official: per displayed row | HTML renderListPage (entries carry distanceMi and sortedByProximity when located) |
+| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: flag:/official: per displayed row | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official:           | HTML renderDetailPage; 404 HTML if no row |
 | GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 LIMIT 500 | JSON { "beaches": [BeachRow...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1 row exists check; KV flag: + official:    | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
@@ -918,7 +1050,7 @@ Routing table (method GET only; anything else → 405):
 - The router NEVER fetches upstream. It imports only src/frontend/render.js and uses env.DB
   and env.FLAGS.
 
-### wrangler.toml (INFRA)
+### wrangler.toml
 
     name = "swim-report"
     main = "src/index.js"
@@ -936,7 +1068,7 @@ Routing table (method GET only; anything else → 405):
     binding = "FLAGS"
     id = "TODO-set-after-wrangler-kv-namespace-create"
 
-## 9. Frontend contract (FRONTEND — src/frontend/render.js)
+## 9. Frontend contract (src/frontend/render.js)
 
 Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML built with
 + concatenation only. All dynamic text goes through escapeHtml.
@@ -949,11 +1081,22 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                       official: OfficialFlag|null,
       //                       distanceMi: number|null } ],
       //          nowIso: "2026-07-04T15:05:00.000Z",
-      //          sortedByProximity: boolean (optional) }
+      //          sortedByProximity: boolean (optional),
+      //          query: string (optional — the active ?q=, echoed into the search
+      //                 input value and an "Showing results for …/Clear search" line),
+      //          hasMore: boolean (optional — more beaches exist server-side than were
+      //                 rendered; drives the empty-state "Search all beaches" submit
+      //                 button, shown only when hasMore && query is empty),
+      //          near: string (optional — raw near param, preserved in a hidden form
+      //                 input so proximity sorting survives a search submit) }
       // -> full HTML document string.
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite
       // or null renders nothing. sortedByProximity adds the "sorted by
-      // approximate distance" note to the intro.
+      // approximate distance" note to the intro. The search box is a GET form
+      // (id="beach-search-form", action="/", input name="q") that submits
+      // server-side while the inline script keeps filtering rendered rows; a
+      // q-filtered page with zero rows shows "No beaches match your search."
+      // (not the empty-database copy).
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
@@ -970,9 +1113,9 @@ exporting a CSS string); render.js is the sole module the router imports.
 
 - Document starts with "<!doctype html>" and the html element MUST be exactly:
     <html lang="en" data-fa-kit-code="ddd41b2d81">
-- In head, load Web Awesome Pro via CDN kit script with the LITERAL placeholder WA_KIT_URL
-  (replacing it with the real kit URL is a TODO.md item):
-    <script type="module" src="WA_KIT_URL"></script>
+- In head, load Web Awesome Pro via the version-pinned CDN kit (WA_KIT_BASE in
+  render.js): the matter-theme, native, and utilities stylesheets plus the
+  webawesome.loader.js module script.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
 - Disclaimer in the footer of EVERY page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
@@ -1050,7 +1193,7 @@ exporting a CSS string); render.js is the sole module the router imports.
 Run with: npm test (vitest run). Tests import pure functions only — no Workers runtime,
 no network, no mocks of fetch needed.
 
-### test/rules.test.js (RULES) — every branch, exact reason strings asserted
+### test/rules.test.js — every branch, exact reason strings asserted
 
 Base inputs helper: all-null fields, sources: [], updated: "2026-07-04T12:00:00.000Z".
 
@@ -1089,7 +1232,7 @@ Base inputs helper: all-null fields, sources: [], updated: "2026-07-04T12:00:00.
     object unchanged (use Object.freeze on input; must not throw).
 29. metersToFeet: 1 → 3.28084 (closeTo), 0 → 0, null → null.
 
-### test/srfParser.test.js (CLIENTS)
+### test/srfParser.test.js
 
 Fixtures built with + and "\n" concatenation (NO backticks), realistic SRF product shape,
 e.g. a fixture containing lines like:
@@ -1121,7 +1264,7 @@ e.g. a fixture containing lines like:
   names match or park_name is null, detail <title>/h1/subtitle, data-name carries
   both names for search.
 
-### test/officialSources.test.js (CLIENTS)
+### test/officialSources.test.js
 
 - parseSouthHavenCsv with inline CSV fixtures: green/yellow/red sites; Gray/Grey
   (unmonitored) sites omitted, mixed gray+color sites omitted; same-named flags
@@ -1146,31 +1289,3 @@ updateScraperHealth (increment/reset, 23-vs-24 boundary, exact alert strings,
 "never" fallback). test/glerl.test.js covers the GLOS buoy gap-fill client
 against a stubbed global fetch.
 
-## 11. Integration review checklist (final reviewer)
-
-- [ ] grep -rn "\x60" src test returns NO backticks; grep -rn "var " finds no var declarations.
-- [ ] src/router.js and src/frontend/ contain no fetch() calls to upstream APIs (request
-      path is D1 + KV only).
-- [ ] Every api.weather.gov call in src/clients/nws.js sends the exact User-Agent
-      "swim.report (hello@swim.report)".
-- [ ] estimateFlag has no fetch/Date/Math.random; RULES_VERSION exported; reason strings in
-      code match section 4 verbatim (tests assert them).
-- [ ] KV writes use keys "flag:" + id / "official:" + id with expirationTtl 7200, only from
-      the scheduled path.
-- [ ] Official objects have official: true and render in a visually distinct card;
-      estimates have official: false and the footer disclaimer text matches section 9
-      exactly.
-- [ ] scheduled handler dispatches on controller.cron matching wrangler.toml's four cron
-      strings exactly; hourly path never runs Overpass; the discovery, enrichment, and
-      webcam paths never write flag keys.
-- [ ] migrations/0001_init.sql matches section 2 exactly; upsert preserves nws_zone.
-- [ ] Wave client tolerates null model values per point (Great Lakes masking) and honors
-      WAVE_MODEL_ORDER; wind fetched only for wave-null beaches.
-- [ ] npm test passes (vitest run, node environment); rules tests cover all 5 precedence
-      steps, both boundaries (2.0 / 4.0 ft, 15/25 mph, 25/35 mph gusts), and all-null →
-      unknown.
-- [ ] <html lang="en" data-fa-kit-code="ddd41b2d81"> present; WA_KIT_URL literal placeholder
-      present in head script tag; TODO.md lists WA_KIT_URL replacement, nationwide Overpass
-      scale-out, free-vs-paid plan note, and list-page pagination.
-- [ ] wrangler dev boots; GET /health returns { "ok": true }; GET / renders (empty-state OK
-      before first sync).

@@ -177,8 +177,18 @@ export function parseLenaweeHtml(html, nowIso) {
       continue;
     }
     if (!isNoAdvisoryPosted(statusText)) {
+      // The ONLY status wording ever observed (live 2026-07-09 + four Wayback
+      // snapshots Aug 2023-Apr 2024) is "No Advisory Posted". The exact string
+      // the county writes into the Status field when an advisory IS active has
+      // never been captured, so it is intentionally NOT mapped to a color --
+      // omit, never guess. Log the VERBATIM status text LOUDLY with a
+      // greppable marker so the real active-advisory wording can be lifted
+      // straight out of production logs the first time it appears, and mapped
+      // then (advisory -> yellow or red per its meaning).
       console.log(
-        "lenawee: unrecognized status text for " + name + ": \"" + statusText + "\", omitting"
+        "lenawee: UNMAPPED STATUS -- capture this verbatim wording to add a " +
+        "color mapping. beach=\"" + name + "\" status=\"" + statusText +
+        "\" (omitting, never guessing a color)"
       );
       continue;
     }

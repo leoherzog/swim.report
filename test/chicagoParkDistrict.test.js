@@ -114,17 +114,55 @@ describe("parseChicagoFlags", function() {
     expect(ohio.color).toBe("green");
   });
 
-  it("drops a stale red row but keeps a fresh green (per-row staleness)", function() {
-    // A ~10-month-old surf red must not force this beach red; only the fresh
-    // green rows count, so the beach is green.
+  it("yields no data (not green) when the surf row is stale and only a fresh green water-quality row remains", function() {
+    // THE RESIDUAL FALSE-GREEN PATH. A ~10-month-old surf red is dropped by the
+    // per-row staleness gate; a fresh green Water Quality row is all that's left.
+    // Most-severe-wins would report that lone green, but the beach's real surf
+    // state is unknown, so category-aware staleness omits the beach entirely.
+    // Fail toward no-data, never toward a wrong official green.
     const text = JSON.stringify([
       { title: "Leone Beach - Surf Conditions", parent: "Leone Beach", date: "1756482510", flag: "Red - Swimming Prohibited" },
       { title: "Leone Beach - Water Quality", parent: "Leone Beach", date: "1783271048", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
+    expect(siteById(sites, "leone beach")).toBe(null);
+  });
+
+  it("still reports green when the beach's own fresh surf row is green (fresh surf licenses green)", function() {
+    // Counterpart to the false-green regression: with a FRESH green surf row the
+    // surf state is known and green, so the beach correctly reports green even
+    // though its water-quality row is stale.
+    const text = JSON.stringify([
+      { title: "Rogers Beach - Surf Conditions", parent: "Rogers Beach", date: "1783271048", flag: "Green" },
+      { title: "Rogers Beach - Water Quality", parent: "Rogers Beach", date: "1756482510", flag: "Green" }
+    ]);
+    const sites = parseChicagoFlags(text, NOW_ISO);
+    const rogers = siteById(sites, "rogers beach");
+    expect(rogers).not.toBe(null);
+    expect(rogers.color).toBe("green");
+  });
+
+  it("recognizes the surf category via the type field when the title lacks the label", function() {
+    // isSurfCategory matches title OR type defensively; if CPD ever moves the
+    // category label out of the title, the type field alone must still license
+    // a genuine fresh green (otherwise the beach would wrongly drop to no-data).
+    const text = JSON.stringify([
+      { title: "Leone Beach", type: "Surf Conditions", parent: "Leone Beach", date: "1783271048", flag: "Green" }
+    ]);
+    const sites = parseChicagoFlags(text, NOW_ISO);
     const leone = siteById(sites, "leone beach");
     expect(leone).not.toBe(null);
     expect(leone.color).toBe("green");
+  });
+
+  it("omits a beach whose only fresh green row is water quality (no surf row at all)", function() {
+    // A fresh green Water Quality row with no Surf row anywhere is still no-data:
+    // there is no evidence about the surf/flag hazard, so green is never emitted.
+    const text = JSON.stringify([
+      { title: "Albion Beach - Water Quality", parent: "Albion Beach", date: "1783271048", flag: "Green" }
+    ]);
+    const sites = parseChicagoFlags(text, NOW_ISO);
+    expect(siteById(sites, "albion beach")).toBe(null);
   });
 
   it("maps a fresh Yellow flag to yellow", function() {
