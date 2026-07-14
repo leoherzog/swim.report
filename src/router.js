@@ -11,6 +11,23 @@ const API_BEACHES_LIMIT = 500;
 // HOME_LIST_LIMIT, so the fetch bound is wider than the display bound.
 const HOME_GEO_FETCH_LIMIT = 500;
 
+// Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
+// Cacheable routes are location-independent and short-lived: 60 s fresh, up to
+// 10 min served-stale-while-revalidating. stale-if-error is set EXPLICITLY
+// because Cloudflare's default on Worker error is to serve stale indefinitely,
+// which would freeze the pages' embedded staleness warnings (nowIso is baked
+// into the HTML) with no bound; 600 s caps that window. The home page must
+// never be cached: it is personalized by request.cf geolocation, which is not
+// part of the cache key and not expressible via Vary.
+const CACHE_CONTROL_CACHEABLE =
+  "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
+const CACHE_CONTROL_NO_STORE = "no-store";
+
+// Throttle for the last_viewed demand stamp: at most one D1 write per beach
+// per hour. The cron consumes last_viewed at hourly granularity, so finer
+// stamps are pure write amplification.
+const LAST_VIEWED_MIN_INTERVAL_MS = 3600000;
+
 // Escapes the LIKE wildcards (% and _) plus the escape character itself so a
 // user's search term is matched literally, not as a pattern. The result is
 // meant to be wrapped in "%" ... "%" and bound to a "LIKE ?n ESCAPE '\'"
@@ -57,11 +74,38 @@ function jsonResponse(body, status, extraHeaders) {
   return new Response(JSON.stringify(body), { status: status, headers: headers });
 }
 
-function htmlResponse(html, status) {
-  return new Response(html, {
-    status: status,
-    headers: { "content-type": "text/html; charset=utf-8" }
-  });
+function htmlResponse(html, status, cacheControl) {
+  const headers = { "content-type": "text/html; charset=utf-8" };
+  if (cacheControl) {
+    headers["cache-control"] = cacheControl;
+  }
+  return new Response(html, { status: status, headers: headers });
+}
+
+// Demand signal for cron prioritization (migration 0007): stamp last_viewed
+// when a visitor opens a beach's detail page or flag API. Fire-and-forget via
+// ctx.waitUntil so it can never delay or fail the render; throttled to once
+// per LAST_VIEWED_MIN_INTERVAL_MS per beach. This is the request path's only
+// D1 write (PLAN.md sections "Conventions" and 8) — still never an upstream
+// fetch. No-ops when ctx is absent (tests, non-Workers callers).
+function touchLastViewed(env, ctx, beach) {
+  if (!ctx || typeof ctx.waitUntil !== "function") {
+    return;
+  }
+  const now = Date.now();
+  const last = beach.last_viewed ? Date.parse(beach.last_viewed) : NaN;
+  if (Number.isFinite(last) && now - last < LAST_VIEWED_MIN_INTERVAL_MS) {
+    return;
+  }
+  const nowIso = new Date(now).toISOString();
+  ctx.waitUntil(
+    env.DB.prepare("UPDATE beaches SET last_viewed = ?1 WHERE id = ?2")
+      .bind(nowIso, beach.id)
+      .run()
+      .catch(function (err) {
+        console.log("router: last_viewed stamp failed for " + beach.id + ": " + err.message);
+      })
+  );
 }
 
 function parseBbox(bboxParam) {
@@ -166,15 +210,16 @@ async function handleHome(env, location, rawQuery, nearParam) {
     hasMore: hasMore,
     near: (typeof nearParam === "string") ? nearParam : ""
   });
-  return htmlResponse(html, 200);
+  return htmlResponse(html, 200, CACHE_CONTROL_NO_STORE);
 }
 
-async function handleDetail(env, beachId) {
+async function handleDetail(env, ctx, beachId) {
   const beach = await env.DB.prepare("SELECT * FROM beaches WHERE id = ?1").bind(beachId).first();
   if (!beach) {
     const html = renderErrorPage({ status: 404, message: "Beach not found" });
-    return htmlResponse(html, 404);
+    return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
   }
+  touchLastViewed(env, ctx, beach);
   // The 24 h wave-forecast series is a detail-page-only read (the list page
   // must never gain a per-row KV get). Fetched alongside the flag/official
   // reads so the extra key costs no added latency.
@@ -192,37 +237,42 @@ async function handleDetail(env, beachId) {
     waves: waves,
     nowIso: nowIso
   });
-  return htmlResponse(html, 200);
+  return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
 }
 
 async function handleApiBeaches(env, url) {
   const bboxParam = url.searchParams.get("bbox");
   const bbox = parseBbox(bboxParam);
   if (bbox === null) {
-    return jsonResponse({ error: "invalid bbox" }, 400);
+    return jsonResponse({ error: "invalid bbox" }, 400, { "cache-control": CACHE_CONTROL_NO_STORE });
   }
   const result = await env.DB.prepare(
     "SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
     "AND lat >= ?2 AND lat <= ?4 LIMIT " + String(API_BEACHES_LIMIT)
   ).bind(bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat).all();
   const rows = result.results || [];
-  return jsonResponse({ beaches: rows }, 200, { "cache-control": "public, max-age=60" });
+  return jsonResponse({ beaches: rows }, 200, { "cache-control": CACHE_CONTROL_CACHEABLE });
 }
 
-async function handleApiFlag(env, beachId) {
-  const beach = await env.DB.prepare("SELECT id FROM beaches WHERE id = ?1").bind(beachId).first();
+async function handleApiFlag(env, ctx, beachId) {
+  const beach = await env.DB.prepare(
+    "SELECT id, last_viewed FROM beaches WHERE id = ?1"
+  ).bind(beachId).first();
   if (!beach) {
+    // Plain max-age (no stale-while-revalidate): a just-discovered beach
+    // should stop 404ing within a minute, not linger stale for the SWR window.
     return jsonResponse({ error: "beach not found" }, 404, { "cache-control": "public, max-age=60" });
   }
+  touchLastViewed(env, ctx, beach);
   const data = await readFlagAndOfficial(env, beachId);
   return jsonResponse(
     { beachId: beachId, estimate: data.estimate, official: data.official },
     200,
-    { "cache-control": "public, max-age=60" }
+    { "cache-control": CACHE_CONTROL_CACHEABLE }
   );
 }
 
-export async function handleRequest(request, env) {
+export async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -234,7 +284,7 @@ export async function handleRequest(request, env) {
   }
 
   if (path === "/health") {
-    return jsonResponse({ ok: true }, 200);
+    return jsonResponse({ ok: true }, 200, { "cache-control": CACHE_CONTROL_NO_STORE });
   }
 
   if (path === "/") {
@@ -253,19 +303,19 @@ export async function handleRequest(request, env) {
   const flagMatch = path.match(/^\/api\/flag\/([^/]+)$/);
   if (flagMatch) {
     const beachId = decodeURIComponent(flagMatch[1]);
-    return handleApiFlag(env, beachId);
+    return handleApiFlag(env, ctx, beachId);
   }
 
   const detailMatch = path.match(/^\/beach\/([^/]+)$/);
   if (detailMatch) {
     const beachId = decodeURIComponent(detailMatch[1]);
-    return handleDetail(env, beachId);
+    return handleDetail(env, ctx, beachId);
   }
 
   if (path.indexOf("/api/") === 0) {
-    return jsonResponse({ error: "not found" }, 404);
+    return jsonResponse({ error: "not found" }, 404, { "cache-control": CACHE_CONTROL_NO_STORE });
   }
 
   const html = renderErrorPage({ status: 404, message: "Not found" });
-  return htmlResponse(html, 404);
+  return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
 }

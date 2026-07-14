@@ -13,7 +13,9 @@ cross-module interface.
 - String concatenation with + ONLY. NEVER template literals — no backtick strings anywhere
   in project source or tests. This includes HTML rendering and test fixtures (use quoted
   strings joined with + and "\n").
-- The fetch handler NEVER calls an upstream API. Request path reads D1 and KV only.
+- The fetch handler NEVER calls an upstream API. Request path reads D1 and KV only; its
+  sole WRITE is the fire-and-forget last_viewed demand stamp (one throttled D1 UPDATE
+  via ctx.waitUntil — section 8), which can never delay or fail a render.
 - All api.weather.gov requests send header: User-Agent: swim.report (hello@swim.report)
 - Per-source, per-beach error isolation: every upstream fetch is wrapped in its own
   try/catch; on failure log with console.log and return null. A client function must
@@ -220,6 +222,18 @@ migrations/0006_flag_history.sql:
   official_source = the resolving scraper id. Retention: the daily runOverpassSync
   deletes rows older than FLAG_HISTORY_RETENTION_DAYS (90) at the top of the run
   (section 7).
+
+migrations/0007_last_viewed.sql:
+
+    ALTER TABLE beaches ADD COLUMN last_viewed TEXT;
+
+  Demand signal: ISO timestamp of the last visitor view of this beach (detail page
+  or /api/flag/:beachId), stamped from the REQUEST path via ctx.waitUntil
+  (touchLastViewed in src/router.js — section 8), throttled to once per beach per
+  hour (LAST_VIEWED_MIN_INTERVAL_MS). NULL = never viewed. Consumed by nothing yet:
+  the hourly recompute still covers the whole table at pilot scale; nationwide
+  scale-out will prioritize recently viewed rows in the recompute rotation
+  (TODO.md "Scale-out").
 
 - idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
@@ -1189,13 +1203,15 @@ BROWSER on the detail page — never by the request path.
 src/index.js:
 
     export default {
-      fetch: (request, env, ctx) => handleRequest(request, env),
+      fetch: (request, env, ctx) => handleRequest(request, env, ctx),
       scheduled: (controller, env, ctx) => { ...dispatch per section 7... }
     };
 
 src/router.js:
 
-    export async function handleRequest(request, env)  // -> Promise<Response>
+    export async function handleRequest(request, env, ctx)  // -> Promise<Response>
+      // ctx is optional (tests omit it): it is only used for the last_viewed
+      // demand stamp below; when absent the stamp silently no-ops.
 
     export { distanceMi }  // re-exported from src/geo.js (section 5): pure haversine
       // great-circle distance in statute miles. Router no longer defines it locally;
@@ -1216,9 +1232,9 @@ Routing table (method GET only; anything else → 405):
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: flag:/official: per displayed row | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
-| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves:  | HTML renderDetailPage (data gains waves: WaveSeries or null); 404 HTML if no row |
+| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null); 404 HTML if no row |
 | GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 LIMIT 500 | JSON { "beaches": [BeachRow...] } |
-| GET /api/flag/:beachId    | handleApiFlag  | D1 row exists check; KV flag: + official:    | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
+| GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
 
@@ -1227,9 +1243,30 @@ Routing table (method GET only; anything else → 405):
 - /api/flag/:beachId: unknown beachId → 404 JSON { "error": "beach not found" }.
 - KV reads: env.FLAGS.get(key, { type: "json" }); null passes through as null.
 - Headers: HTML "content-type": "text/html; charset=utf-8"; JSON
-  "content-type": "application/json"; add "cache-control": "public, max-age=60" on /api/*.
+  "content-type": "application/json". Every response carries an EXPLICIT
+  cache-control for the Workers Cache layer ([cache] enabled in wrangler.toml —
+  responses without cacheable directives are never stored, but the policy is
+  spelled out anyway):
+  - CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600"
+    on detail-page 200s, /api/beaches 200s, /api/flag 200s. stale-if-error is
+    explicit because Cloudflare's default on Worker error is serve-stale-
+    INDEFINITELY, which would freeze the HTML's embedded nowIso-based staleness
+    warnings without bound; 600 s caps the total stale window at ~11 min.
+  - "public, max-age=60" (no SWR) on the /api/flag 404 — a just-discovered beach
+    must stop 404ing within a minute, not linger for the SWR window.
+  - "no-store" on the home page (personalized by request.cf geolocation, which is
+    not in the cache key and not expressible via Vary — caching it would serve one
+    visitor's proximity sort to everyone), /health, invalid-bbox 400s, and all
+    other 404s/error pages.
+- last_viewed demand stamp (touchLastViewed): on a found beach, handleDetail and
+  handleApiFlag issue UPDATE beaches SET last_viewed = nowIso WHERE id = ? inside
+  ctx.waitUntil, only when the row's last_viewed is NULL/invalid or older than
+  LAST_VIEWED_MIN_INTERVAL_MS (3600000). Failures are caught and logged — the stamp
+  can never delay or fail a render. With the response cache enabled, cache HITs do
+  not run the Worker, so stamps only land on misses/revalidations — acceptable: it
+  is a coarse demand signal, not analytics.
 - The router NEVER fetches upstream. It imports only src/frontend/render.js and uses env.DB
-  and env.FLAGS.
+  and env.FLAGS. The last_viewed UPDATE above is its only write.
 
 ### wrangler.toml
 
@@ -1246,6 +1283,9 @@ Routing table (method GET only; anything else → 405):
 
     [placement]
     mode = "smart"
+
+    [cache]
+    enabled = true
 
     [triggers]
     crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]

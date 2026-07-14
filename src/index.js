@@ -1053,7 +1053,7 @@ const CRON_JOBS = {
 
 export default {
   fetch: function (request, env, ctx) {
-    return handleRequest(request, env);
+    return handleRequest(request, env, ctx);
   },
   scheduled: function (controller, env, ctx) {
     const job = CRON_JOBS[controller.cron];

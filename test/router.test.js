@@ -436,3 +436,161 @@ describe("handleDetail waves: KV read", () => {
     expect(res.status).toBe(200);
   });
 });
+
+// D1/KV stand-in for the cache-header and last_viewed tests: every prepared
+// statement is recorded (sql + params) and first()/all()/run() all resolve.
+// first() yields 'beach' (or null), all() yields it as the only row.
+function viewEnv(beach) {
+  const statements = [];
+  const db = {
+    prepare: function (sql) {
+      const st = {
+        sql: sql,
+        params: null,
+        bind: function () {
+          st.params = Array.prototype.slice.call(arguments);
+          return st;
+        },
+        first: function () {
+          statements.push(st);
+          return Promise.resolve(beach || null);
+        },
+        all: function () {
+          statements.push(st);
+          return Promise.resolve({ results: beach ? [beach] : [] });
+        },
+        run: function () {
+          statements.push(st);
+          return Promise.resolve({ success: true });
+        }
+      };
+      return st;
+    }
+  };
+  const flags = { get: function () { return Promise.resolve(null); } };
+  return { env: { DB: db, FLAGS: flags }, statements: statements };
+}
+
+function makeCtx() {
+  const promises = [];
+  return {
+    promises: promises,
+    waitUntil: function (p) {
+      promises.push(p);
+    }
+  };
+}
+
+function getRequest(path) {
+  return { method: "GET", url: "https://swim.report" + path, cf: {} };
+}
+
+const CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
+
+describe("cache-control policy (Workers Cache)", () => {
+  const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1", last_viewed: null };
+
+  it("never caches the home page (personalized by request.cf geolocation)", async () => {
+    const { env } = viewEnv(beach);
+    const res = await handleRequest(getRequest("/"), env);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("marks a found detail page cacheable with bounded stale windows", async () => {
+    const { env } = viewEnv(beach);
+    const res = await handleRequest(getRequest("/beach/b-1"), env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(CACHEABLE);
+  });
+
+  it("never caches a detail 404", async () => {
+    const { env } = viewEnv(null);
+    const res = await handleRequest(getRequest("/beach/nope"), env);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("marks /api/flag and /api/beaches cacheable, /api/flag 404 max-age only", async () => {
+    const found = viewEnv(beach);
+    const flagRes = await handleRequest(getRequest("/api/flag/b-1"), found.env);
+    expect(flagRes.headers.get("cache-control")).toBe(CACHEABLE);
+
+    const missing = viewEnv(null);
+    const flag404 = await handleRequest(getRequest("/api/flag/nope"), missing.env);
+    expect(flag404.status).toBe(404);
+    expect(flag404.headers.get("cache-control")).toBe("public, max-age=60");
+
+    const bboxRes = await handleRequest(
+      getRequest("/api/beaches?bbox=-87,41,-82,47"), viewEnv(beach).env
+    );
+    expect(bboxRes.headers.get("cache-control")).toBe(CACHEABLE);
+  });
+
+  it("never caches /health, invalid bbox, or generic 404s", async () => {
+    const { env } = viewEnv(beach);
+    expect((await handleRequest(getRequest("/health"), env)).headers.get("cache-control")).toBe("no-store");
+    expect((await handleRequest(getRequest("/api/beaches?bbox=bad"), env)).headers.get("cache-control")).toBe("no-store");
+    expect((await handleRequest(getRequest("/api/nope"), env)).headers.get("cache-control")).toBe("no-store");
+    expect((await handleRequest(getRequest("/nope"), env)).headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("last_viewed demand stamping", () => {
+  function beachViewed(lastViewed) {
+    return { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1", last_viewed: lastViewed };
+  }
+
+  function updateStatements(statements) {
+    return statements.filter(function (st) {
+      return st.sql.indexOf("UPDATE beaches SET last_viewed") === 0;
+    });
+  }
+
+  it("stamps a never-viewed beach via ctx.waitUntil on the detail page", async () => {
+    const { env, statements } = viewEnv(beachViewed(null));
+    const ctx = makeCtx();
+    const res = await handleRequest(getRequest("/beach/b-1"), env, ctx);
+    expect(res.status).toBe(200);
+    expect(ctx.promises.length).toBe(1);
+    await Promise.all(ctx.promises);
+    const updates = updateStatements(statements);
+    expect(updates.length).toBe(1);
+    expect(updates[0].params[1]).toBe("b-1");
+    // Param 1 is a fresh ISO timestamp.
+    expect(Number.isFinite(Date.parse(updates[0].params[0]))).toBe(true);
+  });
+
+  it("stamps on /api/flag too, selecting last_viewed for the throttle check", async () => {
+    const { env, statements } = viewEnv(beachViewed(null));
+    const ctx = makeCtx();
+    await handleRequest(getRequest("/api/flag/b-1"), env, ctx);
+    expect(statements[0].sql).toContain("SELECT id, last_viewed FROM beaches");
+    await Promise.all(ctx.promises);
+    expect(updateStatements(statements).length).toBe(1);
+  });
+
+  it("throttles: a stamp within the last hour is not repeated", async () => {
+    const fresh = new Date(Date.now() - 60000).toISOString();
+    const { env, statements } = viewEnv(beachViewed(fresh));
+    const ctx = makeCtx();
+    await handleRequest(getRequest("/beach/b-1"), env, ctx);
+    expect(ctx.promises.length).toBe(0);
+    expect(updateStatements(statements).length).toBe(0);
+  });
+
+  it("re-stamps once the previous view is over an hour old", async () => {
+    const stale = new Date(Date.now() - 7200000).toISOString();
+    const { env, statements } = viewEnv(beachViewed(stale));
+    const ctx = makeCtx();
+    await handleRequest(getRequest("/beach/b-1"), env, ctx);
+    await Promise.all(ctx.promises);
+    expect(updateStatements(statements).length).toBe(1);
+  });
+
+  it("no-ops without ctx (render is unaffected)", async () => {
+    const { env, statements } = viewEnv(beachViewed(null));
+    const res = await handleRequest(getRequest("/beach/b-1"), env);
+    expect(res.status).toBe(200);
+    expect(updateStatements(statements).length).toBe(0);
+  });
+});

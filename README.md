@@ -149,9 +149,15 @@ filtered first and then distance-sorted. Empty or whitespace-only `q` is ignored
 on-page search box submits this parameter as a `GET` form while also filtering the
 rendered rows instantly client-side as you type.
 
-All `/api/*` responses set `content-type: application/json` and
-`cache-control: public, max-age=60`. HTML responses set
-`content-type: text/html; charset=utf-8`.
+All `/api/*` responses set `content-type: application/json`; HTML responses set
+`content-type: text/html; charset=utf-8`. Responses are cached at Cloudflare's edge
+(Workers Cache, `[cache]` in `wrangler.toml`) under an explicit per-route policy:
+successful API and beach-detail responses send
+`cache-control: public, max-age=60, stale-while-revalidate=600, stale-if-error=600`
+(fresh for a minute, served stale up to 10 more while revalidating in the
+background); the `/api/flag` 404 sends plain `public, max-age=60`; the home page,
+`/health`, and error responses send `no-store` — the home page is personalized by
+IP-derived location and must never be shared across visitors.
 
 ## Estimation rules
 

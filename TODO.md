@@ -96,6 +96,22 @@ of it is scoped for follow-up work.
 
 ## Scale-out
 
+- **Flip the recompute rotation to demand-priority once the table outgrows one run.**
+  The request path stamps `beaches.last_viewed` (migration 0007, 2026-07-13; detail
+  page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`) but nothing reads
+  it yet — at pilot scale `MAX_BEACHES_PER_RUN = 1000` covers the whole table hourly,
+  so prioritization would change nothing. When beach count approaches that limit,
+  reorder the hourly SELECT to recompute recently-viewed beaches every run and rotate
+  never/rarely-viewed rows on a slower cadence (with a matching longer KV TTL for the
+  slow tier). Note: Workers Cache means cache HITs don't run the Worker, so
+  `last_viewed` undercounts popular beaches slightly (stamps land on
+  misses/revalidations only) — fine for a coarse priority signal.
+- **Remaining hybrid-freshness follow-ups (agreed direction 2026-07-13, not yet
+  built):** (1) a `*/10`-ish alerts-only cron — NWS alerts are the one event-driven
+  input; a High Surf Warning issued at :05 currently waits up to 55 min for the
+  hourly recompute. One fetch per distinct `nws_zone` per run is a few dozen
+  subrequests. (2) Queue-based stale-refresh (request path enqueues, consumer
+  fetches) only if flagless gaps show up in practice.
 - **Nationwide Overpass scale-out.** `runOverpassSync` currently syncs a single pilot
   bbox (`PILOT_BBOX`, Michigan / Great Lakes shoreline) once a day. Scaling to the
   full US coastline means tiling CONUS coastal bboxes and queuing them (e.g. one tile

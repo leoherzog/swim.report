@@ -12,6 +12,15 @@ head_sampling_rate = 1
 [placement]
 mode = "smart"
 
+# Workers Cache: regional tiered response cache in front of the Worker
+# (wrangler >= 4.69). Only responses carrying cacheable Cache-Control
+# directives are stored — src/router.js sets an explicit policy per route
+# (no-store on the geolocation-personalized home page; short max-age +
+# stale-while-revalidate on detail pages and /api/*). Request path only;
+# crons are unaffected.
+[cache]
+enabled = true
+
 # 0 * * * *        — hourly flag recompute (estimates + official scrapes -> KV)
 # 47 8 * * *       — daily Overpass beach discovery (D1 upserts)
 # 17 3,9,15,21 * * * — NWS point enrichment, 4x daily (the 9:17 run picks up
