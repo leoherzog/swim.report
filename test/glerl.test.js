@@ -3,7 +3,7 @@
 // (South Haven buoy, obs_dataset_id 37, wave parameter_id 195, Hs 0.476 m).
 // No network access — fetchGlcfsWaveHeightsFt runs against a stubbed
 // globalThis.fetch.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   fetchGlcfsWaveHeightsFt,
   parseWaveParameterIds,
@@ -17,6 +17,7 @@ import {
   SEAGULL_PLATFORMS_URL,
   SEAGULL_PARAMETERS_URL
 } from "../src/clients/glerl.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 const NOW = "2026-07-06T02:25:00.000Z";
 const WAVE_NAME = "sea_surface_wave_significant_height";
@@ -273,25 +274,6 @@ describe("parseObsWaveHeightFt", function () {
 });
 
 describe("fetchGlcfsWaveHeightsFt", function () {
-  const realFetch = globalThis.fetch;
-  let fetchedUrls;
-
-  function jsonResponse(data) {
-    return {
-      ok: true,
-      json: function () {
-        return Promise.resolve(data);
-      }
-    };
-  }
-
-  function installFetch(handler) {
-    globalThis.fetch = function (url) {
-      fetchedUrls.push(url);
-      return handler(url);
-    };
-  }
-
   function defaultHandler(url) {
     if (url === SEAGULL_PLATFORMS_URL) {
       return Promise.resolve(jsonResponse(PLATFORMS_FIXTURE));
@@ -305,16 +287,12 @@ describe("fetchGlcfsWaveHeightsFt", function () {
     return Promise.resolve({ ok: false, status: 404, json: function () { return Promise.resolve(null); } });
   }
 
-  beforeEach(function () {
-    fetchedUrls = [];
-  });
-
   afterEach(function () {
-    globalThis.fetch = realFetch;
+    vi.unstubAllGlobals();
   });
 
   it("fills nearby beaches, nulls distant ones, and dedups platform fetches", async function () {
-    installFetch(defaultHandler);
+    const calls = installFetch(defaultHandler);
     const points = [
       { beachId: "beach-near", lat: 42.4, lon: -86.29 },
       { beachId: "beach-near-2", lat: 42.39, lon: -86.3 },
@@ -329,17 +307,17 @@ describe("fetchGlcfsWaveHeightsFt", function () {
     expect(typeof out.sourceUrl).toBe("string");
     // Two beaches share buoy 37 — its obs endpoint is fetched exactly once,
     // and startDate is derived from nowIso (no Date.now()).
-    const obsUrls = fetchedUrls.filter(function (u) { return u.indexOf("/obs?") !== -1; });
+    const obsUrls = calls.map(function (c) { return c.url; }).filter(function (u) { return u.indexOf("/obs?") !== -1; });
     expect(obsUrls.length).toBe(1);
     expect(obsUrls[0].indexOf("obsDatasetId=37")).not.toBe(-1);
     expect(obsUrls[0].indexOf("startDate=2026-07-06")).not.toBe(-1);
   });
 
   it("makes no fetches and returns empty results for empty points", async function () {
-    installFetch(defaultHandler);
+    const calls = installFetch(defaultHandler);
     const out = await fetchGlcfsWaveHeightsFt([], NOW);
     expect(out.results).toEqual({});
-    expect(fetchedUrls.length).toBe(0);
+    expect(calls.length).toBe(0);
   });
 
   it("returns null when the platform catalog fetch fails", async function () {
@@ -360,9 +338,9 @@ describe("fetchGlcfsWaveHeightsFt", function () {
   });
 
   it("returns null on an unparseable nowIso", async function () {
-    installFetch(defaultHandler);
+    const calls = installFetch(defaultHandler);
     expect(await fetchGlcfsWaveHeightsFt([{ beachId: "b1", lat: 42.4, lon: -86.29 }], "garbage")).toBe(null);
-    expect(fetchedUrls.length).toBe(0);
+    expect(calls.length).toBe(0);
   });
 
   it("nulls only the beaches whose platform obs fetch failed", async function () {

@@ -270,8 +270,9 @@ describe("wave-forecast model comparison", () => {
     });
     const open = "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\">";
     expect(html).toContain(open);
-    // The dedicated line-chart element carries the y-axis unit as an attribute.
-    expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation y-label=\"ft\"");
+    // The y-axis unit rides in the slotted config, not on the element.
+    expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation");
+    expect(html).not.toContain("y-label=");
     // Collapsed by default: the model disclosure's opening tag must not carry "open".
     const tagStart = html.indexOf("<wa-details class=\"wave-model-compare\"");
     const tagEnd = html.indexOf(">", tagStart);
@@ -299,9 +300,9 @@ describe("wave-forecast model comparison", () => {
       .toEqual([2.6, 2.4, 2.9]);
     expect(modelConfig.data.datasets[0].pointRadius).toBe(0);
     expect(modelConfig.data.datasets[0].spanGaps).toBe(false);
-    // The "ft" y-axis label rides on the element's y-label attribute now — the
-    // config carries no hand-written scales block.
-    expect(modelConfig.options.scales).toBeUndefined();
+    // The "ft" y-axis label rides in the slotted config's scales block, which
+    // the component deep-merges over its defaults.
+    expect(modelConfig.options.scales.y.title).toEqual({ display: true, text: "ft" });
   });
 
   it("never emits a literal closing script tag inside either JSON block", () => {

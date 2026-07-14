@@ -20,6 +20,7 @@
 // anywhere — all freshness math derives from the nowIso argument.
 
 import { distanceKm, metersToFeet } from "../geo.js";
+import { fetchJson as httpFetchJson } from "./http.js";
 
 export const SEAGULL_API_BASE = "https://seagull-api.glos.org/api/v1";
 export const SEAGULL_PLATFORMS_URL = SEAGULL_API_BASE + "/obs-datasets.geojson";
@@ -189,18 +190,8 @@ export function parseObsWaveHeightFt(obsJson, obsDatasetId, waveParameterIds, no
   return metersToFeet(bestMeters);
 }
 
-async function fetchJson(url, label) {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      console.log("glerl: " + label + " fetch failed: HTTP " + response.status);
-      return null;
-    }
-    return await response.json();
-  } catch (err) {
-    console.log("glerl: " + label + " fetch failed: " + err.message);
-    return null;
-  }
+function fetchJson(url, label) {
+  return httpFetchJson(url, { label: "glerl: " + label });
 }
 
 // Same result shape as openMeteo.fetchWaveHeightsFt:

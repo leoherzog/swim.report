@@ -66,14 +66,6 @@ export function resolveUserLocation(request, url) {
   return null;
 }
 
-function jsonResponse(body, status, extraHeaders) {
-  const headers = Object.assign(
-    { "content-type": "application/json" },
-    extraHeaders || {}
-  );
-  return new Response(JSON.stringify(body), { status: status, headers: headers });
-}
-
 function htmlResponse(html, status, cacheControl) {
   const headers = { "content-type": "text/html; charset=utf-8" };
   if (cacheControl) {
@@ -191,15 +183,25 @@ async function handleHome(env, location, rawQuery, nearParam) {
       rows = rows.slice(0, HOME_LIST_LIMIT);
     }
   }
+  // Bulk KV read: one get() per key family instead of two round-trips per
+  // beach. rows is capped at HOME_LIST_LIMIT (100), which is exactly the
+  // bulk-get key limit, so a single call per family always suffices.
   const entries = [];
-  for (const beach of rows) {
-    const data = await readFlagAndOfficial(env, beach.id);
-    entries.push({
-      beach: beach,
-      estimate: data.estimate,
-      official: data.official,
-      distanceMi: location ? beach.distance_mi : null
-    });
+  if (rows.length > 0) {
+    const flagKeys = rows.map(function (beach) { return "flag:" + beach.id; });
+    const officialKeys = rows.map(function (beach) { return "official:" + beach.id; });
+    const maps = await Promise.all([
+      env.FLAGS.get(flagKeys, { type: "json" }),
+      env.FLAGS.get(officialKeys, { type: "json" })
+    ]);
+    for (const beach of rows) {
+      entries.push({
+        beach: beach,
+        estimate: maps[0].get("flag:" + beach.id) || null,
+        official: maps[1].get("official:" + beach.id) || null,
+        distanceMi: location ? beach.distance_mi : null
+      });
+    }
   }
   const nowIso = new Date().toISOString();
   const html = renderListPage({
@@ -244,14 +246,20 @@ async function handleApiBeaches(env, url) {
   const bboxParam = url.searchParams.get("bbox");
   const bbox = parseBbox(bboxParam);
   if (bbox === null) {
-    return jsonResponse({ error: "invalid bbox" }, 400, { "cache-control": CACHE_CONTROL_NO_STORE });
+    return Response.json(
+      { error: "invalid bbox" },
+      { status: 400, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
+    );
   }
   const result = await env.DB.prepare(
     "SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
     "AND lat >= ?2 AND lat <= ?4 LIMIT " + String(API_BEACHES_LIMIT)
   ).bind(bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat).all();
   const rows = result.results || [];
-  return jsonResponse({ beaches: rows }, 200, { "cache-control": CACHE_CONTROL_CACHEABLE });
+  return Response.json(
+    { beaches: rows },
+    { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
+  );
 }
 
 async function handleApiFlag(env, ctx, beachId) {
@@ -261,14 +269,16 @@ async function handleApiFlag(env, ctx, beachId) {
   if (!beach) {
     // Plain max-age (no stale-while-revalidate): a just-discovered beach
     // should stop 404ing within a minute, not linger stale for the SWR window.
-    return jsonResponse({ error: "beach not found" }, 404, { "cache-control": "public, max-age=60" });
+    return Response.json(
+      { error: "beach not found" },
+      { status: 404, headers: { "cache-control": "public, max-age=60" } }
+    );
   }
   touchLastViewed(env, ctx, beach);
   const data = await readFlagAndOfficial(env, beachId);
-  return jsonResponse(
+  return Response.json(
     { beachId: beachId, estimate: data.estimate, official: data.official },
-    200,
-    { "cache-control": CACHE_CONTROL_CACHEABLE }
+    { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
   );
 }
 
@@ -284,7 +294,10 @@ export async function handleRequest(request, env, ctx) {
   }
 
   if (path === "/health") {
-    return jsonResponse({ ok: true }, 200, { "cache-control": CACHE_CONTROL_NO_STORE });
+    return Response.json(
+      { ok: true },
+      { status: 200, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
+    );
   }
 
   if (path === "/") {
@@ -313,7 +326,10 @@ export async function handleRequest(request, env, ctx) {
   }
 
   if (path.indexOf("/api/") === 0) {
-    return jsonResponse({ error: "not found" }, 404, { "cache-control": CACHE_CONTROL_NO_STORE });
+    return Response.json(
+      { error: "not found" },
+      { status: 404, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
+    );
   }
 
   const html = renderErrorPage({ status: 404, message: "Not found" });

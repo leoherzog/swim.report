@@ -147,7 +147,7 @@ const RULES = [
   // display/width/border-radius/overflow come from the shared framed-embed
   // rule above.
   ".wave-chart {",
-  "  height: 3rem;",
+  "  height: var(--wa-space-3xl);",
   "  aspect-ratio: auto;",
   "  --border-width: 0px;",
   "  --border-radius: 0px;",

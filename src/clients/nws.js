@@ -4,6 +4,8 @@
 // status, or JSON parse failure is caught, logged with console.log, and the
 // function resolves to null.
 
+import { fetchJson } from "./http.js";
+
 export const NWS_USER_AGENT = "swim.report (hello@swim.report)";
 
 function alertsUrlForZone(zoneId) {
@@ -15,23 +17,14 @@ function alertsUrlForZone(zoneId) {
 // NEVER throws across the module boundary — any network error, non-2xx
 // status, or JSON parse failure is caught, logged with console.log, and
 // resolves to null.
-async function fetchNwsJson(url, label) {
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": NWS_USER_AGENT,
-        "Accept": "application/geo+json"
-      }
-    });
-    if (!response.ok) {
-      console.log("nws: " + label + " fetch failed: HTTP " + response.status);
-      return null;
-    }
-    return await response.json();
-  } catch (err) {
-    console.log("nws: " + label + " fetch failed: " + err.message);
-    return null;
-  }
+function fetchNwsJson(url, label) {
+  return fetchJson(url, {
+    headers: {
+      "User-Agent": NWS_USER_AGENT,
+      "Accept": "application/geo+json"
+    },
+    label: "nws: " + label
+  });
 }
 
 export async function fetchActiveAlertEvents(zoneId) {

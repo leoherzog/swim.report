@@ -387,6 +387,19 @@ On any HTTP error, non-2xx status, JSON parse failure, or timeout: console.log t
 (prefix with the module name, e.g. "nws: alerts fetch failed for MIZ071: " + err.message)
 and return null.
 
+### src/clients/http.js (shared transport layer)
+
+    export async function fetchJson(url, opts)
+      // opts: { method, headers, body, label } — all optional; each init field is
+      // set only when supplied (a bare GET passes fetch(url, {})). Implements the
+      // shared fetch -> ok-check -> await response.json() -> catch pipeline: on a
+      // non-2xx status logs label + " fetch failed: HTTP " + status, on any thrown
+      // error (network, JSON parse) logs label + " fetch failed: " + err.message;
+      // both paths return null. Returns the parsed JSON on success. Every module
+      // in src/clients/ routes its HTTP through this helper (passing
+      // label = "<module>: " + detail so log prefixes stay per-module) and keeps
+      // only its own headers, body construction, and post-parse steps.
+
 ### src/geo.js (shared geo helpers, dependency-free)
 
 Not an upstream client — a pure, dependency-free module (no fetch, no Date, no I/O)
@@ -409,6 +422,10 @@ and cron paths.
     export function metersToFeet(m)
       // Pure. number -> number; m * 3.28084. Null-safe: null/undefined -> null
       // (matching the masked/no-data convention across the wave clients).
+
+    export function toRadians(deg)
+      // Pure. deg * Math.PI / 180. Used internally by distanceKm and exported
+      // for other angle math (e.g. src/index.js compassDirection).
 
 ### src/clients/nws.js
 
@@ -697,7 +714,12 @@ wrapper). No Date.now(), no ambient clock.
       // each scraper). options: { headers } (passed verbatim when present — callers
       // that send none keep omitting it), { redirect } (passed verbatim, e.g.
       // "follow"), { logPrefix } (console.log prefix; failures log as
-      // logPrefix + ": HTTP " + status or logPrefix + ": " + message).
+      // logPrefix + ": HTTP " + status or logPrefix + ": " + message),
+      // { timeoutMs } (outbound-request deadline in ms, default 30000; enforced
+      // via AbortSignal.timeout — the resulting AbortError flows through the
+      // existing catch and degrades to null like any other failure). Backward
+      // compatible: callers that omit timeoutMs get the 30 s default.
+      // wisconsinDnr passes timeoutMs: 45000 (that endpoint routinely takes ~30 s).
 
     export function perBeachResult(sites, source, updated)
       // Pure. The standard multi-site (contract shape (b)) result for the common
@@ -911,7 +933,9 @@ guessed color). Full color semantics are in README.md's official-sources table.
   public API, 51 curated Lake Erie public-beach ids (OHIO_SITES; expanded from
   the original 4 — the registry bulk endpoint returns null monitorings/advisories,
   so each id still needs its own detail GET), one GET per id with per-id failure
-  isolation. matches() is HARD-GATED by OHIO_MATCH_BBOX (lat 41.2-42.1,
+  isolation, issued in chunks of OHIO_FETCH_CHUNK_SIZE (exported const, 8) via
+  Promise.allSettled — same total subrequest count and result ordering as the old
+  serial loop, just bounded concurrency. matches() is HARD-GATED by OHIO_MATCH_BBOX (lat 41.2-42.1,
   lon -83.6..-80.4) BEFORE any names[]/proximity check, so a same-named
   Michigan/Ontario beach can never inherit an Ohio official flag; only distinctive,
   low-collision names go in names[] (generic labels resolve by proximity only).
@@ -1203,7 +1227,13 @@ BROWSER on the detail page — never by the request path.
 src/index.js:
 
     export default {
-      fetch: (request, env, ctx) => handleRequest(request, env, ctx),
+      fetch: async (request, env, ctx) => { try { return await handleRequest(request, env, ctx); } catch ... },
+      // The fetch export is the request path's LAST-RESORT error boundary: an
+      // uncaught throw from handleRequest is logged ("index: request handler
+      // threw: " + err.message) and turned into a 500 in the same shape as the
+      // route family — /api/* paths get JSON { "error": "internal error" },
+      // everything else gets renderErrorPage HTML — always cache-control:
+      // no-store so a transient error is never cached.
       scheduled: (controller, env, ctx) => { ...dispatch per section 7... }
     };
 
@@ -1231,7 +1261,7 @@ Routing table (method GET only; anything else → 405):
 
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
-| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: flag:/official: per displayed row | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
+| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: ONE bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — 2 KV reads per page regardless of row count; HOME_LIST_LIMIT (100) is load-bearing here, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null); 404 HTML if no row |
 | GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 LIMIT 500 | JSON { "beaches": [BeachRow...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
@@ -1242,6 +1272,13 @@ Routing table (method GET only; anything else → 405):
   minLat < maxLat, else 400 JSON { "error": "invalid bbox" }. bbox param is REQUIRED.
 - /api/flag/:beachId: unknown beachId → 404 JSON { "error": "beach not found" }.
 - KV reads: env.FLAGS.get(key, { type: "json" }); null passes through as null.
+  The KV binding's bulk form is also used (handleHome only): passing an ARRAY of
+  up to 100 keys returns a Map<key, value|null>; missing keys map to null (the
+  router additionally applies || null so an absent Map entry's undefined
+  normalizes to null, preserving the single-get shape). Any FLAGS test double
+  must implement get() for both forms: string key -> value|null, array of keys
+  -> Map. handleDetail and handleApiFlag still use single-key gets
+  (readFlagAndOfficial).
 - Headers: HTML "content-type": "text/html; charset=utf-8"; JSON
   "content-type": "application/json". Every response carries an EXPLICIT
   cache-control for the Workers Cache layer ([cache] enabled in wrangler.toml —
@@ -1457,7 +1494,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   - Model comparison chart (after the strip + ticks, before the stale warning): when the
     trimmed byModel has >= 2 models, a collapsed-by-default <wa-details
     summary="Compare wave models"> containing <wa-line-chart class="wave-model-chart"
-    without-animation y-label="ft" label=... description=...> (the dedicated
+    without-animation label=... description=...> (the dedicated
     <wa-line-chart> element replaced the old generic <wa-chart type="line">) with the same
     slotted-JSON config pattern as the strip. Datasets: one per model in display order,
     values rounded to 1 decimal in the CONFIG ONLY (storage stays raw; default tooltips
@@ -1465,7 +1502,11 @@ exporting a CSS string); render.js is the sole module the router imports.
     gaps), pointRadius 0, series colors var(--wa-color-blue-60) / var(--wa-color-purple-60)
     / var(--wa-color-cyan-60) — never green/yellow/red, which are reserved for flag
     semantics. Category labels "Now", "+1 h" ... ; the y axis is titled "ft" via the
-    element's y-label attribute (not a Chart.js scales title in the config);
+    slotted config's options.scales.y.title = { display: true, text: "ft" }
+    (emitted by buildWaveModelChartConfig; the element carries NO y-label
+    attribute — wa-line-chart's yLabel property is not attribute-reflected, so
+    y-label markup is dead, and the component deep-merges the slotted JSON over
+    its defaults so the config title wins);
     plugins.title.display false. UNLIKE the band strip this chart keeps the default legend
     and tooltips (comparison view).
     label/description attributes + a visible fallback <p> carry waveModelSummary's

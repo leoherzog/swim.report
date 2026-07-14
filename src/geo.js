@@ -15,7 +15,7 @@ const EARTH_RADIUS_KM = 6371;
 const MI_PER_KM = 3958.8 / 6371;
 const METERS_TO_FEET = 3.28084;
 
-function toRadians(deg) {
+export function toRadians(deg) {
   return deg * Math.PI / 180;
 }
 

@@ -2,8 +2,9 @@
 // Unit tests for fetchWaveHeightsFt's 24-hour forecast series. No network
 // access — the client runs against a stubbed globalThis.fetch. nowIso is fixed
 // so the hourly index (idx = UTC hour) is deterministic.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { fetchWaveHeightsFt, WAVE_MODEL_ORDER } from "../src/clients/openMeteo.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 // idx = getUTCHours("...T15:20:00Z") = 15, so hoursFt[0] maps to series[15].
 const NOW = "2026-07-12T15:20:00.000Z";
@@ -29,41 +30,18 @@ function series(fill, overrides) {
 }
 
 describe("fetchWaveHeightsFt", function() {
-  const realFetch = globalThis.fetch;
-  let fetchedUrls;
-
-  function jsonResponse(data) {
-    return {
-      ok: true,
-      json: function() {
-        return Promise.resolve(data);
-      }
-    };
-  }
-
-  function installFetch(handler) {
-    globalThis.fetch = function(url) {
-      fetchedUrls.push(url);
-      return handler(url);
-    };
-  }
-
-  beforeEach(function() {
-    fetchedUrls = [];
-  });
-
   afterEach(function() {
-    globalThis.fetch = realFetch;
+    vi.unstubAllGlobals();
   });
 
   it("requests forecast_days=2, timezone=UTC, and the three models joined", async function() {
-    installFetch(function() {
+    const calls = installFetch(function() {
       const hourly = {};
       hourly[ECMWF] = series(1);
       return Promise.resolve(jsonResponse({ hourly: hourly }));
     });
     await fetchWaveHeightsFt([{ beachId: "b1", lat: 42.4, lon: -86.29 }], NOW);
-    const url = fetchedUrls[0];
+    const url = calls[0].url;
     expect(url.indexOf("forecast_days=2")).not.toBe(-1);
     expect(url.indexOf("timezone=UTC")).not.toBe(-1);
     expect(url.indexOf("models=" + WAVE_MODEL_ORDER.join(","))).not.toBe(-1);

@@ -298,9 +298,9 @@ describe("buildWaveModelChartConfig", () => {
     });
   });
 
-  it("omits the scales block (the 'ft' label rides on the element's y-label attribute) and hides the chart title plugin", () => {
+  it("sets the 'ft' y-axis title in the scales block and hides the chart title plugin", () => {
     const config = buildWaveModelChartConfig(threeModelTrimmed());
-    expect(config.options.scales).toBeUndefined();
+    expect(config.options.scales.y.title).toEqual({ display: true, text: "ft" });
     expect(config.options.plugins.title.display).toBe(false);
   });
 });

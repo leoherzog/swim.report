@@ -207,7 +207,8 @@ export const wisconsinDnr = {
   scrape: async function(nowIso) {
     const text = await fetchText(WISCONSIN_DNR_URL, {
       headers: { "User-Agent": WISCONSIN_DNR_USER_AGENT },
-      logPrefix: "wisconsinDnr: fetch failed"
+      logPrefix: "wisconsinDnr: fetch failed",
+      timeoutMs: 45000
     });
     if (text === null) {
       return null;

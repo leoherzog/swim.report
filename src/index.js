@@ -1,5 +1,6 @@
 import { handleRequest } from "./router.js";
-import { distanceKm } from "./geo.js";
+import { renderErrorPage } from "./frontend/render.js";
+import { distanceKm, toRadians } from "./geo.js";
 import { estimateFlag } from "./rules.js";
 import {
   fetchActiveAlertEvents,
@@ -569,10 +570,6 @@ const COMPASS_POINTS = [
 // not signal — those fall back to keeping the largest only.
 const COMPASS_MIN_SEPARATION_KM = 0.2;
 
-function toRadians(deg) {
-  return deg * Math.PI / 180;
-}
-
 // Initial bearing (degrees, 0 = north, clockwise) from one point to another,
 // mapped to its eight-point compass label.
 function compassDirection(fromLat, fromLon, toLat, toLon) {
@@ -1052,8 +1049,32 @@ const CRON_JOBS = {
 };
 
 export default {
-  fetch: function (request, env, ctx) {
-    return handleRequest(request, env, ctx);
+  fetch: async function (request, env, ctx) {
+    // Request-path error boundary: an unhandled throw would otherwise surface
+    // Cloudflare's generic error page instead of the project's own. Log the
+    // failure and render a 500 in the same shape as the route's success case —
+    // a JSON body for /api/ routes, renderErrorPage HTML otherwise — always
+    // no-store so a transient error is never cached.
+    try {
+      return await handleRequest(request, env, ctx);
+    } catch (err) {
+      console.log("index: request handler threw: " + err.message);
+      const path = new URL(request.url).pathname;
+      if (path.indexOf("/api/") === 0) {
+        return Response.json(
+          { error: "internal error" },
+          { status: 500, headers: { "cache-control": "no-store" } }
+        );
+      }
+      const html = renderErrorPage({ status: 500, message: "Something went wrong." });
+      return new Response(html, {
+        status: 500,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store"
+        }
+      });
+    }
   },
   scheduled: function (controller, env, ctx) {
     const job = CRON_JOBS[controller.cron];

@@ -24,7 +24,7 @@
 // site — never a guessed color.
 
 import { distanceMi } from "../geo.js";
-import { fetchText } from "./util.js";
+import { fetchText, perBeachResult } from "./util.js";
 
 export const OHIO_BEACHGUARD_PAGE =
   "https://publicapps.odh.ohio.gov/BeachGuardPublic/";
@@ -125,6 +125,11 @@ export const OHIO_SITES = [
 
 // matches() and resolution both treat a site as covering ~2 mi of shoreline.
 export const OHIO_SITE_RADIUS_MI = 2;
+
+// scrape() issues one detail subrequest per OHIO_SITES entry (~53). Run them in
+// small concurrent chunks — bounded so we stay polite to the ODH host and
+// within the subrequest/connection budget — instead of strictly serially.
+export const OHIO_FETCH_CHUNK_SIZE = 8;
 
 // Geographic gate for matches(): every BeachGuard site sits on Ohio's Lake
 // Erie shoreline, so a beach outside this box can never be one of ours — no
@@ -500,12 +505,12 @@ export const ohioBeachGuard = {
     return false;
   },
   scrape: async function(nowIso) {
-    const sites = [];
     // Fetch each beach detail once (one subrequest per OHIO_SITES entry — the
     // bulk listing endpoint omits monitorings/advisories, so per-id detail is
-    // required; see PLAN.md section 7 for the budget). Isolate failures per id
-    // so one bad upstream never poisons the others.
-    for (const site of OHIO_SITES) {
+    // required; see PLAN.md section 7 for the budget). Resolve one site to its
+    // parsed color-or-null; never throws so Promise.allSettled below isolates
+    // failures per id and one bad upstream never poisons the others.
+    async function fetchOhioSite(site) {
       const text = await fetchText(OHIO_BEACHGUARD_API + site.id, {
         headers: {
           "User-Agent": OHIO_USER_AGENT,
@@ -514,37 +519,42 @@ export const ohioBeachGuard = {
         logPrefix: "ohioBeachGuard: fetch failed for id " + site.id
       });
       if (text === null) {
-        continue;
+        return null;
       }
       try {
         const record = parseBeachesListJson(text);
         if (!record) {
           console.log("ohioBeachGuard: no record for id " + site.id);
-          continue;
+          return null;
         }
-        const parsed = parseOhioBeach(record, site, nowIso);
-        if (parsed) {
-          sites.push(parsed);
-        }
+        return parseOhioBeach(record, site, nowIso);
       } catch (err) {
         console.log(
           "ohioBeachGuard: fetch failed for id " + site.id + ": " + err.message
         );
+        return null;
+      }
+    }
+    // Small concurrent chunks (in OHIO_SITES order) rather than one awaited
+    // subrequest at a time, so a slow id no longer serially delays every id
+    // after it. Order and total subrequest count are unchanged.
+    const sites = [];
+    for (let i = 0; i < OHIO_SITES.length; i += OHIO_FETCH_CHUNK_SIZE) {
+      const chunk = OHIO_SITES.slice(i, i + OHIO_FETCH_CHUNK_SIZE);
+      const settled = await Promise.allSettled(chunk.map(fetchOhioSite));
+      for (const outcome of settled) {
+        if (outcome.status === "fulfilled" && outcome.value) {
+          sites.push(outcome.value);
+        }
       }
     }
     if (sites.length === 0) {
       return null;
     }
-    return {
-      perBeach: true,
-      sites: sites,
-      source: OHIO_BEACHGUARD_PAGE,
-      sources: [OHIO_BEACHGUARD_PAGE],
-      // Fallback for sites without their own updated (monitored-and-clear
-      // greens, whose "no advisory" state is live at query time). Advisory
-      // sites carry updated: the advisory's issue date, which wins in
-      // scrapeOfficialFlagFromResult.
-      updated: nowIso
-    };
+    // perBeachResult's updated (nowIso) is the fallback for sites without their
+    // own updated (monitored-and-clear greens, whose "no advisory" state is live
+    // at query time). Advisory sites carry updated: the advisory's issue date,
+    // which wins in scrapeOfficialFlagFromResult.
+    return perBeachResult(sites, OHIO_BEACHGUARD_PAGE, nowIso);
   }
 };

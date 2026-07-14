@@ -8,8 +8,20 @@ import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
 
 // Minimal D1/KV stand-in: records every prepared statement (sql + bound params)
 // so tests can assert on the query the router built. all()/first() resolve to
-// the supplied rows; KV always returns null.
-function makeEnv(rows) {
+// the supplied rows; KV always returns null (a bulk get with an array of keys
+// resolves to a Map of key -> null, matching the Workers KV binding).
+function nullFlags() {
+  return {
+    get: function (key) {
+      if (Array.isArray(key)) {
+        return Promise.resolve(new Map(key.map(function (k) { return [k, null]; })));
+      }
+      return Promise.resolve(null);
+    }
+  };
+}
+
+function makeEnv(rows, flags) {
   const statements = [];
   const db = {
     prepare: function (sql) {
@@ -32,8 +44,7 @@ function makeEnv(rows) {
       return st;
     }
   };
-  const flags = { get: function () { return Promise.resolve(null); } };
-  return { env: { DB: db, FLAGS: flags }, statements: statements };
+  return { env: { DB: db, FLAGS: flags || nullFlags() }, statements: statements };
 }
 
 function homeRequest(search) {
@@ -148,6 +159,65 @@ describe("handleHome ?q= search over the full table", () => {
     await handleRequest(homeRequest(""), missing.env);
     expect(missing.statements[0].sql).not.toContain("LIKE");
     expect(missing.statements[0].params).toBeNull();
+  });
+});
+
+describe("handleHome bulk KV wiring", () => {
+  // Regression pin for the bulk-get plumbing: the flag: map must feed the
+  // estimate slot (the row's flag chip color) and the official: map the
+  // official slot (the OFFICIAL badge). The two values carry DIFFERENT colors
+  // so swapping maps[0]/maps[1] — which would render a scraped official color
+  // as an estimate — fails the chip-color assertions below.
+  it("renders the flag: value as the estimate chip and the official: value as the official badge", async () => {
+    const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
+    const requestedKeyLists = [];
+    const kvValues = {
+      "flag:b1": {
+        color: "yellow",
+        reason: "Estimated wave height 2.5 ft (2–4 ft)",
+        rules_version: "1.1.0",
+        official: false,
+        sources: [],
+        updated: "2026-07-05T12:00:00.000Z"
+      },
+      "official:b1": {
+        color: "red",
+        reason: "Official flag reported by Example Beach Program",
+        official: true,
+        source: "https://example.gov/flags",
+        sources: ["https://example.gov/flags"],
+        updated: "2026-07-05T12:00:00.000Z"
+      }
+    };
+    const flags = {
+      get: function (key) {
+        if (Array.isArray(key)) {
+          requestedKeyLists.push(key);
+          return Promise.resolve(new Map(key.map(function (k) {
+            return [k, kvValues[k] || null];
+          })));
+        }
+        return Promise.resolve(kvValues[key] || null);
+      }
+    };
+    const { env } = makeEnv(rows, flags);
+    const res = await handleRequest(homeRequest(""), env);
+    expect(res.status).toBe(200);
+    // Both key families were requested as bulk arrays, flag: first.
+    expect(requestedKeyLists).toEqual([["flag:b1"], ["official:b1"]]);
+    const html = await res.text();
+    // Scope to the beach row: the embedded stylesheet legitimately mentions
+    // every flag-icon-* class, so assertions must target the rendered markup.
+    const rowStart = html.indexOf("<li class=\"beach-row\"");
+    expect(rowStart).toBeGreaterThan(-1);
+    const row = html.slice(rowStart, html.indexOf("</li>", rowStart));
+    // The estimate slot drives the chip: yellow, never the official's red.
+    expect(row).toContain("flag-icon-yellow");
+    expect(row).toContain(">YELLOW</wa-badge>");
+    expect(row).not.toContain("flag-icon-red");
+    expect(row).not.toContain(">RED</wa-badge>");
+    // The official slot drives the OFFICIAL badge on the row.
+    expect(row).toContain(">OFFICIAL</wa-badge>");
   });
 });
 
@@ -467,8 +537,7 @@ function viewEnv(beach) {
       return st;
     }
   };
-  const flags = { get: function () { return Promise.resolve(null); } };
-  return { env: { DB: db, FLAGS: flags }, statements: statements };
+  return { env: { DB: db, FLAGS: nullFlags() }, statements: statements };
 }
 
 function makeCtx() {

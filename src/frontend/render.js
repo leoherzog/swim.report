@@ -148,6 +148,12 @@ function renderOfficialBadge(sizeClass) {
     "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>";
 }
 
+// Shared wrapper for the small cluster of source labels on a card header,
+// used by renderSourceLabels and renderOfficialSourceLink.
+function sourceCluster(innerHtml) {
+  return "<span class=\"wa-cluster wa-gap-xs wa-font-size-s\">" + innerHtml + "</span>";
+}
+
 // Estimate sources are { label, url } objects (url is provenance only — never
 // rendered as a hyperlink; only official scraper sources link out, see
 // renderOfficialSourceLink). Bare strings are the legacy shape — KV entries
@@ -176,7 +182,7 @@ function renderSourceLabels(sources) {
   if (items.length === 0) {
     return "";
   }
-  return "<span class=\"wa-cluster wa-gap-xs wa-font-size-s\">" + items.join("\n") + "</span>";
+  return sourceCluster(items.join("\n"));
 }
 
 // Official cards are the one place a source renders as a hyperlink: the
@@ -187,9 +193,8 @@ function renderOfficialSourceLink(url) {
   if (!isUrlLike(url)) {
     return "";
   }
-  return "<span class=\"wa-cluster wa-gap-xs wa-font-size-s\">" +
-    "<a href=\"" + escapeHtml(url) + "\" rel=\"noopener noreferrer\">" +
-    escapeHtml(hostnameOf(url)) + "</a></span>";
+  return sourceCluster("<a href=\"" + escapeHtml(url) + "\" rel=\"noopener noreferrer\">" +
+    escapeHtml(hostnameOf(url)) + "</a>");
 }
 
 function renderFlagRow(color, reason) {
@@ -626,7 +631,7 @@ function renderWaveModelCompare(series) {
   const modelConfig = buildWaveModelChartConfig(series);
   const modelSummary = waveModelSummary(series);
   return "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\">" +
-    "<wa-line-chart class=\"wave-model-chart\" without-animation y-label=\"ft\" " +
+    "<wa-line-chart class=\"wave-model-chart\" without-animation " +
     "label=\"Wave height by forecast model\" description=\"" +
     escapeHtml(modelSummary) + "\">" +
     chartScriptAndFallback(modelConfig, modelSummary) +

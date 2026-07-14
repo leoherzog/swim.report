@@ -311,8 +311,9 @@ export function modelNowCaption(trimmed) {
 // (display only — storage stays raw) so the component's default tooltips read
 // cleanly; nulls preserved so spanGaps:false draws honest gaps. Unlike the band
 // strip this keeps tooltips + legend (an interactive comparison view). The
-// chart type and the "ft" y-axis label come from the <wa-line-chart> element
-// and its y-label attribute, NOT this config. The caller stringifies this.
+// chart type comes from the <wa-line-chart> element; the "ft" y-axis label is
+// set here via options.scales.y.title (the component deep-merges this config
+// over its defaults). The caller stringifies this.
 export function buildWaveModelChartConfig(trimmed) {
   const t = readTrimmed(trimmed);
   const byModel = t.byModel;
@@ -350,6 +351,11 @@ export function buildWaveModelChartConfig(trimmed) {
       datasets: datasets
     },
     options: {
+      scales: {
+        y: {
+          title: { display: true, text: "ft" }
+        }
+      },
       plugins: {
         title: { display: false }
       }

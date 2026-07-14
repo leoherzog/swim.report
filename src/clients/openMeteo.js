@@ -5,6 +5,7 @@
 // null.
 
 import { metersToFeet } from "../geo.js";
+import { fetchJson } from "./http.js";
 
 export const WAVE_MODEL_ORDER = ["ecmwf_wam025", "ncep_gfswave025", "meteofrance_wave"];
 
@@ -78,18 +79,11 @@ function latLonQuery(points) {
 // the module boundary: any network error, non-2xx status, or JSON parse
 // failure is caught, logged with console.log, and resolves to null.
 async function fetchLocations(url, label) {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      console.log("openMeteo: " + label + " fetch failed: HTTP " + response.status);
-      return null;
-    }
-    const json = await response.json();
-    return Array.isArray(json) ? json : [json];
-  } catch (err) {
-    console.log("openMeteo: " + label + " fetch failed: " + err.message);
+  const json = await fetchJson(url, { label: "openMeteo: " + label });
+  if (json === null) {
     return null;
   }
+  return Array.isArray(json) ? json : [json];
 }
 
 export async function fetchWaveHeightsFt(points, nowIso) {

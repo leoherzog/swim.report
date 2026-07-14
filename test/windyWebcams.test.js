@@ -3,7 +3,7 @@
 // 2026-07-06 (Indian Grove: South Haven, webcamId 1595253287, day-only
 // player). No network access — fetchNearestWebcam runs against a stubbed
 // globalThis.fetch.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseNearestActiveWebcam,
   fetchNearestWebcam,
@@ -11,6 +11,7 @@ import {
   WEBCAM_RADIUS_KM,
   WEBCAM_FETCH_LIMIT
 } from "../src/clients/windyWebcams.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 // South Haven beach target.
 const LAT = 42.4;
@@ -120,9 +121,6 @@ describe("parseNearestActiveWebcam", function () {
 });
 
 describe("fetchNearestWebcam", function () {
-  const realFetch = globalThis.fetch;
-  let fetchedUrls;
-  let fetchedInits;
   const API_KEY = "test-api-key";
 
   const GOOD_BODY = {
@@ -130,44 +128,22 @@ describe("fetchNearestWebcam", function () {
     webcams: [dayCam(1595253287, "Indian Grove: South Haven", 42.397, -86.331)]
   };
 
-  function jsonResponse(data) {
-    return {
-      ok: true,
-      json: function () {
-        return Promise.resolve(data);
-      }
-    };
-  }
-
-  function installFetch(handler) {
-    globalThis.fetch = function (url, init) {
-      fetchedUrls.push(url);
-      fetchedInits.push(init);
-      return handler(url, init);
-    };
-  }
-
-  beforeEach(function () {
-    fetchedUrls = [];
-    fetchedInits = [];
-  });
-
   afterEach(function () {
-    globalThis.fetch = realFetch;
+    vi.unstubAllGlobals();
   });
 
   it("requests the exact nearby URL with the api-key header and returns the parsed cam", async function () {
-    installFetch(function () {
+    const calls = installFetch(function () {
       return Promise.resolve(jsonResponse(GOOD_BODY));
     });
     const out = await fetchNearestWebcam(LAT, LON, API_KEY);
-    expect(fetchedUrls.length).toBe(1);
-    expect(fetchedUrls[0]).toBe(
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe(
       WINDY_WEBCAMS_API_URL +
       "?nearby=42.4,-86.3," + String(WEBCAM_RADIUS_KM) +
       "&include=player,location&limit=" + String(WEBCAM_FETCH_LIMIT)
     );
-    expect(fetchedInits[0].headers["x-windy-api-key"]).toBe(API_KEY);
+    expect(calls[0].init.headers["x-windy-api-key"]).toBe(API_KEY);
     expect(out).not.toBe(null);
     expect(out.webcam.webcamId).toBe("1595253287");
     expect(out.webcam.title).toBe("Indian Grove: South Haven");
@@ -206,12 +182,12 @@ describe("fetchNearestWebcam", function () {
   });
 
   it("returns null and makes no fetch when the api key is falsy", async function () {
-    installFetch(function () {
+    const calls = installFetch(function () {
       return Promise.resolve(jsonResponse(GOOD_BODY));
     });
     expect(await fetchNearestWebcam(LAT, LON, "")).toBe(null);
     expect(await fetchNearestWebcam(LAT, LON, null)).toBe(null);
     expect(await fetchNearestWebcam(LAT, LON, undefined)).toBe(null);
-    expect(fetchedUrls.length).toBe(0);
+    expect(calls.length).toBe(0);
   });
 });

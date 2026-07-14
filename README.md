@@ -236,8 +236,10 @@ Run tests (pure functions only, no network, no Workers runtime):
 
 ### Environment variables
 
-`.dev.vars` holds local secrets: `WEBAWESOME_NPM_TOKEN` is used by the Web Awesome
-Pro build tooling (`npm install`, via `.npmrc`), `WINDY_WEBCAM_API_TOKEN` is a
+`.dev.vars` holds local secrets: `WEBAWESOME_NPM_TOKEN` and `FONTAWESOME_NPM_TOKEN`
+are used by the Web Awesome Pro / Font Awesome Pro build tooling (`npm install`,
+via `${VAR}` placeholders in `.npmrc` — export both before installing; never
+hardcode a token in `.npmrc`), `WINDY_WEBCAM_API_TOKEN` is a
 Worker **runtime** secret (`wrangler dev` loads `.dev.vars` into `env`
 automatically), and `CLOUDFLARE_TOKEN` is the account API token used to
 authenticate wrangler itself (export it as `CLOUDFLARE_API_TOKEN` before running

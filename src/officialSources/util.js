@@ -36,11 +36,15 @@ export const FLAG_SEVERITY = { green: 1, yellow: 2, red: 3, "double-red": 4 };
 //   redirect  — passed to fetch verbatim when present (e.g. "follow").
 //   logPrefix — console.log prefix; failures log as
 //               logPrefix + ": HTTP " + status  /  logPrefix + ": " + message.
+//   timeoutMs — outbound-request deadline in ms (default 30000). A hung
+//               upstream aborts at this bound; the resulting AbortError is
+//               caught below and degrades to null like any other failure, so
+//               one slow source cannot stall the shared hourly flag cron.
 export async function fetchText(url, options) {
   const opts = options || {};
   const prefix = opts.logPrefix || "officialSources: fetch failed";
   try {
-    const init = {};
+    const init = { signal: AbortSignal.timeout(opts.timeoutMs || 30000) };
     if (opts.headers) {
       init.headers = opts.headers;
     }

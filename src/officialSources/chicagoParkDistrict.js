@@ -43,7 +43,7 @@
 // Red/yellow/double-red resolutions keep the plain most-severe gate — those are
 // the safe direction. We always fail toward no-data, never toward a wrong color.
 
-import { fetchText, FLAG_SEVERITY } from "./util.js";
+import { fetchText, FLAG_SEVERITY, perBeachResult } from "./util.js";
 
 export const CHICAGO_FLAG_STATUS_URL =
   "https://www.chicagoparkdistrict.com/flag-status";
@@ -272,13 +272,7 @@ export const chicagoParkDistrict = {
       if (!sites || sites.length === 0) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: sites,
-        source: CHICAGO_FLAG_STATUS_URL,
-        sources: [CHICAGO_FLAG_STATUS_URL],
-        updated: nowIso
-      };
+      return perBeachResult(sites, CHICAGO_FLAG_STATUS_URL, nowIso);
     } catch (err) {
       console.log("chicagoParkDistrict: fetch failed: " + err.message);
       return null;

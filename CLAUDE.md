@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Deployed 2026-07-13 at **https://swim.report** (custom-domain route). `wrangler.toml` carries the real D1/KV IDs plus observability (full head sampling), Smart Placement, and a pinned `compatibility_date` (bump occasionally). The `WINDY_WEBCAM_API_TOKEN` Worker secret is set. Remote data populates via the crons only — there is no remote `npm run seed`; the request path serves whatever D1/KV currently hold.
 
-`npm install` needs `WEBAWESOME_NPM_TOKEN` exported in the environment (value in `.dev.vars`, which is gitignored) — `.npmrc` routes `@web.awesome.me`, `@awesome.me`, and `@fortawesome` through private registries.
+`npm install` needs both `WEBAWESOME_NPM_TOKEN` and `FONTAWESOME_NPM_TOKEN` exported in the environment (values in `.dev.vars`, which is gitignored) — `.npmrc` routes `@web.awesome.me`/`@awesome.me` and `@fortawesome` through private registries via `${VAR}` placeholders; never hardcode a token in `.npmrc`.
 
 ## Mandatory JavaScript style
 

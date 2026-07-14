@@ -18,6 +18,7 @@
 // null (unknown — the caller leaves the row untouched and retries later).
 
 import { distanceKm } from "./glerl.js";
+import { fetchJson } from "./http.js";
 
 export const WINDY_WEBCAMS_API_URL = "https://api.windy.com/webcams/api/v3/webcams";
 // A cam farther than this from the beach is not "at the beach".
@@ -87,22 +88,11 @@ export async function fetchNearestWebcam(lat, lon, apiKey) {
   const url = WINDY_WEBCAMS_API_URL +
     "?nearby=" + String(lat) + "," + String(lon) + "," + String(WEBCAM_RADIUS_KM) +
     "&include=player,location&limit=" + String(WEBCAM_FETCH_LIMIT);
-  let response;
-  try {
-    response = await fetch(url, { headers: { "x-windy-api-key": apiKey } });
-  } catch (err) {
-    console.log("windyWebcams: fetch failed: " + err.message);
-    return null;
-  }
-  if (!response.ok) {
-    console.log("windyWebcams: fetch failed: HTTP " + response.status);
-    return null;
-  }
-  let json;
-  try {
-    json = await response.json();
-  } catch (err) {
-    console.log("windyWebcams: response parse failed: " + err.message);
+  const json = await fetchJson(url, {
+    headers: { "x-windy-api-key": apiKey },
+    label: "windyWebcams:"
+  });
+  if (json === null) {
     return null;
   }
   return { webcam: parseNearestActiveWebcam(json, lat, lon) };

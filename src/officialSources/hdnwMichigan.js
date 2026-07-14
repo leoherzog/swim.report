@@ -16,7 +16,7 @@
 // SKIPPED, never guessed. A row older than STALE_MAX_DAYS relative to nowIso is
 // dropped as stale rather than presented as current.
 
-import { fetchText, perBeachResult } from "./util.js";
+import { fetchText, perBeachResult, ageDays } from "./util.js";
 
 export const HDNW_URL = "https://nwhealth.org/beach-monitoring-program/";
 
@@ -84,19 +84,18 @@ const CURATED_NAME_MAP = {
   "depot beach": ["depot beach"]
 };
 
-// Pure: (year, month 1-12, day) -> integer day count (days-from-civil, proleptic
-// Gregorian). Lets us diff two calendar dates without ever constructing a Date.
-function daysFromCivil(y, m, d) {
-  const yAdj = m <= 2 ? y - 1 : y;
-  const era = Math.floor((yAdj >= 0 ? yAdj : yAdj - 399) / 400);
-  const yoe = yAdj - era * 400;
-  const doy = Math.floor((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1;
-  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
-  return era * 146097 + doe - 719468;
+// Pure: (year, month 1-12, day) -> UTC-midnight epoch ms for that civil date.
+// Date.UTC is a pure static computation over the supplied components, so both
+// operands of a diff stay anchored to midnight and ageDays returns an exact
+// whole-day integer — the same idiom bldhd/michiganCity/wisconsinDnr use.
+function civilUtcMs(y, m, d) {
+  return Date.UTC(y, m - 1, d);
 }
 
-// nowIso ("2026-07-05T...") -> integer day count, or null if unparseable.
-function nowIsoToDayNumber(nowIso) {
+// nowIso ("2026-07-05T...") -> UTC-midnight epoch ms of its DATE, or null if
+// unparseable. Time-of-day is intentionally dropped so the staleness/future
+// gates compare whole calendar days.
+function nowIsoToUtcMs(nowIso) {
   if (typeof nowIso !== "string") {
     return null;
   }
@@ -104,19 +103,18 @@ function nowIsoToDayNumber(nowIso) {
   if (!match) {
     return null;
   }
-  return daysFromCivil(
+  return civilUtcMs(
     parseInt(match[1], 10),
     parseInt(match[2], 10),
     parseInt(match[3], 10)
   );
 }
 
-// "MM/DD/YY" -> { dayNum, iso } | null (not a well-formed/plausible date).
-// One parse serves both consumers: dayNum (integer day count) drives the
-// staleness/future gates, and iso ("20YY-MM-DDT00:00:00.000Z", pure string
-// work, no Date construction) stamps each site's updated with the SAMPLE date
-// so the frontend's stale-data warning reflects how old the reading actually
-// is, instead of the cron tick masking it.
+// "MM/DD/YY" -> { dayMs, iso } | null (not a well-formed/plausible date).
+// One parse serves both consumers: dayMs (UTC-midnight epoch ms) drives the
+// staleness/future gates, and iso ("20YY-MM-DDT00:00:00.000Z") stamps each
+// site's updated with the SAMPLE date so the frontend's stale-data warning
+// reflects how old the reading actually is, instead of the cron tick masking it.
 function parseTableDate(dateStr) {
   const match = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(dateStr);
   if (!match) {
@@ -129,7 +127,7 @@ function parseTableDate(dateStr) {
     return null;
   }
   return {
-    dayNum: daysFromCivil(year, month, day),
+    dayMs: civilUtcMs(year, month, day),
     iso: "20" + match[3] + "-" + match[1] + "-" + match[2] + "T00:00:00.000Z"
   };
 }
@@ -165,8 +163,8 @@ export function parseHdnwHtml(html, nowIso) {
   if (!html || typeof html !== "string") {
     return null;
   }
-  const nowDay = nowIsoToDayNumber(nowIso);
-  if (nowDay === null) {
+  const nowMs = nowIsoToUtcMs(nowIso);
+  if (nowMs === null) {
     return null;
   }
   const tableMatch = /<table[\s\S]*?<\/table>/i.exec(html);
@@ -178,7 +176,7 @@ export function parseHdnwHtml(html, nowIso) {
     return null;
   }
 
-  // key -> best row so far { dayNum, iso, color, dateStr, ecoli }
+  // key -> best row so far { dayMs, iso, color, dateStr, ecoli }
   const bestByKey = {};
 
   for (let i = 0; i < rows.length; i++) {
@@ -195,7 +193,7 @@ export function parseHdnwHtml(html, nowIso) {
     if (parsedDate === null) {
       continue;
     }
-    const dayNum = parsedDate.dayNum;
+    const sampleMs = parsedDate.dayMs;
     const color = WQI_TO_COLOR[wqi];
     if (!color) {
       continue;
@@ -214,20 +212,22 @@ export function parseHdnwHtml(html, nowIso) {
     if (!Object.prototype.hasOwnProperty.call(CURATED_NAME_MAP, key)) {
       continue;
     }
-    // Drop stale samples relative to nowIso.
-    if (nowDay - dayNum > STALE_MAX_DAYS) {
+    // Drop stale samples relative to nowIso. Both operands are UTC-midnight, so
+    // ageDays is an exact whole-day integer and the boundary matches the old
+    // integer day-number diff.
+    if (ageDays(nowMs, sampleMs) > STALE_MAX_DAYS) {
       continue;
     }
     // Drop implausible future-dated rows (hand-edit typos): a sample can never be
     // meaningfully ahead of "now". A future green typo must never out-rank a
     // current severe reading. One day of slack absorbs UTC-vs-local date skew.
-    if (dayNum - nowDay > 1) {
+    if (ageDays(nowMs, sampleMs) < -1) {
       continue;
     }
     const prev = bestByKey[key];
-    if (!prev || dayNum > prev.dayNum) {
+    if (!prev || sampleMs > prev.dayMs) {
       bestByKey[key] = {
-        dayNum: dayNum,
+        dayMs: sampleMs,
         iso: parsedDate.iso,
         color: color,
         dateStr: dateStr,
