@@ -1,6 +1,7 @@
 // test/michiganCity.test.js
 import { describe, it, expect } from "vitest";
 import { parseMichiganCityHtml, michiganCity } from "../src/officialSources/michiganCity.js";
+import { makeBeach } from "./helpers/beach.js";
 
 // Trimmed inline fixture matching the live page's fusion-text-3 block
 // (verified 2026-07-05). wpValue / stop7Value are injected as raw strings so
@@ -154,34 +155,34 @@ describe("parseMichiganCityHtml", function() {
 
 describe("michiganCity.matches", function() {
   it("matches a beach named Washington Park Beach", function() {
-    const beach = {
-      id: "osm-node-10", name: "Washington Park Beach", park_name: null,
-      lat: 41.7281, lon: -86.9040, nws_zone: null, nws_grid_url: null, osm_id: "node/10"
-    };
+    const beach = makeBeach({
+      name: "Washington Park Beach",
+      lat: 41.7281, lon: -86.9040
+    });
     expect(michiganCity.matches(beach)).toBe(true);
   });
 
   it("matches a beach named Stop 7 / Beachwalk by name even if far from the lakefront point", function() {
-    const beach = {
-      id: "osm-node-11", name: "Stop 7 at Beachwalk", park_name: null,
-      lat: 41.705, lon: -86.895, nws_zone: null, nws_grid_url: null, osm_id: "node/11"
-    };
+    const beach = makeBeach({
+      name: "Stop 7 at Beachwalk",
+      lat: 41.705, lon: -86.895
+    });
     expect(michiganCity.matches(beach)).toBe(true);
   });
 
   it("matches an unrelated-name beach within ~2 mi of the lakefront point", function() {
-    const beach = {
-      id: "osm-node-12", name: "Michigan City Public Beach", park_name: null,
-      lat: 41.735, lon: -86.905, nws_zone: null, nws_grid_url: null, osm_id: "node/12"
-    };
+    const beach = makeBeach({
+      name: "Michigan City Public Beach",
+      lat: 41.735, lon: -86.905
+    });
     expect(michiganCity.matches(beach)).toBe(true);
   });
 
   it("does not match a distant, unrelated beach", function() {
-    const beach = {
-      id: "osm-node-13", name: "Holland State Park", park_name: null,
-      lat: 42.7739, lon: -86.2109, nws_zone: null, nws_grid_url: null, osm_id: "node/13"
-    };
+    const beach = makeBeach({
+      name: "Holland State Park",
+      lat: 42.7739, lon: -86.2109
+    });
     expect(michiganCity.matches(beach)).toBe(false);
   });
 
@@ -191,18 +192,18 @@ describe("michiganCity.matches", function() {
     // City's bacteria reading to this beach -- a wrong official color. The name
     // hit must be geographically bounded. Coordinates: Washington Park,
     // Kenosha WI (~90 mi north on Lake Michigan).
-    const beach = {
-      id: "osm-node-14", name: "Washington Park Beach", park_name: "Washington Park",
-      lat: 42.5806, lon: -87.8103, nws_zone: null, nws_grid_url: null, osm_id: "node/14"
-    };
+    const beach = makeBeach({
+      name: "Washington Park Beach", park_name: "Washington Park",
+      lat: 42.5806, lon: -87.8103
+    });
     expect(michiganCity.matches(beach)).toBe(false);
   });
 
   it("does NOT match a distant beach named Beachwalk", function() {
-    const beach = {
-      id: "osm-node-15", name: "Beachwalk Resort", park_name: null,
-      lat: 43.0, lon: -87.9, nws_zone: null, nws_grid_url: null, osm_id: "node/15"
-    };
+    const beach = makeBeach({
+      name: "Beachwalk Resort",
+      lat: 43.0, lon: -87.9
+    });
     expect(michiganCity.matches(beach)).toBe(false);
   });
 });

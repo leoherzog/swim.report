@@ -23,6 +23,9 @@
 // rather than guess. Any unparseable date or unexpected shape also omits the
 // site — never a guessed color.
 
+import { distanceMi } from "../geo.js";
+import { fetchText } from "./util.js";
+
 export const OHIO_BEACHGUARD_PAGE =
   "https://publicapps.odh.ohio.gov/BeachGuardPublic/";
 export const OHIO_BEACHGUARD_API =
@@ -67,414 +70,57 @@ export const OHIO_USER_AGENT = "swim.report (hello@swim.report)";
 // resolvable only by proximity. The original four sites are listed first, in
 // their original order, so downstream code referencing them by index is stable.
 export const OHIO_SITES = [
-  {
-    id: "162",
-    siteId: "south-bass-island",
-    beachName: "South Bass Island State Park",
-    lat: 41.643074,
-    lon: -82.839073,
-    names: ["south bass island"]
-  },
-  {
-    id: "153",
-    siteId: "maumee-bay-erie",
-    beachName: "Maumee Bay State Park (ERIE)",
-    lat: 41.685799,
-    lon: -83.378098,
-    names: ["maumee bay"]
-  },
-  {
-    id: "154",
-    siteId: "maumee-bay-inland",
-    beachName: "Maumee Bay State Park (INLAND)",
-    lat: 41.683412,
-    lon: -83.376428,
-    names: []
-  },
-  {
-    id: "148",
-    siteId: "kelleys-island",
-    beachName: "Kelleys Island State Park",
-    lat: 41.613113,
-    lon: -82.70105,
-    names: ["kelleys island"]
-  },
-  {
-    id: "132",
-    siteId: "conneaut-township-park",
-    beachName: "Conneaut Township Park",
-    lat: 41.964471,
-    lon: -80.564447,
-    names: ["conneaut township park"]
-  },
-  {
-    id: "141",
-    siteId: "geneva-state-park",
-    beachName: "Geneva State Park",
-    lat: 41.857822,
-    lon: -80.976639,
-    names: ["geneva state park"]
-  },
-  {
-    id: "149",
-    siteId: "lakeshore-park",
-    beachName: "Lakeshore Park",
-    lat: 41.908371,
-    lon: -80.774368,
-    names: []
-  },
-  {
-    id: "167",
-    siteId: "walnut-beach",
-    beachName: "Walnut Beach",
-    lat: 41.901466,
-    lon: -80.809662,
-    names: []
-  },
-  {
-    id: "173",
-    siteId: "columbia-park-beach",
-    beachName: "Columbia Park Beach",
-    lat: 41.487000,
-    lon: -81.902000,
-    names: []
-  },
-  {
-    id: "136",
-    siteId: "edgewater-state-park",
-    beachName: "Edgewater State Park",
-    lat: 41.489300,
-    lon: -81.739197,
-    names: ["edgewater state park"]
-  },
-  {
-    id: "138",
-    siteId: "euclid-state-park",
-    beachName: "Euclid State Park",
-    lat: 41.584301,
-    lon: -81.568604,
-    names: ["euclid state park"]
-  },
-  {
-    id: "145",
-    siteId: "huntington-beach",
-    beachName: "Huntington Beach",
-    lat: 41.490940,
-    lon: -81.934143,
-    names: []
-  },
-  {
-    id: "177",
-    siteId: "parklawn-beach",
-    beachName: "Parklawn Beach",
-    lat: 41.483521,
-    lon: -81.860649,
-    names: []
-  },
-  {
-    id: "185",
-    siteId: "sims-beach",
-    beachName: "Sims Beach",
-    lat: 41.616081,
-    lon: -81.524223,
-    names: []
-  },
-  {
-    id: "166",
-    siteId: "villa-angela-state-park",
-    beachName: "Villa Angela State Park",
-    lat: 41.585098,
-    lon: -81.567703,
-    names: ["villa angela"]
-  },
-  {
-    id: "168",
-    siteId: "battery-park",
-    beachName: "Battery Park",
-    lat: 41.451847,
-    lon: -82.673691,
-    names: []
-  },
-  {
-    id: "125",
-    siteId: "bay-view-east",
-    beachName: "Bay View East",
-    lat: 41.468971,
-    lon: -82.819023,
-    names: []
-  },
-  {
-    id: "126",
-    siteId: "bay-view-west",
-    beachName: "Bay View West",
-    lat: 41.473484,
-    lon: -82.826935,
-    names: []
-  },
-  {
-    id: "131",
-    siteId: "beulah-beach",
-    beachName: "Beulah Beach",
-    lat: 41.394360,
-    lon: -82.441200,
-    names: []
-  },
-  {
-    id: "129",
-    siteId: "cedar-point-chausee",
-    beachName: "Cedar Point Chausee",
-    lat: 41.472710,
-    lon: -82.670357,
-    names: []
-  },
-  {
-    id: "133",
-    siteId: "cranberry-creek",
-    beachName: "Cranberry Creek",
-    lat: 41.383141,
-    lon: -82.473312,
-    names: []
-  },
-  {
-    id: "170",
-    siteId: "crystal-rock",
-    beachName: "Crystal Rock",
-    lat: 41.449081,
-    lon: -82.842499,
-    names: []
-  },
-  {
-    id: "134",
-    siteId: "darby-creek",
-    beachName: "Darby Creek",
-    lat: 41.413155,
-    lon: -82.398567,
-    names: []
-  },
-  {
-    id: "140",
-    siteId: "heidelberg-beach",
-    beachName: "Heidelberg Beach",
-    lat: 41.389469,
-    lon: -82.455460,
-    names: []
-  },
-  {
-    id: "164",
-    siteId: "lagoons-beach",
-    beachName: "Lagoons Beach",
-    lat: 41.428600,
-    lon: -82.358543,
-    names: []
-  },
-  {
-    id: "147",
-    siteId: "lake-front-park",
-    beachName: "Lake Front Park",
-    lat: 41.398251,
-    lon: -82.553787,
-    names: []
-  },
-  {
-    id: "1290",
-    siteId: "linwood-beach",
-    beachName: "Linwood Beach",
-    lat: 41.427071,
-    lon: -82.356827,
-    names: []
-  },
-  {
-    id: "152",
-    siteId: "lions-park",
-    beachName: "Lion's Park",
-    lat: 41.448376,
-    lon: -82.747246,
-    names: []
-  },
-  {
-    id: "165",
-    siteId: "main-street-beach",
-    beachName: "Main Street Beach",
-    lat: 41.425282,
-    lon: -82.366257,
-    names: []
-  },
-  {
-    id: "146",
-    siteId: "nickel-plate-beach",
-    beachName: "Nickel Plate Beach",
-    lat: 41.396881,
-    lon: -82.543808,
-    names: ["nickel plate"]
-  },
-  {
-    id: "284",
-    siteId: "nokomis-park",
-    beachName: "Nokomis Park",
-    lat: 41.427280,
-    lon: -82.352638,
-    names: []
-  },
-  {
-    id: "155",
-    siteId: "oberlin-beach",
-    beachName: "Oberlin Beach",
-    lat: 41.383930,
-    lon: -82.512543,
-    names: []
-  },
-  {
-    id: "156",
-    siteId: "old-woman-creek-beach",
-    beachName: "Old Woman Creek Beach",
-    lat: 41.384560,
-    lon: -82.514717,
-    names: ["old woman creek"]
-  },
-  {
-    id: "1289",
-    siteId: "orchard-beach",
-    beachName: "Orchard Beach",
-    lat: 41.407936,
-    lon: -82.408676,
-    names: []
-  },
-  {
-    id: "157",
-    siteId: "pickerel-creek",
-    beachName: "Pickerel Creek",
-    lat: 41.437355,
-    lon: -82.888077,
-    names: []
-  },
-  {
-    id: "169",
-    siteId: "pipe-creek-wildlife-area",
-    beachName: "Pipe Creek Wildlife Area",
-    lat: 41.451809,
-    lon: -82.673698,
-    names: ["pipe creek"]
-  },
-  {
-    id: "159",
-    siteId: "sawmill-creek",
-    beachName: "Sawmill Creek",
-    lat: 41.413715,
-    lon: -82.588402,
-    names: []
-  },
-  {
-    id: "160",
-    siteId: "sherod-park-beach",
-    beachName: "Sherod Park Beach",
-    lat: 41.416969,
-    lon: -82.389671,
-    names: ["sherod park"]
-  },
-  {
-    id: "161",
-    siteId: "showse-park",
-    beachName: "Showse Park",
-    lat: 41.430000,
-    lon: -82.309998,
-    names: ["showse park"]
-  },
-  {
-    id: "171",
-    siteId: "whites-landing",
-    beachName: "Whites Landing",
-    lat: 41.430901,
-    lon: -82.901520,
-    names: []
-  },
-  {
-    id: "139",
-    siteId: "fairport-harbor",
-    beachName: "Fairport Harbor",
-    lat: 41.758877,
-    lon: -81.274658,
-    names: ["fairport harbor"]
-  },
-  {
-    id: "143",
-    siteId: "headlands-state-park",
-    beachName: "Headlands State Park",
-    lat: 41.758127,
-    lon: -81.291788,
-    names: ["headlands"]
-  },
-  {
-    id: "130",
-    siteId: "century-beach",
-    beachName: "Century Beach",
-    lat: 41.477936,
-    lon: -82.154121,
-    names: []
-  },
-  {
-    id: "262",
-    siteId: "community-park-beach",
-    beachName: "Community Park Beach",
-    lat: 41.490640,
-    lon: -82.112300,
-    names: []
-  },
-  {
-    id: "151",
-    siteId: "lakeview-beach",
-    beachName: "Lakeview Beach",
-    lat: 41.463783,
-    lon: -82.196075,
-    names: []
-  },
-  {
-    id: "261",
-    siteId: "lakewood-beach-park",
-    beachName: "Lakewood Beach Park",
-    lat: 41.487560,
-    lon: -82.122610,
-    names: []
-  },
-  {
-    id: "254",
-    siteId: "miller-beach",
-    beachName: "Miller Beach",
-    lat: 41.502499,
-    lon: -82.061394,
-    names: []
-  },
-  {
-    id: "128",
-    siteId: "catawba-island-state-park",
-    beachName: "Catawba Island State Park",
-    lat: 41.573357,
-    lon: -82.857498,
-    names: ["catawba island"]
-  },
-  {
-    id: "135",
-    siteId: "east-harbor-state-park",
-    beachName: "East Harbor State Park",
-    lat: 41.557709,
-    lon: -82.803314,
-    names: ["east harbor"]
-  },
-  {
-    id: "150",
-    siteId: "lakeside-beach",
-    beachName: "Lakeside Beach",
-    lat: 41.546539,
-    lon: -82.750572,
-    names: []
-  },
-  {
-    id: "158",
-    siteId: "port-clinton",
-    beachName: "Port Clinton (Deep\\Lakeview))",
-    lat: 41.514610,
-    lon: -82.925056,
-    names: []
-  }
+  { id: "162", siteId: "south-bass-island", beachName: "South Bass Island State Park", lat: 41.643074, lon: -82.839073, names: ["south bass island"] },
+  { id: "153", siteId: "maumee-bay-erie", beachName: "Maumee Bay State Park (ERIE)", lat: 41.685799, lon: -83.378098, names: ["maumee bay"] },
+  { id: "154", siteId: "maumee-bay-inland", beachName: "Maumee Bay State Park (INLAND)", lat: 41.683412, lon: -83.376428, names: [] },
+  { id: "148", siteId: "kelleys-island", beachName: "Kelleys Island State Park", lat: 41.613113, lon: -82.70105, names: ["kelleys island"] },
+  { id: "132", siteId: "conneaut-township-park", beachName: "Conneaut Township Park", lat: 41.964471, lon: -80.564447, names: ["conneaut township park"] },
+  { id: "141", siteId: "geneva-state-park", beachName: "Geneva State Park", lat: 41.857822, lon: -80.976639, names: ["geneva state park"] },
+  { id: "149", siteId: "lakeshore-park", beachName: "Lakeshore Park", lat: 41.908371, lon: -80.774368, names: [] },
+  { id: "167", siteId: "walnut-beach", beachName: "Walnut Beach", lat: 41.901466, lon: -80.809662, names: [] },
+  { id: "173", siteId: "columbia-park-beach", beachName: "Columbia Park Beach", lat: 41.487000, lon: -81.902000, names: [] },
+  { id: "136", siteId: "edgewater-state-park", beachName: "Edgewater State Park", lat: 41.489300, lon: -81.739197, names: ["edgewater state park"] },
+  { id: "138", siteId: "euclid-state-park", beachName: "Euclid State Park", lat: 41.584301, lon: -81.568604, names: ["euclid state park"] },
+  { id: "145", siteId: "huntington-beach", beachName: "Huntington Beach", lat: 41.490940, lon: -81.934143, names: [] },
+  { id: "177", siteId: "parklawn-beach", beachName: "Parklawn Beach", lat: 41.483521, lon: -81.860649, names: [] },
+  { id: "185", siteId: "sims-beach", beachName: "Sims Beach", lat: 41.616081, lon: -81.524223, names: [] },
+  { id: "166", siteId: "villa-angela-state-park", beachName: "Villa Angela State Park", lat: 41.585098, lon: -81.567703, names: ["villa angela"] },
+  { id: "168", siteId: "battery-park", beachName: "Battery Park", lat: 41.451847, lon: -82.673691, names: [] },
+  { id: "125", siteId: "bay-view-east", beachName: "Bay View East", lat: 41.468971, lon: -82.819023, names: [] },
+  { id: "126", siteId: "bay-view-west", beachName: "Bay View West", lat: 41.473484, lon: -82.826935, names: [] },
+  { id: "131", siteId: "beulah-beach", beachName: "Beulah Beach", lat: 41.394360, lon: -82.441200, names: [] },
+  { id: "129", siteId: "cedar-point-chausee", beachName: "Cedar Point Chausee", lat: 41.472710, lon: -82.670357, names: [] },
+  { id: "133", siteId: "cranberry-creek", beachName: "Cranberry Creek", lat: 41.383141, lon: -82.473312, names: [] },
+  { id: "170", siteId: "crystal-rock", beachName: "Crystal Rock", lat: 41.449081, lon: -82.842499, names: [] },
+  { id: "134", siteId: "darby-creek", beachName: "Darby Creek", lat: 41.413155, lon: -82.398567, names: [] },
+  { id: "140", siteId: "heidelberg-beach", beachName: "Heidelberg Beach", lat: 41.389469, lon: -82.455460, names: [] },
+  { id: "164", siteId: "lagoons-beach", beachName: "Lagoons Beach", lat: 41.428600, lon: -82.358543, names: [] },
+  { id: "147", siteId: "lake-front-park", beachName: "Lake Front Park", lat: 41.398251, lon: -82.553787, names: [] },
+  { id: "1290", siteId: "linwood-beach", beachName: "Linwood Beach", lat: 41.427071, lon: -82.356827, names: [] },
+  { id: "152", siteId: "lions-park", beachName: "Lion's Park", lat: 41.448376, lon: -82.747246, names: [] },
+  { id: "165", siteId: "main-street-beach", beachName: "Main Street Beach", lat: 41.425282, lon: -82.366257, names: [] },
+  { id: "146", siteId: "nickel-plate-beach", beachName: "Nickel Plate Beach", lat: 41.396881, lon: -82.543808, names: ["nickel plate"] },
+  { id: "284", siteId: "nokomis-park", beachName: "Nokomis Park", lat: 41.427280, lon: -82.352638, names: [] },
+  { id: "155", siteId: "oberlin-beach", beachName: "Oberlin Beach", lat: 41.383930, lon: -82.512543, names: [] },
+  { id: "156", siteId: "old-woman-creek-beach", beachName: "Old Woman Creek Beach", lat: 41.384560, lon: -82.514717, names: ["old woman creek"] },
+  { id: "1289", siteId: "orchard-beach", beachName: "Orchard Beach", lat: 41.407936, lon: -82.408676, names: [] },
+  { id: "157", siteId: "pickerel-creek", beachName: "Pickerel Creek", lat: 41.437355, lon: -82.888077, names: [] },
+  { id: "169", siteId: "pipe-creek-wildlife-area", beachName: "Pipe Creek Wildlife Area", lat: 41.451809, lon: -82.673698, names: ["pipe creek"] },
+  { id: "159", siteId: "sawmill-creek", beachName: "Sawmill Creek", lat: 41.413715, lon: -82.588402, names: [] },
+  { id: "160", siteId: "sherod-park-beach", beachName: "Sherod Park Beach", lat: 41.416969, lon: -82.389671, names: ["sherod park"] },
+  { id: "161", siteId: "showse-park", beachName: "Showse Park", lat: 41.430000, lon: -82.309998, names: ["showse park"] },
+  { id: "171", siteId: "whites-landing", beachName: "Whites Landing", lat: 41.430901, lon: -82.901520, names: [] },
+  { id: "139", siteId: "fairport-harbor", beachName: "Fairport Harbor", lat: 41.758877, lon: -81.274658, names: ["fairport harbor"] },
+  { id: "143", siteId: "headlands-state-park", beachName: "Headlands State Park", lat: 41.758127, lon: -81.291788, names: ["headlands"] },
+  { id: "130", siteId: "century-beach", beachName: "Century Beach", lat: 41.477936, lon: -82.154121, names: [] },
+  { id: "262", siteId: "community-park-beach", beachName: "Community Park Beach", lat: 41.490640, lon: -82.112300, names: [] },
+  { id: "151", siteId: "lakeview-beach", beachName: "Lakeview Beach", lat: 41.463783, lon: -82.196075, names: [] },
+  { id: "261", siteId: "lakewood-beach-park", beachName: "Lakewood Beach Park", lat: 41.487560, lon: -82.122610, names: [] },
+  { id: "254", siteId: "miller-beach", beachName: "Miller Beach", lat: 41.502499, lon: -82.061394, names: [] },
+  { id: "128", siteId: "catawba-island-state-park", beachName: "Catawba Island State Park", lat: 41.573357, lon: -82.857498, names: ["catawba island"] },
+  { id: "135", siteId: "east-harbor-state-park", beachName: "East Harbor State Park", lat: 41.557709, lon: -82.803314, names: ["east harbor"] },
+  { id: "150", siteId: "lakeside-beach", beachName: "Lakeside Beach", lat: 41.546539, lon: -82.750572, names: [] },
+  { id: "158", siteId: "port-clinton", beachName: "Port Clinton (Deep\\Lakeview))", lat: 41.514610, lon: -82.925056, names: [] }
 ];
 
 // matches() and resolution both treat a site as covering ~2 mi of shoreline.
@@ -519,18 +165,6 @@ export const OHIO_MATCH_BBOX = {
 // advisory of ANY kind can never be green.
 const RED_ADVISORY_TYPE_IDS = ["HAB_WARNING_ADV", "HAB_WATCH_ADV"];
 
-// Pure. Haversine great-circle distance in statute miles.
-function distanceMi(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const earthRadiusMi = 3958.8;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 2 * earthRadiusMi * Math.asin(Math.sqrt(a));
-}
 
 // Pure. Parses an ISO-8601 timestamp with an explicit offset or "Z" (the format
 // used by monitorings swimSeason dates, e.g.
@@ -872,21 +506,18 @@ export const ohioBeachGuard = {
     // required; see PLAN.md section 7 for the budget). Isolate failures per id
     // so one bad upstream never poisons the others.
     for (const site of OHIO_SITES) {
+      const text = await fetchText(OHIO_BEACHGUARD_API + site.id, {
+        headers: {
+          "User-Agent": OHIO_USER_AGENT,
+          "Accept": "application/json"
+        },
+        logPrefix: "ohioBeachGuard: fetch failed for id " + site.id
+      });
+      if (text === null) {
+        continue;
+      }
       try {
-        const response = await fetch(OHIO_BEACHGUARD_API + site.id, {
-          headers: {
-            "User-Agent": OHIO_USER_AGENT,
-            "Accept": "application/json"
-          }
-        });
-        if (!response.ok) {
-          console.log(
-            "ohioBeachGuard: fetch failed for id " + site.id +
-            ": HTTP " + response.status
-          );
-          continue;
-        }
-        const record = parseBeachesListJson(await response.text());
+        const record = parseBeachesListJson(text);
         if (!record) {
           console.log("ohioBeachGuard: no record for id " + site.id);
           continue;

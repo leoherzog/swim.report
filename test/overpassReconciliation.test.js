@@ -10,7 +10,7 @@
 // park-containment row.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import worker from "../src/index.js";
+import { runScheduledCron } from "./helpers/cron.js";
 
 // Overpass element fixtures. fetchBeaches issues the [timeout:60] query;
 // fetchParkBeaches issues the [timeout:180] query. The stub routes on that.
@@ -116,11 +116,8 @@ function makeEnv(existingParkRows) {
   return { env: env, batches: batches, runs: runs };
 }
 
-async function runOverpassCron(env) {
-  const waits = [];
-  const ctx = { waitUntil: function (promise) { waits.push(promise); } };
-  worker.scheduled({ cron: "47 8 * * *" }, env, ctx);
-  await Promise.all(waits);
+function runOverpassCron(env) {
+  return runScheduledCron(env, "47 8 * * *");
 }
 
 // A batch is a DELETE batch when its first statement's SQL is a DELETE.

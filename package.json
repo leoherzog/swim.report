@@ -15,8 +15,8 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "vitest": "^4.1.9",
-    "wrangler": "^4.107.0"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.110.0"
   },
   "dependencies": {
     "@awesome.me/kit-ddd41b2d81": "^1.0.2",

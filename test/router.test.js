@@ -254,8 +254,8 @@ describe("renderListPage proximity output", () => {
       official: null,
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    expect(html).toContain("<wa-zoomable-frame");
-    expect(html).toContain(" without-controls>");
+    expect(html).toContain("<iframe class=\"wave-map-frame\"");
+    expect(html).toContain(" title=\"Wave height map\" loading=\"lazy\" allowfullscreen></iframe>");
     expect(html).toContain("https://embed.windy.com/embed.html");
     expect(html).toContain("overlay=waves");
     expect(html).toContain("lat=42.658");
@@ -272,8 +272,8 @@ describe("renderListPage proximity output", () => {
         rules_version: "1.1.0",
         official: false,
         sources: [
-          { label: "ECMWF Wave Forecast via Open-Meteo", url: "https://open-meteo.com/en/docs/marine-weather-api" },
-          { label: "NWS Surf Zone Forecast (SRF-MKX)" },
+          { label: "ECMWF Wave Forecast", url: "https://open-meteo.com/en/docs/marine-weather-api" },
+          { label: "NWS Surf Zone Forecast" },
           "https://api.weather.gov/alerts/active?zone=MIZ071"
         ],
         updated: "2026-07-05T12:00:00.000Z"
@@ -283,19 +283,20 @@ describe("renderListPage proximity output", () => {
     });
     expect(html).toContain("with-header-actions");
     expect(html).toContain("<div slot=\"header-actions\">");
+    // Labels render as plain text — the upstream url is never hyperlinked.
+    expect(html).toContain("<span>ECMWF Wave Forecast</span>");
+    expect(html).not.toContain("https://open-meteo.com/en/docs/marine-weather-api");
+    expect(html).toContain("<span>NWS Surf Zone Forecast</span>");
+    // Legacy bare-string sources render as their hostname, unlinked.
+    expect(html).toContain("<span>api.weather.gov</span>");
+    expect(html).not.toContain("https://api.weather.gov");
     expect(html).toContain(
-      "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">" +
-      "ECMWF Wave Forecast via Open-Meteo</a>"
-    );
-    expect(html).toContain("<span>NWS Surf Zone Forecast (SRF-MKX)</span>");
-    // Legacy bare-string sources render as their hostname.
-    expect(html).toContain(">api.weather.gov</a>");
-    expect(html).toContain(
-      "<div slot=\"footer\" class=\"wa-caption-s\">Updated 2026-07-05T12:00:00.000Z UTC</div>"
+      "<div slot=\"footer\" class=\"wa-caption-s\">Updated " +
+      "<wa-relative-time date=\"2026-07-05T12:00:00.000Z\" sync></wa-relative-time></div>"
     );
     expect(html).not.toContain("Sources:");
     expect(html).toContain(
-      "Set by forecast wave height: 2 ft or higher raises yellow, 4 ft or higher raises red."
+      "Based on the forecast wave height"
     );
     expect(html).not.toContain("Rules version:");
   });
@@ -318,9 +319,15 @@ describe("renderListPage proximity output", () => {
     const officialCard = html.slice(html.indexOf("official-card"), html.indexOf("estimate-card"));
     expect(officialCard).toContain("with-header-actions");
     expect(officialCard).toContain("<div slot=\"header-actions\">");
-    expect(officialCard).toContain(">www.southhavenmi.gov</a>");
+    // Scraped official sources are the one case that links out — hostname
+    // ("www." stripped) linking to the source page.
     expect(officialCard).toContain(
-      "<div slot=\"footer\" class=\"wa-caption-s\">Updated 2026-07-05T14:00:00.000Z UTC</div>"
+      "<a href=\"https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php\" " +
+      "rel=\"noopener noreferrer\">southhavenmi.gov</a>"
+    );
+    expect(officialCard).toContain(
+      "<div slot=\"footer\" class=\"wa-caption-s\">Updated " +
+      "<wa-relative-time date=\"2026-07-05T14:00:00.000Z\" sync></wa-relative-time></div>"
     );
     expect(officialCard).not.toContain("Source:");
   });
@@ -361,7 +368,7 @@ describe("renderListPage proximity output", () => {
       official: null,
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    expect(html).not.toContain("<wa-zoomable-frame");
+    expect(html).not.toContain("<iframe class=\"wave-map-frame\"");
   });
 
   it("omits distances and the note when not sorted", () => {
@@ -369,7 +376,63 @@ describe("renderListPage proximity output", () => {
       entries: [entryFor("Some Beach", null)],
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    expect(html).not.toContain("<span class=\"beach-row-distance\"");
+    expect(html).not.toContain("<span class=\"beach-row-distance");
     expect(html).not.toContain("Sorted by approximate distance");
+  });
+});
+
+describe("handleDetail waves: KV read", () => {
+  // DB stand-in whose first() always yields the beach row; FLAGS records every
+  // requested key. 'wavesValue' is returned for the "waves:" key (null else).
+  function detailEnv(beach, wavesValue) {
+    const keys = [];
+    const db = {
+      prepare: function () {
+        const st = {
+          bind: function () { return st; },
+          first: function () { return Promise.resolve(beach); }
+        };
+        return st;
+      }
+    };
+    const flags = {
+      get: function (key) {
+        keys.push(key);
+        if (key.indexOf("waves:") === 0) {
+          return Promise.resolve(wavesValue || null);
+        }
+        return Promise.resolve(null);
+      }
+    };
+    return { env: { DB: db, FLAGS: flags }, keys: keys };
+  }
+
+  function detailRequest(id) {
+    return { method: "GET", url: "https://swim.report/beach/" + id, cf: {} };
+  }
+
+  const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
+
+  it("requests the waves: series alongside the flag/official keys", async () => {
+    const { env, keys } = detailEnv(beach, null);
+    const res = await handleRequest(detailRequest("b-1"), env);
+    expect(res.status).toBe(200);
+    expect(keys).toContain("waves:b-1");
+    expect(keys).toContain("flag:b-1");
+    expect(keys).toContain("official:b-1");
+  });
+
+  it("still renders 200 when a WaveSeries is present", async () => {
+    const series = {
+      beachId: "b-1",
+      startIso: "2026-07-15T16:00:00.000Z",
+      hoursFt: [1.6, 1.7, 1.8],
+      models: ["ecmwf_wam025"],
+      sources: [{ label: "ECMWF Wave Forecast", url: "https://open-meteo.com/en/docs/marine-weather-api" }],
+      updated: "2026-07-15T16:20:33.000Z"
+    };
+    const { env } = detailEnv(beach, series);
+    const res = await handleRequest(detailRequest("b-1"), env);
+    expect(res.status).toBe(200);
   });
 });

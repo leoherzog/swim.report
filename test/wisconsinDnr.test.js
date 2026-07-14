@@ -8,6 +8,7 @@ import {
   wisconsinDnr,
   WISCONSIN_DNR_URL
 } from "../src/officialSources/wisconsinDnr.js";
+import { makeBeach } from "./helpers/beach.js";
 
 // A fixed "now" a few days after the fixture sample date (2026-06-30), so the
 // default fixtures are all fresh. Staleness tests override SAMPLEDATE.
@@ -199,27 +200,27 @@ describe("parseWisconsinDnrJson", function() {
 
 describe("wisconsinDnr.matches", function() {
   it("matches a Wisconsin Lake Michigan beach", function() {
-    const beach = { id: "osm-1", name: "Bradford Beach", park_name: null, lat: 43.058, lon: -87.874, nws_zone: null, nws_grid_url: null, osm_id: "node/1" };
+    const beach = makeBeach({ name: "Bradford Beach", lat: 43.058, lon: -87.874 });
     expect(wisconsinDnr.matches(beach)).toBe(true);
   });
 
   it("matches a Wisconsin Lake Superior beach", function() {
-    const beach = { id: "osm-2", name: "Maslowski Beach", park_name: null, lat: 46.591, lon: -90.921, nws_zone: null, nws_grid_url: null, osm_id: "node/2" };
+    const beach = makeBeach({ name: "Maslowski Beach", lat: 46.591, lon: -90.921 });
     expect(wisconsinDnr.matches(beach)).toBe(true);
   });
 
   it("matches a western-UP Michigan beach inside the shared box (acceptable; resolution is per-beach)", function() {
-    const beach = { id: "osm-3", name: "Ontonagon Township Park Beach", park_name: null, lat: 46.874, lon: -89.316, nws_zone: null, nws_grid_url: null, osm_id: "node/3" };
+    const beach = makeBeach({ name: "Ontonagon Township Park Beach", lat: 46.874, lon: -89.316 });
     expect(wisconsinDnr.matches(beach)).toBe(true);
   });
 
   it("does not match a Lake Michigan beach on the Michigan (eastern) side", function() {
-    const beach = { id: "osm-4", name: "South Haven South Beach", park_name: null, lat: 42.4, lon: -86.28, nws_zone: null, nws_grid_url: null, osm_id: "node/4" };
+    const beach = makeBeach({ name: "South Haven South Beach", lat: 42.4, lon: -86.28 });
     expect(wisconsinDnr.matches(beach)).toBe(false);
   });
 
   it("does not match a beach south of the box", function() {
-    const beach = { id: "osm-5", name: "Illinois Beach", park_name: null, lat: 42.2, lon: -87.8, nws_zone: null, nws_grid_url: null, osm_id: "node/5" };
+    const beach = makeBeach({ name: "Illinois Beach", lat: 42.2, lon: -87.8 });
     expect(wisconsinDnr.matches(beach)).toBe(false);
   });
 });

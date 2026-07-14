@@ -43,6 +43,8 @@
 // Red/yellow/double-red resolutions keep the plain most-severe gate — those are
 // the safe direction. We always fail toward no-data, never toward a wrong color.
 
+import { fetchText, FLAG_SEVERITY } from "./util.js";
+
 export const CHICAGO_FLAG_STATUS_URL =
   "https://www.chicagoparkdistrict.com/flag-status";
 
@@ -83,9 +85,9 @@ export function beachNameKeys(parentTrimmed) {
   return keys;
 }
 
-// Severity ranking used to pick the most restrictive fresh row per beach.
-// Higher wins. CPD never flies double-red, but it is included for completeness.
-const FLAG_SEVERITY = { green: 1, yellow: 2, red: 3, "double-red": 4 };
+// FLAG_SEVERITY (imported above) picks the most restrictive fresh row per
+// beach. Higher wins. CPD never flies double-red, but the shared ranking
+// includes it for completeness.
 
 // Classify a single CPD flag string. Returns { color, afterhours } or null when
 // the string is not a confidently mappable green/yellow/red (anything
@@ -258,15 +260,14 @@ export const chicagoParkDistrict = {
   },
   scrape: async function(nowIso) {
     const requestUrl = CHICAGO_FLAG_STATUS_URL + "?q=" + cachebustFromNowIso(nowIso);
+    const text = await fetchText(requestUrl, {
+      headers: { "User-Agent": CHICAGO_USER_AGENT },
+      logPrefix: "chicagoParkDistrict: fetch failed"
+    });
+    if (text === null) {
+      return null;
+    }
     try {
-      const response = await fetch(requestUrl, {
-        headers: { "User-Agent": CHICAGO_USER_AGENT }
-      });
-      if (!response.ok) {
-        console.log("chicagoParkDistrict: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const text = await response.text();
       const sites = parseChicagoFlags(text, nowIso);
       if (!sites || sites.length === 0) {
         return null;

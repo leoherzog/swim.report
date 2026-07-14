@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { parseMetroparksHtml, metroparks } from "../src/officialSources/metroparks.js";
 import { resolveSiteForBeach } from "../src/officialSources/index.js";
+import { makeBeach } from "./helpers/beach.js";
 
 // Trimmed fixture mirroring the real vc_tta accordion structure: several
 // unrelated park panels (with facility Open/Closed lines using identical
@@ -174,10 +175,10 @@ describe("metroparks site resolution (no proximity misattribution)", function() 
 
   it("resolves the closed beach to red by name", function() {
     const sites = parseMetroparksHtml(oneClosedOneOpen);
-    const martindale = {
-      id: "osm-node-10", name: "Martindale Beach", park_name: "Kensington Metropark",
-      lat: 42.541, lon: -83.691, nws_zone: null, nws_grid_url: null, osm_id: "node/10"
-    };
+    const martindale = makeBeach({
+      name: "Martindale Beach", park_name: "Kensington Metropark",
+      lat: 42.541, lon: -83.691
+    });
     const site = resolveSiteForBeach(martindale, sites);
     expect(site).toBeTruthy();
     expect(site.siteId).toBe("martindale-beach");
@@ -189,10 +190,10 @@ describe("metroparks site resolution (no proximity misattribution)", function() 
     // A real, currently-OPEN Maple Beach node, at essentially the same coords
     // as its closed Martindale sibling. It must resolve to no site (fall back
     // to the estimate), never to Martindale's red.
-    const maple = {
-      id: "osm-node-11", name: "Maple Beach", park_name: "Kensington Metropark",
-      lat: 42.541, lon: -83.691, nws_zone: null, nws_grid_url: null, osm_id: "node/11"
-    };
+    const maple = makeBeach({
+      name: "Maple Beach", park_name: "Kensington Metropark",
+      lat: 42.541, lon: -83.691
+    });
     expect(resolveSiteForBeach(maple, sites)).toBe(null);
   });
 
@@ -200,44 +201,44 @@ describe("metroparks site resolution (no proximity misattribution)", function() 
     const sites = parseMetroparksHtml(oneClosedOneOpen);
     // A generically named OSM node near Kensington cannot be attributed to a
     // specific beach's closure, so it must resolve to no site.
-    const generic = {
-      id: "osm-node-12", name: "Swimming Area", park_name: "Kensington Metropark",
-      lat: 42.541, lon: -83.691, nws_zone: null, nws_grid_url: null, osm_id: "node/12"
-    };
+    const generic = makeBeach({
+      name: "Swimming Area", park_name: "Kensington Metropark",
+      lat: 42.541, lon: -83.691
+    });
     expect(resolveSiteForBeach(generic, sites)).toBe(null);
   });
 });
 
 describe("metroparks.matches", function() {
   it("matches by exact beach name", function() {
-    const beach = {
-      id: "osm-node-1", name: "Martindale Beach", park_name: null,
-      lat: 42.54, lon: -83.69, nws_zone: null, nws_grid_url: null, osm_id: "node/1"
-    };
+    const beach = makeBeach({
+      name: "Martindale Beach",
+      lat: 42.54, lon: -83.69
+    });
     expect(metroparks.matches(beach)).toBe(true);
   });
 
   it("matches by park_name containing Stony Creek", function() {
-    const beach = {
-      id: "osm-node-2", name: "Beach Area", park_name: "Stony Creek Metropark",
-      lat: 42.66, lon: -83.115, nws_zone: null, nws_grid_url: null, osm_id: "node/2"
-    };
+    const beach = makeBeach({
+      name: "Beach Area", park_name: "Stony Creek Metropark",
+      lat: 42.66, lon: -83.115
+    });
     expect(metroparks.matches(beach)).toBe(true);
   });
 
   it("matches by proximity within 3 mi of Kensington Metropark", function() {
-    const beach = {
-      id: "osm-node-3", name: "Unrelated Name", park_name: null,
-      lat: 42.55, lon: -83.69, nws_zone: null, nws_grid_url: null, osm_id: "node/3"
-    };
+    const beach = makeBeach({
+      name: "Unrelated Name",
+      lat: 42.55, lon: -83.69
+    });
     expect(metroparks.matches(beach)).toBe(true);
   });
 
   it("does not match a beach far from both parks with an unrelated name", function() {
-    const beach = {
-      id: "osm-node-4", name: "Holland State Park", park_name: null,
-      lat: 42.7739, lon: -86.2109, nws_zone: null, nws_grid_url: null, osm_id: "node/4"
-    };
+    const beach = makeBeach({
+      name: "Holland State Park",
+      lat: 42.7739, lon: -86.2109
+    });
     expect(metroparks.matches(beach)).toBe(false);
   });
 
@@ -247,10 +248,10 @@ describe("metroparks.matches", function() {
     // name match would let a Kensington "Maple Beach: Closed" resolve onto it
     // by name and publish a false OFFICIAL RED. Coordinates far from both
     // parks must exclude it.
-    const beach = {
-      id: "osm-node-6", name: "Maple Beach", park_name: null,
-      lat: 44.5, lon: -85.6, nws_zone: null, nws_grid_url: null, osm_id: "node/6"
-    };
+    const beach = makeBeach({
+      name: "Maple Beach",
+      lat: 44.5, lon: -85.6
+    });
     expect(metroparks.matches(beach)).toBe(false);
   });
 
@@ -270,10 +271,10 @@ describe("metroparks.matches", function() {
       "<p><strong>Eastwood Beach:</strong> Open</p>" +
       "</div></div>";
     const sites = parseMetroparksHtml(html);
-    const farMaple = {
-      id: "osm-node-7", name: "Maple Beach", park_name: null,
-      lat: 44.5, lon: -85.6, nws_zone: null, nws_grid_url: null, osm_id: "node/7"
-    };
+    const farMaple = makeBeach({
+      name: "Maple Beach",
+      lat: 44.5, lon: -85.6
+    });
     // The cron only resolves beaches that matched; this one must not match...
     expect(metroparks.matches(farMaple)).toBe(false);
     // ...and if it somehow reached resolution, that is the documented risk we
@@ -282,18 +283,18 @@ describe("metroparks.matches", function() {
   });
 
   it("matches a coordinate-less row purely by known beach name", function() {
-    const beach = {
-      id: "osm-node-8", name: "Baypoint Beach", park_name: null,
-      lat: null, lon: null, nws_zone: null, nws_grid_url: null, osm_id: "node/8"
-    };
+    const beach = makeBeach({
+      name: "Baypoint Beach",
+      lat: null, lon: null
+    });
     expect(metroparks.matches(beach)).toBe(true);
   });
 
   it("does not match Lake St. Clair Metropark Beach (out of scope)", function() {
-    const beach = {
-      id: "osm-node-5", name: "Lake St. Clair Metropark Beach", park_name: "Lake St. Clair Metropark",
-      lat: 42.58, lon: -82.79, nws_zone: null, nws_grid_url: null, osm_id: "node/5"
-    };
+    const beach = makeBeach({
+      name: "Lake St. Clair Metropark Beach", park_name: "Lake St. Clair Metropark",
+      lat: 42.58, lon: -82.79
+    });
     expect(metroparks.matches(beach)).toBe(false);
   });
 });

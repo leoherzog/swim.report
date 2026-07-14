@@ -16,6 +16,8 @@
 // scrape() runs cron-side only; parseSouthHavenCsv and
 // extractSouthHavenCsvUrl are pure and exported for tests.
 
+import { fetchText, FLAG_SEVERITY } from "./util.js";
+
 export const SOUTH_HAVEN_URL =
   "https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php";
 
@@ -129,8 +131,8 @@ const FLAG_LINE_RE = /^Flag #(\d+) (.+?) is (.+)$/;
 const PIER_LINE_RE = /^(North|South) Pier is (Open|Closed)$/;
 
 // double-red is the most severe official tier (see OFFICIAL_COLORS in
-// officialSources/index.js); it must outrank red in the same-site rollup.
-const SEVERITY = { green: 1, yellow: 2, red: 3, "double-red": 4 };
+// officialSources/index.js); FLAG_SEVERITY (imported above) makes it outrank
+// red in the same-site rollup.
 
 // Pure. Canonicalize a raw color phrase to a known South Haven flag color, or
 // null if it is not one. Case-insensitive; collapses interior spaces/hyphens
@@ -288,7 +290,7 @@ export function parseSouthHavenCsv(text, nowIso) {
     }
     let worst = group.colors[0];
     for (let j = 1; j < group.colors.length; j++) {
-      if (SEVERITY[group.colors[j]] > SEVERITY[worst]) {
+      if (FLAG_SEVERITY[group.colors[j]] > FLAG_SEVERITY[worst]) {
         worst = group.colors[j];
       }
     }
@@ -351,34 +353,26 @@ export const southHaven = {
     // Best effort: discover the current CSV href from the flag page so a
     // re-published sheet keeps working; fall back to the known CSV URL. The
     // legend images on the page are NEVER parsed for a color.
-    let csvUrl = null;
-    try {
-      const pageResponse = await fetch(SOUTH_HAVEN_URL, {
-        headers: { "User-Agent": SOUTH_HAVEN_USER_AGENT }
-      });
-      if (pageResponse.ok) {
-        csvUrl = extractSouthHavenCsvUrl(await pageResponse.text());
-      } else {
-        console.log("southHaven: flag page fetch failed: HTTP " + pageResponse.status);
-      }
-    } catch (err) {
-      console.log("southHaven: flag page fetch failed: " + err.message);
-    }
+    const pageHtml = await fetchText(SOUTH_HAVEN_URL, {
+      headers: { "User-Agent": SOUTH_HAVEN_USER_AGENT },
+      logPrefix: "southHaven: flag page fetch failed"
+    });
+    let csvUrl = pageHtml === null ? null : extractSouthHavenCsvUrl(pageHtml);
     if (!csvUrl) {
       csvUrl = SOUTH_HAVEN_CSV_URL;
     }
+    // The docs.google.com pub URL 307-redirects to a signed, single-use
+    // googleusercontent.com URL — follow it fresh every tick.
+    const csvText = await fetchText(csvUrl, {
+      redirect: "follow",
+      headers: { "User-Agent": SOUTH_HAVEN_USER_AGENT },
+      logPrefix: "southHaven: CSV fetch failed"
+    });
+    if (csvText === null) {
+      return null;
+    }
     try {
-      // The docs.google.com pub URL 307-redirects to a signed, single-use
-      // googleusercontent.com URL — follow it fresh every tick.
-      const response = await fetch(csvUrl, {
-        redirect: "follow",
-        headers: { "User-Agent": SOUTH_HAVEN_USER_AGENT }
-      });
-      if (!response.ok) {
-        console.log("southHaven: CSV fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const sites = parseSouthHavenCsv(await response.text(), nowIso);
+      const sites = parseSouthHavenCsv(csvText, nowIso);
       if (!sites || sites.length === 0) {
         // null: unparseable. []: every site gray/unmonitored. Either way
         // there is no official data this tick.

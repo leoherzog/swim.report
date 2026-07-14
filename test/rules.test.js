@@ -3,9 +3,10 @@ import {
   RULES_VERSION,
   ALERT_PRECEDENCE,
   ALERTS_UNAVAILABLE_CAVEAT,
-  metersToFeet,
+  waveColorForHeight,
   estimateFlag
 } from "../src/rules.js";
+import { metersToFeet } from "../src/geo.js";
 
 function baseInputs(overrides) {
   const merged = {
@@ -382,6 +383,66 @@ describe("estimateFlag - determinism and purity", function () {
       const second = estimateFlag(inputs);
       expect(first).toEqual(second);
     }).not.toThrow();
+  });
+});
+
+describe("waveColorForHeight", function () {
+  it("4.0 exactly -> red (boundary)", function () {
+    expect(waveColorForHeight(4.0)).toBe("red");
+  });
+
+  it("3.99 -> yellow", function () {
+    expect(waveColorForHeight(3.99)).toBe("yellow");
+  });
+
+  it("2.0 exactly -> yellow (boundary)", function () {
+    expect(waveColorForHeight(2.0)).toBe("yellow");
+  });
+
+  it("1.99 -> green", function () {
+    expect(waveColorForHeight(1.99)).toBe("green");
+  });
+
+  it("0 -> green", function () {
+    expect(waveColorForHeight(0)).toBe("green");
+  });
+
+  it("null -> null", function () {
+    expect(waveColorForHeight(null)).toBe(null);
+  });
+
+  it("undefined -> null", function () {
+    expect(waveColorForHeight(undefined)).toBe(null);
+  });
+
+  it("NaN -> null", function () {
+    expect(waveColorForHeight(NaN)).toBe(null);
+  });
+
+  it("non-numeric string -> null", function () {
+    expect(waveColorForHeight("3")).toBe(null);
+  });
+});
+
+describe("estimateFlag - echoes waveHeightFt", function () {
+  it("echoes a finite waveHeightFt input onto the result", function () {
+    const result = estimateFlag(baseInputs({ waveHeightFt: 3.2 }));
+    expect(result.waveHeightFt).toBe(3.2);
+  });
+
+  it("waveHeightFt null (or omitted) -> result.waveHeightFt null", function () {
+    expect(estimateFlag(baseInputs({})).waveHeightFt).toBe(null);
+    expect(estimateFlag(baseInputs({ waveHeightFt: null })).waveHeightFt).toBe(null);
+  });
+
+  it("alert decides the color but the wave reading is still echoed", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["High Surf Warning"],
+      waveHeightFt: 1.5
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.waveHeightFt).toBe(1.5);
   });
 });
 

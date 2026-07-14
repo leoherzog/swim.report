@@ -7,6 +7,7 @@ import {
   BLDHD_URL
 } from "../src/officialSources/bldhd.js";
 import { resolveSiteForBeach } from "../src/officialSources/index.js";
+import { makeBeach } from "./helpers/beach.js";
 
 // Trimmed inline fixture modeled on the real bldhd.org/beach-monitoring/
 // markup captured in the probe (docs/official-sources-verified.json /
@@ -229,12 +230,12 @@ describe("parseBldhdHtml", function() {
 
 describe("bldhd.matches", function() {
   it("matches a beach inside the Benzie/Leelanau bounding box", function() {
-    const beach = { id: "osm-node-1", name: "Frankfort Beach", park_name: null, lat: 44.6325, lon: -86.2358, nws_zone: null, nws_grid_url: null, osm_id: "node/1" };
+    const beach = makeBeach({ name: "Frankfort Beach", lat: 44.6325, lon: -86.2358 });
     expect(bldhd.matches(beach)).toBe(true);
   });
 
   it("does not match a beach far outside the box (e.g. South Haven)", function() {
-    const beach = { id: "osm-node-2", name: "South Haven South Beach", park_name: null, lat: 42.4, lon: -86.28, nws_zone: null, nws_grid_url: null, osm_id: "node/2" };
+    const beach = makeBeach({ name: "South Haven South Beach", lat: 42.4, lon: -86.28 });
     expect(bldhd.matches(beach)).toBe(false);
   });
 });
@@ -249,13 +250,11 @@ describe("bldhd site resolution safety", function() {
     // the matches() bbox but > 1.5 mi from every sampling point.
     const html = buildFixture("7/2/2026", TEN_LEVEL_ONE_ROWS);
     const result = parseBldhdHtml(html, NOW_ISO);
-    const farCrystalLakeBeach = {
-      id: "osm-node-9",
+    const farCrystalLakeBeach = makeBeach({
       name: "Crystal Lake Beach",
-      park_name: null,
       lat: 44.655,
       lon: -86.16
-    };
+    });
     expect(bldhd.matches(farCrystalLakeBeach)).toBe(true);
     expect(resolveSiteForBeach(farCrystalLakeBeach, result.sites)).toBe(null);
   });
@@ -263,13 +262,11 @@ describe("bldhd site resolution safety", function() {
   it("still resolves the actual Beulah beach by name", function() {
     const html = buildFixture("7/2/2026", TEN_LEVEL_ONE_ROWS);
     const result = parseBldhdHtml(html, NOW_ISO);
-    const beulah = {
-      id: "osm-node-10",
+    const beulah = makeBeach({
       name: "Beulah Beach",
-      park_name: null,
       lat: 44.6336,
       lon: -86.0908
-    };
+    });
     const site = resolveSiteForBeach(beulah, result.sites);
     expect(site).not.toBe(null);
     expect(site.siteId).toBe("beulah-crystal-lake");

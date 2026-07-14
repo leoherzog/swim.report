@@ -14,21 +14,14 @@ import {
   scrapeOfficialFlagFromResult,
   scrapeOfficialFlag
 } from "../src/officialSources/index.js";
+import { makeBeach } from "./helpers/beach.js";
+import { findSite } from "./helpers/sites.js";
 
 // Mirrors the live feed layout: CRLF line endings, no header row, flags
 // #6-#9 all named North Beach, #10-#12 all named South Beach, and two
 // unnumbered pier lines at the end.
 function southHavenCsv(lines) {
   return lines.join("\r\n");
-}
-
-function siteById(sites, siteId) {
-  for (const site of sites) {
-    if (site.siteId === siteId) {
-      return site;
-    }
-  }
-  return null;
 }
 
 describe("parseSouthHavenCsv", function() {
@@ -54,12 +47,12 @@ describe("parseSouthHavenCsv", function() {
     const sites = parseSouthHavenCsv(csv);
     expect(sites).not.toBe(null);
     expect(sites.length).toBe(9);
-    expect(siteById(sites, "newcome-beach").color).toBe("green");
-    expect(siteById(sites, "packard-park-beach").color).toBe("yellow");
-    expect(siteById(sites, "north-beach").color).toBe("green");
-    expect(siteById(sites, "south-beach").color).toBe("red");
-    expect(siteById(sites, "brown-stairs").color).toBe("yellow");
-    const north = siteById(sites, "north-beach");
+    expect(findSite(sites, "newcome-beach").color).toBe("green");
+    expect(findSite(sites, "packard-park-beach").color).toBe("yellow");
+    expect(findSite(sites, "north-beach").color).toBe("green");
+    expect(findSite(sites, "south-beach").color).toBe("red");
+    expect(findSite(sites, "brown-stairs").color).toBe("yellow");
+    const north = findSite(sites, "north-beach");
     expect(north.names).toContain("north beach");
     expect(typeof north.lat).toBe("number");
     expect(typeof north.lon).toBe("number");
@@ -80,8 +73,8 @@ describe("parseSouthHavenCsv", function() {
     ]);
     const sites = parseSouthHavenCsv(csv);
     expect(sites.length).toBe(2);
-    expect(siteById(sites, "north-beach").color).toBe("yellow");
-    expect(siteById(sites, "south-beach").color).toBe("red");
+    expect(findSite(sites, "north-beach").color).toBe("yellow");
+    expect(findSite(sites, "south-beach").color).toBe("red");
   });
 
   it("omits gray (unmonitored) sites instead of reporting a color", function() {
@@ -152,8 +145,8 @@ describe("parseSouthHavenCsv", function() {
     ]);
     const sites = parseSouthHavenCsv(csv);
     expect(sites.length).toBe(2);
-    expect(siteById(sites, "north-beach").color).toBe("green");
-    expect(siteById(sites, "south-beach").color).toBe("red");
+    expect(findSite(sites, "north-beach").color).toBe("green");
+    expect(findSite(sites, "south-beach").color).toBe("red");
   });
 
   it("returns null when NOTHING in the feed is recognized", function() {
@@ -182,7 +175,7 @@ describe("parseSouthHavenCsv", function() {
       "Flag #7 North Beach is Double Red",
       "Flag #8 North Beach is Green"
     ]);
-    expect(siteById(parseSouthHavenCsv(csv), "north-beach").color).toBe("double-red");
+    expect(findSite(parseSouthHavenCsv(csv), "north-beach").color).toBe("double-red");
   });
 
   it("skips an unrecognized flag color instead of guessing", function() {
@@ -362,17 +355,17 @@ describe("extractSouthHavenCsvUrl", function() {
 
 describe("southHaven.matches", function() {
   it("matches a beach named South Haven South Beach", function() {
-    const beach = { id: "osm-node-1", name: "South Haven South Beach", lat: 42.4, lon: -86.28, nws_zone: null, nws_grid_url: null, osm_id: "node/1" };
+    const beach = makeBeach({ name: "South Haven South Beach", lat: 42.4, lon: -86.28 });
     expect(southHaven.matches(beach)).toBe(true);
   });
 
   it("matches a beach inside the South Haven bounding box with an unrelated name", function() {
-    const beach = { id: "osm-node-2", name: "Packard Park Beach", lat: 42.39, lon: -86.28, nws_zone: null, nws_grid_url: null, osm_id: "node/2" };
+    const beach = makeBeach({ name: "Packard Park Beach", lat: 42.39, lon: -86.28 });
     expect(southHaven.matches(beach)).toBe(true);
   });
 
   it("does not match Holland State Park coordinates", function() {
-    const beach = { id: "osm-node-3", name: "Holland State Park", lat: 42.7739, lon: -86.2109, nws_zone: null, nws_grid_url: null, osm_id: "node/3" };
+    const beach = makeBeach({ name: "Holland State Park", lat: 42.7739, lon: -86.2109 });
     expect(southHaven.matches(beach)).toBe(false);
   });
 });
@@ -384,16 +377,12 @@ describe("Van Buren State Park name trap (wrong-beach guard)", function() {
   // name substring — so the park's beach would inherit the city stairway's
   // flag color. It must NOT resolve to any site: not by name (substring
   // removed) and not by proximity (>1.5 mi from every site).
-  const vanBurenSp = {
-    id: "osm-node-vbsp",
+  const vanBurenSp = makeBeach({
     name: "Van Buren State Park",
     park_name: "Van Buren State Park",
     lat: 42.3576,
-    lon: -86.2865,
-    nws_zone: null,
-    nws_grid_url: null,
-    osm_id: "node/vbsp"
-  };
+    lon: -86.2865
+  });
 
   it("is claimed by the bbox but resolves to no site (no borrowed color)", function() {
     expect(southHaven.matches(vanBurenSp)).toBe(true);
@@ -405,16 +394,12 @@ describe("Van Buren State Park name trap (wrong-beach guard)", function() {
   });
 });
 
-const V2_BEACH = {
+const V2_BEACH = makeBeach({
   id: "osm-node-99",
   name: "Oval Beach",
-  park_name: null,
   lat: 42.4,
-  lon: -86.28,
-  nws_zone: null,
-  nws_grid_url: null,
-  osm_id: "node/99"
-};
+  lon: -86.28
+});
 
 function multiSiteResult(sites) {
   return {
@@ -681,12 +666,12 @@ describe("scrapeOfficialFlag (dual-shape via registry)", function() {
 
 describe("findScraper", function() {
   it("returns southHaven for a matching BeachRow", function() {
-    const beach = { id: "osm-node-1", name: "South Haven North Beach", lat: 42.41, lon: -86.29, nws_zone: null, nws_grid_url: null, osm_id: "node/1" };
+    const beach = makeBeach({ name: "South Haven North Beach", lat: 42.41, lon: -86.29 });
     expect(findScraper(beach)).toBe(southHaven);
   });
 
   it("returns null for a non-matching BeachRow", function() {
-    const beach = { id: "osm-node-3", name: "Holland State Park", lat: 42.7739, lon: -86.2109, nws_zone: null, nws_grid_url: null, osm_id: "node/3" };
+    const beach = makeBeach({ name: "Holland State Park", lat: 42.7739, lon: -86.2109 });
     expect(findScraper(beach)).toBe(null);
   });
 });

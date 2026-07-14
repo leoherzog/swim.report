@@ -15,6 +15,8 @@ export const WISCONSIN_DNR_URL =
   "BEACH_MONITORING_LOCATIONS/MapServer/1/query" +
   "?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=json";
 
+import { fetchText, perBeachResult, ageDays } from "./util.js";
+
 // dnrmaps.wi.gov throttles/blocks requests without a desktop-browser
 // User-Agent (a bare request timed out at 30s in probing); the service is also
 // slow (~30s even when it succeeds), so the cron client should allow 45s+.
@@ -39,8 +41,6 @@ const SILENT_OMIT_STATUS = {
   "no data available": true,
   "other status": true
 };
-
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // This is a PERIODIC (E. coli / bacteria) monitoring program: MAP_STATUS is
 // driven by the most recent water sample (SAMPLEDATE). A colored status only
@@ -147,8 +147,8 @@ export function parseWisconsinDnrJson(text, nowIso) {
     if (typeof sampleMs !== "number" || !isFinite(sampleMs)) {
       continue;
     }
-    const ageDays = (nowMs - sampleMs) / MS_PER_DAY;
-    if (ageDays > MAX_SAMPLE_AGE_DAYS) {
+    const sampleAgeDays = ageDays(nowMs, sampleMs);
+    if (sampleAgeDays > MAX_SAMPLE_AGE_DAYS) {
       // Expected off-season/unmonitored staleness — omit silently so cron logs
       // stay quiet; the beach simply gets no official flag from this source.
       continue;
@@ -205,27 +205,21 @@ export const wisconsinDnr = {
       beach.lat >= 42.45 && beach.lat <= 47.15;
   },
   scrape: async function(nowIso) {
+    const text = await fetchText(WISCONSIN_DNR_URL, {
+      headers: { "User-Agent": WISCONSIN_DNR_USER_AGENT },
+      logPrefix: "wisconsinDnr: fetch failed"
+    });
+    if (text === null) {
+      return null;
+    }
     try {
-      const response = await fetch(WISCONSIN_DNR_URL, {
-        headers: { "User-Agent": WISCONSIN_DNR_USER_AGENT }
-      });
-      if (!response.ok) {
-        console.log("wisconsinDnr: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const sites = parseWisconsinDnrJson(await response.text(), nowIso);
+      const sites = parseWisconsinDnrJson(text, nowIso);
       if (!sites || sites.length === 0) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: sites,
-        source: WISCONSIN_DNR_URL,
-        sources: [WISCONSIN_DNR_URL],
-        // Fallback only — every emitted site carries updated: its own
-        // SAMPLEDATE, which wins in scrapeOfficialFlagFromResult.
-        updated: nowIso
-      };
+      // result-level updated is a fallback only — every emitted site carries
+      // updated: its own SAMPLEDATE, which wins in scrapeOfficialFlagFromResult.
+      return perBeachResult(sites, WISCONSIN_DNR_URL, nowIso);
     } catch (err) {
       console.log("wisconsinDnr: fetch failed: " + err.message);
       return null;

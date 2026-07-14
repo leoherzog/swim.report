@@ -9,11 +9,16 @@ export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 // Workers' fetch sends none by default.
 export const OVERPASS_USER_AGENT = "swim.report (hello@swim.report)";
 
+function bboxLine(bbox) {
+  return "(" + bbox.minLat + "," + bbox.minLon + "," + bbox.maxLat + "," + bbox.maxLon + ")";
+}
+
 function buildQuery(bbox) {
+  const bb = bboxLine(bbox);
   return "[out:json][timeout:60];\n" +
     "(\n" +
-    "  nwr[\"natural\"=\"beach\"][\"name\"](" + bbox.minLat + "," + bbox.minLon + "," + bbox.maxLat + "," + bbox.maxLon + ");\n" +
-    "  nwr[\"leisure\"=\"beach_resort\"][\"name\"](" + bbox.minLat + "," + bbox.minLon + "," + bbox.maxLat + "," + bbox.maxLon + ");\n" +
+    "  nwr[\"natural\"=\"beach\"][\"name\"]" + bb + ";\n" +
+    "  nwr[\"leisure\"=\"beach_resort\"][\"name\"]" + bb + ";\n" +
     ");\n" +
     "out center tags;";
 }
@@ -104,10 +109,6 @@ export async function fetchBeaches(bbox) {
 // commonly bulge lakeward past the park boundary, pulling their center
 // outside the park bbox. Smallest overlapping park bbox wins so a nested
 // specific park beats a containing forest or protected area.
-
-function bboxLine(bbox) {
-  return "(" + bbox.minLat + "," + bbox.minLon + "," + bbox.maxLat + "," + bbox.maxLon + ")";
-}
 
 function buildParkBeachQuery(bbox) {
   const bb = bboxLine(bbox);

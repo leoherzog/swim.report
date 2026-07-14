@@ -91,8 +91,9 @@ Example response:
         "trigger": "wave-height",
         "rules_version": "1.2.0",
         "official": false,
+        "waveHeightFt": 2.62,
         "sources": [
-          { "label": "ECMWF Wave Forecast via Open-Meteo",
+          { "label": "ECMWF Wave Forecast",
             "url": "https://open-meteo.com/en/docs/marine-weather-api" }
         ],
         "updated": "2026-07-04T15:00:03.000Z"
@@ -114,6 +115,23 @@ Liveness check, no upstream/DB access:
 
 Server-rendered HTML pages: a beach list and a beach detail page, built entirely from
 D1 + KV data (see the frontend contract in `src/frontend/render.js`).
+
+The detail page includes a **Wave forecast** section: a "now" wave-height stat (from
+the estimate's structured `waveHeightFt`) plus a Dark Sky-style horizontal strip of
+the next up-to-24 hours of forecast wave height, colored by the same 2 ft / 4 ft
+thresholds the rules engine uses (gray for hours with no model data — common on the
+Great Lakes). The strip is drawn by the Web Awesome `wa-bar-chart` component from a
+server-built JSON config stored hourly in KV (`waves:` keys); it carries the same
+ESTIMATE badge as the estimate card, degrades to a prose forecast summary when JS or
+the component kit is unavailable, and is omitted entirely for beaches with no wave
+series (e.g. buoy-only readings, which still show the "now" stat).
+
+When two or more wave models resolve for a beach, the section also shows each model's
+current reading ("ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft") and a
+collapsed "Compare wave models" line chart of the per-model 24-hour series. The flag
+estimate itself still derives from the composite first-finite-model series — the
+per-model data (`byModel` in the KV `waves:` payload) is stored for transparency and
+future calibration against `flag_history`, not for averaging (see TODO.md).
 
 When Cloudflare's IP-derived geolocation is available on the request (`request.cf`),
 the beach list is sorted by approximate distance to the visitor and each row shows a
@@ -197,10 +215,11 @@ natural-language explanation), `rules_version`, `official: false`, `sources`
 ## Local development
 
     npm install
-    npx wrangler d1 create swim-report        # then paste the database_id into wrangler.toml
-    npx wrangler kv namespace create FLAGS     # then paste the id into wrangler.toml
-    npx wrangler d1 migrations apply swim-report --local
-    npm run dev
+    npm run dev    # predev applies migrations/ to the local D1 automatically
+
+The production D1 database and KV namespace already exist and their IDs are
+committed in `wrangler.toml` — no resource creation is needed. `wrangler dev`
+runs everything against local simulated storage regardless of those IDs.
 
 Then visit `http://localhost:8787/health`, `http://localhost:8787/`, and
 `http://localhost:8787/api/beaches?bbox=-87.6,41.6,-82.3,46.6`.
@@ -212,9 +231,13 @@ Run tests (pure functions only, no network, no Workers runtime):
 ### Environment variables
 
 `.dev.vars` holds local secrets: `WEBAWESOME_NPM_TOKEN` is used by the Web Awesome
-Pro build tooling (`npm install`, via `.npmrc`), and `WINDY_WEBCAM_API_TOKEN` is a
-Worker **runtime** secret — `wrangler dev` loads `.dev.vars` into `env`
-automatically. In production the webcam token must be set once with:
+Pro build tooling (`npm install`, via `.npmrc`), `WINDY_WEBCAM_API_TOKEN` is a
+Worker **runtime** secret (`wrangler dev` loads `.dev.vars` into `env`
+automatically), and `CLOUDFLARE_TOKEN` is the account API token used to
+authenticate wrangler itself (export it as `CLOUDFLARE_API_TOKEN` before running
+wrangler commands — this machine has no `wrangler login` session).
+
+In production the webcam token is a Worker secret, set once (done 2026-07-13) with:
 
     npx wrangler secret put WINDY_WEBCAM_API_TOKEN
 
@@ -285,8 +308,8 @@ night's NWS enrichment and webcam hydration entirely).
   quota, so it stays at polite guesswork. Only the player URL is kept:
   free-tier still-image URLs expire in ~15 minutes, so images are useless under
   the read-only request path, while the player embeds durably. The detail page
-  renders it in a browser-fetched embed frame (the same `wa-zoomable-frame`
-  wrapper as the wave map, zoom buttons hidden) labeled as a *nearby* webcam
+  renders it in a plain `<iframe>` embed (the same framed treatment as the
+  wave map, with an accessible `title`) labeled as a *nearby* webcam
   with a Windy.com attribution link (free-tier requirement). An API failure
   leaves the row untouched (retried next night); a confirmed
   no-cam-within-radius answer clears the webcam columns and stamps the check
@@ -313,6 +336,31 @@ Ohio BeachGuard alone is now 51 per-id GETs — plus up to ~700 KV reads/writes)
 the free plan's 50-subrequest ceiling (the paid
 plan allows 10,000 per invocation). Production deployment assumes the Workers Paid
 plan. See `TODO.md` for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
+
+## Deployment
+
+Production runs at **https://swim.report** (first deployed 2026-07-13) as a single
+Cloudflare Worker with a custom-domain route, Workers Logs observability
+(`head_sampling_rate = 1`), and Smart Placement — all configured in
+`wrangler.toml`, which carries the real production D1 database and KV namespace
+IDs (see PLAN.md section 8 for the authoritative config).
+
+    export CLOUDFLARE_API_TOKEN=...                            # from .dev.vars (CLOUDFLARE_TOKEN)
+    npx wrangler deploy --dry-run                              # validate first
+    npm run deploy                                             # deploy
+    npx wrangler d1 migrations apply swim-report --remote      # after adding a migration
+    npx wrangler tail                                          # live logs
+
+The production database starts empty on a fresh deploy — the `47 8 * * *`
+discovery cron populates beaches on its next run, then the `17 3,9,15,21 * * *`
+enrichment runs drain the NWS-zone queue and the hourly cron starts writing
+flags. There is no remote equivalent of `npm run seed`; either wait for the
+crons or run a local dev server with `remote = true` bindings and trigger the
+scheduled-handler endpoints manually.
+
+`compatibility_date` is pinned — bump it to the current date occasionally when
+deploying. Structured logs land in the Cloudflare dashboard under
+Workers → swim-report → Logs.
 
 ## Official sources
 

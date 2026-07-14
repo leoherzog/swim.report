@@ -5,6 +5,16 @@ of it is scoped for follow-up work.
 
 ## Data quality / coverage
 
+- **Open-Meteo 429s on burst-fired marine batches.** `runFlagRecompute` fires all
+  ~14 marine batches concurrently (`Promise.allSettled`); Open-Meteo weights a
+  50-location call as ~50 calls, so a full pilot run bursts ~700+ weighted calls
+  against the free tier's ~600/minute ceiling and roughly half the batches came back
+  HTTP 429 in local testing (2026-07-13; `waves=185` then `206` of ~250 eligible).
+  Degradation is correct (affected beaches fall to wind/no-data and skip the `waves:`
+  write, recovering next hour), but wave coverage would improve by running the
+  batches sequentially or with a small inter-batch delay — the hourly cron has
+  plenty of wall-clock headroom. Verify whether production (Cloudflare egress IPs)
+  sees the same limiting before tuning.
 - **GLCFS gridded wave source is still down.** The Great Lakes wave gap-fill
   (`src/clients/glerl.js`) uses nearest-GLOS-Seagull-buoy observations because the
   true gridded GLCFS source (erddap.axiomdatascience.com) is hard-down — 100% HTTP
@@ -14,8 +24,8 @@ of it is scoped for follow-up work.
   fall back to wind/unknown by design), and the meters unit for Seagull wave values
   rests on out-of-band research, not an in-band units field.
 - **Windy webcam caveats** (`src/clients/windyWebcams.js`, daily `runWebcamSync`).
-  (1) **Production secret**: `npx wrangler secret put WINDY_WEBCAM_API_TOKEN` must be
-  run once before the next deploy or hydration silently skips (it logs). (2) The
+  (1) ~~Production secret~~ — DONE 2026-07-13, `WINDY_WEBCAM_API_TOKEN` is set on
+  the deployed Worker. (2) The
   Windy free tier publishes **no daily request quota** — 100 lookups/night is polite
   guesswork; watch the daily-run logs for 429s. (3) The free-tier embed player
   **shows ads**; the ad-free tier is €9,990/yr, so ads stay. (4) "Nearest active cam
@@ -34,7 +44,14 @@ of it is scoped for follow-up work.
   `FlagEstimate` objects carry their own `rules_version`, so this is safe to do
   incrementally. Also revisit the flat 90-day retention window
   (`FLAG_HISTORY_RETENTION_DAYS`) once calibration data collection is complete — a
-  tighter policy or downsampling may fit better.
+  tighter policy or downsampling may fit better. The same calibration pass should also
+  decide the multi-model derivation question: the flag currently uses the composite
+  first-finite-model wave series, and the per-model data now stored in the `waves:` KV
+  payloads (`byModel`, 2026-07-13) exists precisely so mean / max / calibrated-blend
+  alternatives can be evaluated retroactively against official flags. Note the safety
+  asymmetry before reaching for a mean: averaging dilutes whichever model saw the
+  hazard (a 4.5 ft + 2.5 ft disagreement averages to yellow, not red); any derivation
+  change must ride a `RULES_VERSION`-style bump to keep calibration cohorts comparable.
 - **Secondary unnamed park beaches need a derivable label to survive.**
   `mergeBeachRows` keeps a park's largest unnamed beach under the bare park name,
   and additional unnamed beaches only when `deriveUnnamedSuffix` finds a
@@ -258,17 +275,37 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
 
 ## Free vs. paid Workers plan
 
-- The hourly `runFlagRecompute` cron's subrequest budget (~950 subrequests/run for the
+- The hourly `runFlagRecompute` cron's subrequest budget (~1550 subrequests/run for the
   pilot region at `MAX_BEACHES_PER_RUN = 1000`, per PLAN.md section 7 — Ohio BeachGuard
-  alone is now 51 per-id GETs) assumes the
+  alone is 51 per-id GETs, and the wave-forecast feature adds up to ~613 `waves:` KV
+  puts) assumes the
   Workers **Paid** plan (10,000 subrequests/invocation, no daily KV-write cap). The
   **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day quota are not
   sufficient at this cadence and beach count. For a free-plan demo, drop
   `MAX_BEACHES_PER_RUN` way down (e.g. 10-15 beaches) and/or reduce cron frequency
   before deploying without a paid plan.
+- **Production went live 2026-07-13 (https://swim.report) — verify the account's
+  Workers plan.** If the account is on Free, the hourly `runFlagRecompute` will hit
+  the 50-subrequest ceiling as soon as the discovery cron populates beaches (watch
+  the first few hourly runs in Workers Logs — observability is enabled with full
+  head sampling). Also confirm the production database populated after the first
+  `47 8 * * *` discovery run and that enrichment is draining.
 
 ## Frontend
 
+- **Wave-forecast strip: hour ticks are relative, not local time.** The detail page's
+  24 h wave strip labels its ticks "Now / +6 h / … / +N h" because D1 has no per-beach
+  timezone column and the series is UTC-indexed. A small progressive-enhancement
+  inline script (pattern of `src/frontend/searchScript.js`) could rewrite the ticks to
+  the *viewer's* browser-local clock time with a "times shown in your local time"
+  note. Deferred from the initial build.
+- **Wave-forecast strip: no hover tooltips.** Chart.js tooltip callbacks are
+  functions, which the slotted-JSON config can't encode (and a slotted config shadows
+  the element's `config` property, so the two can't mix). If per-hour hover values are
+  wanted: move the JSON to an adjacent `<script type="application/json" id=…>`, add a
+  small `waveChartScript.js` that parses it, attaches callbacks, and assigns
+  `el.config` before upgrade. Trades away works-without-our-JS, which is why v1
+  ships `without-tooltip` + `events: []` instead.
 - List-page pagination: `GET /` renders at most the first 100 beaches
   (`ORDER BY COALESCE(park_name, name), name LIMIT 100`) with no pagination controls
   or `?page=` param (the server-side `?q=` search is the way to reach beaches past

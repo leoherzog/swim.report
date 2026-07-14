@@ -6,24 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
-
-const NOW_ISO = "2026-07-05T12:00:00.000Z";
-
-// Minimal valid BeachRow (PLAN.md section 1). Individual tests spread webcam
-// fields on top of this base.
-function beachWith(extra) {
-  const base = {
-    id: "osm-way-505668572",
-    name: "Ottawa Beach",
-    park_name: null,
-    lat: 42.775,
-    lon: -86.211,
-    nws_zone: null,
-    nws_grid_url: null,
-    osm_id: "way/505668572"
-  };
-  return Object.assign(base, extra);
-}
+import { NOW_ISO, beachWith } from "./helpers/render.js";
 
 function renderWith(extra) {
   return renderDetailPage({
@@ -41,11 +24,11 @@ describe("nearby-webcam section", () => {
       webcam_title: "South Pier Cam",
       webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day"
     });
-    expect(html).toContain("<h2 class=\"webcam-heading\">Nearby webcam</h2>");
-    // same wrapper as the wave map: zoom buttons hidden, interaction left
-    // enabled so the player's own controls work
-    expect(html).toContain("<wa-zoomable-frame class=\"webcam-frame\"");
-    expect(html).toContain(" without-controls></wa-zoomable-frame>");
+    expect(html).toContain("<h2 class=\"webcam-heading wa-font-size-l\">Nearby webcam</h2>");
+    // same plain-iframe wrapper as the wave map, so the player's own controls
+    // work and the title reaches the frame as its accessible name
+    expect(html).toContain("<iframe class=\"webcam-frame\"");
+    expect(html).toContain(" allowfullscreen></iframe>");
     expect(html).toContain(
       "src=\"https://webcams.windy.com/webcams/public/embed/player/1595253287/day\"");
     expect(html).toContain("loading=\"lazy\"");
@@ -71,7 +54,7 @@ describe("nearby-webcam section", () => {
       webcam_title: "",
       webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day"
     });
-    expect(html).toContain("<h2 class=\"webcam-heading\">Nearby webcam</h2>");
+    expect(html).toContain("<h2 class=\"webcam-heading wa-font-size-l\">Nearby webcam</h2>");
     expect(html).not.toContain("webcam-title");
     // falls back to a generic embed title
     expect(html).toContain("title=\"Nearby webcam\"");

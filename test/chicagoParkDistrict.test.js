@@ -6,6 +6,8 @@ import {
   cachebustFromNowIso,
   chicagoParkDistrict
 } from "../src/officialSources/chicagoParkDistrict.js";
+import { makeBeach } from "./helpers/beach.js";
+import { findSite } from "./helpers/sites.js";
 
 // Reference "now" for the fixtures below. Epoch seconds = 1783289540.
 // The 36-hour staleness floor is therefore epoch 1783159940.
@@ -36,15 +38,6 @@ function buildFixture() {
   return JSON.stringify(records);
 }
 
-function siteById(sites, id) {
-  for (let i = 0; i < sites.length; i++) {
-    if (sites[i].siteId === id) {
-      return sites[i];
-    }
-  }
-  return null;
-}
-
 describe("parseChicagoFlags", function() {
   it("returns null for malformed JSON", function() {
     expect(parseChicagoFlags("{ not json", NOW_ISO)).toBe(null);
@@ -65,7 +58,7 @@ describe("parseChicagoFlags", function() {
     // (unknown), orphan (no parent) are all omitted.
     expect(sites.length).toBe(3);
 
-    const twelfth = siteById(sites, "12th street beach");
+    const twelfth = findSite(sites, "12th street beach");
     expect(twelfth).not.toBe(null);
     // Regression: the newer water-quality "Green" must NOT win over the surf
     // "Red Afterhours - Swimming Prohibited". A wrong official green here would
@@ -86,7 +79,7 @@ describe("parseChicagoFlags", function() {
       { title: "Oak Street Beach - Surf Conditions", parent: "Oak Street Beach", date: "1783265808", flag: "Red - Swimming Prohibited" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const oak = siteById(sites, "oak street beach");
+    const oak = findSite(sites, "oak street beach");
     expect(oak).not.toBe(null);
     expect(oak.color).toBe("red");
     // Genuine daytime hazard, not an after-hours closure.
@@ -99,7 +92,7 @@ describe("parseChicagoFlags", function() {
       { title: "Foster Beach - Surf Conditions", parent: "Foster Beach", date: "1783270000", flag: "Yellow" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const foster = siteById(sites, "foster beach");
+    const foster = findSite(sites, "foster beach");
     expect(foster.color).toBe("yellow");
   });
 
@@ -110,7 +103,7 @@ describe("parseChicagoFlags", function() {
       { title: "Ohio Street Beach - Surf Conditions", parent: "Ohio Street Beach", date: "1783265808", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const ohio = siteById(sites, "ohio street beach");
+    const ohio = findSite(sites, "ohio street beach");
     expect(ohio.color).toBe("green");
   });
 
@@ -125,7 +118,7 @@ describe("parseChicagoFlags", function() {
       { title: "Leone Beach - Water Quality", parent: "Leone Beach", date: "1783271048", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    expect(siteById(sites, "leone beach")).toBe(null);
+    expect(findSite(sites, "leone beach")).toBe(null);
   });
 
   it("still reports green when the beach's own fresh surf row is green (fresh surf licenses green)", function() {
@@ -137,7 +130,7 @@ describe("parseChicagoFlags", function() {
       { title: "Rogers Beach - Water Quality", parent: "Rogers Beach", date: "1756482510", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const rogers = siteById(sites, "rogers beach");
+    const rogers = findSite(sites, "rogers beach");
     expect(rogers).not.toBe(null);
     expect(rogers.color).toBe("green");
   });
@@ -150,7 +143,7 @@ describe("parseChicagoFlags", function() {
       { title: "Leone Beach", type: "Surf Conditions", parent: "Leone Beach", date: "1783271048", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const leone = siteById(sites, "leone beach");
+    const leone = findSite(sites, "leone beach");
     expect(leone).not.toBe(null);
     expect(leone.color).toBe("green");
   });
@@ -162,30 +155,30 @@ describe("parseChicagoFlags", function() {
       { title: "Albion Beach - Water Quality", parent: "Albion Beach", date: "1783271048", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    expect(siteById(sites, "albion beach")).toBe(null);
+    expect(findSite(sites, "albion beach")).toBe(null);
   });
 
   it("maps a fresh Yellow flag to yellow", function() {
     const sites = parseChicagoFlags(buildFixture(), NOW_ISO);
-    const montrose = siteById(sites, "montrose beach");
+    const montrose = findSite(sites, "montrose beach");
     expect(montrose.color).toBe("yellow");
   });
 
   it("maps an Afterhours closure to red with an after-hours reason", function() {
     const sites = parseChicagoFlags(buildFixture(), NOW_ISO);
-    const calumet = siteById(sites, "calumet beach");
+    const calumet = findSite(sites, "calumet beach");
     expect(calumet.color).toBe("red");
     expect(/after-hours/i.test(calumet.reason)).toBe(true);
   });
 
   it("omits a beach whose newest record is stale (> 36h old)", function() {
     const sites = parseChicagoFlags(buildFixture(), NOW_ISO);
-    expect(siteById(sites, "humboldt beach")).toBe(null);
+    expect(findSite(sites, "humboldt beach")).toBe(null);
   });
 
   it("omits a beach with an unrecognized flag string instead of guessing", function() {
     const sites = parseChicagoFlags(buildFixture(), NOW_ISO);
-    expect(siteById(sites, "rainbow beach")).toBe(null);
+    expect(findSite(sites, "rainbow beach")).toBe(null);
   });
 
   it("maps a Double Red flag to double-red and never lets it degrade to no-data", function() {
@@ -197,7 +190,7 @@ describe("parseChicagoFlags", function() {
       { title: "Rainbow Beach - Water Quality", parent: "Rainbow Beach", date: "1783271048", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const rainbow = siteById(sites, "rainbow beach");
+    const rainbow = findSite(sites, "rainbow beach");
     expect(rainbow).not.toBe(null);
     expect(rainbow.color).toBe("double-red");
   });
@@ -209,7 +202,7 @@ describe("parseChicagoFlags", function() {
       { title: "Oak Street Beach - Weather", parent: "Oak Street Beach", date: "1783296001", flag: "Red Afterhours - Swimming Prohibited" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const oak = siteById(sites, "oak street beach");
+    const oak = findSite(sites, "oak street beach");
     expect(oak.color).toBe("double-red");
   });
 
@@ -224,7 +217,7 @@ describe("parseChicagoFlags", function() {
       { title: "Foster Beach - Water Quality", parent: "Foster Beach", date: "1783271048", flag: "Green" }
     ]);
     const sites = parseChicagoFlags(text, NOW_ISO);
-    const foster = siteById(sites, "foster beach");
+    const foster = findSite(sites, "foster beach");
     expect(foster.color).toBe("red");
   });
 
@@ -259,12 +252,12 @@ describe("cachebustFromNowIso", function() {
 
 describe("chicagoParkDistrict.matches", function() {
   it("matches a beach inside the Chicago lakefront box", function() {
-    const beach = { id: "osm-1", name: "Montrose Beach", park_name: null, lat: 41.9636, lon: -87.6383, nws_zone: null, nws_grid_url: null, osm_id: "node/1" };
+    const beach = makeBeach({ name: "Montrose Beach", lat: 41.9636, lon: -87.6383 });
     expect(chicagoParkDistrict.matches(beach)).toBe(true);
   });
 
   it("does not match a beach outside the box", function() {
-    const beach = { id: "osm-2", name: "South Haven South Beach", park_name: null, lat: 42.4, lon: -86.28, nws_zone: null, nws_grid_url: null, osm_id: "node/2" };
+    const beach = makeBeach({ name: "South Haven South Beach", lat: 42.4, lon: -86.28 });
     expect(chicagoParkDistrict.matches(beach)).toBe(false);
   });
 });

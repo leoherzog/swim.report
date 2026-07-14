@@ -9,6 +9,8 @@
 //       resolved to at most one site via resolveSiteForBeach; beaches that
 //       resolve to no site get no OfficialFlag (null).
 
+import { distanceMi } from "../geo.js";
+import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
 import { southHaven } from "./southHaven.js";
 import { lenawee } from "./lenawee.js";
 import { metroparks } from "./metroparks.js";
@@ -34,8 +36,6 @@ export const scrapers = [
   wisconsinDnr
 ];
 
-export const DEFAULT_SITE_RADIUS_MI = 1.5;
-
 const OFFICIAL_COLORS = ["green", "yellow", "red", "double-red"];
 
 export function findScraper(beach) {
@@ -48,58 +48,14 @@ export function findScraper(beach) {
   return null;
 }
 
-// Haversine great-circle distance in statute miles. Pure.
-export function distanceMi(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const earthRadiusMi = 3958.8;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 2 * earthRadiusMi * Math.asin(Math.sqrt(a));
-}
+// Great-circle distance in statute miles. Re-exported from the dependency-free
+// src/geo.js (a cycle is impossible through that module).
+export { distanceMi };
 
-// Pure. BeachRow + sites[] -> site | null.
-// Pass 1 (names win over proximity): first site, in array order, with any
-// names[] entry contained as a substring of
-// ((beach.park_name || "") + " " + beach.name).toLowerCase().
-// Pass 2: among sites with numeric lat/lon, the NEAREST one whose distance to
-// the beach is within its radiusMi (default DEFAULT_SITE_RADIUS_MI = 1.5).
-// Otherwise null.
-export function resolveSiteForBeach(beach, sites) {
-  if (!Array.isArray(sites)) {
-    return null;
-  }
-  const haystack = ((beach.park_name || "") + " " + beach.name).toLowerCase();
-  for (const site of sites) {
-    if (Array.isArray(site.names)) {
-      for (const name of site.names) {
-        if (typeof name === "string" && name.length > 0 &&
-            haystack.indexOf(name.toLowerCase()) !== -1) {
-          return site;
-        }
-      }
-    }
-  }
-  let best = null;
-  let bestDistance = Infinity;
-  for (const site of sites) {
-    if (typeof site.lat !== "number" || typeof site.lon !== "number") {
-      continue;
-    }
-    const radius = typeof site.radiusMi === "number"
-      ? site.radiusMi
-      : DEFAULT_SITE_RADIUS_MI;
-    const distance = distanceMi(beach.lat, beach.lon, site.lat, site.lon);
-    if (distance <= radius && distance < bestDistance) {
-      best = site;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
+// Per-beach site resolution (names win over proximity) lives in ./util.js so
+// scrapers can reuse it without importing this registry; re-exported here for
+// the cron and tests.
+export { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI };
 
 // Pure (no fetch). Resolves an already-fetched scrape result for ONE beach.
 // Handles both result shapes and returns a complete OfficialFlag with beachId

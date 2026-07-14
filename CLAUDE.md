@@ -10,7 +10,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run seed` — with the dev server running, trigger the daily Overpass discovery cron locally (`curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"`). Hits the live Overpass API and takes ~2 minutes; run it once per fresh database, not on every dev start. `npm run seed:enrich` (NWS point enrichment, 75 beaches/run — repeat to drain the queue), `npm run seed:webcams` (Windy webcam hydration), and `npm run seed:flags` (hourly flag recompute) trigger the other three crons the same way.
 - Cron triggering in local dev goes through `/cdn-cgi/handler/scheduled?cron=<urlencoded cron>` — the old `--test-scheduled` flag and `/__scheduled` path are obsolete in wrangler 4.
 - `npm run deploy` — deploy (`wrangler deploy`); `npx wrangler deploy --dry-run` to validate config without deploying
-- `npx wrangler d1 migrations apply swim-report` — apply `migrations/` to D1
+- `npx wrangler d1 migrations apply swim-report --local` (dev) / `--remote` (production) — apply `migrations/` to D1
+- Wrangler auth: there is no `wrangler login` session on this machine — export `CLOUDFLARE_API_TOKEN` from the `CLOUDFLARE_TOKEN` value in `.dev.vars` before any wrangler command that talks to the Cloudflare API (deploy, remote migrations, secrets, tail).
+
+## Production
+
+Deployed 2026-07-13 at **https://swim.report** (custom-domain route). `wrangler.toml` carries the real D1/KV IDs plus observability (full head sampling), Smart Placement, and a pinned `compatibility_date` (bump occasionally). The `WINDY_WEBCAM_API_TOKEN` Worker secret is set. Remote data populates via the crons only — there is no remote `npm run seed`; the request path serves whatever D1/KV currently hold.
 
 `npm install` needs `WEBAWESOME_NPM_TOKEN` exported in the environment (value in `.dev.vars`, which is gitignored) — `.npmrc` routes `@web.awesome.me`, `@awesome.me`, and `@fortawesome` through private registries.
 

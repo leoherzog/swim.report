@@ -19,6 +19,8 @@
 // resolves to null. Pure parse helpers are exported for tests. No Date.now()
 // anywhere — all freshness math derives from the nowIso argument.
 
+import { distanceKm, metersToFeet } from "../geo.js";
+
 export const SEAGULL_API_BASE = "https://seagull-api.glos.org/api/v1";
 export const SEAGULL_PLATFORMS_URL = SEAGULL_API_BASE + "/obs-datasets.geojson";
 export const SEAGULL_PARAMETERS_URL = SEAGULL_API_BASE + "/parameters";
@@ -52,17 +54,10 @@ export const MAX_PLATFORM_FETCHES = 60;
 // Politeness: at most this many concurrent requests against the Seagull API.
 const OBS_FETCH_CONCURRENCY = 4;
 
-const METERS_TO_FEET = 3.28084;
-
-export function distanceKm(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+// distanceKm and metersToFeet live in the dependency-free src/geo.js. distanceKm
+// is re-exported here because tests and windyWebcams.js import it from this
+// module.
+export { distanceKm };
 
 // Pure. Seagull /api/v1/parameters catalog (array of { parameter_id,
 // standard_name, ... }; parameter_id is globally unique across platforms) ->
@@ -191,7 +186,7 @@ export function parseObsWaveHeightFt(obsJson, obsDatasetId, waveParameterIds, no
   if (bestMeters === null) {
     return null;
   }
-  return bestMeters * METERS_TO_FEET;
+  return metersToFeet(bestMeters);
 }
 
 async function fetchJson(url, label) {

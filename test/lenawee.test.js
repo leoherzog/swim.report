@@ -1,6 +1,7 @@
 // test/lenawee.test.js
 import { describe, it, expect } from "vitest";
 import { parseLenaweeHtml, lenawee } from "../src/officialSources/lenawee.js";
+import { makeBeach } from "./helpers/beach.js";
 
 // Trimmed fixture mirroring the real table structure on
 // https://www.lenawee.mi.us/1099/Public-Beach-Monitoring : one <h2
@@ -176,34 +177,34 @@ describe("parseLenaweeHtml", function() {
 
 describe("lenawee.matches", function() {
   it("matches a beach named Hayes State Park by name", function() {
-    const beach = {
-      id: "osm-node-1", name: "Hayes State Park Beach", park_name: null,
-      lat: 40, lon: -80, nws_zone: null, nws_grid_url: null, osm_id: "node/1"
-    };
+    const beach = makeBeach({
+      name: "Hayes State Park Beach",
+      lat: 40, lon: -80
+    });
     expect(lenawee.matches(beach)).toBe(true);
   });
 
   it("matches a beach via park_name containing Lake Hudson", function() {
-    const beach = {
-      id: "osm-node-2", name: "Swimming Beach", park_name: "Lake Hudson State Recreation Area",
-      lat: 40, lon: -80, nws_zone: null, nws_grid_url: null, osm_id: "node/2"
-    };
+    const beach = makeBeach({
+      name: "Swimming Beach", park_name: "Lake Hudson State Recreation Area",
+      lat: 40, lon: -80
+    });
     expect(lenawee.matches(beach)).toBe(true);
   });
 
   it("matches an unrelated-named beach within ~3 mi of Hayes State Park", function() {
-    const beach = {
-      id: "osm-node-3", name: "Wamplers Lake Beach", park_name: null,
-      lat: 42.07, lon: -84.14, nws_zone: null, nws_grid_url: null, osm_id: "node/3"
-    };
+    const beach = makeBeach({
+      name: "Wamplers Lake Beach",
+      lat: 42.07, lon: -84.14
+    });
     expect(lenawee.matches(beach)).toBe(true);
   });
 
   it("does not match a beach far from both sites with an unrelated name", function() {
-    const beach = {
-      id: "osm-node-4", name: "Holland State Park", park_name: null,
-      lat: 42.7739, lon: -86.2109, nws_zone: null, nws_grid_url: null, osm_id: "node/4"
-    };
+    const beach = makeBeach({
+      name: "Holland State Park",
+      lat: 42.7739, lon: -86.2109
+    });
     expect(lenawee.matches(beach)).toBe(false);
   });
 });

@@ -12,12 +12,14 @@ const RULES = [
   "  padding-inline: var(--wa-space-xl);",
   "}",
 
+  // Size/weight come from wa-font-size-l + wa-font-weight-bold utility classes
+  // on the element. inline-flex + gap stay custom: wa-cluster is block-level
+  // flex, so it is NOT an equivalent swap here. wa-link-plain is also not a
+  // match — it adds a hover color-mix this link deliberately doesn't have.
   ".brand-link {",
   "  display: inline-flex;",
   "  align-items: center;",
   "  gap: var(--wa-space-xs);",
-  "  font-size: var(--wa-font-size-l);",
-  "  font-weight: var(--wa-font-weight-bold);",
   "  color: var(--wa-color-text-normal);",
   "  text-decoration: none;",
   "}",
@@ -32,14 +34,13 @@ const RULES = [
   "  margin-inline: auto;",
   "}",
 
-  ".list-intro h1 {",
-  "  margin: 0;",
-  "}",
-
+  // list-style/padding come from the wa-list-plain utility on the element.
+  // margin stays: the ul's parent (.beach-list-section) is not a layout
+  // utility, so the utilities' child-margin reset doesn't reach it, and the
+  // native :has(+ *) rule would otherwise add margin-block-end before the
+  // (sometimes hidden) empty-state paragraph that follows.
   ".beach-list {",
-  "  list-style: none;",
   "  margin: 0;",
-  "  padding: 0;",
   "}",
 
   ".beach-row-link {",
@@ -69,17 +70,11 @@ const RULES = [
   "  font-size: var(--wa-font-size-s);",
   "}",
 
+  // Quiet color/size/weight come from the wa-caption-s utility on the element;
+  // only the offset and the no-wrap behavior are genuinely custom.
   ".beach-row-distance {",
   "  margin-inline-start: var(--wa-space-xs);",
-  "  color: var(--wa-color-text-quiet);",
-  "  font-weight: var(--wa-font-weight-normal);",
-  "  font-size: var(--wa-font-size-s);",
   "  white-space: nowrap;",
-  "}",
-
-  ".list-sort-note {",
-  "  font-size: var(--wa-font-size-s);",
-  "  margin: 0;",
   "}",
 
   ".empty-state {",
@@ -93,30 +88,31 @@ const RULES = [
   ".flag-icon-red { color: var(--wa-color-red-50); }",
   ".flag-icon-unknown { color: var(--wa-color-gray-50); }",
 
-  ".wave-map-frame {",
-  "  aspect-ratio: 4 / 3;",
-  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
+  // Shared framed-embed treatment: rounded clipping box that fills its column.
+  // The two plain iframes additionally get a 1px surface border; each frame
+  // keeps its own aspect-ratio (these are plain iframes now, so the explicit
+  // sizing is load-bearing).
+  ".wave-map-frame,",
+  ".webcam-frame,",
+  ".wave-chart {",
+  "  display: block;",
+  "  width: 100%;",
   "  border-radius: var(--wa-border-radius-m);",
   "  overflow: hidden;",
   "}",
 
-  ".webcam-heading {",
-  "  margin: 0;",
-  "  font-size: var(--wa-font-size-l);",
+  ".wave-map-frame,",
+  ".webcam-frame {",
+  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
+  "}",
+
+  ".wave-map-frame {",
+  "  aspect-ratio: 4 / 3;",
   "}",
 
   ".webcam-frame {",
-  "  display: block;",
-  "  width: 100%;",
   "  max-width: 100%;",
   "  aspect-ratio: 16 / 9;",
-  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
-  "  border-radius: var(--wa-border-radius-m);",
-  "  overflow: hidden;",
-  "}",
-
-  ".webcam-caption {",
-  "  margin: 0;",
   "}",
 
   ".back-link {",
@@ -137,8 +133,58 @@ const RULES = [
   "  font-size: var(--wa-font-size-l);",
   "}",
 
+  // Longhands on purpose: a border SHORTHAND on the wa-card host would reset
+  // border-style and stomp the theme's --wa-panel-border-style; the card's own
+  // border-style declaration stays in charge.
   ".official-card {",
-  "  border: var(--wa-border-width-l) solid var(--wa-color-success-border-loud);",
+  "  border-color: var(--wa-color-success-border-loud);",
+  "  border-width: var(--wa-border-width-l);",
+  "}",
+
+  // A short Dark Sky-style strip: fixed height, host bar border/radius zeroed
+  // (--border-width / --border-radius are wa-chart host custom properties), and
+  // aspect-ratio forced to auto to override the component's default 16/9.
+  // display/width/border-radius/overflow come from the shared framed-embed
+  // rule above.
+  ".wave-chart {",
+  "  height: 3rem;",
+  "  aspect-ratio: auto;",
+  "  --border-width: 0px;",
+  "  --border-radius: 0px;",
+  "}",
+
+  ".wave-chart-hours {",
+  "  position: relative;",
+  "  height: var(--wa-font-size-l);",
+  "  color: var(--wa-color-text-quiet);",
+  "  font-size: var(--wa-font-size-xs);",
+  "}",
+
+  ".wave-chart-hour {",
+  "  position: absolute;",
+  "  transform: translateX(-50%);",
+  "  white-space: nowrap;",
+  "}",
+
+  ".wave-chart-hour-start {",
+  "  left: 0;",
+  "  transform: none;",
+  "}",
+
+  ".wave-chart-hour-end {",
+  "  right: 0;",
+  "  left: auto;",
+  "  transform: none;",
+  "}",
+
+  // Model-comparison line chart inside the collapsed disclosure. Taller than the
+  // strip (it's a real axis chart), aspect-ratio forced to auto to override the
+  // component default 16/9. The wa-details wrapper keeps its own default styling.
+  ".wave-model-chart {",
+  "  display: block;",
+  "  width: 100%;",
+  "  height: 13rem;",
+  "  aspect-ratio: auto;",
   "}"
 ];
 

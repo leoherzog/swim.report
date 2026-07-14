@@ -14,6 +14,9 @@
 // "Open For Season!" placeholder deferring to EGLE Beach Guard and is
 // intentionally never scraped here.
 
+import { distanceMi } from "../geo.js";
+import { fetchText, perBeachResult } from "./util.js";
+
 export const METROPARKS_URL = "https://www.metroparks.com/park-closures/";
 
 const KENSINGTON_PANEL_ID = "KensingtonMetropark";
@@ -130,20 +133,6 @@ export function parseMetroparksHtml(html) {
   return sites;
 }
 
-// Statute-mile haversine distance. Duplicated locally (rather than imported
-// from src/officialSources/index.js) to avoid a circular import — index.js
-// imports this module to register it in the scrapers array.
-function distanceMi(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const earthRadiusMi = 3958.8;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 2 * earthRadiusMi * Math.asin(Math.sqrt(a));
-}
 
 export const metroparks = {
   id: "huron-clinton-metroparks",
@@ -189,24 +178,19 @@ export const metroparks = {
     return false;
   },
   scrape: async function(nowIso) {
+    // No headers: metroparks.com has only been probed without a User-Agent.
+    const html = await fetchText(METROPARKS_URL, {
+      logPrefix: "metroparks: fetch failed"
+    });
+    if (html === null) {
+      return null;
+    }
     try {
-      const response = await fetch(METROPARKS_URL);
-      if (!response.ok) {
-        console.log("metroparks: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const html = await response.text();
       const sites = parseMetroparksHtml(html);
       if (!sites || sites.length === 0) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: sites,
-        source: METROPARKS_URL,
-        sources: [METROPARKS_URL],
-        updated: nowIso
-      };
+      return perBeachResult(sites, METROPARKS_URL, nowIso);
     } catch (err) {
       console.log("metroparks: fetch failed: " + err.message);
       return null;

@@ -17,6 +17,7 @@ import {
   ohioBeachGuard,
   OHIO_SITES
 } from "../src/officialSources/ohioBeachGuard.js";
+import { makeBeach } from "./helpers/beach.js";
 
 // nowIso used across in-season tests (season runs ~05-23 .. 09-07).
 const NOW_IN_SEASON = "2026-07-05T12:00:00.000Z";
@@ -430,92 +431,62 @@ describe("parseBeachesListJson", function() {
 
 describe("ohioBeachGuard.matches", function() {
   it("matches by name substring", function() {
-    const beach = {
-      id: "osm-1",
+    const beach = makeBeach({
       name: "South Bass Island State Park Beach",
-      park_name: null,
       lat: 41.7,
-      lon: -82.9,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/1"
-    };
+      lon: -82.9
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(true);
   });
 
   it("matches by proximity within ~2 mi even with an unrelated name", function() {
-    const beach = {
-      id: "osm-2",
+    const beach = makeBeach({
       name: "Unnamed Swimming Area",
-      park_name: null,
       lat: 41.6135,
-      lon: -82.7015,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/2"
-    };
+      lon: -82.7015
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(true);
   });
 
   it("does not match a far-away beach named 'Stone Beach' (generic name is proximity-only)", function() {
     // A "Stone Beach" elsewhere on the Great Lakes must NOT inherit South Bass
     // Island's official flag: "stone beach" is intentionally not a name substring.
-    const beach = {
-      id: "osm-stone",
+    const beach = makeBeach({
       name: "Stone Beach",
-      park_name: null,
       lat: 45.0,
-      lon: -85.0,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/99"
-    };
+      lon: -85.0
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(false);
   });
 
   it("still covers South Bass Island's Stone Beach by proximity", function() {
     // The real Stone Beach sits within ~2 mi of the South Bass Island site.
-    const beach = {
-      id: "osm-stone-real",
+    const beach = makeBeach({
       name: "Stone Beach",
-      park_name: null,
       lat: 41.643,
-      lon: -82.84,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/100"
-    };
+      lon: -82.84
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(true);
   });
 
   it("matches a newly-covered Erie-county beach by proximity", function() {
     // Nickel Plate Beach (id 146) is one of the expanded sites.
-    const beach = {
-      id: "osm-nickel",
+    const beach = makeBeach({
       name: "Some Swimming Spot",
-      park_name: null,
       lat: 41.3969,
-      lon: -82.5438,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/146"
-    };
+      lon: -82.5438
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(true);
   });
 
   it("matches a newly-covered beach by its distinctive name substring (inside the Ohio shore box)", function() {
     // In the Ohio Lake Erie bbox but beyond the 2 mi proximity radius of the
     // Geneva site, so only the names[] pass can produce this match.
-    const beach = {
-      id: "osm-geneva",
+    const beach = makeBeach({
       name: "Geneva State Park Beach",
-      park_name: null,
       lat: 41.9,
-      lon: -80.9,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/141"
-    };
+      lon: -80.9
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(true);
   });
 
@@ -523,16 +494,11 @@ describe("ohioBeachGuard.matches", function() {
     // Regression: names[] used to be geographically unbounded, so an
     // out-of-state beach whose name contained an Ohio site substring inherited
     // that Ohio site's OFFICIAL flag — potentially a false affirmative green.
-    const ontarioGeneva = {
-      id: "osm-geneva-on",
+    const ontarioGeneva = makeBeach({
       name: "Geneva State Park Beach",
-      park_name: null,
       lat: 43.0,
-      lon: -80.0,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/900"
-    };
+      lon: -80.0
+    });
     expect(ohioBeachGuard.matches(ontarioGeneva)).toBe(false);
   });
 
@@ -541,59 +507,40 @@ describe("ohioBeachGuard.matches", function() {
     // discovery pilot bbox; an unnamed OSM beach there gets
     // name = park_name containing "headlands" via the daily sync. It must
     // never receive Headlands Beach State Park OH's official color.
-    const beach = {
-      id: "osm-headlands-mi",
+    const beach = makeBeach({
       name: "Headlands International Dark Sky Park",
       park_name: "Headlands International Dark Sky Park",
       lat: 45.78,
-      lon: -84.77,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "way/901"
-    };
+      lon: -84.77
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(false);
   });
 
   it("does not claim a beach near Fairport, Michigan despite the 'fairport harbor' substring risk", function() {
     // Fairport on Michigan's Garden Peninsula is also in the pilot bbox.
-    const beach = {
-      id: "osm-fairport-mi",
+    const beach = makeBeach({
       name: "Fairport Harbor Beach",
-      park_name: null,
       lat: 45.63,
-      lon: -86.66,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/902"
-    };
+      lon: -86.66
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(false);
   });
 
   it("does not match a beach without numeric coordinates (the geographic gate requires them)", function() {
-    const beach = {
-      id: "osm-nocoords",
+    const beach = makeBeach({
       name: "Geneva State Park Beach",
-      park_name: null,
       lat: null,
-      lon: null,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/903"
-    };
+      lon: null
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(false);
   });
 
   it("does not match a far-away beach", function() {
-    const beach = {
-      id: "osm-3",
+    const beach = makeBeach({
       name: "Holland State Park",
-      park_name: null,
       lat: 42.7739,
-      lon: -86.2109,
-      nws_zone: null,
-      nws_grid_url: null,
-      osm_id: "node/3"
-    };
+      lon: -86.2109
+    });
     expect(ohioBeachGuard.matches(beach)).toBe(false);
   });
 });

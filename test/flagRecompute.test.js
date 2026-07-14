@@ -6,8 +6,8 @@
 // The network is stubbed to fail entirely, so every client returns null and
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import worker from "../src/index.js";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
+import { runScheduledCron } from "./helpers/cron.js";
 
 function makeBeachRow(overrides) {
   const row = {
@@ -68,15 +68,8 @@ function makeEnv(beachRows) {
   return { env: env, kvPuts: kvPuts };
 }
 
-async function runHourlyCron(env) {
-  const waits = [];
-  const ctx = {
-    waitUntil: function (promise) {
-      waits.push(promise);
-    }
-  };
-  worker.scheduled({ cron: "0 * * * *" }, env, ctx);
-  await Promise.all(waits);
+function runHourlyCron(env) {
+  return runScheduledCron(env, "0 * * * *");
 }
 
 describe("runFlagRecompute input assembly - alertsCheckable", function () {
@@ -285,5 +278,211 @@ describe("runFlagRecompute flag_history calibration logging", function () {
     expect(made.kvPuts.get("flag:osm-node-2")).toBeDefined();
     // ...but no flag_history INSERT was batched.
     expect(findHistoryStatements(made.batchCalls).length).toBe(0);
+  });
+});
+
+// The hourly cron writes a "waves:" + beachId WaveSeries alongside each "flag:"
+// put, but ONLY when the beach has a real hourly wave series (>=1 finite cell).
+// A fetch failure, an all-masked series, or a buoy-only gap-fill (no series)
+// writes no "waves:" key, while the "flag:" put is always made.
+const MARINE_HOST = "marine-api.open-meteo.com";
+const OPEN_METEO_MARINE_URL = "https://open-meteo.com/en/docs/marine-weather-api";
+
+// A 48-entry hourly series (forecast_days=2, timezone=UTC) of one repeated
+// wave height in METERS — matching what the real /v1/marine endpoint returns.
+function waveSeries48(meters) {
+  const arr = [];
+  for (let h = 0; h < 48; h++) {
+    arr.push(meters);
+  }
+  return arr;
+}
+
+// Build a marine JSON payload for 'count' locations, each carrying the given
+// per-model 48-entry hourly wave_height arrays. 'models' maps model id ->
+// meters value (null for a fully masked model).
+function marinePayload(count, models) {
+  const locations = [];
+  for (let i = 0; i < count; i++) {
+    const hourly = {};
+    for (const model in models) {
+      if (Object.prototype.hasOwnProperty.call(models, model)) {
+        hourly["wave_height_" + model] = waveSeries48(models[model]);
+      }
+    }
+    locations.push({ hourly: hourly });
+  }
+  return locations;
+}
+
+function marineOkResponse(payload) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: function () { return Promise.resolve(payload); }
+  });
+}
+
+describe("runFlagRecompute wave series (waves: KV)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("writes a 24-entry WaveSeries anchored to the run's top-of-hour, plus the flag", async function () {
+    // Freeze Date so the hour index (16) and top-of-hour startIso are
+    // deterministic; only Date is faked so real timers are untouched.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:20:33Z"));
+
+    // Marine payload: only the first model (ecmwf_wam025) is populated, so the
+    // series resolves to a single model and the source label names it.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(marinePayload(1, { ecmwf_wam025: 0.5 }));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runHourlyCron(made.env);
+
+    // The flag put is always present.
+    const flagPut = made.kvPuts.get("flag:osm-node-1");
+    expect(flagPut).toBeDefined();
+
+    // The waves put is present with the specced shape.
+    const wavesPut = made.kvPuts.get("waves:osm-node-1");
+    expect(wavesPut).toBeDefined();
+    expect(wavesPut.opts).toEqual({ expirationTtl: 7200 });
+    const series = JSON.parse(wavesPut.value);
+    expect(series.beachId).toBe("osm-node-1");
+    expect(series.startIso).toBe("2026-07-15T16:00:00.000Z");
+    expect(series.updated).toBe("2026-07-15T16:20:33.000Z");
+    expect(Array.isArray(series.hoursFt)).toBe(true);
+    expect(series.hoursFt.length).toBe(24);
+    // 0.5 m -> ~1.6404 ft, raw (unrounded) floats.
+    expect(series.hoursFt[0]).toBeCloseTo(1.64042, 4);
+    expect(series.models).toEqual(["ecmwf_wam025"]);
+    expect(series.sources).toEqual([
+      { label: "ECMWF Wave Forecast", url: OPEN_METEO_MARINE_URL }
+    ]);
+    // Per-model series ride along for the model-comparison UI; only models
+    // with >= 1 finite hour appear, aligned with hoursFt.
+    expect(Object.keys(series.byModel)).toEqual(["ecmwf_wam025"]);
+    expect(series.byModel["ecmwf_wam025"].length).toBe(24);
+    expect(series.byModel["ecmwf_wam025"][0]).toBe(series.hoursFt[0]);
+  });
+
+  it("writes NO waves: when the marine series is fully masked (all-null), but still writes flag:", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // Marine returns a real series shape but every model masked (null) — the
+    // Great Lakes norm. Buoy gap-fill and wind both fall through to null here.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(marinePayload(1, { ecmwf_wam025: null }));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runHourlyCron(made.env);
+
+    expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
+    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+  });
+
+  it("writes NO waves: when the marine fetch fails entirely, but still writes flag:", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runHourlyCron(made.env);
+
+    expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
+    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+  });
+
+  it("buoy gap-fill supplies the flag reading but never a waves: series", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // Marine masked -> beach is wave-null -> GLOS Seagull buoy gap-fills a
+    // now-observation. The buoy carries no hourly series, so the preserved
+    // (all-masked) hoursFt must yield no waves: put even though flag: gets the
+    // buoy reading.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(marinePayload(1, { ecmwf_wam025: null }));
+      }
+      if (target.indexOf("obs-datasets.geojson") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              features: [{
+                properties: {
+                  obs_dataset_id: 100,
+                  parameters: [{ standard_name: "sea_surface_wave_significant_height" }]
+                },
+                geometry: { coordinates: [-83.3, 44.8] }
+              }]
+            });
+          }
+        });
+      }
+      if (target.indexOf("/parameters") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve([
+              { parameter_id: 5, standard_name: "sea_surface_wave_significant_height" }
+            ]);
+          }
+        });
+      }
+      if (target.indexOf("/obs?") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve([{
+              obs_dataset_id: 100,
+              parameters: [{
+                parameter_id: 5,
+                observations: [{ timestamp: "2026-07-15T15:55:00Z", value: 1.0 }]
+              }]
+            }]);
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runHourlyCron(made.env);
+
+    const flagPut = made.kvPuts.get("flag:osm-node-1");
+    expect(flagPut).toBeDefined();
+    // The buoy reading (1.0 m -> ~3.28 ft) drove a non-unknown estimate.
+    expect(JSON.parse(flagPut.value).color).not.toBe("unknown");
+    // ...but there is no hourly series to publish.
+    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
   });
 });

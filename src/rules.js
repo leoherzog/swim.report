@@ -27,11 +27,21 @@ const ALERT_COLOR_MAP = {
   "Rip Current Statement": "red"
 };
 
-export function metersToFeet(m) {
-  if (m === null || m === undefined) {
+// The wave-height color thresholds (2 ft yellow, 4 ft red) live ONLY here, so the
+// frontend can color per-hour wave forecast cells from the same numbers without
+// restating them. Returns "red"/"yellow"/"green" for a finite numeric height, or
+// null for anything non-numeric/non-finite (null, undefined, NaN, strings).
+export function waveColorForHeight(waveHeightFt) {
+  if (typeof waveHeightFt !== "number" || !isFinite(waveHeightFt)) {
     return null;
   }
-  return m * 3.28084;
+  if (waveHeightFt >= 4) {
+    return "red";
+  }
+  if (waveHeightFt >= 2) {
+    return "yellow";
+  }
+  return "green";
 }
 
 export function estimateFlag(inputs) {
@@ -81,12 +91,15 @@ export function estimateFlag(inputs) {
   }
 
   // Step 3: wave height from Open-Meteo Marine API (already converted to feet).
+  // Color comes from waveColorForHeight (the single home of the 2/4 ft thresholds);
+  // the per-branch reason strings are built here and are unchanged.
   if (color === null && waveHeightFt !== null) {
     trigger = "wave-height";
-    if (waveHeightFt >= 4) {
+    const waveColor = waveColorForHeight(waveHeightFt);
+    if (waveColor === "red") {
       color = "red";
       reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above 4 ft)";
-    } else if (waveHeightFt >= 2) {
+    } else if (waveColor === "yellow") {
       color = "yellow";
       reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above 2 ft)";
     } else {
@@ -96,11 +109,10 @@ export function estimateFlag(inputs) {
   }
 
   // Step 4: wind fallback, only when wave data is entirely unavailable.
-  const hasWaveData = waveHeightFt !== null;
   const speedKnown = windSpeedMph !== null;
   const gustKnown = windGustMph !== null;
 
-  if (color === null && !hasWaveData && (speedKnown || gustKnown)) {
+  if (color === null && waveHeightFt === null && (speedKnown || gustKnown)) {
     trigger = "wind";
     const speedStr = speedKnown ? String(Math.round(windSpeedMph)) : "n/a";
     const gustStr = gustKnown ? String(Math.round(windGustMph)) : "n/a";
@@ -145,6 +157,12 @@ export function estimateFlag(inputs) {
     reason = reason + " (" + ALERTS_UNAVAILABLE_CAVEAT + ")";
   }
 
+  // Echo the structured wave reading (finite number, else null) regardless of which
+  // branch decided the color, so the UI can show a "now" wave stat without parsing
+  // the reason string.
+  const echoedWaveHeightFt =
+    (typeof waveHeightFt === "number" && isFinite(waveHeightFt)) ? waveHeightFt : null;
+
   return {
     beachId: beachId,
     color: color,
@@ -153,6 +171,7 @@ export function estimateFlag(inputs) {
     rules_version: RULES_VERSION,
     official: false,
     sources: sources,
-    updated: updated
+    updated: updated,
+    waveHeightFt: echoedWaveHeightFt
   };
 }

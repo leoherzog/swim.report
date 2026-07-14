@@ -35,6 +35,8 @@
 // rather than guessed. Reporting a wrong official color is the worst possible
 // bug in this product, so "no data" is always preferred over a guess.
 
+import { fetchText, perBeachResult, ageDays } from "./util.js";
+
 export const BLDHD_URL = "https://www.bldhd.org/beach-monitoring/";
 
 // bldhd.org has not been observed to require a User-Agent, but every other
@@ -51,8 +53,6 @@ export const BLDHD_STALE_DAYS = 8;
 // window absorbs any timezone/parse edge; anything beyond it is a typo or an
 // abandoned page and is refused rather than trusted.
 export const BLDHD_FUTURE_SLACK_DAYS = 1;
-
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // BLDHD Water Quality Index Level -> estimated official flag color, taken
 // verbatim from the health department's own weekly-report legend (see file
@@ -214,10 +214,10 @@ export function parseBldhdHtml(html, nowIso) {
     console.log("bldhd: could not parse report date or nowIso for staleness check");
     return null;
   }
-  const ageDays = (nowTime - reportTime) / MS_PER_DAY;
-  if (ageDays > BLDHD_STALE_DAYS) {
+  const reportAgeDays = ageDays(nowTime, reportTime);
+  if (reportAgeDays > BLDHD_STALE_DAYS) {
     console.log(
-      "bldhd: report dated " + reportDate.raw + " is " + ageDays.toFixed(1) +
+      "bldhd: report dated " + reportDate.raw + " is " + reportAgeDays.toFixed(1) +
       " days old (> " + BLDHD_STALE_DAYS + "), treating as stale, skipping"
     );
     return null;
@@ -231,9 +231,9 @@ export function parseBldhdHtml(html, nowIso) {
   // so nowTime is always >= reportTime for a same-day report). Allow a small
   // slack for any timezone edge, then refuse a future-dated report rather than
   // trusting a typo/stale page.
-  if (ageDays < -BLDHD_FUTURE_SLACK_DAYS) {
+  if (reportAgeDays < -BLDHD_FUTURE_SLACK_DAYS) {
     console.log(
-      "bldhd: report dated " + reportDate.raw + " is " + (-ageDays).toFixed(1) +
+      "bldhd: report dated " + reportDate.raw + " is " + (-reportAgeDays).toFixed(1) +
       " days in the FUTURE (typo or abandoned page), refusing to report"
     );
     return null;
@@ -301,20 +301,14 @@ export function parseBldhdHtml(html, nowIso) {
   if (sites.length === 0) {
     return null;
   }
-  return {
-    perBeach: true,
-    sites: sites,
-    source: BLDHD_URL,
-    sources: [BLDHD_URL],
-    // updated is the REPORT date, not nowIso. BLDHD posts roughly weekly, so
-    // stamping nowIso (as real-time scrapers do) would make every official
-    // green look freshly-updated in the UI and permanently suppress the
-    // frontend's 2-hour stale-data warning -- the exact opposite of this
-    // file's header note and the product's honesty principle. Reporting the
-    // report date instead makes the footer show when the data was actually
-    // published and lets the stale warning surface honestly.
-    updated: reportDate.iso
-  };
+  // updated is the REPORT date, not nowIso. BLDHD posts roughly weekly, so
+  // stamping nowIso (as real-time scrapers do) would make every official
+  // green look freshly-updated in the UI and permanently suppress the
+  // frontend's 2-hour stale-data warning -- the exact opposite of this
+  // file's header note and the product's honesty principle. Reporting the
+  // report date instead makes the footer show when the data was actually
+  // published and lets the stale warning surface honestly.
+  return perBeachResult(sites, BLDHD_URL, reportDate.iso);
 }
 
 export const bldhd = {
@@ -326,15 +320,14 @@ export const bldhd = {
       beach.lon >= -86.30 && beach.lon <= -85.55;
   },
   scrape: async function(nowIso) {
+    const html = await fetchText(BLDHD_URL, {
+      headers: { "User-Agent": BLDHD_USER_AGENT },
+      logPrefix: "bldhd: fetch failed"
+    });
+    if (html === null) {
+      return null;
+    }
     try {
-      const response = await fetch(BLDHD_URL, {
-        headers: { "User-Agent": BLDHD_USER_AGENT }
-      });
-      if (!response.ok) {
-        console.log("bldhd: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const html = await response.text();
       return parseBldhdHtml(html, nowIso);
     } catch (err) {
       console.log("bldhd: fetch failed: " + err.message);

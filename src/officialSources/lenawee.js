@@ -10,6 +10,8 @@
 // scrape() runs cron-side only; parseLenaweeHtml is pure and exported for
 // tests.
 
+import { fetchText, perBeachResult, resolveSiteForBeach, MS_PER_DAY } from "./util.js";
+
 export const LENAWEE_URL = "https://www.lenawee.mi.us/1099/Public-Beach-Monitoring";
 
 // Beach coordinates (Lenawee County, Irish Hills area, MI), verified against
@@ -20,7 +22,25 @@ export const LAKE_HUDSON_LAT = 41.8361;
 export const LAKE_HUDSON_LON = -84.2417;
 
 const LENAWEE_MATCH_RADIUS_MI = 3;
-const STALE_MS = 10 * 24 * 60 * 60 * 1000;
+const STALE_MS = 10 * MS_PER_DAY;
+
+// The same name-substring-or-within-radius rule that resolveSiteForBeach
+// applies at resolution time, expressed as static site descriptors so
+// matches() and resolution can never drift apart.
+const LENAWEE_MATCH_SITES = [
+  {
+    names: ["hayes state park"],
+    lat: HAYES_STATE_PARK_LAT,
+    lon: HAYES_STATE_PARK_LON,
+    radiusMi: LENAWEE_MATCH_RADIUS_MI
+  },
+  {
+    names: ["lake hudson"],
+    lat: LAKE_HUDSON_LAT,
+    lon: LAKE_HUDSON_LON,
+    radiusMi: LENAWEE_MATCH_RADIUS_MI
+  }
+];
 
 // Pure. The GREEN gate. A beach is only reported green when its status field
 // normalizes EXACTLY to "no advisory posted" (whitespace collapsed, a single
@@ -38,21 +58,6 @@ function isNoAdvisoryPosted(statusText) {
     .replace(/[.\s]+$/, "")
     .trim();
   return normalized === "no advisory posted";
-}
-
-// Haversine great-circle distance in statute miles. Pure. (Kept local to
-// this module rather than imported from ./index.js to avoid a circular
-// import before this scraper is registered there.)
-function lenaweeDistanceMi(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const earthRadiusMi = 3958.8;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 2 * earthRadiusMi * Math.asin(Math.sqrt(a));
 }
 
 // Pure. Converts captured M/D/YY(YY) [H:MM AM/PM] regex groups into a UTC
@@ -224,52 +229,30 @@ export function parseLenaweeHtml(html, nowIso) {
   return sites;
 }
 
-function lenaweeNameMatches(beach) {
-  const haystack = ((beach.park_name || "") + " " + beach.name).toLowerCase();
-  return haystack.indexOf("hayes state park") !== -1 || haystack.indexOf("lake hudson") !== -1;
-}
-
-function lenaweeProximityMatches(beach) {
-  const hayesDistance = lenaweeDistanceMi(
-    beach.lat, beach.lon, HAYES_STATE_PARK_LAT, HAYES_STATE_PARK_LON
-  );
-  if (hayesDistance <= LENAWEE_MATCH_RADIUS_MI) {
-    return true;
-  }
-  const hudsonDistance = lenaweeDistanceMi(
-    beach.lat, beach.lon, LAKE_HUDSON_LAT, LAKE_HUDSON_LON
-  );
-  return hudsonDistance <= LENAWEE_MATCH_RADIUS_MI;
-}
-
 export const lenawee = {
   id: "lenawee-mi",
   label: "Lenawee County Health Department",
   url: LENAWEE_URL,
   matches: function(beach) {
-    return lenaweeNameMatches(beach) || lenaweeProximityMatches(beach);
+    return resolveSiteForBeach(beach, LENAWEE_MATCH_SITES) !== null;
   },
   scrape: async function(nowIso) {
+    // No headers: lenawee.mi.us has only been probed without a User-Agent.
+    const html = await fetchText(LENAWEE_URL, {
+      logPrefix: "lenawee: fetch failed"
+    });
+    if (html === null) {
+      return null;
+    }
     try {
-      const response = await fetch(LENAWEE_URL);
-      if (!response.ok) {
-        console.log("lenawee: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const html = await response.text();
       const sites = parseLenaweeHtml(html, nowIso);
       if (!sites || sites.length === 0) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: sites,
-        source: LENAWEE_URL,
-        sources: [LENAWEE_URL],
-        // Fallback only — every emitted site carries updated: the page's own
-        // Last Updated timestamp, which wins in scrapeOfficialFlagFromResult.
-        updated: nowIso
-      };
+      // result-level updated is a fallback only — every emitted site carries
+      // updated: the page's own Last Updated timestamp, which wins in
+      // scrapeOfficialFlagFromResult.
+      return perBeachResult(sites, LENAWEE_URL, nowIso);
     } catch (err) {
       console.log("lenawee: fetch failed: " + err.message);
       return null;

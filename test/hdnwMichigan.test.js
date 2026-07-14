@@ -5,6 +5,8 @@
 import { describe, it, expect } from "vitest";
 import { parseHdnwHtml, hdnwMichigan } from "../src/officialSources/hdnwMichigan.js";
 import { resolveSiteForBeach } from "../src/officialSources/index.js";
+import { makeBeach } from "./helpers/beach.js";
+import { findSite } from "./helpers/sites.js";
 
 const NOW = "2026-07-05T12:00:00.000Z";
 
@@ -29,10 +31,6 @@ function tableHtml(rows) {
   return "<html><body><table>\n" + HEADER_ROW + "\n" + rows.join("\n") + "\n</table></body></html>";
 }
 
-function siteFor(sites, siteId) {
-  return sites.find(function(s) { return s.siteId === siteId; }) || null;
-}
-
 describe("parseHdnwHtml WQI -> color mapping", function() {
   it("maps WQI 1/2/3/4 to green/yellow/red/double-red", function() {
     const html = tableHtml([
@@ -42,10 +40,10 @@ describe("parseHdnwHtml WQI -> color mapping", function() {
       dataRow("07/01/26", "Charlevoix", "Elm Point Beach", "517.2", "4")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    expect(siteFor(sites, "thumb lake beach").color).toBe("green");
-    expect(siteFor(sites, "mackinaw 2").color).toBe("yellow");
-    expect(siteFor(sites, "wooden shoe park").color).toBe("red");
-    expect(siteFor(sites, "elm point beach").color).toBe("double-red");
+    expect(findSite(sites, "thumb lake beach").color).toBe("green");
+    expect(findSite(sites, "mackinaw 2").color).toBe("yellow");
+    expect(findSite(sites, "wooden shoe park").color).toBe("red");
+    expect(findSite(sites, "elm point beach").color).toBe("double-red");
   });
 
   it("carries curated names[] and a reason with the sample date and E. coli", function() {
@@ -53,7 +51,7 @@ describe("parseHdnwHtml WQI -> color mapping", function() {
       dataRow("06/29/26", "Charlevoix", "Thumb Lake Beach", "7.3", "1")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    const site = siteFor(sites, "thumb lake beach");
+    const site = findSite(sites, "thumb lake beach");
     expect(site.names).toEqual(["thumb lake"]);
     expect(site.reason.indexOf("06/29/26")).not.toBe(-1);
     expect(site.reason.indexOf("7.3")).not.toBe(-1);
@@ -69,9 +67,9 @@ describe("parseHdnwHtml WQI -> color mapping", function() {
       dataRow("07/03/26", "Emmet", "Zorn Park", "&gt;2419.6", "3")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    expect(siteFor(sites, "thumb lake beach").updated).toBe("2026-06-29T00:00:00.000Z");
+    expect(findSite(sites, "thumb lake beach").updated).toBe("2026-06-29T00:00:00.000Z");
     // Most-recent-wins carries the WINNING row's date, not the older one.
-    expect(siteFor(sites, "zorn park").updated).toBe("2026-07-03T00:00:00.000Z");
+    expect(findSite(sites, "zorn park").updated).toBe("2026-07-03T00:00:00.000Z");
   });
 });
 
@@ -93,8 +91,8 @@ describe("parseHdnwHtml defensive skipping", function() {
       dataRow("07/01/26", "Emmet", "Middle Village", "8.5", "1")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    expect(siteFor(sites, "zorn park")).toBe(null);
-    expect(siteFor(sites, "middle village").color).toBe("green");
+    expect(findSite(sites, "zorn park")).toBe(null);
+    expect(findSite(sites, "middle village").color).toBe("green");
   });
 
   it("skips a row for a beach not in the curated name map", function() {
@@ -121,7 +119,7 @@ describe("parseHdnwHtml defensive skipping", function() {
     ]);
     // 07/07 -> 07/15 is exactly 8 days, not stale.
     const sites = parseHdnwHtml(html, "2026-07-15T12:00:00.000Z");
-    expect(siteFor(sites, "thumb lake beach").color).toBe("green");
+    expect(findSite(sites, "thumb lake beach").color).toBe("green");
   });
 });
 
@@ -157,7 +155,7 @@ describe("parseHdnwHtml color derives from WQI, not E. coli format", function() 
       dataRow("07/03/26", "Emmet", "Zorn Park", "&gt;2419.6", "3")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    const site = siteFor(sites, "zorn park");
+    const site = findSite(sites, "zorn park");
     expect(site.color).toBe("red");
     expect(site.reason.indexOf("07/03/26")).not.toBe(-1);
     expect(site.reason.indexOf("2419.6")).not.toBe(-1);
@@ -168,7 +166,7 @@ describe("parseHdnwHtml color derives from WQI, not E. coli format", function() 
       dataRow("07/03/26", "Emmet", "Zorn Park", "", "3")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    const site = siteFor(sites, "zorn park");
+    const site = findSite(sites, "zorn park");
     expect(site.color).toBe("red");
     expect(site.reason.indexOf("not reported")).not.toBe(-1);
   });
@@ -182,7 +180,7 @@ describe("parseHdnwHtml future-date guard", function() {
       dataRow("07/20/26", "Emmet", "Zorn Park", "2.0", "1")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    const site = siteFor(sites, "zorn park");
+    const site = findSite(sites, "zorn park");
     expect(site.color).toBe("red");
     expect(site.reason.indexOf("07/04/26")).not.toBe(-1);
   });
@@ -205,7 +203,7 @@ describe("hdnwMichigan Oden vs Wooden Shoe Park resolution", function() {
       dataRow("07/01/26", "Antrim", "Wooden Shoe Park", "1500.0", "3")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    const woodenBeach = { id: "osm-w", name: "Wooden Shoe Park", park_name: null, lat: 45.0, lon: -85.0, nws_zone: null, nws_grid_url: null, osm_id: "node/9" };
+    const woodenBeach = makeBeach({ name: "Wooden Shoe Park", lat: 45.0, lon: -85.0 });
     const resolved = resolveSiteForBeach(woodenBeach, sites);
     expect(resolved).not.toBe(null);
     expect(resolved.siteId).toBe("wooden shoe park");
@@ -217,7 +215,7 @@ describe("hdnwMichigan Oden vs Wooden Shoe Park resolution", function() {
       dataRow("07/01/26", "Emmet", "Oden", "2.0", "1")
     ]);
     const sites = parseHdnwHtml(html, NOW);
-    const odenBeach = { id: "osm-o", name: "Oden Beach", park_name: null, lat: 45.42, lon: -84.83, nws_zone: null, nws_grid_url: null, osm_id: "node/10" };
+    const odenBeach = makeBeach({ name: "Oden Beach", lat: 45.42, lon: -84.83 });
     const resolved = resolveSiteForBeach(odenBeach, sites);
     expect(resolved).not.toBe(null);
     expect(resolved.siteId).toBe("oden");
@@ -247,17 +245,17 @@ describe("parseHdnwHtml empty/garbage", function() {
 
 describe("hdnwMichigan.matches", function() {
   it("matches a beach inside the four-county bounding box", function() {
-    const beach = { id: "osm-1", name: "Petoskey State Park", park_name: null, lat: 45.40, lon: -84.90, nws_zone: null, nws_grid_url: null, osm_id: "node/1" };
+    const beach = makeBeach({ name: "Petoskey State Park", lat: 45.40, lon: -84.90 });
     expect(hdnwMichigan.matches(beach)).toBe(true);
   });
 
   it("does not match a South Haven beach far to the south", function() {
-    const beach = { id: "osm-2", name: "South Haven South Beach", park_name: null, lat: 42.40, lon: -86.28, nws_zone: null, nws_grid_url: null, osm_id: "node/2" };
+    const beach = makeBeach({ name: "South Haven South Beach", lat: 42.40, lon: -86.28 });
     expect(hdnwMichigan.matches(beach)).toBe(false);
   });
 
   it("does not match a beach with non-numeric coordinates", function() {
-    const beach = { id: "osm-3", name: "Broken", park_name: null, lat: null, lon: null, nws_zone: null, nws_grid_url: null, osm_id: "node/3" };
+    const beach = makeBeach({ name: "Broken", lat: null, lon: null });
     expect(hdnwMichigan.matches(beach)).toBe(false);
   });
 });

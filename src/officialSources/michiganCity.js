@@ -12,6 +12,9 @@
 // scrape() runs cron-side only; parseMichiganCityHtml is pure and exported
 // for tests.
 
+import { distanceMi } from "../geo.js";
+import { fetchText, perBeachResult, ageDays } from "./util.js";
+
 export const MICHIGAN_CITY_URL =
   "https://parks.michigancityin.gov/parks-and-facilities/washington-park/";
 
@@ -40,23 +43,6 @@ const MONTH_NAMES = [
   "january", "february", "march", "april", "may", "june",
   "july", "august", "september", "october", "november", "december"
 ];
-
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
-
-// Local haversine distance in statute miles. Duplicated (rather than
-// imported from src/officialSources/index.js) to avoid a circular import --
-// index.js imports this module to register it in the scrapers array.
-function distanceMi(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const earthRadiusMi = 3958.8;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 2 * earthRadiusMi * Math.asin(Math.sqrt(a));
-}
 
 // Pure. Bacteria count -> flag color, using the page's own stated
 // thresholds verbatim (<=235 acceptable, 236-999 advisory, >=1000 closed).
@@ -152,11 +138,11 @@ export function parseMichiganCityHtml(html, nowIso) {
     return null;
   }
   const readingMs = Date.parse(parsedDate.isoDate);
-  const ageDays = (nowMs - readingMs) / MS_PER_DAY;
-  if (ageDays > MAX_STALE_DAYS) {
+  const readingAgeDays = ageDays(nowMs, readingMs);
+  if (readingAgeDays > MAX_STALE_DAYS) {
     console.log(
       "michiganCity: reading for " + parsedDate.dateLabel + " is " +
-      ageDays.toFixed(1) + " days old, treating as stale"
+      readingAgeDays.toFixed(1) + " days old, treating as stale"
     );
     return null;
   }
@@ -220,26 +206,19 @@ export const michiganCity = {
     return false;
   },
   scrape: async function(nowIso) {
+    const html = await fetchText(MICHIGAN_CITY_URL, {
+      headers: { "User-Agent": MICHIGAN_CITY_USER_AGENT },
+      logPrefix: "michiganCity: fetch failed"
+    });
+    if (html === null) {
+      return null;
+    }
     try {
-      const response = await fetch(MICHIGAN_CITY_URL, {
-        headers: { "User-Agent": MICHIGAN_CITY_USER_AGENT }
-      });
-      if (!response.ok) {
-        console.log("michiganCity: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const html = await response.text();
       const parsed = parseMichiganCityHtml(html, nowIso);
       if (!parsed) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: parsed.sites,
-        source: MICHIGAN_CITY_URL,
-        sources: [MICHIGAN_CITY_URL],
-        updated: parsed.updated
-      };
+      return perBeachResult(parsed.sites, MICHIGAN_CITY_URL, parsed.updated);
     } catch (err) {
       console.log("michiganCity: fetch failed: " + err.message);
       return null;

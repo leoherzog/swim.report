@@ -1,6 +1,16 @@
 name = "swim-report"
 main = "src/index.js"
-compatibility_date = "2026-06-01"
+compatibility_date = "2026-07-13"
+routes = [
+  { pattern = "swim.report", custom_domain = true }
+]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[placement]
+mode = "smart"
 
 # 0 * * * *        — hourly flag recompute (estimates + official scrapes -> KV)
 # 47 8 * * *       — daily Overpass beach discovery (D1 upserts)
@@ -13,8 +23,8 @@ crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "swim-report"
-database_id = "TODO-set-after-wrangler-d1-create"
+database_id = "694e08f2-01dd-4ece-9bd3-61da4c6f8481"
 
 [[kv_namespaces]]
 binding = "FLAGS"
-id = "TODO-set-after-wrangler-kv-namespace-create"
+id = "d7814f3408de401e8fef467754c18381"

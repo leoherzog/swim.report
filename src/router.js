@@ -1,16 +1,15 @@
 import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/render.js";
+import { distanceMi } from "./geo.js";
+
+// Re-exported so existing importers (tests) keep working after the haversine
+// consolidation into src/geo.js.
+export { distanceMi };
 
 const HOME_LIST_LIMIT = 100;
 const API_BEACHES_LIMIT = 500;
 // When sorting by proximity we need every candidate row before slicing to
 // HOME_LIST_LIMIT, so the fetch bound is wider than the display bound.
 const HOME_GEO_FETCH_LIMIT = 500;
-
-const EARTH_RADIUS_MI = 3958.8;
-
-function toRadians(deg) {
-  return deg * Math.PI / 180;
-}
 
 // Escapes the LIKE wildcards (% and _) plus the escape character itself so a
 // user's search term is matched literally, not as a pattern. The result is
@@ -21,16 +20,6 @@ export function escapeLike(term) {
     .split("\\").join("\\\\")
     .split("%").join("\\%")
     .split("_").join("\\_");
-}
-
-// Great-circle distance (haversine) in statute miles. Pure; exported for tests.
-export function distanceMi(lat1, lon1, lat2, lon2) {
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 2 * EARTH_RADIUS_MI * Math.asin(Math.sqrt(a));
 }
 
 // User location for proximity sorting: the "near" query param (lat,lon —
@@ -97,9 +86,11 @@ function parseBbox(bboxParam) {
 }
 
 async function readFlagAndOfficial(env, beachId) {
-  const estimate = await env.FLAGS.get("flag:" + beachId, { type: "json" });
-  const official = await env.FLAGS.get("official:" + beachId, { type: "json" });
-  return { estimate: estimate, official: official };
+  const results = await Promise.all([
+    env.FLAGS.get("flag:" + beachId, { type: "json" }),
+    env.FLAGS.get("official:" + beachId, { type: "json" })
+  ]);
+  return { estimate: results[0], official: results[1] };
 }
 
 // Optional ?q= search covers the ENTIRE beaches table, not just the rendered
@@ -111,6 +102,19 @@ async function readFlagAndOfficial(env, beachId) {
 const LIKE_WHERE =
   " WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\\' OR name LIKE ?1 ESCAPE '\\')";
 
+// Builds the "SELECT * FROM beaches ..." statement shared by both home-page
+// branches: an optional LIKE_WHERE clause, an optional ORDER BY clause, and a
+// caller-supplied LIMIT. Resulting SQL strings are byte-identical to the
+// hand-written per-branch queries this replaces.
+function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
+  const where = hasQuery ? LIKE_WHERE : "";
+  const order = orderByClause ? " ORDER BY " + orderByClause : "";
+  const stmt = env.DB.prepare(
+    "SELECT * FROM beaches" + where + order + " LIMIT " + String(limit)
+  );
+  return hasQuery ? stmt.bind(pattern) : stmt;
+}
+
 async function handleHome(env, location, rawQuery, nearParam) {
   const query = (typeof rawQuery === "string") ? rawQuery.trim() : "";
   const hasQuery = query.length > 0;
@@ -118,14 +122,7 @@ async function handleHome(env, location, rawQuery, nearParam) {
   let rows;
   let hasMore = false;
   if (location) {
-    let stmt;
-    if (hasQuery) {
-      stmt = env.DB.prepare(
-        "SELECT * FROM beaches" + LIKE_WHERE + " LIMIT " + String(HOME_GEO_FETCH_LIMIT)
-      ).bind(pattern);
-    } else {
-      stmt = env.DB.prepare("SELECT * FROM beaches LIMIT " + String(HOME_GEO_FETCH_LIMIT));
-    }
+    const stmt = buildHomeStatement(env, hasQuery, pattern, null, HOME_GEO_FETCH_LIMIT);
     const result = await stmt.all();
     rows = result.results || [];
     for (const beach of rows) {
@@ -140,18 +137,9 @@ async function handleHome(env, location, rawQuery, nearParam) {
     // displayName()). Fetch one extra row to detect whether more beaches exist
     // beyond the cap (drives the "search all beaches" empty-state affordance).
     const detectLimit = HOME_LIST_LIMIT + 1;
-    let stmt;
-    if (hasQuery) {
-      stmt = env.DB.prepare(
-        "SELECT * FROM beaches" + LIKE_WHERE +
-        " ORDER BY COALESCE(park_name, name), name LIMIT " + String(detectLimit)
-      ).bind(pattern);
-    } else {
-      stmt = env.DB.prepare(
-        "SELECT * FROM beaches ORDER BY COALESCE(park_name, name), name LIMIT " +
-        String(detectLimit)
-      );
-    }
+    const stmt = buildHomeStatement(
+      env, hasQuery, pattern, "COALESCE(park_name, name), name", detectLimit
+    );
     const result = await stmt.all();
     rows = result.results || [];
     hasMore = rows.length > HOME_LIST_LIMIT;
@@ -187,12 +175,21 @@ async function handleDetail(env, beachId) {
     const html = renderErrorPage({ status: 404, message: "Beach not found" });
     return htmlResponse(html, 404);
   }
-  const data = await readFlagAndOfficial(env, beachId);
+  // The 24 h wave-forecast series is a detail-page-only read (the list page
+  // must never gain a per-row KV get). Fetched alongside the flag/official
+  // reads so the extra key costs no added latency.
+  const results = await Promise.all([
+    readFlagAndOfficial(env, beachId),
+    env.FLAGS.get("waves:" + beachId, { type: "json" })
+  ]);
+  const data = results[0];
+  const waves = results[1];
   const nowIso = new Date().toISOString();
   const html = renderDetailPage({
     beach: beach,
     estimate: data.estimate,
     official: data.official,
+    waves: waves,
     nowIso: nowIso
   });
   return htmlResponse(html, 200);
@@ -202,7 +199,7 @@ async function handleApiBeaches(env, url) {
   const bboxParam = url.searchParams.get("bbox");
   const bbox = parseBbox(bboxParam);
   if (bbox === null) {
-    return jsonResponse({ error: "invalid bbox" }, 400, {});
+    return jsonResponse({ error: "invalid bbox" }, 400);
   }
   const result = await env.DB.prepare(
     "SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
@@ -237,7 +234,7 @@ export async function handleRequest(request, env) {
   }
 
   if (path === "/health") {
-    return jsonResponse({ ok: true }, 200, {});
+    return jsonResponse({ ok: true }, 200);
   }
 
   if (path === "/") {
@@ -266,7 +263,7 @@ export async function handleRequest(request, env) {
   }
 
   if (path.indexOf("/api/") === 0) {
-    return jsonResponse({ error: "not found" }, 404, {});
+    return jsonResponse({ error: "not found" }, 404);
   }
 
   const html = renderErrorPage({ status: 404, message: "Not found" });

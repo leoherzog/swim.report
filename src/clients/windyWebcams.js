@@ -20,8 +20,6 @@
 import { distanceKm } from "./glerl.js";
 
 export const WINDY_WEBCAMS_API_URL = "https://api.windy.com/webcams/api/v3/webcams";
-// Human-readable portal for attribution links — never link the raw API request.
-export const WINDY_WEBCAMS_INFO_URL = "https://www.windy.com/webcams";
 // A cam farther than this from the beach is not "at the beach".
 export const WEBCAM_RADIUS_KM = 5;
 // API max limit per request.

@@ -16,6 +16,8 @@
 // SKIPPED, never guessed. A row older than STALE_MAX_DAYS relative to nowIso is
 // dropped as stale rather than presented as current.
 
+import { fetchText, perBeachResult } from "./util.js";
+
 export const HDNW_URL = "https://nwhealth.org/beach-monitoring-program/";
 
 export const HDNW_LABEL = "Health Department of Northwest Michigan Beach Monitoring Program";
@@ -109,20 +111,13 @@ function nowIsoToDayNumber(nowIso) {
   );
 }
 
-// "MM/DD/YY" -> "20YY-MM-DDT00:00:00.000Z", or null if not a well-formed date
-// string. Pure string work (no Date construction); used to stamp each site's
-// updated with the SAMPLE date so the frontend's stale-data warning reflects
-// how old the reading actually is, instead of the cron tick masking it.
-function tableDateToIso(dateStr) {
-  const match = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(dateStr);
-  if (!match) {
-    return null;
-  }
-  return "20" + match[3] + "-" + match[1] + "-" + match[2] + "T00:00:00.000Z";
-}
-
-// "MM/DD/YY" -> integer day count, or null if not a well-formed date string.
-function tableDateToDayNumber(dateStr) {
+// "MM/DD/YY" -> { dayNum, iso } | null (not a well-formed/plausible date).
+// One parse serves both consumers: dayNum (integer day count) drives the
+// staleness/future gates, and iso ("20YY-MM-DDT00:00:00.000Z", pure string
+// work, no Date construction) stamps each site's updated with the SAMPLE date
+// so the frontend's stale-data warning reflects how old the reading actually
+// is, instead of the cron tick masking it.
+function parseTableDate(dateStr) {
   const match = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(dateStr);
   if (!match) {
     return null;
@@ -133,7 +128,10 @@ function tableDateToDayNumber(dateStr) {
   if (month < 1 || month > 12 || day < 1 || day > 31) {
     return null;
   }
-  return daysFromCivil(year, month, day);
+  return {
+    dayNum: daysFromCivil(year, month, day),
+    iso: "20" + match[3] + "-" + match[1] + "-" + match[2] + "T00:00:00.000Z"
+  };
 }
 
 // Extract the visible text of one <td> with fragments SPACE-joined (never naive
@@ -180,7 +178,7 @@ export function parseHdnwHtml(html, nowIso) {
     return null;
   }
 
-  // key -> best row so far { dayNum, color, dateStr, ecoli }
+  // key -> best row so far { dayNum, iso, color, dateStr, ecoli }
   const bestByKey = {};
 
   for (let i = 0; i < rows.length; i++) {
@@ -193,10 +191,11 @@ export function parseHdnwHtml(html, nowIso) {
     const ecoli = cellText(cells[3]);
     const wqi = cellText(cells[4]);
 
-    const dayNum = tableDateToDayNumber(dateStr);
-    if (dayNum === null) {
+    const parsedDate = parseTableDate(dateStr);
+    if (parsedDate === null) {
       continue;
     }
+    const dayNum = parsedDate.dayNum;
     const color = WQI_TO_COLOR[wqi];
     if (!color) {
       continue;
@@ -227,7 +226,13 @@ export function parseHdnwHtml(html, nowIso) {
     }
     const prev = bestByKey[key];
     if (!prev || dayNum > prev.dayNum) {
-      bestByKey[key] = { dayNum: dayNum, color: color, dateStr: dateStr, ecoli: ecoli };
+      bestByKey[key] = {
+        dayNum: dayNum,
+        iso: parsedDate.iso,
+        color: color,
+        dateStr: dateStr,
+        ecoli: ecoli
+      };
     }
   }
 
@@ -251,12 +256,12 @@ export function parseHdnwHtml(html, nowIso) {
     };
     // updated is the sample date, NOT nowIso: a periodic (roughly weekly)
     // E. coli reading stamped with the cron tick would render as freshly
-    // updated and suppress the UI's honest stale-data warning. dateStr already
-    // passed tableDateToDayNumber, so this never actually returns null; the
-    // guard just avoids emitting updated: null on a logic drift.
-    const updatedIso = tableDateToIso(row.dateStr);
-    if (updatedIso) {
-      site.updated = updatedIso;
+    // updated and suppress the UI's honest stale-data warning. row.iso came
+    // from the same parseTableDate call that validated the row, so it is
+    // always set; the guard just avoids emitting updated: null on a logic
+    // drift.
+    if (row.iso) {
+      site.updated = row.iso;
     }
     sites.push(site);
   }
@@ -286,28 +291,22 @@ export const hdnwMichigan = {
     return inHdnwBox(beach);
   },
   scrape: async function(nowIso) {
+    const html = await fetchText(HDNW_URL, {
+      headers: { "User-Agent": HDNW_USER_AGENT },
+      logPrefix: "hdnwMichigan: fetch failed"
+    });
+    if (html === null) {
+      return null;
+    }
     try {
-      const response = await fetch(HDNW_URL, {
-        headers: { "User-Agent": HDNW_USER_AGENT }
-      });
-      if (!response.ok) {
-        console.log("hdnwMichigan: fetch failed: HTTP " + response.status);
-        return null;
-      }
-      const html = await response.text();
       const sites = parseHdnwHtml(html, nowIso);
       if (!sites || sites.length === 0) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: sites,
-        source: HDNW_URL,
-        sources: [HDNW_URL],
-        // Fallback only — every emitted site carries updated: its own sample
-        // date, which wins in scrapeOfficialFlagFromResult.
-        updated: nowIso
-      };
+      // result-level updated is a fallback only — every emitted site carries
+      // updated: its own sample date, which wins in
+      // scrapeOfficialFlagFromResult.
+      return perBeachResult(sites, HDNW_URL, nowIso);
     } catch (err) {
       console.log("hdnwMichigan: fetch failed: " + err.message);
       return null;
