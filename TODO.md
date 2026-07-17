@@ -5,6 +5,14 @@ of it is scoped for follow-up work.
 
 ## Data quality / coverage
 
+- **Pond filter covers unnamed park beaches only.** The discovery sync drops
+  unnamed park-contained beaches whose adjacent `natural=water` is all below
+  ~4.5 ha bbox (2026-07-17; real case: Hawthorn Pond Natural Area). NAMED
+  pond beaches (e.g. "Dukes Lake Beach"-style rows from the named-beach query)
+  are deliberately untouched — someone mapping a name is treated as intent —
+  and the named-beach query fetches no water context (`out center tags`, no
+  bb). If named pond beaches turn out to be noise too, extend the water fetch
+  to that query and apply the same `isPondBeach` test.
 - **Open-Meteo 429s on burst-fired marine batches.** `runFlagRecompute` fires all
   ~14 marine batches concurrently (`Promise.allSettled`); Open-Meteo weights a
   50-location call as ~50 calls, so a full pilot run bursts ~700+ weighted calls
@@ -133,6 +141,14 @@ of it is scoped for follow-up work.
   `ALERT:` line once a matched scraper has returned null for 24 consecutive hourly
   runs, but nothing pages a human — wiring the alert to email/push is a possible
   follow-up.
+- **Not every scraper implements empty-success yet.** The contract (PLAN.md)
+  now distinguishes "parsed cleanly, nothing to report" (empty `sites: []`
+  result, a health success) from `null` (genuine fetch/parse failure).
+  metroparks, hdnw-michigan, and michigan-city comply; the other scrapers
+  (wisconsin-dnr, bldhd, lenawee, south-haven, ohio-beachguard,
+  chicago-park-district) still return `null` when they parse fine but no site
+  survives their gates — rare in season, but off-season or stale-only data
+  would log a false failure streak. Migrate them the same way.
 
 ## Official-source coverage
 

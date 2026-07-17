@@ -291,7 +291,11 @@ night's NWS enrichment and webcam hydration entirely).
   overlapping park bbox and stored with that `park_name`; unnamed park beaches are
   kept one-per-park (the largest) and take the park's name, because most OSM
   mappers name the park polygon (Holland State Park) rather than the beach way
-  inside it. Results are upserted into D1. Each Overpass query gets a single
+  inside it. The park query also fetches `natural=water` within 60 m of each
+  candidate beach, and an unnamed beach whose nearby water is all pond-sized
+  (every overlapping water bbox < ~4.5 ha) is dropped — this keeps tiny pond
+  patches inside named natural areas from becoming beach rows, while a beach
+  with no water mapped nearby is always kept. Results are upserted into D1. Each Overpass query gets a single
   delayed retry (60 s) on failure; if the named-beaches query fails twice the sync
   aborts (existing data kept), and if only the park query fails twice the sync
   degrades to named beaches only with existing `park_name` values left untouched.
@@ -404,7 +408,11 @@ The hourly cron tracks every matched scraper's consecutive-null streak in KV
 scraper that has matched beaches returns null for 24 consecutive hourly runs
 (~24 h quiet), the cron logs a LOUD `ALERT:` line naming the scraper and its
 last success, so a silently-broken source page surfaces in the logs instead of
-just going dark.
+just going dark. Only `null` counts as a failure: a scrape that fetched and
+parsed cleanly but had nothing to report — a closure-only source (e.g.
+Metroparks) with every beach Open — returns an empty result (shape (b) with
+`sites: []`), which is a SUCCESS and resets the streak. A working source with
+nothing to report must never return null, or it would raise a false alert.
 
 ## How to add a new official-source scraper
 
@@ -429,8 +437,14 @@ just going dark.
            //     names: ["lowercase substrings"], lat, lon, radiusMi,
            //     updated /* optional ISO; overrides result updated */ }],
            //     source: url, sources: [url], updated: nowIso }
-           // or null on any fetch/parse failure. NEVER throw, NEVER guess a
-           // color — omit ambiguous sites instead.
+           // Return null ONLY on genuine failure (fetch failed, page
+           // unparseable, parse threw) — null is what the health tracker
+           // counts as a failure. A clean parse with nothing to report (every
+           // beach Open on a closure-only source) is a SUCCESS: return an
+           // empty shape (b) result (`sites: []`), NEVER null. An empty sites
+           // list resolves to no site for every beach (no KV written) and so
+           // flows through harmlessly. NEVER throw, NEVER guess a color — omit
+           // ambiguous sites instead.
            // updated honesty: only real-time sources may stamp nowIso.
            // Periodic sources (water sampling, weekly reports) must stamp
            // the source's own report/sample date — result-level when the

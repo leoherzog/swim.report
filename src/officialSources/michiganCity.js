@@ -59,11 +59,13 @@ function bacteriaColorFor(value) {
 
 // Pure. html string -> { dateLabel, isoDate } | null. Parses the prose
 // "The bacteria levels reported for {Weekday}, {Month} {Day}{suffix},
-// {Year}." line. Returns null on any drift from that exact phrasing
-// (abbreviated month, missing comma, etc.) rather than guessing.
+// {Year}." line. The ordinal suffix is optional: the page hand-writes both
+// "July 15" and "July 15th" forms depending on who typed it that week.
+// Returns null on any drift from that phrasing (abbreviated month, missing
+// comma, etc.) rather than guessing.
 function parseReadingDate(html) {
   const match =
-    /The bacteria levels reported for ([A-Za-z]+), ([A-Za-z]+) (\d{1,2})(st|nd|rd|th), (\d{4})\./
+    /The bacteria levels reported for ([A-Za-z]+), ([A-Za-z]+) (\d{1,2})(st|nd|rd|th)?, (\d{4})\./
       .exec(html);
   if (!match) {
     return null;
@@ -71,7 +73,9 @@ function parseReadingDate(html) {
   const weekday = match[1];
   const monthName = match[2];
   const day = parseInt(match[3], 10);
-  const suffix = match[4];
+  // Absent on the no-suffix form; normalize to "" so the label never emits
+  // the literal string "undefined".
+  const suffix = match[4] || "";
   const year = parseInt(match[5], 10);
   const monthIndex = MONTH_NAMES.indexOf(monthName.toLowerCase());
   if (monthIndex === -1 || isNaN(day) || isNaN(year)) {

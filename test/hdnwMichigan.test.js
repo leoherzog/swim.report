@@ -105,12 +105,15 @@ describe("parseHdnwHtml defensive skipping", function() {
     expect(sites[0].siteId).toBe("middle village");
   });
 
-  it("skips a stale row older than 8 days relative to nowIso", function() {
+  it("returns an empty array (not null) when the only row is stale", function() {
     const html = tableHtml([
       dataRow("06/29/26", "Charlevoix", "Thumb Lake Beach", "7.3", "1")
     ]);
     // 06/29 -> 07/15 is 16 days; the only row is stale, so nothing survives.
-    expect(parseHdnwHtml(html, "2026-07-15T12:00:00.000Z")).toBe(null);
+    // The table parsed fine and rows were iterated, so this is a successful
+    // parse with nothing current to report -> [], NOT a failure (null). This is
+    // the seasonal steady state once sampling pauses.
+    expect(parseHdnwHtml(html, "2026-07-15T12:00:00.000Z")).toEqual([]);
   });
 
   it("keeps a fresh row on the 8-day boundary", function() {
@@ -185,11 +188,13 @@ describe("parseHdnwHtml future-date guard", function() {
     expect(site.reason.indexOf("07/04/26")).not.toBe(-1);
   });
 
-  it("drops a lone future-dated row entirely (returns null)", function() {
+  it("drops a lone future-dated row entirely (returns an empty array)", function() {
     const html = tableHtml([
       dataRow("07/20/26", "Emmet", "Zorn Park", "2.0", "1")
     ]);
-    expect(parseHdnwHtml(html, NOW)).toBe(null);
+    // Table and row parsed, but the row is future-dated and dropped -> a
+    // successful parse with nothing to report, not a failure.
+    expect(parseHdnwHtml(html, NOW)).toEqual([]);
   });
 });
 
@@ -224,6 +229,9 @@ describe("hdnwMichigan Oden vs Wooden Shoe Park resolution", function() {
 });
 
 describe("parseHdnwHtml empty/garbage", function() {
+  // null is reserved for a parse that could not proceed (page-shape failure);
+  // the health tracker counts it as a failure. A successful parse with nothing
+  // current to report returns an empty array instead (see below).
   it("returns null for empty, null, or non-table input", function() {
     expect(parseHdnwHtml("", NOW)).toBe(null);
     expect(parseHdnwHtml(null, NOW)).toBe(null);
@@ -237,9 +245,12 @@ describe("parseHdnwHtml empty/garbage", function() {
     expect(parseHdnwHtml(html, "not-a-date")).toBe(null);
   });
 
-  it("returns null when the table has only a header and no valid data rows", function() {
+  it("returns an empty array (not null) when the table has only a header and no valid data rows", function() {
+    // The <table> and its header <tr> are found and iterated — the parse
+    // succeeded — but the header row carries no valid sample, so nothing
+    // survives. That is empty-success ([]), not a page-shape failure (null).
     const html = "<table>\n" + HEADER_ROW + "\n</table>";
-    expect(parseHdnwHtml(html, NOW)).toBe(null);
+    expect(parseHdnwHtml(html, NOW)).toEqual([]);
   });
 });
 

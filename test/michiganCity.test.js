@@ -46,6 +46,26 @@ describe("parseMichiganCityHtml", function() {
     expect(stop7.names).toContain("beachwalk");
   });
 
+  it("parses the no-suffix date form the page also uses (\"July 15\", not \"July 15th\")", function() {
+    // The bulletin is hand-typed weekly; some weeks the ordinal suffix is
+    // dropped ("Wednesday, July 15, 2026." verbatim from the live page). The
+    // label must reproduce that wording exactly -- never emit "undefined"
+    // where the suffix would be.
+    const noSuffixSentence = "The bacteria levels reported for Wednesday, July 15, 2026.";
+    const nowIso = "2026-07-17T15:45:00.000Z";
+    const html = buildFixtureHtml(noSuffixSentence, "43.6", "14.1");
+    const result = parseMichiganCityHtml(html, nowIso);
+    expect(result).not.toBe(null);
+    expect(result.updated).toBe("2026-07-15T12:00:00.000Z");
+    expect(result.sites.length).toBe(2);
+    const wp = result.sites.find(function(s) { return s.siteId === "washington-park-beach"; });
+    const stop7 = result.sites.find(function(s) { return s.siteId === "stop-7-beachwalk"; });
+    expect(wp.color).toBe("green");
+    expect(stop7.color).toBe("green");
+    expect(wp.reason.indexOf("Wednesday, July 15, 2026") !== -1).toBe(true);
+    expect(wp.reason.indexOf("undefined") === -1).toBe(true);
+  });
+
   it("maps a value in the advisory band (236-999) to yellow", function() {
     const html = buildFixtureHtml(FRESH_DATE_SENTENCE, "450.0", "12.0");
     const result = parseMichiganCityHtml(html, NOW_ISO);
@@ -145,8 +165,12 @@ describe("parseMichiganCityHtml", function() {
   });
 
   it("returns null when the date sentence drifts from the expected phrasing", function() {
+    // An abbreviated month ("Jul") is real drift the strict gate must still
+    // reject -- distinct from the merely-optional ordinal suffix. The full
+    // month name is required so a malformed line degrades to null, never a
+    // guessed date.
     const html = buildFixtureHtml(
-      "The bacteria levels reported for Thu, July 2, 2026.",
+      "The bacteria levels reported for Thursday, Jul 2, 2026.",
       "6.3", "12.0"
     );
     expect(parseMichiganCityHtml(html, NOW_ISO)).toBe(null);

@@ -5,7 +5,7 @@
 // src/frontend/render.js.
 
 import { describe, it, expect } from "vitest";
-import { parseParkBeachElements, associateParkForBeach } from "../src/clients/overpass.js";
+import { parseParkBeachElements, associateParkForBeach, isPondBeach, WATER_MIN_AREA_DEG2 } from "../src/clients/overpass.js";
 import { mergeBeachRows } from "../src/index.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
 
@@ -72,6 +72,81 @@ describe("parseParkBeachElements", () => {
     ]);
     expect(parsed.beaches.length).toBe(1);
     expect(parsed.parks.length).toBe(0);
+  });
+
+  it("collects natural=water elements as waters with bbox areas", () => {
+    const parsed = parseParkBeachElements([
+      { type: "way", id: 1, tags: { natural: "water", name: "Hawthorn Pond" },
+        bounds: bounds(42.7776, -86.0273, 42.7793, -86.0258) },
+      { type: "relation", id: 2, tags: { natural: "water", water: "lake", name: "Lake Michigan" },
+        bounds: bounds(41.6, -87.9, 46.1, -84.7) }
+    ]);
+    expect(parsed.waters.length).toBe(2);
+    expect(parsed.beaches.length).toBe(0);
+    expect(parsed.parks.length).toBe(0);
+    expect(parsed.waters[0].areaDeg2).toBeGreaterThan(0);
+  });
+
+  it("classifies a named park-tagged lake as a park, not water", () => {
+    // A named protected lake must keep donating its name to contained beaches;
+    // losing its water role only errs toward keeping a beach.
+    const parsed = parseParkBeachElements([
+      { type: "way", id: 1, tags: { natural: "water", boundary: "protected_area", name: "Hawthorn Pond Natural Area" },
+        bounds: bounds(42.776, -86.028, 42.781, -86.018) }
+    ]);
+    expect(parsed.parks.length).toBe(1);
+    expect(parsed.waters.length).toBe(0);
+  });
+});
+
+describe("isPondBeach", () => {
+  // Real case: way/161131900, a ~5 m x 6 m unnamed beach on Hawthorn Pond
+  // (bbox ~2.5e-6 deg², well under the threshold).
+  const pondBeach = {
+    bounds: { minLat: 42.7792907, minLon: -86.0260356, maxLat: 42.7793370, maxLon: -86.0259587 }
+  };
+  const pond = {
+    bounds: { minLat: 42.7776573, minLon: -86.0273107, maxLat: 42.7792911, maxLon: -86.0258057 },
+    areaDeg2: 0.00000246
+  };
+  const lake = {
+    bounds: { minLat: 42.7, minLon: -86.3, maxLat: 43.0, maxLon: -86.0 },
+    areaDeg2: 0.09
+  };
+
+  it("is true when every adjacent water body is pond-sized", () => {
+    expect(isPondBeach(pondBeach, [pond])).toBe(true);
+  });
+
+  it("is false when any adjacent water body is large enough", () => {
+    expect(isPondBeach(pondBeach, [pond, lake])).toBe(false);
+  });
+
+  it("is false when no water is mapped nearby (missing data never drops)", () => {
+    expect(isPondBeach(pondBeach, [])).toBe(false);
+    // A large lake far outside the padded bbox is not "nearby" either.
+    const farLake = {
+      bounds: { minLat: 45.0, minLon: -85.0, maxLat: 45.5, maxLon: -84.5 },
+      areaDeg2: 0.25
+    };
+    expect(isPondBeach(pondBeach, [farLake])).toBe(false);
+  });
+
+  it("matches water through the ~100 m bbox padding", () => {
+    // Water bbox stops ~0.0005 deg short of the beach bbox — still adjacent.
+    const nearbySmall = {
+      bounds: { minLat: 42.7794, minLon: -86.0259, maxLat: 42.7797, maxLon: -86.0255 },
+      areaDeg2: WATER_MIN_AREA_DEG2 / 10
+    };
+    expect(isPondBeach(pondBeach, [nearbySmall])).toBe(true);
+  });
+
+  it("treats water at exactly the threshold as large enough", () => {
+    const atThreshold = {
+      bounds: pond.bounds,
+      areaDeg2: WATER_MIN_AREA_DEG2
+    };
+    expect(isPondBeach(pondBeach, [atThreshold])).toBe(false);
   });
 });
 

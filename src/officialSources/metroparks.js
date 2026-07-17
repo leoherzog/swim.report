@@ -5,6 +5,14 @@
 // red (beach access closed); "Open" is NOT an affirmative water-quality
 // all-clear, so it is simply omitted (no site, no green).
 //
+// Empty-success semantics: a scrape that fetches and parses the page cleanly
+// but finds every beach Open has nothing to report, so scrape() returns an
+// empty perBeachResult ([] sites) — a SUCCESSFUL run for scraper-health
+// purposes, not a failure. null is reserved strictly for real failures (fetch
+// failed, neither panel found, parse threw). This matters because all four
+// beaches are Open most of the season; without it a perfectly working
+// closure-only source would log a permanent consecutive-null "failure" streak.
+//
 // scrape() runs cron-side only; parseMetroparksHtml is pure and exported for
 // tests. Parsing is scoped STRICTLY to the id="KensingtonMetropark" and
 // id="StonyCreekMetropark" accordion panels — the page has ~40 other
@@ -187,7 +195,12 @@ export const metroparks = {
     }
     try {
       const sites = parseMetroparksHtml(html);
-      if (!sites || sites.length === 0) {
+      // null means a real parse failure (neither panel found / bad input) and
+      // must surface as a failure. An empty array means the page parsed cleanly
+      // with every beach Open — a successful scrape with nothing to report, so
+      // it flows through as an empty perBeachResult (resolves to no site for
+      // every beach, writes no official KV) and counts as a health success.
+      if (sites === null) {
         return null;
       }
       return perBeachResult(sites, METROPARKS_URL, nowIso);

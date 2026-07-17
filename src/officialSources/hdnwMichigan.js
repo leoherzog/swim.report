@@ -15,6 +15,14 @@
 // Product safety: any row that does not parse cleanly and completely is
 // SKIPPED, never guessed. A row older than STALE_MAX_DAYS relative to nowIso is
 // dropped as stale rather than presented as current.
+//
+// Empty-success semantics: null means the parse FAILED (bad input, no <table>,
+// no rows, unparseable nowIso) — the page may have changed shape and the health
+// tracker should count it as a failure. A successful parse that finds the table
+// and iterates rows but has nothing current to report (every sample stale,
+// future-dated, unknown-named, or bad-WQI) returns an EMPTY sites array, which
+// scrape() forwards as perBeachResult([], ...) — a healthy scrape with no data,
+// NOT a failure. This is the seasonal steady state once sampling pauses.
 
 import { fetchText, perBeachResult, ageDays } from "./util.js";
 
@@ -157,8 +165,12 @@ function normalizeBeachName(raw) {
 // Parses the first table on the page, keeps only rows that parse cleanly, map to
 // a known curated beach, carry a valid WQI (1-4), and are not stale. When a beach
 // has several rows (e.g. an elevated reading plus a "(Follow up)" retest) the
-// MOST RECENT sample wins. Returns null on empty/garbage input or when no site
-// survives.
+// MOST RECENT sample wins.
+// Returns null only when the parse could not proceed: empty/garbage input, no
+// <table>, no <tr> rows, or an unparseable nowIso (page-shape failure). When the
+// table and rows are found and iterated but no site survives the gates (stale,
+// future-dated, unknown name, bad WQI), returns an EMPTY array — a successful
+// parse with nothing current to report, not a failure.
 export function parseHdnwHtml(html, nowIso) {
   if (!html || typeof html !== "string") {
     return null;
@@ -266,9 +278,10 @@ export function parseHdnwHtml(html, nowIso) {
     sites.push(site);
   }
 
-  if (sites.length === 0) {
-    return null;
-  }
+  // Zero survivors is a SUCCESSFUL parse with nothing current to report (the
+  // table and rows were found and iterated, but every sample was stale,
+  // future-dated, unknown-named, or bad-WQI). Return the empty array, not null:
+  // null is reserved for a parse that could not proceed (page-shape failure).
   return sites;
 }
 
@@ -300,7 +313,11 @@ export const hdnwMichigan = {
     }
     try {
       const sites = parseHdnwHtml(html, nowIso);
-      if (!sites || sites.length === 0) {
+      // null is a parse failure (page may have changed) -> null. An empty array
+      // is a healthy parse with nothing current to report (seasonal steady state
+      // once sampling pauses) -> perBeachResult([], ...), NOT a failure. A
+      // non-empty array carries the resolved sites unchanged.
+      if (sites === null) {
         return null;
       }
       // result-level updated is a fallback only — every emitted site carries

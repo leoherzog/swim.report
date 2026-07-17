@@ -654,13 +654,27 @@ entirely when it is unset.
       //     way/relation["boundary"="protected_area"]["name"](bbox); )->.parks;
       //   .parks map_to_area->.pa;
       //   nwr["natural"="beach"](area.pa)(bbox)->.b;
+      //   ( way["natural"="water"](around.b:60);
+      //     relation["natural"="water"](around.b:60); )->.water;
       //   .b out tags bb;
       //   .parks out tags bb;
+      //   .water out tags bb;
       // All three park tag filters are REQUIRED (verified: Van Buren State Park MI
       // is nature_reserve + protected_area, not leisure=park). Association happens
       // locally, NOT via Overpass is_in (is_in only accepts nodes) and NEVER via
       // name-based area lookup (name collisions across states: Silver Lake State
       // Park exists in MI, NH, and VT).
+      // POND FILTER: an UNNAMED beach is dropped before park association when
+      // isPondBeach(beach, waters) — at least one natural=water bbox overlaps its
+      // bbox padded by 0.001 deg (~100 m) AND every overlapping water bbox is
+      // smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈ 4.5 ha at MI latitudes;
+      // real case: Hawthorn Pond Natural Area's 32 m² beach on a ~2 ha pond
+      // became a full row). Beach size itself is NOT a usable signal — sub-100 m²
+      // unnamed slivers verified on Lake Erie / Torch Lake / Mullett Lake.
+      // Beaches with NO mapped water nearby are KEPT (missing data never drops);
+      // NAMED beaches are never filtered (they also arrive via fetchBeaches).
+      // Rows already in D1 for now-filtered beaches drain via the section-7
+      // reconciliation pass (name = park_name rows no longer produced).
       // Return: array of { osmType, osmId, name: string|null, locality: string|null,
       //                    lat, lon, areaDeg2: number (beach bbox area, ranking only),
       //                    parkName: string|null, parkKey: "relation/8550215"|null }
@@ -671,10 +685,17 @@ entirely when it is unset.
       // Never substitutes for name. Failure -> null.
 
     export function parseParkBeachElements(elements)
-      // Pure, exported for tests. Raw Overpass elements -> { beaches, parks }.
+      // Pure, exported for tests. Raw Overpass elements -> { beaches, parks, waters }.
       // Element with natural=beach -> beach (even when also park-tagged), carrying
       // its optional locality (loc_name tag); named element with a park tag ->
-      // park; no usable coords -> skipped.
+      // park (checked BEFORE water so a named protected lake keeps donating its
+      // name — losing its water role only errs toward keeping a beach); remaining
+      // natural=water -> waters ({ bounds, areaDeg2 }); no usable coords -> skipped.
+
+    export function isPondBeach(beach, waters)  // + export const WATER_MIN_AREA_DEG2
+      // Pure, exported for tests. True iff >= 1 water bbox overlaps the beach
+      // bbox padded by 0.001 deg AND all overlapping water bboxes are below
+      // WATER_MIN_AREA_DEG2. Empty/absent nearby water -> false.
 
     // runQuery internal note: an HTTP-200 Overpass body carrying a non-empty
     // "remark" field is a server-side timeout that TRUNCATED the elements array;
@@ -806,7 +827,16 @@ wrapper). No Date.now(), no ambient clock.
       url: "https://...",                // page scraped; goes into source/sources
       matches: function(beach) { ... },  // BeachRow -> boolean, pure
       scrape: async function(nowIso) { ... }
-      // -> result | null on any failure or unparseable page. Result is EITHER:
+      // -> result | null. null is FAILURE-ONLY: a fetch failure, an unparseable
+      // page, or a parse that threw. A scrape that fetched and parsed cleanly
+      // but has nothing to report (e.g. a closure-only source with every beach
+      // Open) is a SUCCESS, not a failure — it returns an empty result (shape
+      // (b) with sites: []), never null. The health tracker (section 7 step 8)
+      // treats result !== null as success, so a working source with nothing to
+      // report must NOT return null or it logs a permanent false failure streak.
+      // An empty sites[] resolves to no site for every beach (no official KV
+      // written), so it flows through scrapeOfficialFlagFromResult harmlessly.
+      // Result is EITHER:
       //
       // (a) legacy single-color — applied to EVERY matched beach:
       //   { color, reason, official: true, scraperId: id, source: url,
@@ -1072,9 +1102,13 @@ still needs real pagination (TODO.md).
    lastFailure } written with NO expirationTtl (the streak must survive across
    runs). Delegate the decision to the pure helper
    updateScraperHealth(scraperId, prev, succeeded, nowIso) -> { next, alert }
-   in src/scraperHealth.js: on a usable result reset consecutiveNulls to 0 and
-   stamp lastSuccess = nowIso; on a null result increment consecutiveNulls and
-   stamp lastFailure = nowIso. When consecutiveNulls reaches
+   in src/scraperHealth.js, with succeeded = (result !== null): on any non-null
+   result reset consecutiveNulls to 0 and stamp lastSuccess = nowIso; on a null
+   result increment consecutiveNulls and stamp lastFailure = nowIso. An EMPTY
+   result (shape (b) with sites: []) is a non-null result and so counts as a
+   SUCCESS — a closure-only source reporting every beach Open is healthy, not
+   failing. null is reserved for genuine failure (fetch/parse), so only genuine
+   failure ever accrues a streak. When consecutiveNulls reaches
    SCRAPER_HEALTH_ALERT_THRESHOLD (24, i.e. >= ~24h quiet) the helper returns a
    LOUD alert string logged once per run:
    "ALERT: official scraper <id> has returned null for <n> consecutive hourly

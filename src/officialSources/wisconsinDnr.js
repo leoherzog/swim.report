@@ -208,7 +208,10 @@ export const wisconsinDnr = {
     const text = await fetchText(WISCONSIN_DNR_URL, {
       headers: { "User-Agent": WISCONSIN_DNR_USER_AGENT },
       logPrefix: "wisconsinDnr: fetch failed",
-      timeoutMs: 45000
+      // The DNR ArcGIS layer's TTFB is routinely 20-24s with spikes past 30s;
+      // 60s keeps headroom so an ordinary slow spell doesn't abort into a
+      // false health failure. A genuinely hung upstream still aborts here.
+      timeoutMs: 60000
     });
     if (text === null) {
       return null;

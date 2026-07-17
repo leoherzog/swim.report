@@ -566,6 +566,14 @@ describe("scrapeOfficialFlagFromResult", function() {
   it("returns null for a null result", function() {
     expect(scrapeOfficialFlagFromResult(V2_BEACH, fakeScraper, null)).toBe(null);
   });
+
+  it("returns null (harmlessly, no throw) for an empty-sites perBeachResult", function() {
+    // A closure-only source (e.g. Metroparks) that parsed cleanly but has
+    // nothing to report emits an empty perBeachResult. It must resolve to no
+    // official flag for any beach without throwing — the empty-success path.
+    const result = multiSiteResult([]);
+    expect(scrapeOfficialFlagFromResult(V2_BEACH, fakeScraper, result)).toBe(null);
+  });
 });
 
 describe("scrapeOfficialFlag (dual-shape via registry)", function() {

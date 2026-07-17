@@ -1,7 +1,8 @@
 // test/metroparks.test.js
 import { describe, it, expect } from "vitest";
-import { parseMetroparksHtml, metroparks } from "../src/officialSources/metroparks.js";
-import { resolveSiteForBeach } from "../src/officialSources/index.js";
+import { parseMetroparksHtml, metroparks, METROPARKS_URL } from "../src/officialSources/metroparks.js";
+import { resolveSiteForBeach, scrapeOfficialFlagFromResult } from "../src/officialSources/index.js";
+import { perBeachResult } from "../src/officialSources/util.js";
 import { makeBeach } from "./helpers/beach.js";
 
 // Trimmed fixture mirroring the real vc_tta accordion structure: several
@@ -110,6 +111,23 @@ describe("parseMetroparksHtml", function() {
       "</div></div>";
     const sites = parseMetroparksHtml(fixture);
     expect(sites).toEqual([]);
+
+    // Empty-success flow: the all-Open [] is wrapped in an empty perBeachResult
+    // (a SUCCESSFUL scrape with nothing to report, so scrape() returns this,
+    // never null). It must resolve to no official flag for every metropark
+    // beach without throwing, writing no official KV.
+    const result = perBeachResult(sites, METROPARKS_URL, "2026-07-17T00:00:00.000Z");
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    const beaches = [
+      makeBeach({ name: "Martindale Beach", park_name: "Kensington Metropark", lat: 42.541, lon: -83.691 }),
+      makeBeach({ name: "Maple Beach", park_name: "Kensington Metropark", lat: 42.541, lon: -83.691 }),
+      makeBeach({ name: "Baypoint Beach", park_name: "Stony Creek Metropark", lat: 42.66, lon: -83.115 }),
+      makeBeach({ name: "Eastwood Beach", park_name: "Stony Creek Metropark", lat: 42.66, lon: -83.115 })
+    ];
+    for (let i = 0; i < beaches.length; i++) {
+      expect(scrapeOfficialFlagFromResult(beaches[i], metroparks, result)).toBe(null);
+    }
   });
 
   it("omits a beach whose status word is not a clean Open/Closed token", function() {

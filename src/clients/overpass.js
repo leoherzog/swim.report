@@ -116,8 +116,13 @@ function buildParkBeachQuery(bbox) {
     ")->.parks;\n" +
     ".parks map_to_area->.pa;\n" +
     "nwr[\"natural\"=\"beach\"](area.pa)" + bb + "->.b;\n" +
+    "(\n" +
+    "  way[\"natural\"=\"water\"](around.b:60);\n" +
+    "  relation[\"natural\"=\"water\"](around.b:60);\n" +
+    ")->.water;\n" +
     ".b out tags bb;\n" +
-    ".parks out tags bb;";
+    ".parks out tags bb;\n" +
+    ".water out tags bb;";
 }
 
 function elementBounds(element) {
@@ -143,13 +148,35 @@ function isParkTagged(tags) {
     tags.boundary === "protected_area";
 }
 
+// --- Pond filtering -------------------------------------------------------
+// The park-containment query keeps UNNAMED beaches, which sweeps in tiny sand
+// patches on ponds inside named parks (real case: Hawthorn Pond Natural Area,
+// Holland Twp MI — a 5 m x 6 m unnamed beach way on a ~180 m pond became a
+// full beach row named after the park). Beach size alone cannot separate these
+// from real beaches: verified against live data, sub-100 m² unnamed slivers
+// sit on Lake Erie, Torch Lake, and Mullett Lake. The separating signal is the
+// ADJACENT WATER BODY's size, so the query also fetches natural=water within
+// 60 m of every candidate beach and the client drops unnamed beaches whose
+// nearby water is ALL smaller than WATER_MIN_AREA_DEG2.
+//
+// ~5e-6 deg² ≈ 45,000 m² (~4.5 ha) bbox at Michigan latitudes — between the
+// classic pond/lake boundary and the smallest observed real swim lakes with
+// ~2x margin each way (Hawthorn Pond bbox ≈ 2.5e-6; Hawk Lake, the smallest
+// lake with a real township swim beach in the pilot bbox, ≈ 1.2e-5).
+export const WATER_MIN_AREA_DEG2 = 0.000005;
+
+// Beach bbox is padded by ~100 m when matching water bboxes so a beach that
+// stops short of the waterline still associates with its water body.
+const WATER_MATCH_PADDING_DEG = 0.001;
+
 // Pure; exported for tests. Splits raw Overpass elements (from the park-beach
-// query) into beach and park records. An element tagged both natural=beach
-// and park-ish is treated as a beach only. Elements without usable
-// coordinates are skipped.
+// query) into beach, park, and water records. An element tagged both
+// natural=beach and park-ish is treated as a beach only. Elements without
+// usable coordinates are skipped.
 export function parseParkBeachElements(elements) {
   const beaches = [];
   const parks = [];
+  const waters = [];
   for (let i = 0; i < elements.length; i++) {
     const element = elements[i];
     const tags = element.tags || {};
@@ -176,6 +203,9 @@ export function parseParkBeachElements(elements) {
         areaDeg2: bboxAreaDeg2(bounds)
       });
     } else if (tags.name && isParkTagged(tags)) {
+      // Before the water branch: a named protected lake (park tags +
+      // natural=water) must keep donating its name to contained beaches —
+      // losing its water role only errs toward KEEPING a beach.
       parks.push({
         osmType: element.type,
         osmId: element.id,
@@ -183,14 +213,44 @@ export function parseParkBeachElements(elements) {
         bounds: bounds,
         areaDeg2: bboxAreaDeg2(bounds)
       });
+    } else if (tags.natural === "water") {
+      waters.push({
+        bounds: bounds,
+        areaDeg2: bboxAreaDeg2(bounds)
+      });
     }
   }
-  return { beaches: beaches, parks: parks };
+  return { beaches: beaches, parks: parks, waters: waters };
 }
 
 function boundsOverlap(a, b) {
   return a.minLat <= b.maxLat && a.maxLat >= b.minLat &&
     a.minLon <= b.maxLon && a.maxLon >= b.minLon;
+}
+
+// Pure; exported for tests. True when the beach sits ONLY on pond-sized water:
+// at least one water bbox overlaps its (padded) bbox and every overlapping one
+// is smaller than WATER_MIN_AREA_DEG2. A beach with NO mapped water nearby
+// returns false — missing data must never drop a beach, only positive
+// evidence that all its water is tiny.
+export function isPondBeach(beach, waters) {
+  const padded = {
+    minLat: beach.bounds.minLat - WATER_MATCH_PADDING_DEG,
+    minLon: beach.bounds.minLon - WATER_MATCH_PADDING_DEG,
+    maxLat: beach.bounds.maxLat + WATER_MATCH_PADDING_DEG,
+    maxLon: beach.bounds.maxLon + WATER_MATCH_PADDING_DEG
+  };
+  let sawWater = false;
+  for (let i = 0; i < waters.length; i++) {
+    const water = waters[i];
+    if (boundsOverlap(padded, water.bounds)) {
+      if (water.areaDeg2 >= WATER_MIN_AREA_DEG2) {
+        return false;
+      }
+      sawWater = true;
+    }
+  }
+  return sawWater;
 }
 
 // Pure; exported for tests. Returns the smallest-bbox park whose bounding box
@@ -222,8 +282,16 @@ export async function fetchParkBeaches(bbox) {
   }
   const parsed = parseParkBeachElements(elements);
   const out = [];
+  let droppedPond = 0;
   for (let i = 0; i < parsed.beaches.length; i++) {
     const beach = parsed.beaches[i];
+    // Pond filter applies to UNNAMED beaches only: they become rows purely by
+    // park inference, so they need the water evidence. A beach someone named
+    // in OSM is kept regardless (it also arrives via the named-beach query).
+    if (beach.name === null && isPondBeach(beach, parsed.waters)) {
+      droppedPond = droppedPond + 1;
+      continue;
+    }
     const park = associateParkForBeach(beach, parsed.parks);
     out.push({
       osmType: beach.osmType,
@@ -236,6 +304,9 @@ export async function fetchParkBeaches(bbox) {
       parkName: park === null ? null : park.name,
       parkKey: park === null ? null : park.osmType + "/" + String(park.osmId)
     });
+  }
+  if (droppedPond > 0) {
+    console.log("overpass: park beaches dropped " + String(droppedPond) + " unnamed pond beaches");
   }
   return out;
 }
