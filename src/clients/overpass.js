@@ -118,7 +118,7 @@ function buildParkBeachQuery(bbox) {
     "nwr[\"natural\"=\"beach\"](area.pa)" + bb + "->.b;\n" +
     "(\n" +
     "  way[\"natural\"=\"water\"](around.b:60);\n" +
-    "  relation[\"natural\"=\"water\"](around.b:60);\n" +
+    "  way[\"natural\"=\"coastline\"](around.b:60);\n" +
     ")->.water;\n" +
     ".b out tags bb;\n" +
     ".parks out tags bb;\n" +
@@ -158,6 +158,17 @@ function isParkTagged(tags) {
 // ADJACENT WATER BODY's size, so the query also fetches natural=water within
 // 60 m of every candidate beach and the client drops unnamed beaches whose
 // nearby water is ALL smaller than WATER_MIN_AREA_DEG2.
+//
+// The water fetch is WAYS ONLY — around on natural=water RELATIONS forces the
+// server to load the Great Lakes multipolygons' full geometry and is
+// pathological (verified 2026-07-17: >10 min server-side vs 72 s without;
+// [timeout:180] would kill it nightly). Ponds are essentially always closed
+// ways, so way-water carries the entire pond signal. natural=coastline ways
+// are fetched as cheap positive large-water evidence so a Great Lakes
+// shorefront beach whose lake is relation-mapped still associates with big
+// water. Known residual exposure: a beach on a relation-mapped INLAND lake
+// whose only nearby way-water is a small pond would be wrongly dropped —
+// rare, and a beach with no nearby way-water at all is kept.
 //
 // ~5e-6 deg² ≈ 45,000 m² (~4.5 ha) bbox at Michigan latitudes — between the
 // classic pond/lake boundary and the smallest observed real swim lakes with
@@ -213,10 +224,14 @@ export function parseParkBeachElements(elements) {
         bounds: bounds,
         areaDeg2: bboxAreaDeg2(bounds)
       });
-    } else if (tags.natural === "water") {
+    } else if (tags.natural === "water" || tags.natural === "coastline") {
+      // A coastline way IS the shoreline of sea-sized water (the Great Lakes
+      // use coastline tagging), so it counts as large regardless of its own
+      // segment bbox.
       waters.push({
         bounds: bounds,
-        areaDeg2: bboxAreaDeg2(bounds)
+        areaDeg2: bboxAreaDeg2(bounds),
+        shoreline: tags.natural === "coastline"
       });
     }
   }
@@ -230,9 +245,10 @@ function boundsOverlap(a, b) {
 
 // Pure; exported for tests. True when the beach sits ONLY on pond-sized water:
 // at least one water bbox overlaps its (padded) bbox and every overlapping one
-// is smaller than WATER_MIN_AREA_DEG2. A beach with NO mapped water nearby
-// returns false — missing data must never drop a beach, only positive
-// evidence that all its water is tiny.
+// is smaller than WATER_MIN_AREA_DEG2 (a shoreline record — a coastline way —
+// always counts as large). A beach with NO mapped water nearby returns false —
+// missing data must never drop a beach, only positive evidence that all its
+// water is tiny.
 export function isPondBeach(beach, waters) {
   const padded = {
     minLat: beach.bounds.minLat - WATER_MATCH_PADDING_DEG,
@@ -244,7 +260,7 @@ export function isPondBeach(beach, waters) {
   for (let i = 0; i < waters.length; i++) {
     const water = waters[i];
     if (boundsOverlap(padded, water.bounds)) {
-      if (water.areaDeg2 >= WATER_MIN_AREA_DEG2) {
+      if (water.shoreline === true || water.areaDeg2 >= WATER_MIN_AREA_DEG2) {
         return false;
       }
       sawWater = true;

@@ -7,6 +7,7 @@
 
 import { PAGE_STYLES } from "./styles.js";
 import { LIST_SEARCH_SCRIPT } from "./searchScript.js";
+import { LIST_GEO_SCRIPT } from "./geoScript.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
@@ -437,16 +438,10 @@ export function renderListPage(data) {
     ("<wa-button class=\"search-all-btn\" type=\"submit\" form=\"beach-search-form\" " +
       "appearance=\"outlined\" size=\"small\">Search all beaches</wa-button>") : "";
 
-  const sortNoteHtml = data && data.sortedByProximity ?
-    ("<p class=\"list-sort-note wa-caption-s\">" +
-      "<wa-icon name=\"location-dot\"></wa-icon> " +
-      "Sorted by approximate distance to you, based on your network location.</p>") : "";
-
   const introHtml = "<section class=\"list-intro wa-stack wa-gap-xs\">" +
     "<h1>Swim Report</h1>" +
     "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags for pilot beaches across the " +
     "Great Lakes region.</p>" +
-    sortNoteHtml +
     "</section>";
 
   // The search box submits to the server (method GET, name=q) so results cover
@@ -482,7 +477,8 @@ export function renderListPage(data) {
 
   const mainHtml = introHtml + searchHtml + activeQueryHtml + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
-    "<script>" + LIST_SEARCH_SCRIPT + "</script>";
+    "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
+    "<script>" + LIST_GEO_SCRIPT + "</script>";
 
   return renderDocument("Swim Report", bodyHtml);
 }

@@ -74,17 +74,19 @@ describe("parseParkBeachElements", () => {
     expect(parsed.parks.length).toBe(0);
   });
 
-  it("collects natural=water elements as waters with bbox areas", () => {
+  it("collects natural=water and natural=coastline elements as waters", () => {
     const parsed = parseParkBeachElements([
       { type: "way", id: 1, tags: { natural: "water", name: "Hawthorn Pond" },
         bounds: bounds(42.7776, -86.0273, 42.7793, -86.0258) },
-      { type: "relation", id: 2, tags: { natural: "water", water: "lake", name: "Lake Michigan" },
-        bounds: bounds(41.6, -87.9, 46.1, -84.7) }
+      { type: "way", id: 2, tags: { natural: "coastline" },
+        bounds: bounds(43.04, -86.26, 43.06, -86.25) }
     ]);
     expect(parsed.waters.length).toBe(2);
     expect(parsed.beaches.length).toBe(0);
     expect(parsed.parks.length).toBe(0);
     expect(parsed.waters[0].areaDeg2).toBeGreaterThan(0);
+    expect(parsed.waters[0].shoreline).toBe(false);
+    expect(parsed.waters[1].shoreline).toBe(true);
   });
 
   it("classifies a named park-tagged lake as a park, not water", () => {
@@ -147,6 +149,18 @@ describe("isPondBeach", () => {
       areaDeg2: WATER_MIN_AREA_DEG2
     };
     expect(isPondBeach(pondBeach, [atThreshold])).toBe(false);
+  });
+
+  it("treats an overlapping coastline way as large water regardless of its bbox", () => {
+    // A short Great Lakes coastline segment can have a tiny bbox of its own;
+    // its presence still proves sea-sized water (relation-mapped lakes carry
+    // no way-water for around to find).
+    const shortCoastline = {
+      bounds: { minLat: 42.7790, minLon: -86.0262, maxLat: 42.7796, maxLon: -86.0258 },
+      areaDeg2: 0.00000024,
+      shoreline: true
+    };
+    expect(isPondBeach(pondBeach, [pond, shortCoastline])).toBe(false);
   });
 });
 

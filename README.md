@@ -291,11 +291,14 @@ night's NWS enrichment and webcam hydration entirely).
   overlapping park bbox and stored with that `park_name`; unnamed park beaches are
   kept one-per-park (the largest) and take the park's name, because most OSM
   mappers name the park polygon (Holland State Park) rather than the beach way
-  inside it. The park query also fetches `natural=water` within 60 m of each
-  candidate beach, and an unnamed beach whose nearby water is all pond-sized
-  (every overlapping water bbox < ~4.5 ha) is dropped — this keeps tiny pond
-  patches inside named natural areas from becoming beach rows, while a beach
-  with no water mapped nearby is always kept. Results are upserted into D1. Each Overpass query gets a single
+  inside it. The park query also fetches `natural=water` and `natural=coastline`
+  ways within 60 m of each candidate beach (ways only — proximity against water
+  relations would load the Great Lakes multipolygons and blow the query budget),
+  and an unnamed beach whose nearby water is all pond-sized (every overlapping
+  water bbox < ~4.5 ha, with coastline ways always counting as large) is
+  dropped — this keeps tiny pond patches inside named natural areas from
+  becoming beach rows, while a beach with no water mapped nearby is always
+  kept. Results are upserted into D1. Each Overpass query gets a single
   delayed retry (60 s) on failure; if the named-beaches query fails twice the sync
   aborts (existing data kept), and if only the park query fails twice the sync
   degrades to named beaches only with existing `park_name` values left untouched.

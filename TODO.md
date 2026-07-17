@@ -12,7 +12,13 @@ of it is scoped for follow-up work.
   are deliberately untouched — someone mapping a name is treated as intent —
   and the named-beach query fetches no water context (`out center tags`, no
   bb). If named pond beaches turn out to be noise too, extend the water fetch
-  to that query and apply the same `isPondBeach` test.
+  to that query and apply the same `isPondBeach` test. Known residual gap of
+  the ways-only water fetch (see PLAN.md §5): an unnamed beach on a
+  relation-mapped INLAND lake (no coastline tagging) whose only nearby
+  way-water is a small pond would be wrongly dropped — no confirmed real
+  instance yet; if one shows up, the fix is a cheap follow-up water-relation
+  membership probe, not reverting to `relation(around...)` (pathologically
+  slow, >10 min server-side).
 - **Open-Meteo 429s on burst-fired marine batches.** `runFlagRecompute` fires all
   ~14 marine batches concurrently (`Promise.allSettled`); Open-Meteo weights a
   50-location call as ~50 calls, so a full pilot run bursts ~700+ weighted calls

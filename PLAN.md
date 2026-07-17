@@ -655,7 +655,7 @@ entirely when it is unset.
       //   .parks map_to_area->.pa;
       //   nwr["natural"="beach"](area.pa)(bbox)->.b;
       //   ( way["natural"="water"](around.b:60);
-      //     relation["natural"="water"](around.b:60); )->.water;
+      //     way["natural"="coastline"](around.b:60); )->.water;
       //   .b out tags bb;
       //   .parks out tags bb;
       //   .water out tags bb;
@@ -665,12 +665,19 @@ entirely when it is unset.
       // name-based area lookup (name collisions across states: Silver Lake State
       // Park exists in MI, NH, and VT).
       // POND FILTER: an UNNAMED beach is dropped before park association when
-      // isPondBeach(beach, waters) — at least one natural=water bbox overlaps its
-      // bbox padded by 0.001 deg (~100 m) AND every overlapping water bbox is
+      // isPondBeach(beach, waters) — at least one water record overlaps its
+      // bbox padded by 0.001 deg (~100 m) AND every overlapping one is
       // smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈ 4.5 ha at MI latitudes;
       // real case: Hawthorn Pond Natural Area's 32 m² beach on a ~2 ha pond
       // became a full row). Beach size itself is NOT a usable signal — sub-100 m²
       // unnamed slivers verified on Lake Erie / Torch Lake / Mullett Lake.
+      // The water fetch is WAYS ONLY (+ natural=coastline ways as always-large
+      // shoreline evidence): around on water RELATIONS loads the Great Lakes
+      // multipolygons' full geometry and is pathological (verified 2026-07-17:
+      // >10 min server-side vs 72 s without — [timeout:180] would kill the
+      // query nightly). Ponds are essentially always closed ways, so way-water
+      // carries the whole pond signal; a beach on a relation-mapped lake sees
+      // either a coastline way (Great Lakes) or no nearby water (kept).
       // Beaches with NO mapped water nearby are KEPT (missing data never drops);
       // NAMED beaches are never filtered (they also arrive via fetchBeaches).
       // Rows already in D1 for now-filtered beaches drain via the section-7
@@ -690,12 +697,14 @@ entirely when it is unset.
       // its optional locality (loc_name tag); named element with a park tag ->
       // park (checked BEFORE water so a named protected lake keeps donating its
       // name — losing its water role only errs toward keeping a beach); remaining
-      // natural=water -> waters ({ bounds, areaDeg2 }); no usable coords -> skipped.
+      // natural=water or natural=coastline -> waters ({ bounds, areaDeg2,
+      // shoreline: bool — true for coastline }); no usable coords -> skipped.
 
     export function isPondBeach(beach, waters)  // + export const WATER_MIN_AREA_DEG2
-      // Pure, exported for tests. True iff >= 1 water bbox overlaps the beach
-      // bbox padded by 0.001 deg AND all overlapping water bboxes are below
-      // WATER_MIN_AREA_DEG2. Empty/absent nearby water -> false.
+      // Pure, exported for tests. True iff >= 1 water record overlaps the beach
+      // bbox padded by 0.001 deg AND all overlapping ones are below
+      // WATER_MIN_AREA_DEG2 (shoreline records always count as large).
+      // Empty/absent nearby water -> false.
 
     // runQuery internal note: an HTTP-200 Overpass body carrying a non-empty
     // "remark" field is a server-side timeout that TRUNCATED the elements array;
@@ -1400,12 +1409,23 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                 input so proximity sorting survives a search submit) }
       // -> full HTML document string.
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite
-      // or null renders nothing. sortedByProximity adds the "sorted by
-      // approximate distance" note to the intro. The search box is a GET form
+      // or null renders nothing. sortedByProximity is still accepted (the
+      // router passes it) but renders no visible note — the per-row distance
+      // labels carry the proximity signal on their own. The search box is a GET form
       // (id="beach-search-form", action="/", input name="q") that submits
       // server-side while the inline script keeps filtering rendered rows; a
       // q-filtered page with zero rows shows "No beaches match your search."
       // (not the empty-database copy).
+      // The page also embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a
+      // browser-side geolocation upgrade: on load, when the URL has no "near"
+      // param, it calls navigator.geolocation.getCurrentPosition and on success
+      // reloads via location.replace with "?near=lat,lon" (3-decimal rounding,
+      // ~110 m — matching the rough distance labels; other params like q are
+      // preserved), so the server-side proximity sort (section 8) upgrades from
+      // IP-derived request.cf coordinates to real browser location. No
+      // geolocation API, denied permission, or timeout silently keeps the
+      // IP-based ordering; an existing "near" param short-circuits the script,
+      // so the reload happens at most once and can never loop.
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
