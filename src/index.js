@@ -3,7 +3,9 @@ import { renderErrorPage } from "./frontend/render.js";
 import { distanceKm, toRadians } from "./geo.js";
 import { estimateFlag } from "./rules.js";
 import {
-  fetchActiveAlertEvents,
+  fetchAllActiveAlerts,
+  nwsAlertsForZone,
+  alertsUrlForZone,
   wfoFromGridUrl,
   fetchLatestSrfText,
   fetchPointMetadata
@@ -53,10 +55,6 @@ const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // way the NWS cap parks non-US points.
 const ECCC_ENRICHMENT_LIMIT = 50;
 const ECCC_ENRICHMENT_MAX_ATTEMPTS = 5;
-// Padding (degrees) around the Canadian beaches' bounding box for the single
-// hourly weather-alerts fetch — generous so an alert polygon merely touching
-// the box's edge is never clipped out of the intersect query.
-const ECCC_ALERTS_BBOX_PAD_DEG = 0.5;
 // Both Overpass queries must never run concurrently with each other (or another
 // sync invocation) -- overpass-api.de allows only 2 slots per IP and 429s beyond
 // that. A single delayed retry smooths over most transient 429s/timeouts without
@@ -196,7 +194,13 @@ async function runFlagRecompute(env) {
     ).all();
     const beaches = beachesResult.results || [];
 
-    // Step 3: alerts, once per distinct non-null nws_zone.
+    // Step 3: alerts — ONE national fetch, matched to the run's distinct
+    // nws_zone values locally (nwsAlertsForZone). Costs a single subrequest
+    // regardless of zone count, so nationwide scale-out never multiplies
+    // alert calls. A failed fetch maps every zone to null (per-beach
+    // alertsCheckable stays true, mirroring the old per-zone failure mode).
+    // Each zone's entry keeps the zone-scoped provenance URL for its beaches'
+    // source entries.
     const zones = Array.from(
       new Set(
         beaches
@@ -205,36 +209,42 @@ async function runFlagRecompute(env) {
       )
     );
     const alertsMap = new Map();
-    for (const zone of zones) {
+    if (zones.length > 0) {
+      let nationalAlerts = null;
       try {
-        const result = await fetchActiveAlertEvents(zone);
-        alertsMap.set(zone, result);
+        nationalAlerts = await fetchAllActiveAlerts();
       } catch (err) {
-        console.log("index: alerts fetch threw for zone " + zone + ": " + err.message);
-        alertsMap.set(zone, null);
+        console.log("index: nws alerts fetch threw: " + err.message);
+        nationalAlerts = null;
+      }
+      for (const zone of zones) {
+        if (nationalAlerts === null) {
+          alertsMap.set(zone, null);
+        } else {
+          const matched = nwsAlertsForZone(nationalAlerts.alerts, zone);
+          alertsMap.set(zone, {
+            events: matched.events,
+            details: matched.details,
+            sourceUrl: alertsUrlForZone(zone)
+          });
+        }
       }
     }
 
     // Step 3b: ECCC alerts for Canadian beaches (eccc_zone set by the ECCC
-    // enrichment cron; such rows always have nws_zone NULL). One bbox fetch
-    // over the Canadian rows' padded bounding box returns every active alert
-    // with its region polygon; per-beach matching is a local point-in-polygon
-    // (ecccAlertsForPoint) in step 7, so this costs a single subrequest
-    // regardless of beach count. null = fetch failed (Canadian beaches keep
-    // alertsCheckable true, mirroring a transient NWS alerts failure).
+    // enrichment cron; such rows always have nws_zone NULL). One national
+    // fetch returns every active alert with its region polygon; per-beach
+    // matching is a local point-in-polygon (ecccAlertsForPoint) in step 7, so
+    // this costs a single subrequest regardless of beach count. Skipped when
+    // the run has no Canadian rows. null = fetch failed (Canadian beaches
+    // keep alertsCheckable true, mirroring a transient NWS alerts failure).
     const ecccBeaches = beaches.filter(function (b) {
       return !b.nws_zone && b.eccc_zone;
     });
     let ecccAlerts = null;
     if (ecccBeaches.length > 0) {
-      const ecccBbox = {
-        minLon: Math.min.apply(null, ecccBeaches.map(function (b) { return b.lon; })) - ECCC_ALERTS_BBOX_PAD_DEG,
-        minLat: Math.min.apply(null, ecccBeaches.map(function (b) { return b.lat; })) - ECCC_ALERTS_BBOX_PAD_DEG,
-        maxLon: Math.max.apply(null, ecccBeaches.map(function (b) { return b.lon; })) + ECCC_ALERTS_BBOX_PAD_DEG,
-        maxLat: Math.max.apply(null, ecccBeaches.map(function (b) { return b.lat; })) + ECCC_ALERTS_BBOX_PAD_DEG
-      };
       try {
-        ecccAlerts = await fetchActiveEcccAlerts(ecccBbox, nowIso);
+        ecccAlerts = await fetchActiveEcccAlerts(nowIso);
       } catch (err) {
         console.log("index: eccc alerts fetch threw: " + err.message);
         ecccAlerts = null;

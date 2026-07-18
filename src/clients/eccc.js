@@ -4,7 +4,7 @@
 // beaches PILOT_BBOX sweeps in on the Ontario shoreline, which api.weather.gov
 // 404s forever. Two collections are used:
 //   - weather-alerts: active public alerts as GeoJSON features carrying the
-//     REAL alert-region polygons, so one bbox fetch per run plus local
+//     REAL alert-region polygons, so one national fetch per run plus local
 //     point-in-polygon replaces any per-beach or per-zone lookup.
 //   - public-standard-forecast-zones: per-point region lookup used by the
 //     enrichment cron to stamp beaches as Canadian (eccc_zone).
@@ -18,9 +18,11 @@ import { pointInGeometry } from "../geo.js";
 export const ECCC_API_BASE = "https://api.weather.gc.ca";
 // Human-readable alerts page for source { url } entries shown to visitors.
 export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
-// weather-alerts features per fetch; the national active set runs ~500, the
-// pilot-bbox subset far fewer, so one page always suffices.
-const ECCC_ALERTS_FETCH_LIMIT = 500;
+// weather-alerts features per fetch. The national active set runs ~500 in a
+// busy period, so 2000 leaves ample headroom for one page to always suffice
+// (pygeoapi clamps an over-max limit rather than erroring); a page that comes
+// back exactly full logs a truncation warning below.
+const ECCC_ALERTS_FETCH_LIMIT = 2000;
 // Half-width in degrees of the bbox used for the per-point forecast-zone
 // lookup. Zone polygons are forecast-region sized (thousands of km2), so a
 // ~1 km box behaves as a point-in-polygon test server-side; a US point
@@ -39,8 +41,10 @@ function pickIsoString(primary, fallback) {
   return null;
 }
 
-// Active public alerts intersecting bbox ({ minLon, minLat, maxLon, maxLat }).
-// nowIso drives the expiry filter — no Date.now() inside. Success ->
+// Every active public alert nationwide in ONE fetch (no bbox — the hourly
+// cron calls this once per run and matches beaches locally via
+// ecccAlertsForPoint). nowIso drives the expiry filter — no Date.now()
+// inside. Success ->
 //   { alerts: [{ event, onset, ends, geometry }], sourceUrl }
 // where event = properties.alert_name_en (ECCC serves lowercase names, e.g.
 // "severe thunderstorm warning"), onset = validity_datetime falling back to
@@ -50,17 +54,22 @@ function pickIsoString(primary, fallback) {
 // keeps rows briefly past expiry, so both are dropped here: status_en of
 // "ended", and a parseable expiration_datetime earlier than nowIso. Features
 // without a usable event name or geometry are skipped. Failure -> null.
-export async function fetchActiveEcccAlerts(bbox, nowIso) {
+export async function fetchActiveEcccAlerts(nowIso) {
   const url = ECCC_API_BASE + "/collections/weather-alerts/items?f=json" +
-    "&limit=" + String(ECCC_ALERTS_FETCH_LIMIT) +
-    "&bbox=" + String(bbox.minLon) + "," + String(bbox.minLat) +
-    "," + String(bbox.maxLon) + "," + String(bbox.maxLat);
-  const json = await fetchJson(url, { label: "eccc: alerts for bbox" });
+    "&limit=" + String(ECCC_ALERTS_FETCH_LIMIT);
+  const json = await fetchJson(url, { label: "eccc: active alerts" });
   if (json === null) {
     return null;
   }
   const nowMs = Date.parse(nowIso);
   const features = Array.isArray(json.features) ? json.features : [];
+  if (features.length >= ECCC_ALERTS_FETCH_LIMIT) {
+    console.log(
+      "eccc: alerts fetch returned " + String(features.length) +
+      " features at the " + String(ECCC_ALERTS_FETCH_LIMIT) +
+      " limit — result may be truncated"
+    );
+  }
   const alerts = [];
   for (const feature of features) {
     const props = feature && feature.properties ? feature.properties : null;

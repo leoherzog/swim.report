@@ -96,8 +96,8 @@ of it is scoped for follow-up work.
   is the fix.
 - **Canadian beaches: alerts supported, no rip/surf signal.** Ontario shoreline
   beaches now get Environment Canada alert coverage (ECCC zone enrichment cron +
-  the hourly GeoMet `weather-alerts` bbox fetch, `src/clients/eccc.js` — rules
-  step 1b). But ECCC issues no rip current / high surf / beach hazards product,
+  the hourly national GeoMet `weather-alerts` fetch matched per beach by
+  alert-region polygon, `src/clients/eccc.js` — rules step 1b). But ECCC issues no rip current / high surf / beach hazards product,
   so Canadian estimates lean entirely on the curated warning set plus
   wave/wind — there is no step-2 analog. Possible future refinements: the ECCC
   colour-coded tier (`risk_colour_en`, rolled out Nov 2025) as a severity
@@ -132,8 +132,10 @@ of it is scoped for follow-up work.
 - **Remaining hybrid-freshness follow-ups (agreed direction 2026-07-13, not yet
   built):** (1) a `*/10`-ish alerts-only cron — NWS alerts are the one event-driven
   input; a High Surf Warning issued at :05 currently waits up to 55 min for the
-  hourly recompute. One fetch per distinct `nws_zone` per run is a few dozen
-  subrequests. (2) Queue-based stale-refresh (request path enqueues, consumer
+  hourly recompute. Now that alerts are a single national fetch matched to beaches
+  locally, such a cron would cost just ONE `api.weather.gov/alerts/active` fetch per
+  run (plus one ECCC national fetch if Canadian beaches are included), regardless of
+  zone count. (2) Queue-based stale-refresh (request path enqueues, consumer
   fetches) only if flagless gaps show up in practice.
 - **Nationwide Overpass scale-out.** `runOverpassSync` currently syncs a single pilot
   bbox (`PILOT_BBOX`, Michigan / Great Lakes shoreline) once a day. Scaling to the
@@ -322,7 +324,7 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
 
 ## Free vs. paid Workers plan
 
-- The hourly `runFlagRecompute` cron's subrequest budget (~1550 subrequests/run for the
+- The hourly `runFlagRecompute` cron's subrequest budget (~1500 subrequests/run for the
   pilot region at `MAX_BEACHES_PER_RUN = 1000`, per PLAN.md section 7 — Ohio BeachGuard
   alone is 51 per-id GETs, and the wave-forecast feature adds up to ~613 `waves:` KV
   puts) assumes the

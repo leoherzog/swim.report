@@ -122,9 +122,7 @@ describe("fetchActiveEcccAlerts", function () {
       });
     });
 
-    const result = await fetchActiveEcccAlerts(
-      { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 }, NOW_ISO
-    );
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
     expect(result).not.toBeNull();
     expect(result.alerts.length).toBe(1);
     expect(result.alerts[0].event).toBe("severe thunderstorm warning");
@@ -135,7 +133,8 @@ describe("fetchActiveEcccAlerts", function () {
     expect(result.alerts[0].geometry.type).toBe("Polygon");
     expect(result.sourceUrl).toBe(requestedUrl);
     expect(requestedUrl).toContain("collections/weather-alerts/items");
-    expect(requestedUrl).toContain("bbox=-87.6,41.6,-82.3,46.6");
+    expect(requestedUrl).toContain("limit=2000");
+    expect(requestedUrl.indexOf("bbox=")).toBe(-1);
   });
 
   it("falls back to publication/expiration when validity/event-end are absent", async function () {
@@ -144,9 +143,7 @@ describe("fetchActiveEcccAlerts", function () {
         features: [alertFeature({ validity_datetime: null, event_end_datetime: null })]
       });
     });
-    const result = await fetchActiveEcccAlerts(
-      { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 }, NOW_ISO
-    );
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
     expect(result.alerts[0].onset).toBe("2026-07-18T10:55:00.000Z");
     expect(result.alerts[0].ends).toBe("2026-07-18T20:00:00.000Z");
   });
@@ -164,9 +161,7 @@ describe("fetchActiveEcccAlerts", function () {
         ]
       });
     });
-    const result = await fetchActiveEcccAlerts(
-      { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 }, NOW_ISO
-    );
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
     expect(result.alerts.map(function (a) { return a.event; })).toEqual(["squall warning"]);
   });
 
@@ -174,16 +169,12 @@ describe("fetchActiveEcccAlerts", function () {
     vi.stubGlobal("fetch", function () {
       return Promise.resolve({ ok: false, status: 500 });
     });
-    expect(await fetchActiveEcccAlerts(
-      { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 }, NOW_ISO
-    )).toBeNull();
+    expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
 
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network down"));
     });
-    expect(await fetchActiveEcccAlerts(
-      { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 }, NOW_ISO
-    )).toBeNull();
+    expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
   });
 });
 

@@ -8,7 +8,14 @@ import { fetchJson } from "./http.js";
 
 export const NWS_USER_AGENT = "swim.report (hello@swim.report)";
 
-function alertsUrlForZone(zoneId) {
+// The national active-alerts endpoint fetched once per hourly run; zone
+// matching happens locally in nwsAlertsForZone.
+export const NWS_ACTIVE_ALERTS_URL = "https://api.weather.gov/alerts/active";
+
+// Per-zone provenance URL for FlagEstimate source entries — no longer what
+// the cron fetches (that is NWS_ACTIVE_ALERTS_URL), but the zone-scoped view
+// is the more useful pointer for a given beach's payload.
+export function alertsUrlForZone(zoneId) {
   return "https://api.weather.gov/alerts/active?zone=" + zoneId;
 }
 
@@ -27,22 +34,51 @@ function fetchNwsJson(url, label) {
   });
 }
 
-export async function fetchActiveAlertEvents(zoneId) {
-  const url = alertsUrlForZone(zoneId);
-  const json = await fetchNwsJson(url, "alerts for " + zoneId);
+// Every zone id a single alert feature applies to, deduped: the UGC geocode
+// list (forecast zones "MIZ071" and county codes "MIC161" share it) merged
+// with the last path segment of each affectedZones URL. The two namespaces
+// never collide, and beach.nws_zone is always a forecast-zone id, so exact
+// membership here reproduces the old per-zone endpoint's matching.
+function alertZoneIds(props) {
+  const seen = {};
+  const zones = [];
+  const ugc = props.geocode && Array.isArray(props.geocode.UGC) ? props.geocode.UGC : [];
+  for (const code of ugc) {
+    if (typeof code === "string" && code.length > 0 && !seen[code]) {
+      seen[code] = true;
+      zones.push(code);
+    }
+  }
+  const affected = Array.isArray(props.affectedZones) ? props.affectedZones : [];
+  for (const zoneUrl of affected) {
+    if (typeof zoneUrl !== "string" || zoneUrl.length === 0) {
+      continue;
+    }
+    const segments = zoneUrl.split("/");
+    const code = segments[segments.length - 1];
+    if (code.length > 0 && !seen[code]) {
+      seen[code] = true;
+      zones.push(code);
+    }
+  }
+  return zones;
+}
+
+// Every active alert nationwide in ONE fetch (the hourly cron calls this once
+// per run regardless of zone count; per-zone filtering happens locally via
+// nwsAlertsForZone). Success ->
+//   { alerts: [{ event, onset, ends, zones: [zone ids] }], sourceUrl }
+// where onset/ends fall back onset -> effective / ends -> expires (null when
+// the feed omits both) and zones comes from alertZoneIds. Features without an
+// event name or with zero resolvable zone ids are skipped (a zoneless alert
+// could never match a beach). Failure -> null.
+export async function fetchAllActiveAlerts() {
+  const json = await fetchNwsJson(NWS_ACTIVE_ALERTS_URL, "all active alerts");
   if (json === null) {
     return null;
   }
   const features = Array.isArray(json.features) ? json.features : [];
-  const seen = {};
-  const events = [];
-  // details: one { event, onset, ends } per alert feature (onset/ends ISO
-  // strings, null when the feed omits them — falling back to effective/expires
-  // first). events stays the deduped name list the rules engine consumes;
-  // details keeps per-alert time periods for the detail page's hazard lane,
-  // deduped only on exact (event, onset, ends) repeats.
-  const seenDetails = {};
-  const details = [];
+  const alerts = [];
   for (let i = 0; i < features.length; i++) {
     const feature = features[i];
     const props = feature && feature.properties ? feature.properties : null;
@@ -50,19 +86,52 @@ export async function fetchActiveAlertEvents(zoneId) {
     if (!event) {
       continue;
     }
-    if (!seen[event]) {
-      seen[event] = true;
-      events.push(event);
+    const zones = alertZoneIds(props);
+    if (zones.length === 0) {
+      continue;
     }
-    const onset = pickIsoString(props.onset, props.effective);
-    const ends = pickIsoString(props.ends, props.expires);
-    const detailKey = event + "|" + String(onset) + "|" + String(ends);
+    alerts.push({
+      event: event,
+      onset: pickIsoString(props.onset, props.effective),
+      ends: pickIsoString(props.ends, props.expires),
+      zones: zones
+    });
+  }
+  return { alerts: alerts, sourceUrl: NWS_ACTIVE_ALERTS_URL };
+}
+
+// Pure, exported for tests — the NWS counterpart of ecccAlertsForPoint.
+// Filters a fetchAllActiveAlerts result's alerts down to those whose zones
+// include zoneId, in the per-zone result shape the rules engine and hazard
+// lane consume: { events: [deduped names], details: [{ event, onset, ends }] }
+// (details deduped only on exact (event, onset, ends) repeats). Malformed
+// input -> { events: [], details: [] }.
+export function nwsAlertsForZone(alerts, zoneId) {
+  const events = [];
+  const seen = {};
+  const details = [];
+  const seenDetails = {};
+  const list = Array.isArray(alerts) ? alerts : [];
+  for (const alert of list) {
+    if (alert === null || typeof alert !== "object" || typeof alert.event !== "string") {
+      continue;
+    }
+    if (!Array.isArray(alert.zones) || alert.zones.indexOf(zoneId) === -1) {
+      continue;
+    }
+    if (!seen[alert.event]) {
+      seen[alert.event] = true;
+      events.push(alert.event);
+    }
+    const onset = typeof alert.onset === "string" ? alert.onset : null;
+    const ends = typeof alert.ends === "string" ? alert.ends : null;
+    const detailKey = alert.event + "|" + String(onset) + "|" + String(ends);
     if (!seenDetails[detailKey]) {
       seenDetails[detailKey] = true;
-      details.push({ event: event, onset: onset, ends: ends });
+      details.push({ event: alert.event, onset: onset, ends: ends });
     }
   }
-  return { events: events, details: details, sourceUrl: url };
+  return { events: events, details: details };
 }
 
 // First non-empty string of the two candidates, else null (alert features

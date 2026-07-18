@@ -434,7 +434,7 @@ export function renderListPage(data) {
   // filter runs against the whole beaches table, not just the rendered rows.
   const searchAllHtml = offerSearchAll ?
     ("<wa-button class=\"search-all-btn\" type=\"submit\" form=\"beach-search-form\" " +
-      "appearance=\"outlined\" size=\"small\">Search all beaches</wa-button>") : "";
+      "appearance=\"outlined\" size=\"s\">Search all beaches</wa-button>") : "";
 
   const introHtml = "<section class=\"list-intro wa-stack wa-gap-xs\">" +
     "<h1>Swim Report</h1>" +

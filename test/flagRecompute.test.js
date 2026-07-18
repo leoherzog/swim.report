@@ -138,7 +138,11 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
                 properties: {
                   event: "Beach Hazards Statement",
                   onset: "2026-07-15T14:00:00Z",
-                  ends: "2026-07-16T06:00:00Z"
+                  ends: "2026-07-16T06:00:00Z",
+                  // National feed: the feature must self-identify its zones so
+                  // nwsAlertsForZone can match the beach's nws_zone "MIZ071".
+                  geocode: { UGC: ["MIZ071"] },
+                  affectedZones: ["https://api.weather.gov/zones/forecast/MIZ071"]
                 }
               }]
             });

@@ -182,7 +182,7 @@ Precedence is strict: the first matching rule wins, evaluated top to bottom.
 
 | # | Signal | Source | Condition | Color | Reason |
 |---|--------|--------|-----------|-------|--------|
-| 1 | Active NWS alert | `api.weather.gov/alerts/active?zone={nws_zone}` | Event = "High Surf Warning" | double-red | "Active NWS alert: High Surf Warning" |
+| 1 | Active NWS alert | `api.weather.gov/alerts/active` (matched by `nws_zone`) | Event = "High Surf Warning" | double-red | "Active NWS alert: High Surf Warning" |
 | 1 | Active NWS alert | same | Event = "Beach Hazards Statement" | red | "Active NWS alert: Beach Hazards Statement" |
 | 1 | Active NWS alert | same | Event = "High Surf Advisory" | red | "Active NWS alert: High Surf Advisory" |
 | 1 | Active NWS alert | same | Event = "Rip Current Statement" | red | "Active NWS alert: Rip Current Statement" |
@@ -307,9 +307,12 @@ night's NWS enrichment and webcam hydration entirely).
 - `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
   the whole pilot table every run, so no flag ever outlives its 2 h KV TTL waiting
-  for a rotation turn), fetches NWS alerts/SRF, Environment Canada alerts (one
-  GeoMet `weather-alerts` bbox fetch covering every `eccc_zone` beach, matched
-  per beach by alert-region polygon containment), and Open-Meteo wave/wind data, runs
+  for a rotation turn), fetches alerts, SRF, and Open-Meteo wave/wind data. Both
+  alert authorities are fetched nationally once per run and matched to beaches
+  locally — one `api.weather.gov/alerts/active` fetch matched by `nws_zone`, and one
+  GeoMet `weather-alerts` fetch matched per beach by alert-region polygon
+  containment (for every `eccc_zone` beach) — so alert cost stays flat no matter how
+  many zones or beaches a run covers. It runs
   them through `estimateFlag`, runs the official-source scrapers (once per distinct
   matched scraper, resolved per beach, with KV-backed health monitoring), and
   writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second

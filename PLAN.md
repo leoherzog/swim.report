@@ -378,8 +378,8 @@ Pure module. No fetch, no Date, no env. Exports:
                                         // US beaches, ECCC alert_name_en for Canadian
                                         // ones — one authority per beach), [] if fetch OK
                                         // but no alerts, or null if the alerts fetch failed
-      alertDetails: [                   // per-alert details from fetchActiveAlertEvents
-        { event: "Rip Current Statement",  // (section 5): onset/ends ISO strings or null.
+      alertDetails: [                   // per-alert details from nwsAlertsForZone /
+        { event: "Rip Current Statement",  // ecccAlertsForPoint (section 5): onset/ends ISO strings or null.
           onset: "2026-07-04T10:00:00.000Z",  // Echoed (sanitized) into the output's
           ends: "2026-07-05T02:00:00.000Z" }  // alertDetails; never affects the color
       ],                                // decision. null/missing -> echoed as [].
@@ -476,7 +476,7 @@ the same inputs return deeply-equal objects.
 
 All fetching functions: async, take structured args, return data or null, NEVER throw.
 On any HTTP error, non-2xx status, JSON parse failure, or timeout: console.log the error
-(prefix with the module name, e.g. "nws: alerts fetch failed for MIZ071: " + err.message)
+(prefix with the module name, e.g. "nws: all active alerts fetch failed: " + err.message)
 and return null.
 
 ### src/clients/http.js (shared transport layer)
@@ -535,24 +535,43 @@ and cron paths.
     // wrapper every api.weather.gov call routes through; sends the required
     // User-Agent + Accept: application/geo+json headers, checks response.ok,
     // parses JSON, logs + returns null on any non-2xx / network / parse failure.
-    // Internal (not exported): alertsUrlForZone(zoneId) — builds
-    // "https://api.weather.gov/alerts/active?zone=" + zoneId.
 
-    export async function fetchActiveAlertEvents(zoneId)
-      // zoneId: "MIZ071"
-      // GET "https://api.weather.gov/alerts/active?zone=" + zoneId with User-Agent +
-      // Accept: application/geo+json
-      // Success -> { events: ["Rip Current Statement", ...],
-      //              details: [{ event, onset, ends }, ...],
-      //              sourceUrl: <that alerts URL> }
-      //   events = json.features.map(f => f.properties.event), deduped, [] when no alerts.
-      //   details = one entry per alert feature (deduped only on exact
-      //   (event, onset, ends) repeats): onset falls back properties.onset ->
+    export const NWS_ACTIVE_ALERTS_URL = "https://api.weather.gov/alerts/active";
+      // The national active-alerts endpoint fetched ONCE per hourly run
+      // (fetchAllActiveAlerts); zone matching happens locally in nwsAlertsForZone.
+
+    export function alertsUrlForZone(zoneId)
+      // Pure. "https://api.weather.gov/alerts/active?zone=" + zoneId. Provenance
+      // URL ONLY — the cron no longer fetches per zone (that is
+      // NWS_ACTIVE_ALERTS_URL), but the zone-scoped view is the more useful
+      // pointer for a given beach's FlagEstimate source entry.
+
+    export async function fetchAllActiveAlerts()
+      // Every active alert nationwide in ONE GET of NWS_ACTIVE_ALERTS_URL (the
+      // hourly cron calls this once per run regardless of zone count; per-zone
+      // filtering happens locally via nwsAlertsForZone). Same User-Agent +
+      // Accept: application/geo+json headers as every api.weather.gov call.
+      // Success -> { alerts: [{ event, onset, ends, zones: [zone ids] }],
+      //              sourceUrl: NWS_ACTIVE_ALERTS_URL }
+      //   event = properties.event; onset falls back properties.onset ->
       //   properties.effective -> null, ends falls back properties.ends ->
-      //   properties.expires -> null (non-empty strings only). Feeds the
-      //   FlagEstimate's alertDetails echo (sections 1, 4) for the detail page's
-      //   hazard lane.
-      // Failure -> null
+      //   properties.expires -> null (non-empty strings only); zones = the
+      //   deduped union of properties.geocode.UGC and the last path segment of
+      //   each properties.affectedZones URL. Forecast-zone (MIZxxx) and county
+      //   (MICxxx) UGC namespaces never collide, and beach.nws_zone is always a
+      //   forecast zone, so exact membership reproduces the old per-zone
+      //   endpoint's matching. Features without an event name or with zero
+      //   resolvable zone ids are skipped (a zoneless alert could never match a
+      //   beach). Failure -> null.
+
+    export function nwsAlertsForZone(alerts, zoneId)
+      // Pure, exported for tests — the NWS counterpart of ecccAlertsForPoint.
+      // Filters a fetchAllActiveAlerts result's alerts down to those whose zones
+      // include zoneId, in the per-zone shape the rules engine and hazard lane
+      // consume: { events: [deduped names], details: [{ event, onset, ends }] }
+      // (details deduped only on exact (event, onset, ends) repeats). Feeds the
+      // FlagEstimate's alertDetails echo (sections 1, 4) for the detail page's
+      // hazard lane. Malformed input -> { events: [], details: [] }.
 
     export function wfoFromGridUrl(nwsGridUrl)
       // "https://api.weather.gov/gridpoints/GRR/33,33" -> "GRR"
@@ -581,18 +600,22 @@ Environment and Climate Change Canada via the MSC GeoMet OGC API
 Ontario-shoreline beaches api.weather.gov 404s forever. Unlike
 api.weather.gov, GeoMet needs NO auth and NO User-Agent header. Alert
 features carry the REAL alert-region polygons, so there is no per-zone alerts
-endpoint to poll: the hourly cron makes ONE bbox fetch and matches beaches
+endpoint to poll: the hourly cron makes ONE national fetch and matches beaches
 locally via pointInGeometry (src/geo.js).
 
     export const ECCC_API_BASE = "https://api.weather.gc.ca";
     export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
       // human-readable alerts page for source { url } entries
 
-    export async function fetchActiveEcccAlerts(bbox, nowIso)
-      // bbox: { minLon, minLat, maxLon, maxLat }. nowIso drives the expiry
-      // filter — no Date.now() inside.
-      // GET ECCC_API_BASE + "/collections/weather-alerts/items?f=json&limit=500
-      //   &bbox=minLon,minLat,maxLon,maxLat"
+    export async function fetchActiveEcccAlerts(nowIso)
+      // nowIso drives the expiry filter — no Date.now() inside. NO bbox: the
+      // whole national active set is fetched once per run and matched to beaches
+      // locally via ecccAlertsForPoint.
+      // GET ECCC_API_BASE + "/collections/weather-alerts/items?f=json&limit=2000"
+      //   The national active set runs a few hundred in a busy period, so the
+      //   2000 limit leaves ample headroom for one page to always suffice
+      //   (pygeoapi CLAMPS an over-max limit rather than erroring); a page that
+      //   comes back exactly full logs a truncation warning.
       // Success -> { alerts: [{ event, onset, ends, geometry }], sourceUrl }
       //   event = properties.alert_name_en (GeoMet serves LOWERCASE names,
       //   e.g. "severe thunderstorm warning"); onset = validity_datetime
@@ -610,7 +633,7 @@ locally via pointInGeometry (src/geo.js).
       // alerts down to those whose polygon contains the point, in the NWS
       // result shape: { events: [deduped names], details: [{ event, onset,
       // ends }] } (details deduped on exact (event, onset, ends) repeats,
-      // matching fetchActiveAlertEvents). Malformed input -> empty result.
+      // matching nwsAlertsForZone). Malformed input -> empty result.
 
     export async function fetchEcccZoneName(lat, lon)
       // Enrichment counterpart of nws.js fetchPointMetadata.
@@ -1219,15 +1242,20 @@ still needs real pagination (TODO.md).
    (recompute_updated is migration 0004; NULLs sort first, so never-recomputed rows and
    the longest-waiting rows always go first — a fair rotation if the table ever exceeds
    the limit).
-3. Alerts: build the set of distinct non-null nws_zone values; fetchActiveAlertEvents once
-   per zone; store in a Map. Zones whose fetch failed map to null.
+3. Alerts: build the set of distinct non-null nws_zone values; when non-empty, ONE
+   fetchAllActiveAlerts() call for the whole run, then each zone's Map entry =
+   nwsAlertsForZone(nationalAlerts.alerts, zone) as { events, details, sourceUrl:
+   alertsUrlForZone(zone) } — per-beach source entries stay byte-identical to the old
+   per-zone design (label "NWS Alerts", zone-scoped provenance URL). This costs a SINGLE
+   subrequest regardless of zone count, so nationwide scale-out never multiplies alert
+   calls. A failed or thrown national fetch maps EVERY zone to null (per-beach
+   alertsCheckable stays true — same as the old per-zone failure mode).
 3b. ECCC alerts: for the Canadian rows (nws_zone NULL, eccc_zone NOT NULL), ONE
-   fetchActiveEcccAlerts call over those rows' bounding box padded by
-   ECCC_ALERTS_BBOX_PAD_DEG (0.5°) — the alert features carry their region
-   polygons, so per-beach matching happens locally in step 7 via
-   ecccAlertsForPoint and this costs a single subrequest regardless of beach
-   count. Skipped when the run has no Canadian rows; a failed fetch (null) just
-   means those beaches get alerts: null this run.
+   fetchActiveEcccAlerts(nowIso) call for the whole national active set (no bbox)
+   — the alert features carry their region polygons, so per-beach matching
+   happens locally in step 7 via ecccAlertsForPoint and this costs a single
+   subrequest regardless of beach count. Skipped when the run has no Canadian
+   rows; a failed fetch (null) just means those beaches get alerts: null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
 5. Waves: fetchWaveHeightsFt in batches of 50 (Promise.allSettled across batches; a failed
@@ -1313,15 +1341,17 @@ still needs real pagination (TODO.md).
 10. Stamp the rotation cursor: one env.DB.batch of
    UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
 
-Subrequest budget (paid plan, 10,000/invocation): ~30-60 alert calls + 1 ECCC alerts
-bbox call (step 3b) + ~2×15 SRF calls +
+Subrequest budget (paid plan, 10,000/invocation): 1 NWS national alerts call (step 3) +
+1 ECCC national alerts call (step 3b) + ~2×15 SRF calls +
 ~13 marine batches + ≤62 GLCFS buoy (2 catalogs + ≤60 deduped platform fetches, step 5b) +
 ≤13 wind batches + ~62 official-scraper fetches (one scrape() per matched scraper; South
 Haven uses 2 fetches, Ohio BeachGuard now issues ONE GET per OHIO_SITES entry = 51, the
 rest 1 each) + ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch
 (step 9, only when >= 1 estimate/official pair exists) + ≤700 flag/official KV puts +
-≤613 waves KV puts (step 7 — only beaches with >= 1 finite forecast hour) ≈ 1550 at the
-full ~613-row pilot table, still well under 10,000. Free plan
+≤613 waves KV puts (step 7 — only beaches with >= 1 finite forecast hour) ≈ 1500 at the
+full ~613-row pilot table, still well under 10,000. Both authorities' alerts are now ONE
+national fetch each — no longer a call per distinct zone — so alert cost stays flat as the
+table grows. Free plan
 (50 subrequests, 1000 KV writes/day) is NOT sufficient at this cadence — README must state
 the paid-plan assumption; alternatively cap MAX_BEACHES_PER_RUN low for a free-plan demo
 (TODO.md).
@@ -1947,9 +1977,10 @@ alertsCheckable caveat; alertColorForEvent maps both namespaces (Title Case
 - fetchActiveEcccAlerts with stubbed fetch: keeps live alerts and maps
   event/onset/ends/geometry (validity/event-end preferred, publication/
   expiration fallbacks); drops status_en "ended" and expired features; skips
-  features without a usable name or geometry; bbox and collection appear in the
-  request URL; sourceUrl echoes the request; null on HTTP failure and thrown
-  fetch (never throws).
+  features without a usable name or geometry; the weather-alerts collection and
+  limit=2000 appear in the request URL and no bbox= does (national fetch);
+  sourceUrl echoes the request; null on HTTP failure and thrown fetch (never
+  throws).
 - ecccAlertsForPoint: containing polygons only, event dedupe, detail dedupe on
   exact (event, onset, ends); no containing polygon → empty result; malformed
   input degrades to empty.
