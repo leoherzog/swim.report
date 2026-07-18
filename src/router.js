@@ -208,6 +208,10 @@ async function handleHome(env, location, rawQuery, nearParam) {
     entries: entries,
     nowIso: nowIso,
     sortedByProximity: !!location,
+    // Same resolved location that sorted the rows above — the map centers on it
+    // (browser "near" fix or Cloudflare IP estimate), so a first load with no
+    // browser geolocation still opens on the visitor's area, not a fixed region.
+    location: location,
     query: hasQuery ? query : "",
     hasMore: hasMore,
     near: (typeof nearParam === "string") ? nearParam : ""

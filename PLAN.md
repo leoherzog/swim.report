@@ -1652,6 +1652,33 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // geolocation API, denied permission, or timeout silently keeps the
       // IP-based ordering; an existing "near" param short-circuits the script,
       // so the reload happens at most once and can never loop.
+      // Between the intro and the search form the page also embeds a home-page
+      // map: <section class="home-map-section"><div id="home-map"
+      // class="home-map framed-embed wa-border-radius-m"
+      // data-center="lat,lon"? data-center-precise="1|0"?></div>
+      // <script type="application/json"
+      // id="home-map-data">[{id,name,lat,lon,iconClass,label}, ...]</script>
+      // </section> (the container reuses the shared .framed-embed border +
+      // wa-border-radius-m utility, same as the detail-page wave map / webcam).
+      // The marker JSON is entries filtered to finite lat/lon; best color =
+      // official.color else estimate.color else "unknown". iconClass is that
+      // color's tint class via the shared flagIconColorClass (double-red -> the
+      // red class) and label is FLAG_ICON_LABELS[color], both computed server-
+      // side so mapScript.js builds a <wa-icon name="flag"> marker (the same
+      // icon component the UI uses) with no icon path or color logic of its own.
+      // data-center
+      // is the router's resolved location (data.location, the same {lat,lon} that
+      // sorts the list — browser "near" fix or Cloudflare IP estimate, 3 dp);
+      // data-center-precise is "1" for a browser fix, "0" for the IP estimate.
+      // Home-page-only (never in renderDocument's shared head): MapLibre GL JS
+      // 5.24.0 + its CSS (unpkg, pinned) plus the browser-side LIST_MAP_SCRIPT
+      // (src/frontend/mapScript.js) render an OpenFreeMap positron map
+      // (https://tiles.openfreemap.org/styles/positron), centered on data-center
+      // (zoom 10 when precise, else 9) else fitBounds over the markers else a
+      // Great Lakes default ([-84, 44], zoom 5), with one clickable flag
+      // <a href="/beach/<id>"> marker per beach. All browser-only — the Worker
+      // request path fetches
+      // nothing upstream (section "two-path rule").
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,

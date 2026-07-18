@@ -246,6 +246,29 @@ const RULES = [
   ".beach-row-link > .wa-cluster {",
   "  flex-shrink: 0;",
   "  white-space: nowrap;",
+  "}",
+
+  // Homepage map: the border comes from the shared .framed-embed class and the
+  // rounded corners from the wa-border-radius-m utility (same treatment as the
+  // detail-page wave map / webcam). Only the map's own concerns live here: an
+  // explicit height (MapLibre collapses to 0px without one and renders blank)
+  // and the overflow clip that keeps the tiles inside the rounded corners.
+  ".home-map {",
+  "  height: 20rem;",
+  "  overflow: hidden;",
+  "}",
+  // Flag marker: an anchor carrying a flag-icon-* color class; its <wa-icon>
+  // sizes to 1em (so font-size sets the marker size) and inherits the color via
+  // currentColor. Drop-shadow keeps the flag legible over the light positron
+  // tiles; a CSS filter on the wa-icon host reaches its shadow-DOM svg.
+  ".home-map-marker {",
+  "  display: block;",
+  "  line-height: 0;",
+  "  font-size: 1.5rem;",
+  "}",
+  ".home-map-marker wa-icon {",
+  "  display: block;",
+  "  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));",
   "}"
 ];
 

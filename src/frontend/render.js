@@ -8,6 +8,7 @@
 import { PAGE_STYLES } from "./styles.js";
 import { LIST_SEARCH_SCRIPT } from "./searchScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
+import { LIST_MAP_SCRIPT } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import {
   trimWaveSeries,
@@ -26,6 +27,13 @@ const STALE_MS = 7200000;
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
 // The matching wa-theme-matter / wa-palette-mild classes go on <html>.
 const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.10.0";
+
+// MapLibre GL JS (pinned) + the OpenFreeMap positron style: browser-only assets
+// for the home-page map (src/frontend/mapScript.js). Loaded from renderListPage,
+// not from renderDocument's shared <head> — detail/error pages never pay for
+// them, and the Worker itself never fetches them (two-path rule).
+const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js";
+const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css";
 
 // Kit theme overrides, minus the kit's webfont downloads: body/heading lead
 // with genuine system fonts so the pinned matter.css Roboto @font-face (served
@@ -73,6 +81,15 @@ function normalizeColor(color) {
     return color;
   }
   return "unknown";
+}
+
+// The single source for a flag color's tint class: double-red shares the red
+// tint (only its icon count differs), everything else maps to its own color.
+// Used by renderFlagIcon (the UI's flags) and renderHomeMap (the map markers)
+// so the color-to-class rule lives in exactly one place.
+function flagIconColorClass(color) {
+  const normalized = normalizeColor(color);
+  return "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
 }
 
 function isStale(nowIso, updatedIso) {
@@ -132,7 +149,7 @@ function renderStaleWarning(updatedIso) {
 // wherever visible flag text sits next to it.
 function renderFlagIcon(color, sizeClass, slotName, labelText) {
   const normalized = normalizeColor(color);
-  const colorClass = "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
+  const colorClass = flagIconColorClass(color);
   const iconClass = sizeClass + " " + colorClass;
   const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
   if (normalized === "double-red") {
@@ -410,6 +427,69 @@ function renderBeachRow(entry) {
   return lines.join("\n");
 }
 
+// Homepage map: one clickable flag marker per beach with finite coordinates,
+// embedded as JSON for the browser-side MapLibre init script (mapScript.js) to
+// read. Best-color precedence mirrors renderDetailPage's titleColor: official
+// wins over estimate, estimate wins over "unknown". Each marker carries a
+// server-computed iconClass (via the shared flagIconColorClass — double-red is
+// tinted red) and label (FLAG_ICON_LABELS) so the browser builds a <wa-icon
+// name="flag"> marker with no icon path or color logic of its own: the icon and
+// the color-to-class rule stay single-sourced here. The resolved user location
+// (the same signal that
+// sorts the list — a browser "near" fix or Cloudflare's IP estimate) rides
+// along as a data-center attribute so the browser can center the map without
+// another fetch; data-center-precise marks which source it came from.
+function renderHomeMap(entries, near, location) {
+  const list = Array.isArray(entries) ? entries : [];
+  const markers = [];
+  for (let i = 0; i < list.length; i++) {
+    const entry = list[i];
+    const beach = entry && entry.beach;
+    if (!beach) {
+      continue;
+    }
+    const lat = (beach.lat === null || beach.lat === undefined) ? NaN : Number(beach.lat);
+    const lon = (beach.lon === null || beach.lon === undefined) ? NaN : Number(beach.lon);
+    if (!isFinite(lat) || !isFinite(lon)) {
+      continue;
+    }
+    const best = entry.official ? entry.official.color
+      : (entry.estimate ? entry.estimate.color : "unknown");
+    markers.push({
+      id: beach.id,
+      name: displayName(beach),
+      lat: lat,
+      lon: lon,
+      iconClass: flagIconColorClass(best),
+      label: FLAG_ICON_LABELS[normalizeColor(best)]
+    });
+  }
+  const markersJson = JSON.stringify(markers).split("<").join("\\u003c");
+  // Map center: the resolved user location that also sorts the list — the
+  // browser "near" fix when the visitor granted geolocation, otherwise
+  // Cloudflare's IP-derived request.cf estimate. data-center-precise ("1" for a
+  // browser fix, "0" for the coarser IP estimate) lets the browser zoom tighter
+  // on a real fix than on the estimate; with no location at all the attribute
+  // is omitted and the browser falls back to fitting the markers. Coordinates
+  // round to ~110 m (3 dp) — the map never needs finer, and it keeps precise
+  // coordinates out of the markup.
+  const centerLat = location ? Number(location.lat) : NaN;
+  const centerLon = location ? Number(location.lon) : NaN;
+  const centerAttrs = (isFinite(centerLat) && isFinite(centerLon))
+    ? (" data-center=\"" + centerLat.toFixed(3) + "," + centerLon.toFixed(3) + "\"" +
+       " data-center-precise=\"" + (near ? "1" : "0") + "\"")
+    : "";
+  // The framed box reuses the existing .framed-embed border + the
+  // wa-border-radius-m utility (same treatment as the detail-page wave map /
+  // webcam); .home-map itself only adds the map's fixed height and the
+  // clip-to-radius overflow. The section carries the single accessible name
+  // (its landmark label) — the map div is an unlabeled MapLibre mount.
+  return "<section class=\"home-map-section\" aria-label=\"Map of nearby beaches with estimated flag status\">" +
+    "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\"" + centerAttrs + "></div>" +
+    "<script type=\"application/json\" id=\"home-map-data\">" + markersJson + "</script>" +
+    "</section>";
+}
+
 export function renderListPage(data) {
   const entries = (data && Array.isArray(data.entries)) ? data.entries : [];
   const rowsHtml = entries.map(renderBeachRow).join("\n");
@@ -421,6 +501,10 @@ export function renderListPage(data) {
   // exist than were rendered (hasMore).
   const query = data && data.query ? String(data.query) : "";
   const nearParam = data && data.near ? String(data.near) : "";
+  // Resolved user location for map centering: the router's { lat, lon } (browser
+  // "near" fix or Cloudflare IP estimate), the same signal that proximity-sorts
+  // the list. null keeps the map fitting the markers instead.
+  const location = data && data.location ? data.location : null;
   const hasMore = !!(data && data.hasMore);
   const offerSearchAll = hasMore && query.length === 0;
 
@@ -441,6 +525,8 @@ export function renderListPage(data) {
     "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags for pilot beaches across the " +
     "Great Lakes region.</p>" +
     "</section>";
+
+  const mapHtml = renderHomeMap(entries, nearParam, location);
 
   // The search box submits to the server (method GET, name=q) so results cover
   // the whole table, while the inline script keeps filtering rendered rows as
@@ -473,10 +559,13 @@ export function renderListPage(data) {
     "</p>" +
     "</section>";
 
-  const mainHtml = introHtml + searchHtml + activeQueryHtml + listHtml;
+  const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
-    "<script>" + LIST_GEO_SCRIPT + "</script>";
+    "<script>" + LIST_GEO_SCRIPT + "</script>" +
+    "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +
+    "<script src=\"" + MAPLIBRE_JS + "\"></script>" +
+    "<script>" + LIST_MAP_SCRIPT + "</script>";
 
   return renderDocument("Swim Report", bodyHtml);
 }
