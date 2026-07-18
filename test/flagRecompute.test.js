@@ -1,8 +1,9 @@
 // Cron input-assembly test for runFlagRecompute (via the scheduled handler):
-// verifies the alertsCheckable wiring — a beach whose nws_zone is still NULL
-// (not yet NWS-enriched) must get an estimate whose reason carries the
-// explicit "NWS alerts not yet available for this beach" caveat, while an
-// enriched beach whose alerts fetch merely failed this run must NOT.
+// verifies the alertsCheckable wiring — a beach with neither nws_zone nor
+// eccc_zone (not yet enriched for either authority) must get an estimate
+// whose reason carries the explicit "Weather alerts not yet available for
+// this beach" caveat, while an enriched beach whose alerts fetch merely
+// failed this run must NOT.
 // The network is stubbed to fail entirely, so every client returns null and
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -22,6 +23,8 @@ function makeBeachRow(overrides) {
     nws_grid_url: null,
     osm_id: "node/1",
     enrichment_attempts: 0,
+    eccc_zone: null,
+    eccc_attempts: 0,
     recompute_updated: null,
     webcam_id: null,
     webcam_title: null,
@@ -165,6 +168,121 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
       ends: "2026-07-16T06:00:00Z"
     }]);
     expect(estimate.ripCurrentRisk).toBeNull();
+  });
+
+  it("Canadian beach (eccc_zone set) with a containing ECCC alert polygon -> ECCC red, no caveat", async function () {
+    // Stub GeoMet: one active severe thunderstorm warning whose region
+    // polygon contains the Colchester Beach point. Everything else fails so
+    // waves/wind/SRF are null and the alert decides the color.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gc.ca/collections/weather-alerts/items") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              features: [{
+                type: "Feature",
+                properties: {
+                  alert_name_en: "severe thunderstorm warning",
+                  status_en: "issued",
+                  validity_datetime: "2026-07-18T11:00:00.000Z",
+                  event_end_datetime: "2026-07-18T21:00:00.000Z"
+                },
+                geometry: {
+                  type: "Polygon",
+                  coordinates: [[
+                    [-83.2, 41.7], [-82.6, 41.7], [-82.6, 42.3], [-83.2, 42.3], [-83.2, 41.7]
+                  ]]
+                }
+              }]
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-way-175343424",
+        name: "Colchester Beach",
+        lat: 41.9836774,
+        lon: -82.9343626,
+        eccc_zone: "Windsor - Essex - Chatham-Kent",
+        enrichment_attempts: 5
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-way-175343424").value);
+    expect(estimate.color).toBe("red");
+    expect(estimate.reason).toBe("Active Environment Canada alert: severe thunderstorm warning");
+    expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+    expect(estimate.alertDetails).toEqual([{
+      event: "severe thunderstorm warning",
+      onset: "2026-07-18T11:00:00.000Z",
+      ends: "2026-07-18T21:00:00.000Z"
+    }]);
+    expect(estimate.sources).toEqual([{
+      label: "Environment Canada Alerts",
+      url: "https://weather.gc.ca/warnings/index_e.html"
+    }]);
+  });
+
+  it("Canadian beach outside every alert polygon -> alerts checked ([]), no caveat", async function () {
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gc.ca/collections/weather-alerts/items") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () { return Promise.resolve({ features: [] }); }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-ca-1",
+        name: "Sunset Beach",
+        lat: 46.2686243,
+        lon: -83.2821572,
+        eccc_zone: "Blind River - Thessalon",
+        enrichment_attempts: 5
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-ca-1").value);
+    expect(estimate.color).toBe("unknown");
+    expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+    // The successful (empty) alerts check still names its source.
+    expect(estimate.sources).toEqual([{
+      label: "Environment Canada Alerts",
+      url: "https://weather.gc.ca/warnings/index_e.html"
+    }]);
+  });
+
+  it("Canadian beach with a failed ECCC fetch gets NO caveat (transient failure, alerts were checkable)", async function () {
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-ca-2",
+        name: "Colchester Beach",
+        lat: 41.9836774,
+        lon: -82.9343626,
+        eccc_zone: "Windsor - Essex - Chatham-Kent",
+        enrichment_attempts: 5
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-ca-2").value);
+    expect(estimate.color).toBe("unknown");
+    expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+    expect(estimate.sources).toEqual([]);
   });
 
   it("mixed table: only the unenriched beach carries the caveat", async function () {

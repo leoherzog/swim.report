@@ -304,8 +304,8 @@ function renderBrandHeader() {
 // estimates must never read as official flag status, on any page.
 function renderFooter() {
   return "<small>Beach locations via OpenStreetMap contributors. Marine and weather data via " +
-    "NOAA/NWS and Open-Meteo. Estimated — not the official flag status. Always obey " +
-    "posted flags and lifeguards.</small>";
+    "NOAA/NWS, Environment and Climate Change Canada, and Open-Meteo. Estimated — not the " +
+    "official flag status. Always obey posted flags and lifeguards.</small>";
 }
 
 function renderPageShell(headerHtml, mainHtml, footerHtml) {

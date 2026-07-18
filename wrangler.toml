@@ -25,9 +25,11 @@ enabled = true
 # 47 8 * * *       — daily Overpass beach discovery (D1 upserts)
 # 17 3,9,15,21 * * * — NWS point enrichment, 4x daily (the 9:17 run picks up
 #                    rows the 8:47 discovery just inserted)
+# 29 4,10,16,22 * * * — ECCC zone enrichment, 4x daily (Canadian beaches the
+#                    NWS enrichment permanently parked)
 # 31 9 * * *       — daily Windy webcam hydration
 [triggers]
-crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
+crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
 [[d1_databases]]
 binding = "DB"

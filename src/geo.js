@@ -42,3 +42,65 @@ export function metersToFeet(m) {
   }
   return m * METERS_TO_FEET;
 }
+
+// Ray-casting point-in-ring test on a GeoJSON linear ring ([[lon, lat], ...]).
+// Planar math is fine at forecast-region scale; boundary points are accepted
+// or rejected by the crossing parity like any ray cast (no special casing).
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  let j = ring.length - 1;
+  for (let i = 0; i < ring.length; i++) {
+    const xi = ring[i][0];
+    const yi = ring[i][1];
+    const xj = ring[j][0];
+    const yj = ring[j][1];
+    const crosses = (yi > lat) !== (yj > lat) &&
+      lon < (xj - xi) * (lat - yi) / (yj - yi) + xi;
+    if (crosses) {
+      inside = !inside;
+    }
+    j = i;
+  }
+  return inside;
+}
+
+// True when the point sits inside a GeoJSON Polygon or MultiPolygon geometry:
+// inside an outer ring and inside none of that polygon's holes. Malformed or
+// non-areal geometry (null, Point, missing coordinates) returns false — the
+// caller treats "not contained" as "no match", never as an error. Used by the
+// ECCC alerts client to match beaches to alert-region polygons.
+export function pointInGeometry(geometry, lat, lon) {
+  if (geometry === null || typeof geometry !== "object") {
+    return false;
+  }
+  let polygons = null;
+  if (geometry.type === "Polygon") {
+    polygons = [geometry.coordinates];
+  } else if (geometry.type === "MultiPolygon") {
+    polygons = geometry.coordinates;
+  } else {
+    return false;
+  }
+  if (!Array.isArray(polygons)) {
+    return false;
+  }
+  for (const rings of polygons) {
+    if (!Array.isArray(rings) || rings.length === 0 || !Array.isArray(rings[0])) {
+      continue;
+    }
+    if (!pointInRing(lon, lat, rings[0])) {
+      continue;
+    }
+    let inHole = false;
+    for (let h = 1; h < rings.length; h++) {
+      if (Array.isArray(rings[h]) && pointInRing(lon, lat, rings[h])) {
+        inHole = true;
+        break;
+      }
+    }
+    if (!inHole) {
+      return true;
+    }
+  }
+  return false;
+}

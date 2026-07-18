@@ -4,14 +4,14 @@
 // complete FlagEstimate object out. This is the ONLY place in the codebase
 // where a flag color is decided for an estimate.
 
-export const RULES_VERSION = "1.2.0";
+export const RULES_VERSION = "1.3.0";
 
-// Caveat appended to the reason when the cron reports that NWS alerts were
-// not checkable for this beach (nws_zone still NULL — the beach has not been
-// through NWS point enrichment yet). Distinguishes "alerts checked, none
-// active" from "alerts never checked" so a wave-only green can never present
-// itself as alert-verified.
-export const ALERTS_UNAVAILABLE_CAVEAT = "NWS alerts not yet available for this beach";
+// Caveat appended to the reason when the cron reports that weather alerts
+// were not checkable for this beach (neither NWS nor ECCC enrichment has
+// resolved it yet). Distinguishes "alerts checked, none active" from "alerts
+// never checked" so a wave-only green can never present itself as
+// alert-verified.
+export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
 
 export const ALERT_PRECEDENCE = [
   "High Surf Warning",
@@ -27,13 +27,60 @@ const ALERT_COLOR_MAP = {
   "Rip Current Statement": "red"
 };
 
-// The flag color a recognized NWS alert maps to, or null for any event outside
-// ALERT_PRECEDENCE. Exported so the frontend's hazard lane colors alert bands
-// from the exact same mapping the flag decision uses.
+// Environment and Climate Change Canada issues NO beach-specific hazard
+// products (no rip current, high surf, or beach hazards analog exists in the
+// Canadian system), so Canadian beaches map a curated set of severe weather
+// WARNINGS for hazards dangerous to people in or on the water: storm surge,
+// tornado/waterspout, squalls, lightning, and damaging onshore wind (ECCC's
+// wind warning criteria — sustained >= 50 km/h or gusts >= 90 km/h — sit above
+// this engine's own wind-fallback red thresholds). Watches are deliberately
+// EXCLUDED: mapping a watch to yellow would let it mask a wave-height red
+// under the strict step precedence. Event names are exact-match against the
+// GeoMet weather-alerts alert_name_en strings, which ECCC serves lowercase.
+export const ECCC_ALERT_PRECEDENCE = [
+  "tornado warning",
+  "storm surge warning",
+  "squall warning",
+  "waterspout warning",
+  "severe thunderstorm warning",
+  "wind warning"
+];
+
+const ECCC_ALERT_COLOR_MAP = {
+  "tornado warning": "double-red",
+  "storm surge warning": "double-red",
+  "squall warning": "red",
+  "waterspout warning": "red",
+  "severe thunderstorm warning": "red",
+  "wind warning": "red"
+};
+
+// The flag color a recognized alert maps to — NWS events (ALERT_PRECEDENCE,
+// Title Case) and ECCC events (ECCC_ALERT_PRECEDENCE, lowercase) share one
+// lookup since the two namespaces can never collide — or null for any other
+// event. Exported so the frontend's hazard lane colors alert bands from the
+// exact same mapping the flag decision uses.
 export function alertColorForEvent(eventName) {
-  return Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)
-    ? ALERT_COLOR_MAP[eventName]
-    : null;
+  if (Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)) {
+    return ALERT_COLOR_MAP[eventName];
+  }
+  if (Object.prototype.hasOwnProperty.call(ECCC_ALERT_COLOR_MAP, eventName)) {
+    return ECCC_ALERT_COLOR_MAP[eventName];
+  }
+  return null;
+}
+
+// The issuing body's display label for a recognized alert event ("NWS" or
+// "Environment Canada"), null for unrecognized events. Single home of the
+// authority attribution the frontend's hazard-band text uses.
+export function alertAuthorityForEvent(eventName) {
+  if (Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)) {
+    return "NWS";
+  }
+  if (Object.prototype.hasOwnProperty.call(ECCC_ALERT_COLOR_MAP, eventName)) {
+    return "Environment Canada";
+  }
+  return null;
 }
 
 // The flag color a rip-current risk level maps to: HIGH -> red, MODERATE ->
@@ -79,8 +126,9 @@ export function estimateFlag(inputs) {
   const sources = source.sources !== undefined ? source.sources : [];
   const updated = source.updated !== undefined ? source.updated : null;
   // alertsCheckable: true when the cron could look up alerts for this beach
-  // (it has an nws_zone), false when it could not (not yet NWS-enriched),
-  // null/undefined for legacy callers (treated as "no caveat").
+  // (it has an nws_zone or an eccc_zone), false when it could not (not yet
+  // enriched for either authority), null/undefined for legacy callers
+  // (treated as "no caveat").
   const alertsCheckable = source.alertsCheckable !== undefined ? source.alertsCheckable : null;
 
   let color = null;
@@ -95,6 +143,22 @@ export function estimateFlag(inputs) {
         color = alertColorForEvent(eventName);
         reason = "Active NWS alert: " + eventName;
         trigger = "nws-alert";
+        break;
+      }
+    }
+  }
+
+  // Step 1b: active Environment Canada alerts, evaluated in
+  // ECCC_ALERT_PRECEDENCE order. Same alerts input — the cron fills it from
+  // ECCC for Canadian beaches (a beach is enriched for exactly one authority,
+  // and the two event-name namespaces cannot collide).
+  if (color === null && alerts !== null) {
+    for (let i = 0; i < ECCC_ALERT_PRECEDENCE.length; i++) {
+      const eventName = ECCC_ALERT_PRECEDENCE[i];
+      if (alerts.indexOf(eventName) !== -1) {
+        color = alertColorForEvent(eventName);
+        reason = "Active Environment Canada alert: " + eventName;
+        trigger = "eccc-alert";
         break;
       }
     }
@@ -168,12 +232,12 @@ export function estimateFlag(inputs) {
     }
   }
 
-  // Honesty caveat: when alerts were not checkable for this beach (nws_zone
-  // still NULL), say so explicitly so a wave/wind/no-data estimate is never
-  // read as "alerts were checked and none were active". Skipped only when an
-  // alert itself decided the color (contradictory input — alerts were
-  // evidently available).
-  if (alertsCheckable === false && trigger !== "nws-alert") {
+  // Honesty caveat: when alerts were not checkable for this beach (neither
+  // nws_zone nor eccc_zone resolved yet), say so explicitly so a
+  // wave/wind/no-data estimate is never read as "alerts were checked and none
+  // were active". Skipped only when an alert itself decided the color
+  // (contradictory input — alerts were evidently available).
+  if (alertsCheckable === false && trigger !== "nws-alert" && trigger !== "eccc-alert") {
     reason = reason + " (" + ALERTS_UNAVAILABLE_CAVEAT + ")";
   }
 

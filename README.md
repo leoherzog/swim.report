@@ -1,8 +1,9 @@
 # Swim Report (swim.report)
 
 Swim Report estimates beach hazard flag status (green / yellow / red / double-red /
-unknown) for US beaches using public NWS and Open-Meteo data, and — where a
-municipality publishes one — surfaces the real official flag alongside it.
+unknown) for US and Canadian Great Lakes beaches using public NWS, Environment and
+Climate Change Canada (ECCC), and Open-Meteo data, and — where a municipality
+publishes one — surfaces the real official flag alongside it.
 
 ## Estimated vs. official
 
@@ -11,7 +12,8 @@ municipality publishes one — surfaces the real official flag alongside it.
 Every color shown by Swim Report is either:
 
 - an **ESTIMATE** (`official: false`) — a deterministic, versioned guess computed from
-  NWS alerts, NWS Surf Zone Forecast rip current risk, and Open-Meteo wave/wind data.
+  NWS alerts (or Environment Canada alerts for Canadian beaches), NWS Surf Zone
+  Forecast rip current risk, and Open-Meteo wave/wind data.
   It is not a substitute for the flag actually flying at the beach.
 - an **OFFICIAL** reading (`official: true`) — scraped directly from a municipality's
   or health department's own published status page/API, when Swim Report has a
@@ -174,7 +176,7 @@ IP-derived location and must never be shared across visitors.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.2.0`. Given the same inputs it always returns the same output.
+`rules_version` is `1.3.0`. Given the same inputs it always returns the same output.
 
 Precedence is strict: the first matching rule wins, evaluated top to bottom.
 
@@ -184,6 +186,12 @@ Precedence is strict: the first matching rule wins, evaluated top to bottom.
 | 1 | Active NWS alert | same | Event = "Beach Hazards Statement" | red | "Active NWS alert: Beach Hazards Statement" |
 | 1 | Active NWS alert | same | Event = "High Surf Advisory" | red | "Active NWS alert: High Surf Advisory" |
 | 1 | Active NWS alert | same | Event = "Rip Current Statement" | red | "Active NWS alert: Rip Current Statement" |
+| 1b | Active ECCC alert (Canadian beaches) | `api.weather.gc.ca` `weather-alerts` collection, matched by alert-region polygon | Event = "tornado warning" | double-red | "Active Environment Canada alert: tornado warning" |
+| 1b | Active ECCC alert | same | Event = "storm surge warning" | double-red | "Active Environment Canada alert: storm surge warning" |
+| 1b | Active ECCC alert | same | Event = "squall warning" | red | "Active Environment Canada alert: squall warning" |
+| 1b | Active ECCC alert | same | Event = "waterspout warning" | red | "Active Environment Canada alert: waterspout warning" |
+| 1b | Active ECCC alert | same | Event = "severe thunderstorm warning" | red | "Active Environment Canada alert: severe thunderstorm warning" |
+| 1b | Active ECCC alert | same | Event = "wind warning" | red | "Active Environment Canada alert: wind warning" |
 | 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product, regex-parsed | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
 | 2 | Rip current risk | same | MODERATE | yellow | "NWS surf zone forecast rip current risk: MODERATE" |
 | 3 | Wave height | Open-Meteo Marine API (m converted to ft, `m * 3.28084`) | >= 4 ft | red | "Estimated wave height X.X ft (at or above 4 ft)" |
@@ -200,6 +208,16 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 
 - Alerts are checked in `ALERT_PRECEDENCE` order, not the order they appear in the
   NWS response — "High Surf Warning" always wins over any other simultaneous alert.
+- Canadian beaches (swept in by the pilot bbox on the Ontario shoreline) use
+  Environment and Climate Change Canada instead: ECCC issues **no** rip current,
+  high surf, or beach hazards product, so step 1b maps a curated set of severe
+  weather **warnings** for hazards dangerous to people in or on the water
+  (`ECCC_ALERT_PRECEDENCE`, checked in that order). Watches are deliberately
+  unmapped — a watch-to-yellow rule would let it mask a wave-height red under the
+  strict precedence. Event names are exact-match against the GeoMet API's
+  lowercase `alert_name_en` strings. Each beach is alert-checked by exactly one
+  authority (NWS via its `nws_zone`, or ECCC via alert-region polygon containment
+  once `eccc_zone` is set).
 - Rip current risk beats wave height even when the wave height alone would imply a
   worse (or better) color. A MODERATE rip risk yields yellow even with a 6 ft wave
   height reading.
@@ -214,18 +232,18 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 - An empty alerts array (`[]`, i.e. a successful fetch with zero active alerts) does
   not by itself count as "usable data" — with everything else null the result is
   still `unknown`, not `green`.
-- A beach not yet through NWS point enrichment (its `nws_zone` is still `NULL`, so
-  alerts and rip-current risk were never checkable) carries an explicit caveat
-  appended to its `reason`: ` (NWS alerts not yet available for this beach)`. This
-  adds no new color or table row — it only distinguishes "alerts checked, none
-  active" from "alerts never checked" so a wave/wind-only estimate is never
-  presentable as alert-verified. The caveat is omitted once the beach is enriched
-  (and whenever an NWS alert itself decided the color).
+- A beach not yet enriched for either authority (both `nws_zone` and `eccc_zone`
+  still `NULL`, so alerts and rip-current risk were never checkable) carries an
+  explicit caveat appended to its `reason`: ` (Weather alerts not yet available
+  for this beach)`. This adds no new color or table row — it only distinguishes
+  "alerts checked, none active" from "alerts never checked" so a wave/wind-only
+  estimate is never presentable as alert-verified. The caveat is omitted once the
+  beach is enriched (and whenever an alert itself decided the color).
 
 Every `FlagEstimate` carries: `color`, a human-readable `reason`, `trigger` (which
-precedence branch decided the color: `nws-alert`, `rip-current`, `wave-height`,
-`wind`, `rip-current-low`, or `no-data` — the detail page renders this as a
-natural-language explanation), `rules_version`, `official: false`, `sources`
+precedence branch decided the color: `nws-alert`, `eccc-alert`, `rip-current`,
+`wave-height`, `wind`, `rip-current-low`, or `no-data` — the detail page renders
+this as a natural-language explanation), `rules_version`, `official: false`, `sources`
 (`{ label, url }` entries for the data actually used for that beach), and `updated`
 (ISO 8601 UTC).
 
@@ -281,7 +299,7 @@ paint, and live OS switches apply without a reload.
 
 ### Cron jobs
 
-Four scheduled triggers run in production (see `wrangler.toml`). They are separate
+Five scheduled triggers run in production (see `wrangler.toml`). They are separate
 crons on purpose: each upstream's rate-limit posture is independent, and a failure
 in one job never starves another (an aborted Overpass sync used to skip that
 night's NWS enrichment and webcam hydration entirely).
@@ -289,7 +307,9 @@ night's NWS enrichment and webcam hydration entirely).
 - `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
   the whole pilot table every run, so no flag ever outlives its 2 h KV TTL waiting
-  for a rotation turn), fetches NWS alerts/SRF and Open-Meteo wave/wind data, runs
+  for a rotation turn), fetches NWS alerts/SRF, Environment Canada alerts (one
+  GeoMet `weather-alerts` bbox fetch covering every `eccc_zone` beach, matched
+  per beach by alert-region polygon containment), and Open-Meteo wave/wind data, runs
   them through `estimateFlag`, runs the official-source scrapers (once per distinct
   matched scraper, resolved per beach, with KV-backed health monitoring), and
   writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
@@ -329,6 +349,16 @@ night's NWS enrichment and webcam hydration entirely).
   `enrichment_attempts` counter (migration 0003); after 5 failed attempts a row is
   parked and no longer requeued, so permanently-404ing non-US points (Ontario
   shoreline swept in by the pilot bbox) can't starve US beaches.
+- `29 4,10,16,22 * * *` (4x daily, offset ~1h from the NWS trigger) —
+  `runEcccEnrichment`: the Canadian counterpart. Beaches NWS enrichment
+  permanently parked (`nws_zone` NULL at the attempts cap) get their ECCC public
+  forecast region name (e.g. "Windsor - Essex - Chatham-Kent") from the GeoMet
+  `public-standard-forecast-zones` collection (`src/clients/eccc.js`, no auth or
+  User-Agent required), up to 50 per run — one run covers the current ~50-row
+  Ontario backlog. A row with `eccc_zone` set joins the hourly Environment
+  Canada alerts check and stops carrying the alerts-unavailable caveat; rows no
+  Canadian region matches park at their own 5-attempt cap (`eccc_attempts`,
+  migration 0008).
 - `31 9 * * *` (daily) — `runWebcamSync`: hydrates each beach's nearest **Windy
   webcam** (`src/clients/windyWebcams.js`, Webcams API v3 free tier): up to 100
   beaches/night — never-checked rows first, then rows last checked more than
@@ -348,15 +378,19 @@ night's NWS enrichment and webcam hydration entirely).
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
 developing via the scheduled-handler endpoint:
 
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"          # daily discovery sync
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"  # NWS point enrichment
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"          # webcam hydration
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"           # hourly flag recompute
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"           # daily discovery sync
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"   # NWS point enrichment
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*"  # ECCC zone enrichment
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"            # hourly flag recompute
 
-`npm run seed` / `npm run seed:enrich` / `npm run seed:webcams` / `npm run seed:flags`
-wrap these four commands. The local database starts empty — run `npm run seed` once
-after a fresh checkout (it queries the live Overpass API and takes a couple of
-minutes), then `npm run seed:enrich` a few times to give beaches their NWS zones.
+`npm run seed` / `npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:webcams` /
+`npm run seed:flags` wrap these five commands. The local database starts empty — run
+`npm run seed` once after a fresh checkout (it queries the live Overpass API and takes
+a couple of minutes), then `npm run seed:enrich` a few times to give beaches their NWS
+zones (and `npm run seed:eccc` afterwards for the Canadian rows NWS parks — note the
+NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes before
+Canadian rows become ECCC candidates).
 The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
 longer exist in wrangler 4.
 
@@ -383,7 +417,8 @@ IDs (see PLAN.md section 8 for the authoritative config).
 
 The production database starts empty on a fresh deploy — the `47 8 * * *`
 discovery cron populates beaches on its next run, then the `17 3,9,15,21 * * *`
-enrichment runs drain the NWS-zone queue and the hourly cron starts writing
+enrichment runs drain the NWS-zone queue (with `29 4,10,16,22 * * *` picking up
+the Canadian rows NWS parks) and the hourly cron starts writing
 flags. There is no remote equivalent of `npm run seed`; either wait for the
 crons or run a local dev server with `remote = true` bindings and trigger the
 scheduled-handler endpoints manually.

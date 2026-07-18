@@ -11,7 +11,7 @@
 // so this strip colors each hour from the exact same numbers the flag estimate
 // uses — no restated thresholds here.
 
-import { waveColorForHeight, alertColorForEvent, ripRiskColor } from "../rules.js";
+import { waveColorForHeight, alertColorForEvent, alertAuthorityForEvent, ripRiskColor } from "../rules.js";
 
 // Band presentation: label + palette token per waveColorForHeight result.
 // null (non-numeric/masked hour) maps to the "no-data" band, which uses the
@@ -265,7 +265,7 @@ export function computeHazardBands(estimate, totalHours, nowIso) {
     out.push({
       kind: "alert",
       label: entry.event,
-      text: "NWS alert: " + entry.event + " — " + range,
+      text: alertAuthorityForEvent(entry.event) + " alert: " + entry.event + " — " + range,
       leftPct: (startHour / total) * 100,
       widthPct: ((endHour - startHour) / total) * 100,
       bgVar: style.bgVar,

@@ -40,8 +40,15 @@ cross-module interface.
                                      // display (section 9).
       lat: 42.401,                   // number (REAL)
       lon: -86.288,                  // number (REAL)
-      nws_zone: "MIZ071",            // string or null (null until enriched by daily sync)
+      nws_zone: "MIZ071",            // string or null (null until enriched by daily sync;
+                                     // stays null forever for Canadian beaches)
       nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33", // string or null
+      eccc_zone: null,               // string or null: ECCC public forecast region NAME
+                                     // ("Windsor - Essex - Chatham-Kent") set by the ECCC
+                                     // enrichment cron for beaches NWS enrichment
+                                     // permanently parked. NOT NULL marks the beach as
+                                     // Canadian: the hourly cron checks Environment
+                                     // Canada alerts for it (section 7).
       osm_id: "node/123456",         // string: osmType + "/" + osmNumericId
       webcam_id: "1595253287",       // string or null: Windy webcamId of the nearest active cam
       webcam_title: "Indian Grove: South Haven", // string or null (may be "")
@@ -61,14 +68,15 @@ cross-module interface.
       "color": "yellow",             // "green" | "yellow" | "red" | "double-red" | "unknown"
       "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
       "trigger": "wave-height",      // which precedence branch decided the color — see section 4
-      "rules_version": "1.2.0",
+      "rules_version": "1.3.0",
       "official": false,
       "waveHeightFt": 2.62,          // structured echo of the input wave reading (null when
                                      // absent) — ALWAYS present regardless of which branch
                                      // decided the color; feeds the detail page's "now" wave
                                      // stat so the UI never parses the reason string. Older
                                      // KV payloads lack it; renderers treat missing as null.
-      "alertDetails": [              // structured echo of the per-alert NWS details (sanitized:
+      "alertDetails": [              // structured echo of the per-alert details, NWS or
+                                     // ECCC depending on the beach's authority (sanitized:
         { "event": "Beach Hazards Statement",   // entries without a string event dropped,
           "onset": "2026-07-04T10:00:00.000Z",  // non-string/empty onset/ends -> null).
           "ends": "2026-07-05T02:00:00.000Z" }  // ALWAYS present ([] when none) regardless of
@@ -246,6 +254,20 @@ migrations/0007_last_viewed.sql:
   scale-out will prioritize recently viewed rows in the recompute rotation
   (TODO.md "Scale-out").
 
+migrations/0008_eccc.sql:
+
+    ALTER TABLE beaches ADD COLUMN eccc_zone TEXT;
+    ALTER TABLE beaches ADD COLUMN eccc_attempts INTEGER NOT NULL DEFAULT 0;
+
+  ECCC (Environment and Climate Change Canada) enrichment for the Canadian
+  beaches PILOT_BBOX sweeps in on the Ontario shoreline. eccc_zone is the
+  GeoMet public-standard-forecast-zones region NAME; eccc_attempts mirrors
+  enrichment_attempts so points no Canadian region ever matches park at the
+  cap (eccc_attempts >= 5) instead of occupying the enrichment batch forever.
+  Only rows NWS enrichment permanently parked (nws_zone NULL AND
+  enrichment_attempts >= 5) are ECCC-enrichment candidates, so a US beach is
+  never ECCC-looked-up before api.weather.gov has definitively rejected it.
+
 - idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
   key "last_overpass_count" (value = String(count)).
@@ -278,11 +300,12 @@ official card when official is null.
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.2.0";
+    export const RULES_VERSION = "1.3.0";
 
-    export const ALERTS_UNAVAILABLE_CAVEAT = "NWS alerts not yet available for this beach";
+    export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
       // Appended to the reason (see the caveat rule after step 5) when the cron
-      // reports alerts were not checkable for this beach (nws_zone still NULL).
+      // reports alerts were not checkable for this beach (neither nws_zone nor
+      // eccc_zone resolved yet).
 
     export const ALERT_PRECEDENCE = [
       "High Surf Warning",        // -> double-red
@@ -290,6 +313,24 @@ Pure module. No fetch, no Date, no env. Exports:
       "High Surf Advisory",       // -> red
       "Rip Current Statement"     // -> red
     ];
+
+    export const ECCC_ALERT_PRECEDENCE = [
+      "tornado warning",             // -> double-red
+      "storm surge warning",         // -> double-red
+      "squall warning",              // -> red
+      "waterspout warning",          // -> red
+      "severe thunderstorm warning", // -> red
+      "wind warning"                 // -> red
+    ];
+      // Environment and Climate Change Canada issues NO beach-specific hazard
+      // products (no rip current / high surf / beach hazards analog exists in
+      // the Canadian system), so Canadian beaches map this curated set of
+      // severe weather WARNINGS for hazards dangerous to people in or on the
+      // water. Watches are deliberately excluded — a watch->yellow mapping
+      // would let it mask a wave-height red under strict step precedence.
+      // Names are exact-match against GeoMet's alert_name_en strings, which
+      // ECCC serves LOWERCASE — the two authorities' namespaces can never
+      // collide with NWS Title Case.
 
     // metersToFeet moved to src/geo.js (section 5) — rules.js no longer exports it.
 
@@ -301,10 +342,18 @@ Pure module. No fetch, no Date, no env. Exports:
       // from it too, so the strip and the flag can never disagree on thresholds.
 
     export function alertColorForEvent(eventName)
-      // Pure. The flag color a recognized NWS alert maps to ("High Surf Warning" ->
-      // "double-red"; the other ALERT_PRECEDENCE events -> "red"), null for any other
-      // event. Step 1 derives its color from this function and the frontend's hazard
-      // lane (section 9) colors alert bands from it, so they can never disagree.
+      // Pure. The flag color a recognized alert maps to — NWS ("High Surf Warning" ->
+      // "double-red"; the other ALERT_PRECEDENCE events -> "red") and ECCC
+      // ("tornado warning" / "storm surge warning" -> "double-red"; the other
+      // ECCC_ALERT_PRECEDENCE events -> "red") share this one lookup — null for any
+      // other event. Steps 1/1b derive their colors from this function and the
+      // frontend's hazard lane (section 9) colors alert bands from it, so they can
+      // never disagree.
+
+    export function alertAuthorityForEvent(eventName)
+      // Pure. "NWS" for ALERT_PRECEDENCE events, "Environment Canada" for
+      // ECCC_ALERT_PRECEDENCE events, null otherwise. Single home of the
+      // issuing-body attribution the hazard-band text uses (section 9).
 
     export function ripRiskColor(risk)
       // Pure. "HIGH" -> "red", "MODERATE" -> "yellow", anything else (LOW, null,
@@ -325,7 +374,9 @@ Pure module. No fetch, no Date, no env. Exports:
 
     inputs = {
       beachId: "osm-node-123456",       // string
-      alerts: ["Rip Current Statement"],// array of NWS event-name strings, [] if fetch OK
+      alerts: ["Rip Current Statement"],// array of alert event-name strings (NWS for
+                                        // US beaches, ECCC alert_name_en for Canadian
+                                        // ones — one authority per beach), [] if fetch OK
                                         // but no alerts, or null if the alerts fetch failed
       alertDetails: [                   // per-alert details from fetchActiveAlertEvents
         { event: "Rip Current Statement",  // (section 5): onset/ends ISO strings or null.
@@ -334,10 +385,11 @@ Pure module. No fetch, no Date, no env. Exports:
       ],                                // decision. null/missing -> echoed as [].
       alertsCheckable: true,            // true | false | null (missing/undefined -> null):
                                         // true when the cron could look up alerts (beach
-                                        // has an nws_zone; a transient fetch failure this
-                                        // run still counts as true), false when nws_zone is
-                                        // NULL (not yet NWS-enriched, so alerts/SRF are
-                                        // never checkable), null for legacy callers (no
+                                        // has an nws_zone OR an eccc_zone; a transient
+                                        // fetch failure this run still counts as true),
+                                        // false when neither is resolved (not yet enriched
+                                        // for either authority, so alerts are never
+                                        // checkable), null for legacy callers (no
                                         // caveat). Drives the reason caveat after step 5.
       ripCurrentRisk: "HIGH",           // "HIGH" | "MODERATE" | "LOW" | null
       waveHeightFt: 3.2,                // number (feet, already converted) or null
@@ -358,6 +410,14 @@ must NOT be mutated.
      reason: "Active NWS alert: High Surf Warning"
    - "Beach Hazards Statement" / "High Surf Advisory" / "Rip Current Statement" → "red",
      reason: "Active NWS alert: " + eventName
+1b. Environment Canada alerts. Same inputs.alerts array (the cron fills it from ECCC
+   for Canadian beaches; the namespaces cannot collide), scanned against
+   ECCC_ALERT_PRECEDENCE in ECCC_ALERT_PRECEDENCE order; exact string equality;
+   unknown events (watches, heat/air-quality warnings) ignored.
+   - "tornado warning" / "storm surge warning" → "double-red",
+     reason: "Active Environment Canada alert: " + eventName
+   - "squall warning" / "waterspout warning" / "severe thunderstorm warning" /
+     "wind warning" → "red", reason: "Active Environment Canada alert: " + eventName
 2. Rip current risk (from SRF product).
    - "HIGH" → "red",     reason: "NWS surf zone forecast rip current risk: HIGH"
    - "MODERATE" → "yellow", reason: "NWS surf zone forecast rip current risk: MODERATE"
@@ -395,17 +455,18 @@ must NOT be mutated.
 
 ### Alerts-unavailable caveat (applied AFTER the color/reason are decided)
 
-When inputs.alertsCheckable === false AND the deciding trigger is NOT "nws-alert", append
-" (" + ALERTS_UNAVAILABLE_CAVEAT + ")" to the final reason, e.g.
-"Estimated wave height 1.0 ft (below 2 ft) (NWS alerts not yet available for this beach)".
-This distinguishes "alerts checked, none active" from "alerts never checkable" so a
-wave/wind/no-data estimate can never present as alert-verified. Skipped when an alert
-itself decided the color (contradictory input) and when alertsCheckable is true/null.
-Colors, triggers, thresholds, precedence, and sources are otherwise UNCHANGED.
+When inputs.alertsCheckable === false AND the deciding trigger is NOT "nws-alert" or
+"eccc-alert", append " (" + ALERTS_UNAVAILABLE_CAVEAT + ")" to the final reason, e.g.
+"Estimated wave height 1.0 ft (below 2 ft) (Weather alerts not yet available for this
+beach)". This distinguishes "alerts checked, none active" from "alerts never checkable"
+so a wave/wind/no-data estimate can never present as alert-verified. Skipped when an
+alert itself decided the color (contradictory input) and when alertsCheckable is
+true/null. Colors, triggers, thresholds, precedence, and sources are otherwise UNCHANGED.
 
 Return value: a FlagEstimate (section 1) with beachId, color, reason as above, trigger
-(the branch that decided the color: step 1 → "nws-alert", step 2 → "rip-current",
-step 3 → "wave-height", step 4 → "wind", step 5 LOW → "rip-current-low",
+(the branch that decided the color: step 1 → "nws-alert", step 1b → "eccc-alert",
+step 2 → "rip-current", step 3 → "wave-height", step 4 → "wind",
+step 5 LOW → "rip-current-low",
 step 5 otherwise → "no-data"), rules_version: RULES_VERSION, official: false,
 sources: inputs.sources (or []), updated: inputs.updated, plus the structured
 echoes waveHeightFt / alertDetails / ripCurrentRisk (section 1). Two calls with
@@ -458,6 +519,14 @@ and cron paths.
       // Pure. deg * Math.PI / 180. Used internally by distanceKm and exported
       // for other angle math (e.g. src/index.js compassDirection).
 
+    export function pointInGeometry(geometry, lat, lon)
+      // Pure. True when the point sits inside a GeoJSON Polygon or MultiPolygon
+      // (ray casting: inside an outer ring, inside none of that polygon's
+      // holes; planar math — fine at forecast-region scale). Malformed or
+      // non-areal geometry (null, Point, missing coordinates) -> false, never
+      // a throw. Used by the ECCC client to match beaches to alert-region
+      // polygons.
+
 ### src/clients/nws.js
 
     export const NWS_USER_AGENT = "swim.report (hello@swim.report)";
@@ -504,6 +573,56 @@ and cron paths.
       //   nwsZone = last path segment of json.properties.forecastZone
       //   nwsGridUrl = json.properties.forecastGridData
       // Failure -> null
+
+### src/clients/eccc.js
+
+Environment and Climate Change Canada via the MSC GeoMet OGC API
+(api.weather.gc.ca, pygeoapi) — the Canadian counterpart to nws.js for
+Ontario-shoreline beaches api.weather.gov 404s forever. Unlike
+api.weather.gov, GeoMet needs NO auth and NO User-Agent header. Alert
+features carry the REAL alert-region polygons, so there is no per-zone alerts
+endpoint to poll: the hourly cron makes ONE bbox fetch and matches beaches
+locally via pointInGeometry (src/geo.js).
+
+    export const ECCC_API_BASE = "https://api.weather.gc.ca";
+    export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
+      // human-readable alerts page for source { url } entries
+
+    export async function fetchActiveEcccAlerts(bbox, nowIso)
+      // bbox: { minLon, minLat, maxLon, maxLat }. nowIso drives the expiry
+      // filter — no Date.now() inside.
+      // GET ECCC_API_BASE + "/collections/weather-alerts/items?f=json&limit=500
+      //   &bbox=minLon,minLat,maxLon,maxLat"
+      // Success -> { alerts: [{ event, onset, ends, geometry }], sourceUrl }
+      //   event = properties.alert_name_en (GeoMet serves LOWERCASE names,
+      //   e.g. "severe thunderstorm warning"); onset = validity_datetime
+      //   falling back to publication_datetime; ends = event_end_datetime
+      //   falling back to expiration_datetime; geometry = the alert-region
+      //   Polygon/MultiPolygon. The collection also returns recently-ENDED
+      //   alerts (status_en "ended") and keeps rows briefly past expiry —
+      //   BOTH are dropped here (status_en "ended"; parseable
+      //   expiration_datetime < nowIso). Features without a usable event name
+      //   or geometry are skipped.
+      // Failure -> null.
+
+    export function ecccAlertsForPoint(alerts, lat, lon)
+      // Pure, exported for tests. Filters a fetchActiveEcccAlerts result's
+      // alerts down to those whose polygon contains the point, in the NWS
+      // result shape: { events: [deduped names], details: [{ event, onset,
+      // ends }] } (details deduped on exact (event, onset, ends) repeats,
+      // matching fetchActiveAlertEvents). Malformed input -> empty result.
+
+    export async function fetchEcccZoneName(lat, lon)
+      // Enrichment counterpart of nws.js fetchPointMetadata.
+      // GET ECCC_API_BASE + "/collections/public-standard-forecast-zones/items
+      //   ?f=json&skipGeometry=true&limit=2&bbox=<point +/- 0.01 deg>"
+      // (the tiny bbox acts as a server-side containment test; skipGeometry
+      // keeps the response small — region polygons are large).
+      // Success with a region -> { zoneName: properties.NAME }, e.g.
+      // "Windsor - Essex - Chatham-Kent". A clean ZERO-region answer (a US
+      // point) -> null, deliberately indistinguishable from failure: both
+      // count an enrichment attempt and the cap parks the row either way.
+      // Failure -> null.
 
 ### src/clients/srfParser.js (pure, no fetch)
 
@@ -1063,7 +1182,7 @@ guessed color). Full color semantics are in README.md's official-sources table.
 wrangler.toml triggers:
 
     [triggers]
-    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
+    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
@@ -1073,9 +1192,11 @@ matched job; an unrecognized cron is logged and ignored. The table:
                          off-peak for both US users and the Overpass API; discovery ONLY)
 - "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; the 09:17 run picks up rows the
                          08:47 discovery just inserted)
+- "29 4,10,16,22 * * *" → runEcccEnrichment(env) (4x daily, offset ~1h from the NWS trigger;
+                         picks up rows the NWS runs have permanently parked)
 - "31 9 * * *"         → runWebcamSync(env)     (daily, shortly after discovery)
 
-The four jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
+The five jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
 independent and a failure in one never starves another (an aborted Overpass sync used to
 skip that night's NWS enrichment and webcam hydration entirely). The matched job is
 invoked via ctx.waitUntil with a top-level .catch that logs "index: scheduled <label>
@@ -1100,6 +1221,13 @@ still needs real pagination (TODO.md).
    the limit).
 3. Alerts: build the set of distinct non-null nws_zone values; fetchActiveAlertEvents once
    per zone; store in a Map. Zones whose fetch failed map to null.
+3b. ECCC alerts: for the Canadian rows (nws_zone NULL, eccc_zone NOT NULL), ONE
+   fetchActiveEcccAlerts call over those rows' bounding box padded by
+   ECCC_ALERTS_BBOX_PAD_DEG (0.5°) — the alert features carry their region
+   polygons, so per-beach matching happens locally in step 7 via
+   ecccAlertsForPoint and this costs a single subrequest regardless of beach
+   count. Skipped when the run has no Canadian rows; a failed fetch (null) just
+   means those beaches get alerts: null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
 5. Waves: fetchWaveHeightsFt in batches of 50 (Promise.allSettled across batches; a failed
@@ -1119,13 +1247,18 @@ still needs real pagination (TODO.md).
 6. Wind: only for beaches whose waveHeightFt is null after steps 5 + 5b — fetchWinds
    in batches of 50.
 7. Per beach: assemble inputs (nulls for anything missing), including
-   alertsCheckable: beach.nws_zone ? true : false (section 4 — a still-unenriched
-   beach with nws_zone NULL gets the honesty caveat instead of a silent wave-only
-   green) and alertDetails from the zone's alerts result (null when the fetch
-   failed or the beach has no zone — estimateFlag echoes it into the stored
-   payload for the detail page's hazard lane); sources = array of
+   alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false (section 4 —
+   a beach enriched for neither authority gets the honesty caveat instead of a
+   silent wave-only green) and alertDetails from the zone's alerts result (null
+   when the fetch failed or the beach has no zone — estimateFlag echoes it into
+   the stored payload for the detail page's hazard lane). Canadian beaches
+   (nws_zone NULL, eccc_zone set) fill alerts/alertDetails from the step-3b
+   result via ecccAlertsForPoint(ecccAlerts.alerts, beach.lat, beach.lon) — a
+   successful fetch with zero containing polygons is a real "no active alerts"
+   ([]), exactly like an empty NWS zone response. sources = array of
    { label, url } entries (section 1) for every source that returned data for THIS
-   beach — alerts: "NWS Alerts"; SRF: "NWS Surf Zone Forecast";
+   beach — alerts: "NWS Alerts", or "Environment Canada Alerts" with url
+   ECCC_ALERTS_INFO_URL for Canadian beaches; SRF: "NWS Surf Zone Forecast";
    waves: waveSourceLabel(model) from WAVE_MODEL_LABELS
    (GLCFS_WAVE_MODEL -> "GLOS Buoy Observations") with url
    waveSourceUrl(model) (Open-Meteo marine docs, or SEAGULL_INFO_URL for buoy
@@ -1180,7 +1313,8 @@ still needs real pagination (TODO.md).
 10. Stamp the rotation cursor: one env.DB.batch of
    UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
 
-Subrequest budget (paid plan, 10,000/invocation): ~30-60 alert calls + ~2×15 SRF calls +
+Subrequest budget (paid plan, 10,000/invocation): ~30-60 alert calls + 1 ECCC alerts
+bbox call (step 3b) + ~2×15 SRF calls +
 ~13 marine batches + ≤62 GLCFS buoy (2 catalogs + ≤60 deduped platform fetches, step 5b) +
 ≤13 wind batches + ~62 official-scraper fetches (one scrape() per matched scraper; South
 Haven uses 2 fetches, Ohio BeachGuard now issues ONE GET per OHIO_SITES entry = 51, the
@@ -1285,6 +1419,27 @@ swept in by PILOT_BBOX (Ontario shoreline) that api.weather.gov 404s forever —
 occupying the batch and starving US beaches; after 5 attempts a row is permanently parked
 and no longer requeued. The per-run summary log reports attempted / enriched / failures /
 parked (rows with nws_zone IS NULL AND enrichment_attempts >= 5).
+
+### runEcccEnrichment (4x daily: "29 4,10,16,22 * * *")
+
+Constants: ECCC_ENRICHMENT_LIMIT = 50 (the Ontario-shoreline sweep is ~50 rows, so
+one run drains the whole backlog), ECCC_ENRICHMENT_MAX_ATTEMPTS = 5.
+
+The Canadian counterpart of runNwsEnrichment, on its own trigger (offset ~1h) so
+the two enrichment upstreams never share a failure window. Candidates are ONLY
+rows NWS enrichment permanently parked:
+
+SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts >= 5
+AND eccc_zone IS NULL AND eccc_attempts < 5 ORDER BY eccc_attempts ASC, RANDOM()
+LIMIT 50; for each, fetchEcccZoneName(lat, lon) sequentially; on success UPDATE
+beaches SET eccc_zone = ? WHERE id = ?; on null/throw UPDATE beaches SET
+eccc_attempts = eccc_attempts + 1 WHERE id = ? (per-beach isolation via
+bumpEcccAttempts, mirroring the NWS side). A row with eccc_zone set is Canadian:
+the hourly recompute checks Environment Canada alerts for it and it stops
+carrying the alerts-unavailable caveat. Rows no Canadian region matches (a US
+point that somehow exhausted NWS attempts, a mid-lake centroid) park at the cap
+exactly like the NWS side. The per-run summary log reports attempted / enriched /
+failures / parked (rows unresolvable by BOTH authorities).
 
 ### runWebcamSync (daily: "31 9 * * *")
 
@@ -1409,7 +1564,7 @@ Routing table (method GET only; anything else → 405):
     enabled = true
 
     [triggers]
-    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "31 9 * * *"]
+    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
     [[d1_databases]]
     binding = "DB"
@@ -1498,8 +1653,9 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
 - Disclaimer in the footer of EVERY page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
-  Rendered inside the shared footer <small> alongside the data attributions (it replaced
-  the former top-of-page wa-callout banner; the sentence itself is the invariant).
+  Rendered inside the shared footer <small> alongside the data attributions ("NOAA/NWS,
+  Environment and Climate Change Canada, and Open-Meteo"; it replaced the former
+  top-of-page wa-callout banner — the sentence itself is the invariant).
 
 ### Flag rendering rules
 
@@ -1583,7 +1739,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     a trimmed series exists — the lane needs the strip's timeline to position against):
     computeHazardBands(estimate, series.totalHours, nowIso) in waveStrip.js returns
     [{ kind, label, text, leftPct, widthPct, bgVar, fgVar, edgeVar }] — one band per
-    flag-relevant NWS alert (alertColorForEvent non-null) from estimate.alertDetails
+    flag-relevant alert (alertColorForEvent non-null — NWS or ECCC) from estimate.alertDetails
     overlapping the window, positioned by onset/ends snapped to whole hours (floor
     start, ceil end, min 1 h; missing onset = already active, missing ends =
     open-ended, both clamped to the window; exact (event, startHour, endHour) repeats
@@ -1601,8 +1757,10 @@ exporting a CSS string); render.js is the sole module the router imports.
     .wave-alert-band (left/width percentages and color tokens are per-instance inline
     styles, the sanctioned case; role="note" tabindex="0"), the hazard name as a
     CSS-ellipsized visible label, and a sibling wa-tooltip whose text — identical to
-    the band's aria-label — is the name plus period, e.g. "NWS alert: Beach Hazards
-    Statement — now through +14 h" (same range phrasing as the strip segments).
+    the band's aria-label — is the issuing body (alertAuthorityForEvent) plus name
+    plus period, e.g. "NWS alert: Beach Hazards Statement — now through +14 h" or
+    "Environment Canada alert: severe thunderstorm warning — now through +6 h"
+    (same range phrasing as the strip segments).
     Legacy FlagEstimate payloads without the echo fields render no lane.
   - Strip: a plain flex row, Dark Sky style — <div class="wave-strip" role="list"
     aria-label="Wave height forecast for the next N hours"> of colored segment divs
@@ -1772,6 +1930,39 @@ Base inputs helper: all-null fields, sources: [], updated: "2026-07-04T12:00:00.
     metersToFeet now lives in src/geo.js, so this block imports it from ../src/geo.js
     (not ../src/rules.js) even though it still resides in test/rules.test.js.
 
+Plus the ECCC step-1b block (same exact-reason-string style): each
+ECCC_ALERT_PRECEDENCE event → its color with reason "Active Environment Canada
+alert: <event>" and trigger "eccc-alert"; ECCC precedence order wins over input
+order; watches / heat / air-quality events ignored (fall through to waves); a
+recognized NWS event wins over a recognized ECCC event (step 1 before 1b); an
+ECCC alert beats wave height; an ECCC-alert-decided color suppresses the
+alertsCheckable caveat; alertColorForEvent maps both namespaces (Title Case
+"Wind Warning" is NOT an ECCC match); alertAuthorityForEvent → "NWS" /
+"Environment Canada" / null.
+
+### test/eccc.test.js
+
+- pointInGeometry (imported from ../src/geo.js): interior/exterior points,
+  hole exclusion, MultiPolygon membership, malformed/non-areal geometry → false.
+- fetchActiveEcccAlerts with stubbed fetch: keeps live alerts and maps
+  event/onset/ends/geometry (validity/event-end preferred, publication/
+  expiration fallbacks); drops status_en "ended" and expired features; skips
+  features without a usable name or geometry; bbox and collection appear in the
+  request URL; sourceUrl echoes the request; null on HTTP failure and thrown
+  fetch (never throws).
+- ecccAlertsForPoint: containing polygons only, event dedupe, detail dedupe on
+  exact (event, onset, ends); no containing polygon → empty result; malformed
+  input degrades to empty.
+- fetchEcccZoneName: first region NAME returned (URL carries skipGeometry=true);
+  zero regions (US point) → null; HTTP failure → null.
+
+### test/ecccEnrichment.test.js
+
+runEcccEnrichment via runScheduledCron("29 4,10,16,22 * * *") with a recording
+DB stub: success stamps eccc_zone (no attempts bump); a null lookup (zero
+regions) bumps eccc_attempts; a thrown fetch bumps attempts for that beach only
+and the loop continues to enrich the next row (per-beach isolation).
+
 ### test/srfParser.test.js
 
 Fixtures built with + and "\n" concatenation (NO backticks), realistic SRF product shape,
@@ -1856,8 +2047,12 @@ buoy case (stat without strip), legacy/absent payload omission, and the stale
 warning. test/flagRecompute.test.js additionally asserts the "waves:" KV write
 (24-entry hoursFt, top-of-hour startIso, TTL 7200) and its absence for all-null or
 failed wave fetches, plus the alertDetails/ripCurrentRisk echoes landing in the
-"flag:" payload when the alerts fetch succeeds; test/router.test.js asserts
-handleDetail reads the "waves:" key. test/rules.test.js also covers
+"flag:" payload when the alerts fetch succeeds, and the Canadian path: an
+eccc_zone beach inside a stubbed GeoMet alert polygon gets the ECCC red with the
+"Environment Canada Alerts" source and no caveat, one outside every polygon gets
+a checked-but-clear estimate (still no caveat, source still named), and a failed
+ECCC fetch behaves like a transient NWS alerts failure (no caveat, no source);
+test/router.test.js asserts handleDetail reads the "waves:" key. test/rules.test.js also covers
 alertColorForEvent / ripRiskColor and the alertDetails / ripCurrentRisk output
 echoes (sanitization, legacy defaults).
 

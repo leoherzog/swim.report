@@ -94,11 +94,20 @@ of it is scoped for follow-up work.
   rescues beach polygons that exist. P.J. Hoffmaster State Park has a park polygon
   but no `natural=beach` element inside it, so it still doesn't appear. Fixing OSM
   is the fix.
-- **Canadian beaches are parked, not supported.** Ontario shoreline swept in by
-  `PILOT_BBOX` permanently 404s NWS point enrichment and parks after 5 attempts
-  (the `enrichment_attempts` cap). Real support means Environment Canada data — a
-  bigger feature, only worth pairing with a Canadian official source (see
-  Windsor-Essex under the scraper list below).
+- **Canadian beaches: alerts supported, no rip/surf signal.** Ontario shoreline
+  beaches now get Environment Canada alert coverage (ECCC zone enrichment cron +
+  the hourly GeoMet `weather-alerts` bbox fetch, `src/clients/eccc.js` — rules
+  step 1b). But ECCC issues no rip current / high surf / beach hazards product,
+  so Canadian estimates lean entirely on the curated warning set plus
+  wave/wind — there is no step-2 analog. Possible future refinements: the ECCC
+  colour-coded tier (`risk_colour_en`, rolled out Nov 2025) as a severity
+  signal, the experimental `marineweather-realtime` GeoMet collection for lake
+  marine warnings, and pairing with a Canadian official source (see
+  Windsor-Essex under the scraper list below). NOTE: "waterspout warning" /
+  "storm surge warning" / "tornado warning" literal API strings are inferred
+  from ECCC's product list but not yet observed live in `alert_name_en`
+  (nothing active during development) — verify the exact strings when one
+  fires; a mismatch fails safe (event ignored).
 - **SwimSmart / Michigan DNR partnership outreach.** Michigan's SwimSmart program
   and DNR-managed state park beaches are the ONLY path to Michigan's statewide
   official data: every EGLE BeachGuard/MiEnviro access route is a React/Angular SPA

@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   RULES_VERSION,
   ALERT_PRECEDENCE,
+  ECCC_ALERT_PRECEDENCE,
   ALERTS_UNAVAILABLE_CAVEAT,
   waveColorForHeight,
   alertColorForEvent,
+  alertAuthorityForEvent,
   ripRiskColor,
   estimateFlag
 } from "../src/rules.js";
@@ -81,6 +83,103 @@ describe("estimateFlag - alerts (step 1)", function () {
     }));
     expect(result.color).toBe("green");
     expect(result.reason).toBe("Estimated wave height 1.0 ft (below 2 ft)");
+  });
+});
+
+describe("ECCC_ALERT_PRECEDENCE", function () {
+  it("lists Environment Canada alerts in the documented precedence order", function () {
+    expect(ECCC_ALERT_PRECEDENCE).toEqual([
+      "tornado warning",
+      "storm surge warning",
+      "squall warning",
+      "waterspout warning",
+      "severe thunderstorm warning",
+      "wind warning"
+    ]);
+  });
+});
+
+describe("estimateFlag - Environment Canada alerts (step 1b)", function () {
+  it("tornado warning -> double-red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["tornado warning"] }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("eccc-alert");
+    expect(result.reason).toBe("Active Environment Canada alert: tornado warning");
+  });
+
+  it("storm surge warning -> double-red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["storm surge warning"] }));
+    expect(result.color).toBe("double-red");
+    expect(result.reason).toBe("Active Environment Canada alert: storm surge warning");
+  });
+
+  it("squall warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["squall warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active Environment Canada alert: squall warning");
+  });
+
+  it("waterspout warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["waterspout warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active Environment Canada alert: waterspout warning");
+  });
+
+  it("severe thunderstorm warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["severe thunderstorm warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active Environment Canada alert: severe thunderstorm warning");
+  });
+
+  it("wind warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["wind warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active Environment Canada alert: wind warning");
+  });
+
+  it("ECCC_ALERT_PRECEDENCE order wins over input order", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["wind warning", "tornado warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.reason).toBe("Active Environment Canada alert: tornado warning");
+  });
+
+  it("watches and non-water products are ignored, falls through to waves", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["severe thunderstorm watch", "heat warning", "air quality warning"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("green");
+    expect(result.reason).toBe("Estimated wave height 1.0 ft (below 2 ft)");
+  });
+
+  it("a recognized NWS event wins over a recognized ECCC event (step 1 before 1b)", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["wind warning", "Rip Current Statement"]
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Rip Current Statement");
+  });
+
+  it("ECCC alert beats wave height under strict precedence", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["severe thunderstorm warning"],
+      waveHeightFt: 0.5
+    }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active Environment Canada alert: severe thunderstorm warning");
+  });
+
+  it("contradictory input: ECCC alert decided the color, caveat suppressed", function () {
+    const result = estimateFlag(baseInputs({
+      alertsCheckable: false,
+      alerts: ["wind warning"]
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("eccc-alert");
+    expect(result.reason).toBe("Active Environment Canada alert: wind warning");
   });
 });
 
@@ -236,8 +335,8 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
 });
 
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
-  it("bumped RULES_VERSION for the reason-format change", function () {
-    expect(RULES_VERSION).toBe("1.2.0");
+  it("bumped RULES_VERSION for the ECCC alerts + caveat-wording change", function () {
+    expect(RULES_VERSION).toBe("1.3.0");
   });
 
   it("wave-only green with alertsCheckable false appends the caveat", function () {
@@ -320,6 +419,27 @@ describe("alertColorForEvent / ripRiskColor", function () {
     expect(alertColorForEvent("Rip Current Statement")).toBe("red");
     expect(alertColorForEvent("Tornado Warning")).toBeNull();
     expect(alertColorForEvent("toString")).toBeNull(); // prototype key, not a mapping
+  });
+
+  it("maps every ECCC_ALERT_PRECEDENCE event to its flag color (lowercase, exact match)", function () {
+    expect(alertColorForEvent("tornado warning")).toBe("double-red");
+    expect(alertColorForEvent("storm surge warning")).toBe("double-red");
+    expect(alertColorForEvent("squall warning")).toBe("red");
+    expect(alertColorForEvent("waterspout warning")).toBe("red");
+    expect(alertColorForEvent("severe thunderstorm warning")).toBe("red");
+    expect(alertColorForEvent("wind warning")).toBe("red");
+    // Watches and non-water ECCC products stay unmapped.
+    expect(alertColorForEvent("severe thunderstorm watch")).toBeNull();
+    expect(alertColorForEvent("heat warning")).toBeNull();
+    // Title Case would be an NWS-style string, not what GeoMet serves.
+    expect(alertColorForEvent("Wind Warning")).toBeNull();
+  });
+
+  it("alertAuthorityForEvent attributes events to their issuing body", function () {
+    expect(alertAuthorityForEvent("High Surf Warning")).toBe("NWS");
+    expect(alertAuthorityForEvent("wind warning")).toBe("Environment Canada");
+    expect(alertAuthorityForEvent("heat warning")).toBeNull();
+    expect(alertAuthorityForEvent("toString")).toBeNull();
   });
 
   it("maps HIGH -> red, MODERATE -> yellow, everything else -> null", function () {

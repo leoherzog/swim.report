@@ -8,6 +8,12 @@ import {
   fetchLatestSrfText,
   fetchPointMetadata
 } from "./clients/nws.js";
+import {
+  fetchActiveEcccAlerts,
+  ecccAlertsForPoint,
+  fetchEcccZoneName,
+  ECCC_ALERTS_INFO_URL
+} from "./clients/eccc.js";
 import { parseRipCurrentRisk } from "./clients/srfParser.js";
 import { fetchWaveHeightsFt, fetchWinds } from "./clients/openMeteo.js";
 import {
@@ -40,6 +46,17 @@ const NWS_ENRICHMENT_LIMIT = 75;
 // swept in by PILOT_BBOX) that api.weather.gov 404s forever would occupy the
 // whole nightly batch and starve US beaches (TODO.md).
 const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
+// ECCC zone enrichment (own cron, 4x daily): only rows NWS permanently parked
+// (nws_zone NULL at the attempts cap) are candidates — the Ontario-shoreline
+// sweep is ~50 rows, so one run drains the whole backlog. Its own attempts
+// cap parks points no ECCC region ever matches (mid-lake centroids) the same
+// way the NWS cap parks non-US points.
+const ECCC_ENRICHMENT_LIMIT = 50;
+const ECCC_ENRICHMENT_MAX_ATTEMPTS = 5;
+// Padding (degrees) around the Canadian beaches' bounding box for the single
+// hourly weather-alerts fetch — generous so an alert polygon merely touching
+// the box's edge is never clipped out of the intersect query.
+const ECCC_ALERTS_BBOX_PAD_DEG = 0.5;
 // Both Overpass queries must never run concurrently with each other (or another
 // sync invocation) -- overpass-api.de allows only 2 slots per IP and 429s beyond
 // that. A single delayed retry smooths over most transient 429s/timeouts without
@@ -198,6 +215,32 @@ async function runFlagRecompute(env) {
       }
     }
 
+    // Step 3b: ECCC alerts for Canadian beaches (eccc_zone set by the ECCC
+    // enrichment cron; such rows always have nws_zone NULL). One bbox fetch
+    // over the Canadian rows' padded bounding box returns every active alert
+    // with its region polygon; per-beach matching is a local point-in-polygon
+    // (ecccAlertsForPoint) in step 7, so this costs a single subrequest
+    // regardless of beach count. null = fetch failed (Canadian beaches keep
+    // alertsCheckable true, mirroring a transient NWS alerts failure).
+    const ecccBeaches = beaches.filter(function (b) {
+      return !b.nws_zone && b.eccc_zone;
+    });
+    let ecccAlerts = null;
+    if (ecccBeaches.length > 0) {
+      const ecccBbox = {
+        minLon: Math.min.apply(null, ecccBeaches.map(function (b) { return b.lon; })) - ECCC_ALERTS_BBOX_PAD_DEG,
+        minLat: Math.min.apply(null, ecccBeaches.map(function (b) { return b.lat; })) - ECCC_ALERTS_BBOX_PAD_DEG,
+        maxLon: Math.max.apply(null, ecccBeaches.map(function (b) { return b.lon; })) + ECCC_ALERTS_BBOX_PAD_DEG,
+        maxLat: Math.max.apply(null, ecccBeaches.map(function (b) { return b.lat; })) + ECCC_ALERTS_BBOX_PAD_DEG
+      };
+      try {
+        ecccAlerts = await fetchActiveEcccAlerts(ecccBbox, nowIso);
+      } catch (err) {
+        console.log("index: eccc alerts fetch threw: " + err.message);
+        ecccAlerts = null;
+      }
+    }
+
     // Step 4: SRF, once per distinct WFO.
     const wfos = Array.from(
       new Set(
@@ -321,6 +364,18 @@ async function runFlagRecompute(env) {
               url: alertEntry.sourceUrl
             });
           }
+        } else if (beach.eccc_zone && ecccAlerts !== null) {
+          // Canadian beach: match the run's single ECCC fetch to this point
+          // via the alert-region polygons. A successful fetch with zero
+          // containing polygons is a real "no active alerts" ([]), exactly
+          // like an empty NWS zone response.
+          const matched = ecccAlertsForPoint(ecccAlerts.alerts, beach.lat, beach.lon);
+          alerts = matched.events;
+          alertDetails = matched.details;
+          sources.push({
+            label: "Environment Canada Alerts",
+            url: ECCC_ALERTS_INFO_URL
+          });
         }
 
         let ripCurrentRisk = null;
@@ -359,17 +414,18 @@ async function runFlagRecompute(env) {
         }
 
         // alertsCheckable distinguishes "alerts checked, none active"
-        // (alerts === []) from "alerts not checkable" (nws_zone still NULL —
-        // beach not yet NWS-enriched). When false, estimateFlag appends an
-        // explicit "NWS alerts not yet available for this beach" caveat to
-        // the reason so a wave-only green is never presentable as
-        // alert-verified. A transient alerts-fetch failure for an enriched
-        // beach stays alertsCheckable: true (no caveat).
+        // (alerts === []) from "alerts not checkable" (neither nws_zone nor
+        // eccc_zone resolved — beach not yet enriched for either authority).
+        // When false, estimateFlag appends an explicit "Weather alerts not
+        // yet available for this beach" caveat to the reason so a wave-only
+        // green is never presentable as alert-verified. A transient
+        // alerts-fetch failure for an enriched beach (either authority) stays
+        // alertsCheckable: true (no caveat).
         const inputs = {
           beachId: beach.id,
           alerts: alerts,
           alertDetails: alertDetails,
-          alertsCheckable: beach.nws_zone ? true : false,
+          alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false,
           ripCurrentRisk: ripCurrentRisk,
           waveHeightFt: waveHeightFt,
           windSpeedMph: windSpeedMph,
@@ -972,6 +1028,78 @@ async function runNwsEnrichment(env) {
   }
 }
 
+// ECCC zone enrichment (own cron, 4x daily, offset from the NWS trigger so
+// the two enrichment upstreams never share a failure window): beaches that
+// NWS point enrichment permanently parked (nws_zone NULL at the attempts cap
+// — the Ontario shoreline swept in by PILOT_BBOX) get their ECCC public
+// forecast region name from the GeoMet public-standard-forecast-zones
+// collection. A row with eccc_zone set is treated as Canadian by the hourly
+// recompute: it joins the single weather-alerts bbox fetch and loses the
+// alerts-unavailable caveat. Genuinely un-resolvable points (no Canadian
+// region contains them) park at ECCC_ENRICHMENT_MAX_ATTEMPTS exactly like
+// the NWS side.
+async function bumpEcccAttempts(env, beachId) {
+  try {
+    await env.DB.prepare(
+      "UPDATE beaches SET eccc_attempts = eccc_attempts + 1 WHERE id = ?1"
+    ).bind(beachId).run();
+  } catch (updateErr) {
+    console.log("index: eccc enrichment attempt bump failed for " + beachId + ": " + updateErr.message);
+  }
+}
+
+async function runEcccEnrichment(env) {
+  let enriched = 0;
+  let enrichmentFailures = 0;
+
+  try {
+    const needsEnrichment = await env.DB.prepare(
+      "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts >= " +
+      String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " AND eccc_zone IS NULL AND eccc_attempts < " +
+      String(ECCC_ENRICHMENT_MAX_ATTEMPTS) + " ORDER BY eccc_attempts ASC, RANDOM() LIMIT " +
+      String(ECCC_ENRICHMENT_LIMIT)
+    ).all();
+    const toEnrich = needsEnrichment.results || [];
+    for (const beach of toEnrich) {
+      try {
+        const zone = await fetchEcccZoneName(beach.lat, beach.lon);
+        if (zone !== null) {
+          await env.DB.prepare(
+            "UPDATE beaches SET eccc_zone = ?1 WHERE id = ?2"
+          ).bind(zone.zoneName, beach.id).run();
+          enriched = enriched + 1;
+        } else {
+          // fetchEcccZoneName returns null on any failure AND on a clean
+          // zero-region answer (a US point) — both count an attempt so
+          // unresolvable rows eventually park.
+          enrichmentFailures = enrichmentFailures + 1;
+          await bumpEcccAttempts(env, beach.id);
+        }
+      } catch (err) {
+        enrichmentFailures = enrichmentFailures + 1;
+        console.log("index: eccc enrichment failed for " + beach.id + ": " + err.message);
+        await bumpEcccAttempts(env, beach.id);
+      }
+    }
+
+    const parkedResult = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM beaches WHERE nws_zone IS NULL AND eccc_zone IS NULL " +
+      "AND enrichment_attempts >= " + String(NWS_ENRICHMENT_MAX_ATTEMPTS) +
+      " AND eccc_attempts >= " + String(ECCC_ENRICHMENT_MAX_ATTEMPTS)
+    ).first();
+    const parkedCount = parkedResult ? parkedResult.n : 0;
+
+    console.log(
+      "index: eccc enrichment complete, attempted=" + String(toEnrich.length) +
+      " enriched=" + String(enriched) +
+      " failures=" + String(enrichmentFailures) +
+      " parked=" + String(parkedCount)
+    );
+  } catch (err) {
+    console.log("index: eccc enrichment failed: " + err.message);
+  }
+}
+
 // Webcam hydration (own cron, daily): for beaches never checked
 // (webcam_checked IS NULL sorts first in SQLite ASC) or last checked over
 // 14 days ago, ask the Windy Webcams API for the nearest active cam and
@@ -1048,6 +1176,7 @@ const CRON_JOBS = {
   "0 * * * *": { run: runFlagRecompute, label: "flag recompute" },
   "47 8 * * *": { run: runOverpassSync, label: "overpass sync" },
   "17 3,9,15,21 * * *": { run: runNwsEnrichment, label: "nws enrichment" },
+  "29 4,10,16,22 * * *": { run: runEcccEnrichment, label: "eccc enrichment" },
   "31 9 * * *": { run: runWebcamSync, label: "webcam sync" }
 };
 
