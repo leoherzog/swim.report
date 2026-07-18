@@ -88,30 +88,21 @@ const RULES = [
   ".flag-icon-red { color: var(--wa-color-red-50); }",
   ".flag-icon-unknown { color: var(--wa-color-gray-50); }",
 
-  // Shared framed-embed treatment: rounded clipping box that fills its column.
-  // The two plain iframes additionally get a 1px surface border; each frame
-  // keeps its own aspect-ratio (these are plain iframes now, so the explicit
-  // sizing is load-bearing).
+  // Shared framed-embed treatment: the wrapper div carries the
+  // "wa-frame:landscape wa-border-radius-m" utilities, which already supply the
+  // 16:9 aspect-ratio, overflow clipping, and rounded corners. Only the 1px
+  // surface border (not part of any utility) lives here.
+  ".framed-embed {",
+  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
+  "}",
+
+  // wa-frame auto-fills only child img/video, so the plain iframes still need
+  // explicit 100% sizing to fill the frame.
   ".wave-map-frame,",
   ".webcam-frame {",
   "  display: block;",
   "  width: 100%;",
-  "  border-radius: var(--wa-border-radius-m);",
-  "  overflow: hidden;",
-  "}",
-
-  ".wave-map-frame,",
-  ".webcam-frame {",
-  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
-  "}",
-
-  ".wave-map-frame {",
-  "  aspect-ratio: 16 / 9;",
-  "}",
-
-  ".webcam-frame {",
-  "  max-width: 100%;",
-  "  aspect-ratio: 16 / 9;",
+  "  height: 100%;",
   "}",
 
   ".back-link {",
@@ -131,12 +122,10 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
-  ".beach-title {",
-  "  margin-block: var(--wa-space-xs) 0;",
-  "}",
-
+  // Grouping/spacing come from the parent .beach-identity (wa-stack wa-gap-2xs),
+  // which also zero-margins its children — so the title needs no rule of its
+  // own, and the subtitle keeps only its quiet color and size.
   ".beach-subtitle {",
-  "  margin-block: var(--wa-space-3xs) 0;",
   "  color: var(--wa-color-text-quiet);",
   "  font-size: var(--wa-font-size-l);",
   "}",
@@ -154,6 +143,37 @@ const RULES = [
   ".official-card,",
   ".estimate-card {",
   "  --spacing: var(--wa-space-m);",
+  "}",
+
+  // Hazard lane above the strip: one relative row per active hazard, each
+  // band absolutely positioned by per-instance left/width percentages (its
+  // colors are per-instance inline values too). The label ellipsizes when the
+  // band is short; the full text rides the tooltip and aria-label.
+  ".wave-alert-lane {",
+  "  position: relative;",
+  "  height: var(--wa-space-xl);",
+  "}",
+
+  ".wave-alert-band {",
+  "  position: absolute;",
+  "  top: 0;",
+  "  bottom: 0;",
+  "  display: flex;",
+  "  align-items: center;",
+  "  padding: 0 var(--wa-space-xs);",
+  "  font-size: var(--wa-font-size-xs);",
+  "  border: var(--wa-border-width-s) solid;",
+  "  border-radius: var(--wa-border-radius-s);",
+  "}",
+
+  ".wave-alert-band:focus-visible {",
+  "  outline: var(--wa-focus-ring);",
+  "}",
+
+  ".wave-alert-label {",
+  "  overflow: hidden;",
+  "  white-space: nowrap;",
+  "  text-overflow: ellipsis;",
   "}",
 
   // A short Dark Sky-style strip: a flex row of proportional colored segments
@@ -209,12 +229,16 @@ const RULES = [
 
   // Model-comparison line chart inside the collapsed disclosure. Taller than the
   // strip (it's a real axis chart), aspect-ratio forced to auto to override the
-  // component default 16/9.
+  // component default 16/9. --point-radius: 0 hides points on every dataset
+  // (component custom property, resolved per-dataset when pointRadius is not
+  // set explicitly in the Chart.js config) instead of restating pointRadius: 0
+  // in each dataset object.
   ".wave-model-chart {",
   "  display: block;",
   "  width: 100%;",
   "  height: 13rem;",
   "  aspect-ratio: auto;",
+  "  --point-radius: 0;",
   "}",
 
   // Keep the list row's flag/badge cluster on one line and never squeezed by

@@ -122,6 +122,51 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
   });
 
+  it("a successful alerts fetch lands its per-alert details in the flag payload", async function () {
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gov/alerts/active") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              features: [{
+                properties: {
+                  event: "Beach Hazards Statement",
+                  onset: "2026-07-15T14:00:00Z",
+                  ends: "2026-07-16T06:00:00Z"
+                }
+              }]
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-3",
+        name: "Test Beach Gamma",
+        nws_zone: "MIZ071",
+        nws_grid_url: null // no WFO -> SRF skipped
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-3").value);
+    expect(estimate.color).toBe("red");
+    expect(estimate.reason).toBe("Active NWS alert: Beach Hazards Statement");
+    // The structured echo the detail page's hazard lane consumes.
+    expect(estimate.alertDetails).toEqual([{
+      event: "Beach Hazards Statement",
+      onset: "2026-07-15T14:00:00Z",
+      ends: "2026-07-16T06:00:00Z"
+    }]);
+    expect(estimate.ripCurrentRisk).toBeNull();
+  });
+
   it("mixed table: only the unenriched beach carries the caveat", async function () {
     const made = makeEnv([
       makeBeachRow({ id: "osm-node-1", nws_zone: null, nws_grid_url: null }),

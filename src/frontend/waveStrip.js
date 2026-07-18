@@ -11,7 +11,7 @@
 // so this strip colors each hour from the exact same numbers the flag estimate
 // uses — no restated thresholds here.
 
-import { waveColorForHeight } from "../rules.js";
+import { waveColorForHeight, alertColorForEvent, ripRiskColor } from "../rules.js";
 
 // Band presentation: label + palette token per waveColorForHeight result.
 // null (non-numeric/masked hour) maps to the "no-data" band, which uses the
@@ -173,6 +173,126 @@ export function trimWaveSeries(waves, nowIso) {
   };
 }
 
+// Hazard-band presentation: quiet fill + matching on-quiet text + loud edge per
+// flag color the hazard maps to, expressed through the SEMANTIC danger/warning
+// theme-assignment tokens (not raw red/yellow tints). Semantic tokens adapt to
+// light and dark modes — matter.css maps each to a different tint in its light
+// vs dark block — whereas the raw tints are single static values that never
+// invert. The default variant mapping resolves danger->red and warning->yellow,
+// so these preserve the current hues. double-red shares the red (danger)
+// treatment (the band label carries the severity). The yellow edge deliberately
+// uses warning-border-normal, not -loud: -loud resolves to yellow-50, which
+// reads olive/muddy in the mild palette (the same tint PLAN.md section 9 avoids
+// for the strip's yellow band).
+const HAZARD_STYLES = {
+  "double-red": {
+    bgVar: "var(--wa-color-danger-fill-quiet)",
+    fgVar: "var(--wa-color-danger-on-quiet)",
+    edgeVar: "var(--wa-color-danger-border-loud)"
+  },
+  "red": {
+    bgVar: "var(--wa-color-danger-fill-quiet)",
+    fgVar: "var(--wa-color-danger-on-quiet)",
+    edgeVar: "var(--wa-color-danger-border-loud)"
+  },
+  "yellow": {
+    bgVar: "var(--wa-color-warning-fill-quiet)",
+    fgVar: "var(--wa-color-warning-on-quiet)",
+    edgeVar: "var(--wa-color-warning-border-normal)"
+  }
+};
+
+// Hazard bands overlaid above the wave strip: one band per flag-relevant NWS
+// alert overlapping the trimmed window (positioned by its onset/ends period),
+// plus a full-window band for a HIGH/MODERATE rip-current risk (the SRF
+// product carries no parseable period, so its text names the source instead
+// of claiming one). estimate is the FlagEstimate KV payload — legacy payloads
+// without alertDetails/ripCurrentRisk simply produce no bands. Colors come
+// from rules.js (alertColorForEvent / ripRiskColor), never restated here.
+// -> [{ kind, label, text, leftPct, widthPct, bgVar, fgVar, edgeVar }]
+export function computeHazardBands(estimate, totalHours, nowIso) {
+  const out = [];
+  if (estimate === null || typeof estimate !== "object") {
+    return out;
+  }
+  const total = (typeof totalHours === "number" && isFinite(totalHours) && totalHours > 0)
+    ? totalHours : 0;
+  const nowMs = Date.parse(nowIso);
+  if (total === 0 || Number.isNaN(nowMs)) {
+    return out;
+  }
+  const windowMs = total * 3600000;
+
+  const details = Array.isArray(estimate.alertDetails) ? estimate.alertDetails : [];
+  const seen = {};
+  for (let i = 0; i < details.length; i++) {
+    const entry = details[i];
+    if (entry === null || typeof entry !== "object" || typeof entry.event !== "string") {
+      continue;
+    }
+    const color = alertColorForEvent(entry.event);
+    if (color === null) {
+      continue;
+    }
+    // Missing/unparseable onset means "already active"; missing ends means
+    // "open-ended" — both clamp to the window rather than dropping the band.
+    let startMs = Date.parse(entry.onset);
+    let endMs = Date.parse(entry.ends);
+    if (Number.isNaN(startMs)) {
+      startMs = nowMs;
+    }
+    if (Number.isNaN(endMs)) {
+      endMs = nowMs + windowMs;
+    }
+    const clampedStart = Math.max(startMs, nowMs);
+    const clampedEnd = Math.min(endMs, nowMs + windowMs);
+    if (clampedEnd <= clampedStart) {
+      continue;
+    }
+    // Snap to whole hours (floor the start, ceil the end, minimum one hour)
+    // so bands align with the strip's hour granularity and tick labels.
+    const startHour = Math.floor((clampedStart - nowMs) / 3600000);
+    const endHour = Math.min(total, Math.max(startHour + 1, Math.ceil((clampedEnd - nowMs) / 3600000)));
+    const key = entry.event + "|" + startHour + "|" + endHour;
+    if (seen[key]) {
+      continue;
+    }
+    seen[key] = true;
+    const range = startHour === 0
+      ? ("now through +" + endHour + " h")
+      : ("+" + startHour + " h to +" + endHour + " h");
+    const style = HAZARD_STYLES[color];
+    out.push({
+      kind: "alert",
+      label: entry.event,
+      text: "NWS alert: " + entry.event + " — " + range,
+      leftPct: (startHour / total) * 100,
+      widthPct: ((endHour - startHour) / total) * 100,
+      bgVar: style.bgVar,
+      fgVar: style.fgVar,
+      edgeVar: style.edgeVar
+    });
+  }
+
+  const risk = estimate.ripCurrentRisk;
+  const riskColor = ripRiskColor(risk);
+  if (riskColor !== null) {
+    const style = HAZARD_STYLES[riskColor];
+    out.push({
+      kind: "rip",
+      label: "Rip current risk: " + risk,
+      text: "Rip current risk " + risk + " — from the latest NWS surf zone forecast",
+      leftPct: 0,
+      widthPct: 100,
+      bgVar: style.bgVar,
+      fgVar: style.fgVar,
+      edgeVar: style.edgeVar
+    });
+  }
+
+  return out;
+}
+
 // Run-length-encode consecutive hours that share a color band.
 // -> [{ band, tokenVar, label, hours }]; the hour counts sum to hoursFt.length.
 export function computeWaveRuns(hoursFt) {
@@ -281,9 +401,11 @@ export function modelNowCaption(trimmed) {
 // (display only — storage stays raw) so the component's default tooltips read
 // cleanly; nulls preserved so spanGaps:false draws honest gaps. Unlike the band
 // strip this keeps tooltips + legend (an interactive comparison view). The
-// chart type comes from the <wa-line-chart> element; the "ft" y-axis label is
-// set here via options.scales.y.title (the component deep-merges this config
-// over its defaults). The caller stringifies this.
+// chart type AND the "ft" y-axis label both come from the <wa-line-chart>
+// element (its yLabel attribute — empirically the axis title renders from
+// parsed HTML; the kebab y-label spelling does NOT), so this config only needs
+// to keep plugins.title.display false to suppress the element's accessibility
+// label leaking as a visible chart title. The caller stringifies this.
 export function buildWaveModelChartConfig(trimmed) {
   const t = readTrimmed(trimmed);
   const byModel = t.byModel;
@@ -310,7 +432,6 @@ export function buildWaveModelChartConfig(trimmed) {
       data: data,
       borderColor: color,
       backgroundColor: color,
-      pointRadius: 0,
       spanGaps: false
     });
   }
@@ -321,11 +442,6 @@ export function buildWaveModelChartConfig(trimmed) {
       datasets: datasets
     },
     options: {
-      scales: {
-        y: {
-          title: { display: true, text: "ft" }
-        }
-      },
       plugins: {
         title: { display: false }
       }

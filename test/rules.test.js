@@ -4,6 +4,8 @@ import {
   ALERT_PRECEDENCE,
   ALERTS_UNAVAILABLE_CAVEAT,
   waveColorForHeight,
+  alertColorForEvent,
+  ripRiskColor,
   estimateFlag
 } from "../src/rules.js";
 import { metersToFeet } from "../src/geo.js";
@@ -310,6 +312,25 @@ describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", functio
   });
 });
 
+describe("alertColorForEvent / ripRiskColor", function () {
+  it("maps every ALERT_PRECEDENCE event to its flag color, unknown events to null", function () {
+    expect(alertColorForEvent("High Surf Warning")).toBe("double-red");
+    expect(alertColorForEvent("Beach Hazards Statement")).toBe("red");
+    expect(alertColorForEvent("High Surf Advisory")).toBe("red");
+    expect(alertColorForEvent("Rip Current Statement")).toBe("red");
+    expect(alertColorForEvent("Tornado Warning")).toBeNull();
+    expect(alertColorForEvent("toString")).toBeNull(); // prototype key, not a mapping
+  });
+
+  it("maps HIGH -> red, MODERATE -> yellow, everything else -> null", function () {
+    expect(ripRiskColor("HIGH")).toBe("red");
+    expect(ripRiskColor("MODERATE")).toBe("yellow");
+    expect(ripRiskColor("LOW")).toBeNull();
+    expect(ripRiskColor(null)).toBeNull();
+    expect(ripRiskColor("extreme")).toBeNull();
+  });
+});
+
 describe("estimateFlag - output contract", function () {
   it("27. official false, rules_version, beachId, sources, updated propagate", function () {
     const sourcesArr = ["https://api.weather.gov/alerts/active?zone=MIZ071"];
@@ -364,6 +385,41 @@ describe("estimateFlag - output contract", function () {
     };
     const result = estimateFlag(inputs);
     expect(result.sources).toEqual([]);
+  });
+
+  it("echoes sanitized alertDetails on every branch, [] for legacy callers", function () {
+    const details = [
+      { event: "Beach Hazards Statement",
+        onset: "2026-07-04T10:00:00.000Z", ends: "2026-07-05T02:00:00.000Z" },
+      { event: "Tornado Warning", onset: 42, ends: "" }, // non-string/empty times -> null
+      { onset: "2026-07-04T10:00:00.000Z" },             // no event -> dropped
+      null,
+      "garbage"
+    ];
+    // A wave-decided branch still echoes the alert details.
+    const result = estimateFlag(baseInputs({ waveHeightFt: 1.0, alertDetails: details }));
+    expect(result.trigger).toBe("wave-height");
+    expect(result.alertDetails).toEqual([
+      { event: "Beach Hazards Statement",
+        onset: "2026-07-04T10:00:00.000Z", ends: "2026-07-05T02:00:00.000Z" },
+      { event: "Tornado Warning", onset: null, ends: null }
+    ]);
+    // Legacy caller (no field) and malformed field both echo [].
+    expect(estimateFlag(baseInputs({})).alertDetails).toEqual([]);
+    expect(estimateFlag(baseInputs({ alertDetails: "nope" })).alertDetails).toEqual([]);
+  });
+
+  it("echoes ripCurrentRisk (known levels only) regardless of the deciding branch", function () {
+    // An alert decides the color, but the risk level still echoes through.
+    const result = estimateFlag(baseInputs({
+      alerts: ["High Surf Warning"],
+      ripCurrentRisk: "MODERATE"
+    }));
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.ripCurrentRisk).toBe("MODERATE");
+    expect(estimateFlag(baseInputs({ ripCurrentRisk: "LOW" })).ripCurrentRisk).toBe("LOW");
+    expect(estimateFlag(baseInputs({})).ripCurrentRisk).toBeNull();
+    expect(estimateFlag(baseInputs({ ripCurrentRisk: "extreme" })).ripCurrentRisk).toBeNull();
   });
 });
 

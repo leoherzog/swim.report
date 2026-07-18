@@ -92,6 +92,8 @@ Example response:
         "rules_version": "1.2.0",
         "official": false,
         "waveHeightFt": 2.62,
+        "alertDetails": [],
+        "ripCurrentRisk": null,
         "sources": [
           { "label": "ECMWF Wave Forecast",
             "url": "https://open-meteo.com/en/docs/marine-weather-api" }
@@ -125,9 +127,15 @@ consecutive same-band hours, sized proportionally — built server-side from the
 KV wave series (`waves:` keys). Each segment carries a `wa-tooltip` (hover/focus/tap)
 and a matching `aria-label` naming its band and hour range ("2–4 ft waves (estimated)
 — +5 h to +8 h"), and a visually-hidden prose summary keeps the whole forecast
-readable by assistive tech. The section carries the same ESTIMATE badge as the
-estimate card and is omitted entirely for beaches with no wave series (e.g. buoy-only
-readings, which still show the "now" stat).
+readable by assistive tech. Active hazards overlay the strip as a lane of labeled
+bands along the top: each flag-relevant NWS alert renders a band spanning its
+onset-to-ends period within the window (tooltip: "NWS alert: Beach Hazards Statement
+— now through +14 h"), and a HIGH/MODERATE rip-current risk from the surf zone
+forecast renders a full-window band (the SRF product carries no parseable end time).
+The `alertDetails` and `ripCurrentRisk` fields echoed on the estimate payload feed
+this lane. The section carries the same ESTIMATE badge as the
+estimate card (on the "waves now" stat line) and is omitted entirely for beaches
+with no wave series (e.g. buoy-only readings, which still show the "now" stat).
 
 When two or more wave models resolve for a beach, the section also shows each model's
 current reading ("ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft") and a
@@ -266,6 +274,10 @@ system font stacks (no external font requests). Theme changes in the kit builder
 mean re-copying the snippet's theme/palette/overrides into `render.js` — the
 pinned CDN files themselves are immutable and long-cached. Font Awesome icons
 resolve through the kit code set via `data-fa-kit-code` on the `<html>` element.
+Light/dark mode follows the visitor's OS preference: a tiny blocking inline
+script in `<head>` (`src/frontend/colorSchemeScript.js`) toggles the `wa-dark`
+class on `<html>` from `prefers-color-scheme` before the theme stylesheets
+paint, and live OS switches apply without a reload.
 
 ### Cron jobs
 

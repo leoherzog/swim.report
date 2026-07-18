@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   trimWaveSeries,
   computeWaveRuns,
+  computeHazardBands,
   waveStripSummary,
   modelDisplayName,
   orderedModelIds,
@@ -278,7 +279,7 @@ describe("buildWaveModelChartConfig", () => {
     expect(gfs.data[1]).toBeNull();
   });
 
-  it("sets pointRadius 0, spanGaps false, and distinct non-flag color tokens", () => {
+  it("omits pointRadius (points hidden via the --point-radius custom property on .wave-model-chart), sets spanGaps false, and distinct non-flag color tokens", () => {
     const config = buildWaveModelChartConfig(threeModelTrimmed());
     const colors = config.data.datasets.map(function (d) { return d.borderColor; });
     expect(colors).toEqual([
@@ -287,7 +288,7 @@ describe("buildWaveModelChartConfig", () => {
       "var(--wa-color-cyan-60)"
     ]);
     config.data.datasets.forEach(function (d) {
-      expect(d.pointRadius).toBe(0);
+      expect(d).not.toHaveProperty("pointRadius");
       expect(d.spanGaps).toBe(false);
       expect(d.backgroundColor).toBe(d.borderColor);
       // Never a flag semantic color.
@@ -297,9 +298,9 @@ describe("buildWaveModelChartConfig", () => {
     });
   });
 
-  it("sets the 'ft' y-axis title in the scales block and hides the chart title plugin", () => {
+  it("carries no scales block (the 'ft' y-axis title rides on the element's yLabel attribute) and hides the chart title plugin", () => {
     const config = buildWaveModelChartConfig(threeModelTrimmed());
-    expect(config.options.scales.y.title).toEqual({ display: true, text: "ft" });
+    expect(config.options.scales).toBeUndefined();
     expect(config.options.plugins.title.display).toBe(false);
   });
 });
@@ -400,5 +401,141 @@ describe("waveStripSummary", () => {
 
   it("returns an empty string for no runs", () => {
     expect(waveStripSummary([])).toBe("");
+  });
+});
+
+describe("computeHazardBands", () => {
+  const NOW = "2026-07-05T12:00:00.000Z";
+
+  function estimateWithHazards(extra) {
+    return Object.assign({
+      color: "red",
+      reason: "Active NWS alert: Beach Hazards Statement",
+      official: false
+    }, extra);
+  }
+
+  it("positions a flag-relevant alert by its onset/ends, snapped to hours", () => {
+    const bands = computeHazardBands(estimateWithHazards({
+      alertDetails: [{
+        event: "Beach Hazards Statement",
+        onset: "2026-07-05T10:00:00.000Z", // before now -> clamps to 0
+        ends: "2026-07-06T02:00:00.000Z"   // +14 h
+      }]
+    }), 24, NOW);
+    expect(bands).toHaveLength(1);
+    expect(bands[0].kind).toBe("alert");
+    expect(bands[0].label).toBe("Beach Hazards Statement");
+    expect(bands[0].text).toBe("NWS alert: Beach Hazards Statement — now through +14 h");
+    expect(bands[0].leftPct).toBe(0);
+    expect(bands[0].widthPct).toBeCloseTo((14 / 24) * 100, 10);
+    expect(bands[0].bgVar).toBe("var(--wa-color-danger-fill-quiet)");
+    expect(bands[0].fgVar).toBe("var(--wa-color-danger-on-quiet)");
+    expect(bands[0].edgeVar).toBe("var(--wa-color-danger-border-loud)");
+  });
+
+  it("a future-onset alert starts mid-window and clamps its end to the window", () => {
+    const bands = computeHazardBands(estimateWithHazards({
+      alertDetails: [{
+        event: "High Surf Warning",
+        onset: "2026-07-05T18:00:00.000Z", // +6 h
+        ends: "2026-07-07T00:00:00.000Z"   // way past the window
+      }]
+    }), 24, NOW);
+    expect(bands).toHaveLength(1);
+    expect(bands[0].leftPct).toBe(25);
+    expect(bands[0].widthPct).toBe(75);
+    expect(bands[0].text).toBe("NWS alert: High Surf Warning — +6 h to +24 h");
+  });
+
+  it("missing onset means already active; missing ends means open-ended", () => {
+    const bands = computeHazardBands(estimateWithHazards({
+      alertDetails: [{ event: "Rip Current Statement", onset: null, ends: null }]
+    }), 24, NOW);
+    expect(bands).toHaveLength(1);
+    expect(bands[0].leftPct).toBe(0);
+    expect(bands[0].widthPct).toBe(100);
+    expect(bands[0].text).toBe("NWS alert: Rip Current Statement — now through +24 h");
+  });
+
+  it("drops alerts fully outside the window and non-precedence events", () => {
+    const bands = computeHazardBands(estimateWithHazards({
+      alertDetails: [
+        { event: "Beach Hazards Statement",
+          onset: "2026-07-04T00:00:00.000Z", ends: "2026-07-05T06:00:00.000Z" }, // ended
+        { event: "Beach Hazards Statement",
+          onset: "2026-07-07T00:00:00.000Z", ends: "2026-07-08T00:00:00.000Z" }, // not yet
+        { event: "Tornado Warning", onset: null, ends: null },                    // not flag-relevant
+        "garbage", null                                                           // malformed
+      ]
+    }), 24, NOW);
+    expect(bands).toHaveLength(0);
+  });
+
+  it("dedupes exact repeats but keeps distinct periods of the same event", () => {
+    const detail = { event: "High Surf Advisory",
+      onset: "2026-07-05T12:00:00.000Z", ends: "2026-07-05T18:00:00.000Z" };
+    const later = { event: "High Surf Advisory",
+      onset: "2026-07-06T00:00:00.000Z", ends: "2026-07-06T06:00:00.000Z" };
+    const bands = computeHazardBands(estimateWithHazards({
+      alertDetails: [detail, detail, later]
+    }), 24, NOW);
+    expect(bands).toHaveLength(2);
+    expect(bands[0].text).toBe("NWS alert: High Surf Advisory — now through +6 h");
+    expect(bands[1].text).toBe("NWS alert: High Surf Advisory — +12 h to +18 h");
+  });
+
+  it("adds a full-window band for HIGH (red) and MODERATE (yellow) rip risk", () => {
+    const high = computeHazardBands(estimateWithHazards({ ripCurrentRisk: "HIGH" }), 24, NOW);
+    expect(high).toHaveLength(1);
+    expect(high[0].kind).toBe("rip");
+    expect(high[0].label).toBe("Rip current risk: HIGH");
+    expect(high[0].text).toBe("Rip current risk HIGH — from the latest NWS surf zone forecast");
+    expect(high[0].leftPct).toBe(0);
+    expect(high[0].widthPct).toBe(100);
+    expect(high[0].bgVar).toBe("var(--wa-color-danger-fill-quiet)");
+
+    const moderate = computeHazardBands(estimateWithHazards({ ripCurrentRisk: "MODERATE" }), 24, NOW);
+    expect(moderate).toHaveLength(1);
+    expect(moderate[0].bgVar).toBe("var(--wa-color-warning-fill-quiet)");
+    expect(moderate[0].fgVar).toBe("var(--wa-color-warning-on-quiet)");
+  });
+
+  it("LOW/garbage rip risk and legacy estimates yield no bands", () => {
+    expect(computeHazardBands(estimateWithHazards({ ripCurrentRisk: "LOW" }), 24, NOW))
+      .toHaveLength(0);
+    expect(computeHazardBands(estimateWithHazards({ ripCurrentRisk: "extreme" }), 24, NOW))
+      .toHaveLength(0);
+    // Legacy KV payload without either echo field.
+    expect(computeHazardBands(estimateWithHazards({}), 24, NOW)).toHaveLength(0);
+  });
+
+  it("degrades to [] on malformed inputs (estimate, window, nowIso)", () => {
+    const withAlert = estimateWithHazards({
+      alertDetails: [{ event: "Beach Hazards Statement", onset: null, ends: null }]
+    });
+    expect(computeHazardBands(null, 24, NOW)).toEqual([]);
+    expect(computeHazardBands("nope", 24, NOW)).toEqual([]);
+    expect(computeHazardBands(withAlert, 0, NOW)).toEqual([]);
+    expect(computeHazardBands(withAlert, NaN, NOW)).toEqual([]);
+    expect(computeHazardBands(withAlert, 24, "not a date")).toEqual([]);
+  });
+
+  it("alert bands come before the rip band and a trimmed window scales positions", () => {
+    // 12-hour trimmed window: the +6 h onset sits at 50%.
+    const bands = computeHazardBands(estimateWithHazards({
+      alertDetails: [{
+        event: "High Surf Warning",
+        onset: "2026-07-05T18:00:00.000Z",
+        ends: null
+      }],
+      ripCurrentRisk: "MODERATE"
+    }), 12, NOW);
+    expect(bands).toHaveLength(2);
+    expect(bands[0].kind).toBe("alert");
+    expect(bands[0].leftPct).toBe(50);
+    expect(bands[0].widthPct).toBe(50);
+    expect(bands[0].text).toBe("NWS alert: High Surf Warning — +6 h to +12 h");
+    expect(bands[1].kind).toBe("rip");
   });
 });

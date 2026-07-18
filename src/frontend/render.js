@@ -8,9 +8,11 @@
 import { PAGE_STYLES } from "./styles.js";
 import { LIST_SEARCH_SCRIPT } from "./searchScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
+import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
+  computeHazardBands,
   waveStripSummary,
   modelNowCaption,
   orderedModelIds,
@@ -308,7 +310,7 @@ function renderFooter() {
 
 function renderPageShell(headerHtml, mainHtml, footerHtml) {
   const lines = [];
-  lines.push("<wa-page class=\"app-page\">");
+  lines.push("<wa-page>");
   lines.push("<header slot=\"header\" class=\"app-header\">" + headerHtml + "</header>");
   lines.push("<main class=\"app-main wa-stack wa-gap-l\">" + mainHtml + "</main>");
   lines.push("<footer slot=\"footer\" class=\"app-footer\">" + footerHtml + "</footer>");
@@ -323,6 +325,9 @@ function renderDocument(title, bodyHtml) {
   lines.push("<head>");
   lines.push("<meta charset=\"utf-8\">");
   lines.push("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  // Blocking on purpose: toggles wa-dark from the OS color-scheme preference
+  // before the theme stylesheets below paint (see colorSchemeScript.js).
+  lines.push("<script>" + COLOR_SCHEME_SCRIPT + "</script>");
   lines.push("<title>" + escapeHtml(title) + "</title>");
   lines.push("<link rel=\"stylesheet\" href=\"" + WA_KIT_BASE + "/styles/themes/matter.css\">");
   lines.push("<link rel=\"stylesheet\" href=\"" + WA_KIT_BASE + "/styles/native.css\">");
@@ -388,7 +393,7 @@ function renderBeachRow(entry) {
   const searchable = (beach.park_name ? beach.park_name + " " : "") + String(beach.name || "");
   const dataName = escapeHtml(searchable.toLowerCase());
   const href = "/beach/" + encodeURIComponent(beach.id);
-  const officialBadgeHtml = official ? (" " + renderOfficialBadge("wa-font-size-2xs")) : "";
+  const officialBadgeHtml = official ? (" " + renderOfficialBadge(null)) : "";
   const milesLabel = formatMiles(entry.distanceMi);
   const distanceHtml = span("beach-row-distance wa-caption-s", milesLabel);
   const subtitle = subtitleName(beach);
@@ -491,8 +496,10 @@ function renderWaveMap(beach) {
     "&zoom=11&overlay=waves&product=ecmwfWaves&level=surface&marker=true" +
     "&lat=" + lat.toFixed(3) + "&lon=" + lon.toFixed(3);
   return "<section class=\"wave-map\">" +
+    "<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
     "<iframe class=\"wave-map-frame\" src=\"" + escapeHtml(embedSrc) + "\"" +
     " title=\"Wave height map\" loading=\"lazy\" allowfullscreen></iframe>" +
+    "</div>" +
     "</section>";
 }
 
@@ -521,8 +528,10 @@ function renderWebcam(beach) {
   const lines = [];
   lines.push("<section class=\"webcam-section wa-stack wa-gap-s\">");
   lines.push("<h2 class=\"webcam-heading wa-font-size-l\">Nearby webcam</h2>");
-  lines.push("<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
-    " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen></iframe>");
+  lines.push("<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
+    "<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
+    " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen></iframe>" +
+    "</div>");
   lines.push("<p class=\"webcam-caption wa-caption-s\">" + captionParts.join(" &middot; ") + "</p>");
   lines.push("</section>");
   return lines.join("\n");
@@ -606,9 +615,10 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
   const hasNow = !!estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt);
   const nowStat = hasNow
-    ? ("<p class=\"wave-now\"><span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">" +
+    ? ("<p class=\"wave-now wa-cluster wa-gap-s\"><span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">" +
         estimate.waveHeightFt.toFixed(1) + " ft</span> " +
-        "<span class=\"wave-now-label wa-caption-s\">waves now</span></p>")
+        "<span class=\"wave-now-label wa-caption-s\">waves now</span> " +
+        renderEstimateBadge() + "</p>")
     : "";
 
   let chartBlock = "";
@@ -642,6 +652,35 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
   };
 }
 
+// Hazard lane above the wave strip: one positioned band row per active hazard
+// (a flag-relevant NWS alert with its time period, or a HIGH/MODERATE
+// rip-current risk). The band's left/width percentages and color tokens are
+// genuinely per-instance values (the sanctioned inline-style case); its
+// visible label carries the hazard name (CSS-ellipsized when the span is
+// short) and the tooltip/aria-label carry the full name-plus-period text —
+// the same pattern as the strip segments. Returns "" for no bands.
+function renderHazardLane(bands) {
+  if (bands.length === 0) {
+    return "";
+  }
+  const rows = [];
+  const tips = [];
+  for (let i = 0; i < bands.length; i++) {
+    const band = bands[i];
+    const id = "wave-alert-" + i;
+    rows.push("<div class=\"wave-alert-lane\">" +
+      "<div class=\"wave-alert-band\" id=\"" + id + "\" role=\"note\" tabindex=\"0\"" +
+      " aria-label=\"" + escapeHtml(band.text) + "\"" +
+      " style=\"left: " + band.leftPct + "%; width: " + band.widthPct + "%;" +
+      " background: " + band.bgVar + "; color: " + band.fgVar + ";" +
+      " border-color: " + band.edgeVar + ";\">" +
+      "<span class=\"wave-alert-label\">" + escapeHtml(band.label) + "</span>" +
+      "</div></div>");
+    tips.push("<wa-tooltip for=\"" + id + "\">" + escapeHtml(band.text) + "</wa-tooltip>");
+  }
+  return rows.join("") + tips.join("");
+}
+
 // Collapsed model-comparison line chart: rendered only when two or more models
 // are present in the trimmed window (a single model would just repeat the
 // strip). Same slotted-JSON pattern as the strip. Returns "" otherwise. Pure.
@@ -653,7 +692,7 @@ function renderWaveModelCompare(series) {
   const modelSummary = waveModelSummary(series);
   return "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\" " +
     "appearance=\"plain\" icon-placement=\"start\">" +
-    "<wa-line-chart class=\"wave-model-chart\" without-animation " +
+    "<wa-line-chart class=\"wave-model-chart\" without-animation yLabel=\"ft\" " +
     "label=\"Wave height by forecast model\" description=\"" +
     escapeHtml(modelSummary) + "\">" +
     chartScriptAndFallback(modelConfig, modelSummary) +
@@ -669,6 +708,12 @@ function renderWaveForecast(estimate, waves, nowIso) {
   const series = trimWaveSeries(waves, nowIso);
   const strip = renderWaveStripParts(estimate, series, nowIso, waves && waves.updated);
   const modelCompareHtml = renderWaveModelCompare(series);
+  // Hazard lane needs the strip's timeline to position bands against — with
+  // no renderable series there is no bar graph to overlay (the estimate card
+  // still names any active alert in its reason).
+  const hazardHtml = series
+    ? renderHazardLane(computeHazardBands(estimate, series.totalHours, nowIso))
+    : "";
 
   // Neither the stat nor the strip has anything to render — omit the section.
   if (!strip.hasNow && !series) {
@@ -677,14 +722,19 @@ function renderWaveForecast(estimate, waves, nowIso) {
 
   const lines = [];
   lines.push("<section class=\"wave-forecast wa-stack wa-gap-s\">");
-  lines.push("<div class=\"wa-cluster wa-gap-s\">" +
-    "<h2 class=\"wave-forecast-heading wa-font-size-l\">Wave forecast</h2>" +
-    renderEstimateBadge() + "</div>");
   if (strip.nowStat) {
     lines.push(strip.nowStat);
+  } else {
+    // No now-stat (legacy payload without waveHeightFt): the ESTIMATE badge
+    // normally riding the stat line still has to mark the section as
+    // estimated — that framing is a product invariant.
+    lines.push("<div class=\"wa-cluster wa-gap-s\">" + renderEstimateBadge() + "</div>");
   }
   if (strip.modelNowHtml) {
     lines.push(strip.modelNowHtml);
+  }
+  if (hazardHtml) {
+    lines.push(hazardHtml);
   }
   if (strip.chartBlock) {
     lines.push(strip.chartBlock);
@@ -726,13 +776,20 @@ export function renderDetailPage(data) {
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
 
-  const headerBlock = "<a class=\"back-link\" href=\"/\">" +
+  // Identity block wrapped in its own tight nested stack (wa-gap-2xs) so the
+  // back-link, title, subtitle, and coords group together; the outer app-main
+  // stack's wa-gap-l then separates the whole header from the cards below.
+  // (A stack zero-margins its children, so .beach-title/.beach-subtitle carry
+  // no margins of their own.)
+  const headerBlock = "<div class=\"beach-identity wa-stack wa-gap-2xs\">" +
+    "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
     "<p class=\"wa-caption-s\"><a class=\"coords-link\" href=\"" + escapeHtml(osmHref) +
     "\" rel=\"noopener noreferrer\">" +
-    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
+    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>" +
+    "</div>";
 
   const officialHtml = renderOfficialCard(official, nowIso);
   const estimateHtml = renderEstimateCard(estimate, nowIso);

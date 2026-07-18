@@ -313,6 +313,35 @@ describe("renderListPage geolocation script", () => {
   });
 });
 
+describe("document shell color scheme", () => {
+  it("embeds a blocking OS color-scheme script in head before the theme stylesheet", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z"
+    });
+    // Load-bearing pieces of the inline script: the media query, the wa-dark
+    // class toggle on <html>, and the change-event subscription for live OS
+    // switches.
+    expect(html).toContain("window.matchMedia('(prefers-color-scheme: dark)')");
+    expect(html).toContain("document.documentElement.classList.toggle('wa-dark', dark)");
+    expect(html).toContain("query.addEventListener('change'");
+    // It must run BEFORE the theme stylesheets paint (no light flash for
+    // dark-preference visitors), so the script precedes the matter.css link.
+    const scriptAt = html.indexOf("prefers-color-scheme: dark");
+    const themeCssAt = html.indexOf("matter.css");
+    expect(scriptAt).toBeGreaterThan(-1);
+    expect(themeCssAt).toBeGreaterThan(scriptAt);
+  });
+
+  it("keeps the server-rendered html class list static — wa-dark is a runtime-only toggle", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z"
+    });
+    expect(html).toContain("<html lang=\"en\" class=\"wa-theme-matter wa-palette-mild wa-cloak\" data-fa-kit-code=\"ddd41b2d81\">");
+  });
+});
+
 describe("renderListPage proximity output", () => {
   function entryFor(name, dist) {
     return {

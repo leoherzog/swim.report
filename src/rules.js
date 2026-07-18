@@ -27,6 +27,28 @@ const ALERT_COLOR_MAP = {
   "Rip Current Statement": "red"
 };
 
+// The flag color a recognized NWS alert maps to, or null for any event outside
+// ALERT_PRECEDENCE. Exported so the frontend's hazard lane colors alert bands
+// from the exact same mapping the flag decision uses.
+export function alertColorForEvent(eventName) {
+  return Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)
+    ? ALERT_COLOR_MAP[eventName]
+    : null;
+}
+
+// The flag color a rip-current risk level maps to: HIGH -> red, MODERATE ->
+// yellow, anything else (LOW, null, garbage) -> null. Single home of that
+// mapping — estimateFlag step 2 and the frontend's hazard lane both use it.
+export function ripRiskColor(risk) {
+  if (risk === "HIGH") {
+    return "red";
+  }
+  if (risk === "MODERATE") {
+    return "yellow";
+  }
+  return null;
+}
+
 // The wave-height color thresholds (2 ft yellow, 4 ft red) live ONLY here, so the
 // frontend can color per-hour wave forecast cells from the same numbers without
 // restating them. Returns "red"/"yellow"/"green" for a finite numeric height, or
@@ -49,6 +71,7 @@ export function estimateFlag(inputs) {
 
   const beachId = source.beachId !== undefined ? source.beachId : null;
   const alerts = source.alerts !== undefined ? source.alerts : null;
+  const alertDetails = source.alertDetails !== undefined ? source.alertDetails : null;
   const ripCurrentRisk = source.ripCurrentRisk !== undefined ? source.ripCurrentRisk : null;
   const waveHeightFt = source.waveHeightFt !== undefined ? source.waveHeightFt : null;
   const windSpeedMph = source.windSpeedMph !== undefined ? source.windSpeedMph : null;
@@ -69,7 +92,7 @@ export function estimateFlag(inputs) {
     for (let i = 0; i < ALERT_PRECEDENCE.length; i++) {
       const eventName = ALERT_PRECEDENCE[i];
       if (alerts.indexOf(eventName) !== -1) {
-        color = ALERT_COLOR_MAP[eventName];
+        color = alertColorForEvent(eventName);
         reason = "Active NWS alert: " + eventName;
         trigger = "nws-alert";
         break;
@@ -79,13 +102,10 @@ export function estimateFlag(inputs) {
 
   // Step 2: rip current risk parsed from the NWS Surf Zone Forecast.
   if (color === null) {
-    if (ripCurrentRisk === "HIGH") {
-      color = "red";
-      reason = "NWS surf zone forecast rip current risk: HIGH";
-      trigger = "rip-current";
-    } else if (ripCurrentRisk === "MODERATE") {
-      color = "yellow";
-      reason = "NWS surf zone forecast rip current risk: MODERATE";
+    const riskColor = ripRiskColor(ripCurrentRisk);
+    if (riskColor !== null) {
+      color = riskColor;
+      reason = "NWS surf zone forecast rip current risk: " + ripCurrentRisk;
       trigger = "rip-current";
     }
   }
@@ -163,6 +183,29 @@ export function estimateFlag(inputs) {
   const echoedWaveHeightFt =
     (typeof waveHeightFt === "number" && isFinite(waveHeightFt)) ? waveHeightFt : null;
 
+  // Echo the structured NWS alert details ({ event, onset, ends } — onset/ends
+  // ISO strings or null) and the rip-current risk level regardless of which
+  // branch decided the color, so the UI's hazard lane never parses the reason
+  // string. Sanitized copies: entries without a string event are dropped,
+  // non-string timestamps become null, an unrecognized risk becomes null.
+  const echoedAlertDetails = [];
+  if (Array.isArray(alertDetails)) {
+    for (let i = 0; i < alertDetails.length; i++) {
+      const entry = alertDetails[i];
+      if (entry === null || typeof entry !== "object" || typeof entry.event !== "string") {
+        continue;
+      }
+      echoedAlertDetails.push({
+        event: entry.event,
+        onset: (typeof entry.onset === "string" && entry.onset.length > 0) ? entry.onset : null,
+        ends: (typeof entry.ends === "string" && entry.ends.length > 0) ? entry.ends : null
+      });
+    }
+  }
+  const echoedRipCurrentRisk =
+    (ripCurrentRisk === "HIGH" || ripCurrentRisk === "MODERATE" || ripCurrentRisk === "LOW")
+      ? ripCurrentRisk : null;
+
   return {
     beachId: beachId,
     color: color,
@@ -172,6 +215,8 @@ export function estimateFlag(inputs) {
     official: false,
     sources: sources,
     updated: updated,
-    waveHeightFt: echoedWaveHeightFt
+    waveHeightFt: echoedWaveHeightFt,
+    alertDetails: echoedAlertDetails,
+    ripCurrentRisk: echoedRipCurrentRisk
   };
 }

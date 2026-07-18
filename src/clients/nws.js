@@ -36,15 +36,45 @@ export async function fetchActiveAlertEvents(zoneId) {
   const features = Array.isArray(json.features) ? json.features : [];
   const seen = {};
   const events = [];
+  // details: one { event, onset, ends } per alert feature (onset/ends ISO
+  // strings, null when the feed omits them — falling back to effective/expires
+  // first). events stays the deduped name list the rules engine consumes;
+  // details keeps per-alert time periods for the detail page's hazard lane,
+  // deduped only on exact (event, onset, ends) repeats.
+  const seenDetails = {};
+  const details = [];
   for (let i = 0; i < features.length; i++) {
     const feature = features[i];
-    const event = feature && feature.properties ? feature.properties.event : null;
-    if (event && !seen[event]) {
+    const props = feature && feature.properties ? feature.properties : null;
+    const event = props ? props.event : null;
+    if (!event) {
+      continue;
+    }
+    if (!seen[event]) {
       seen[event] = true;
       events.push(event);
     }
+    const onset = pickIsoString(props.onset, props.effective);
+    const ends = pickIsoString(props.ends, props.expires);
+    const detailKey = event + "|" + String(onset) + "|" + String(ends);
+    if (!seenDetails[detailKey]) {
+      seenDetails[detailKey] = true;
+      details.push({ event: event, onset: onset, ends: ends });
+    }
   }
-  return { events: events, sourceUrl: url };
+  return { events: events, details: details, sourceUrl: url };
+}
+
+// First non-empty string of the two candidates, else null (alert features
+// commonly carry effective/expires but leave onset/ends null).
+function pickIsoString(primary, fallback) {
+  if (typeof primary === "string" && primary.length > 0) {
+    return primary;
+  }
+  if (typeof fallback === "string" && fallback.length > 0) {
+    return fallback;
+  }
+  return null;
 }
 
 export function wfoFromGridUrl(nwsGridUrl) {

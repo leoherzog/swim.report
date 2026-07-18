@@ -191,8 +191,8 @@ describe("wave-forecast section", () => {
     expect(html).toContain("<span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">2.6 ft</span>");
     expect(html).not.toContain("<div class=\"wave-strip\"");
     expect(html).not.toContain("<wa-line-chart");
-    // The section heading still appears (the stat alone justifies it).
-    expect(html).toContain("Wave forecast");
+    // The section wrapper still renders (the stat alone justifies it).
+    expect(html).toContain("<section class=\"wave-forecast wa-stack");
   });
 
   it("legacy estimate without waveHeightFt but with a series renders the strip, no stat", () => {
@@ -208,17 +208,16 @@ describe("wave-forecast section", () => {
 
   it("renders no wave-forecast section when there is neither a height nor a series", () => {
     const html = render({ estimate: null, official: null, waves: null });
-    // "Wave forecast" (the visible heading) and the section wrapper only exist
-    // when the section renders; the CSS class names ship in the stylesheet
-    // regardless, so match the rendered markers, not the bare class substring.
-    expect(html).not.toContain("Wave forecast");
+    // The section wrapper only exists when the section renders; the CSS class
+    // names ship in the stylesheet regardless, so match the rendered marker,
+    // not the bare class substring.
     expect(html).not.toContain("class=\"wave-forecast wa-stack");
   });
 
   it("defaults waves to null when the field is absent entirely", () => {
     const html = render({ estimate: estimateWith({}), official: null });
     // Legacy estimate (no height) + no waves -> no section, and no throw.
-    expect(html).not.toContain("Wave forecast");
+    expect(html).not.toContain("class=\"wave-forecast wa-stack");
   });
 
   it("shows the stale-data warning when waves.updated is more than 2 h old", () => {
@@ -231,13 +230,29 @@ describe("wave-forecast section", () => {
       "<wa-relative-time date=\"2026-07-05T09:00:00.000Z\" sync></wa-relative-time>");
   });
 
-  it("includes the ESTIMATE badge in the section", () => {
+  it("puts the ESTIMATE badge on the now-stat line, with no section heading", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({})
     });
-    const section = html.slice(html.indexOf("class=\"wave-forecast"));
+    // The badge rides the "waves now" stat line (the former "Wave forecast"
+    // h2 heading row is gone).
+    const nowStart = html.indexOf("<p class=\"wave-now");
+    expect(nowStart).toBeGreaterThan(-1);
+    const nowLine = html.slice(nowStart, html.indexOf("</p>", nowStart));
+    expect(nowLine).toContain("waves now");
+    expect(nowLine).toContain(">ESTIMATE</wa-badge>");
+    expect(html).not.toContain("wave-forecast-heading");
+  });
+
+  it("legacy estimate without a now-stat still carries the ESTIMATE badge in the section", () => {
+    const html = render({
+      estimate: estimateWith({}), // no waveHeightFt -> no stat line
+      official: null,
+      waves: wavesWith({})
+    });
+    const section = html.slice(html.indexOf("<section class=\"wave-forecast"));
     expect(section).toContain(">ESTIMATE</wa-badge>");
   });
 
@@ -273,8 +288,10 @@ describe("wave-forecast model comparison", () => {
     const open = "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\" " +
       "appearance=\"plain\" icon-placement=\"start\">";
     expect(html).toContain(open);
-    // The y-axis unit rides in the slotted config, not on the element.
-    expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation");
+    // The "ft" y-axis unit rides on the element via the yLabel attribute
+    // (empirically the axis title renders from parsed HTML). The kebab
+    // y-label spelling is dead and must never be emitted.
+    expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation yLabel=\"ft\"");
     expect(html).not.toContain("y-label=");
     // Collapsed by default: the model disclosure's opening tag must not carry "open".
     const tagStart = html.indexOf("<wa-details class=\"wave-model-compare\"");
@@ -301,11 +318,19 @@ describe("wave-forecast model comparison", () => {
     // 2.63 / 2.44 / 2.9 rounded to a single decimal.
     expect(modelConfig.data.datasets.map(function (d) { return d.data[0]; }))
       .toEqual([2.6, 2.4, 2.9]);
-    expect(modelConfig.data.datasets[0].pointRadius).toBe(0);
+    // Points are hidden via the --point-radius CSS custom property on the
+    // .wave-model-chart element (styles.js), not a restated pointRadius key.
+    // Positively assert the hiding mechanism ships in the page's embedded
+    // styles, so deleting the CSS declaration fails the suite.
+    expect(html).toContain("--point-radius: 0");
+    expect(modelConfig.data.datasets[0]).not.toHaveProperty("pointRadius");
     expect(modelConfig.data.datasets[0].spanGaps).toBe(false);
-    // The "ft" y-axis label rides in the slotted config's scales block, which
-    // the component deep-merges over its defaults.
-    expect(modelConfig.options.scales.y.title).toEqual({ display: true, text: "ft" });
+    // The "ft" y-axis label rides on the element (yLabel attribute), not the
+    // slotted config — so the config carries no scales block. It keeps only
+    // plugins.title.display false to suppress the element's label leaking as
+    // a visible chart title.
+    expect(modelConfig.options.scales).toBeUndefined();
+    expect(modelConfig.options.plugins.title.display).toBe(false);
   });
 
   it("never emits a literal closing script tag inside the JSON block", () => {
@@ -357,5 +382,107 @@ describe("wave-forecast model comparison", () => {
     // The band strip is untouched, and no chart JSON ships at all.
     expect(html).toContain("<div class=\"wave-strip\"");
     expect(extractAllChartJson(html)).toHaveLength(0);
+  });
+});
+
+describe("wave-forecast hazard lane", () => {
+  // NOW_ISO is 2026-07-05T12:00:00.000Z; this alert runs now -> +14 h.
+  const BHS_DETAIL = {
+    event: "Beach Hazards Statement",
+    onset: "2026-07-05T10:00:00.000Z",
+    ends: "2026-07-06T02:00:00.000Z"
+  };
+
+  it("renders an alert band positioned by the alert's period, above the strip", () => {
+    const html = render({
+      estimate: estimateWith({
+        waveHeightFt: 3.1,
+        alertDetails: [BHS_DETAIL]
+      }),
+      official: null,
+      waves: wavesWith({})
+    });
+    const bandStart = html.indexOf("<div class=\"wave-alert-band\"");
+    expect(bandStart).toBeGreaterThan(-1);
+    const band = html.slice(bandStart, html.indexOf("</div></div>", bandStart));
+    // Onset before now clamps to the window start; ends at +14 h of 24.
+    expect(band).toContain("left: 0%; width: " + ((14 / 24) * 100) + "%;");
+    expect(band).toContain("background: var(--wa-color-danger-fill-quiet);");
+    expect(band).toContain(
+      "<span class=\"wave-alert-label\">Beach Hazards Statement</span>");
+    // Tooltip and aria-label carry the name plus the period.
+    expect(html).toContain("<wa-tooltip for=\"wave-alert-0\">" +
+      "NWS alert: Beach Hazards Statement — now through +14 h</wa-tooltip>");
+    expect(band).toContain(
+      "aria-label=\"NWS alert: Beach Hazards Statement — now through +14 h\"");
+    // The lane renders before (above) the strip.
+    expect(bandStart).toBeLessThan(html.indexOf("<div class=\"wave-strip\""));
+  });
+
+  it("an alert starting mid-window gets a mid-window band", () => {
+    const html = render({
+      estimate: estimateWith({
+        waveHeightFt: 3.1,
+        alertDetails: [{
+          event: "High Surf Warning",
+          onset: "2026-07-05T18:00:00.000Z", // +6 h
+          ends: "2026-07-06T18:00:00.000Z"   // beyond the window -> clamped
+        }]
+      }),
+      official: null,
+      waves: wavesWith({})
+    });
+    expect(html).toContain("left: 25%; width: 75%;");
+    expect(html).toContain("<wa-tooltip for=\"wave-alert-0\">" +
+      "NWS alert: High Surf Warning — +6 h to +24 h</wa-tooltip>");
+  });
+
+  it("ignores non-flag-relevant alerts", () => {
+    const html = render({
+      estimate: estimateWith({
+        waveHeightFt: 1.0,
+        alertDetails: [{ event: "Tornado Warning", onset: null, ends: null }]
+      }),
+      official: null,
+      waves: wavesWith({})
+    });
+    expect(html).not.toContain("<div class=\"wave-alert-band\"");
+  });
+
+  it("renders a full-window rip-current band naming the SRF source", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0, ripCurrentRisk: "HIGH" }),
+      official: null,
+      waves: wavesWith({})
+    });
+    const bandStart = html.indexOf("<div class=\"wave-alert-band\"");
+    expect(bandStart).toBeGreaterThan(-1);
+    const band = html.slice(bandStart, html.indexOf("</div></div>", bandStart));
+    expect(band).toContain("left: 0%; width: 100%;");
+    expect(band).toContain(
+      "<span class=\"wave-alert-label\">Rip current risk: HIGH</span>");
+    expect(html).toContain("<wa-tooltip for=\"wave-alert-0\">" +
+      "Rip current risk HIGH — from the latest NWS surf zone forecast</wa-tooltip>");
+  });
+
+  it("legacy estimate without the echo fields renders no lane", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({})
+    });
+    expect(html).not.toContain("<div class=\"wave-alert-band\"");
+  });
+
+  it("renders no lane without a series to overlay (buoy-fallback beach)", () => {
+    const html = render({
+      estimate: estimateWith({
+        waveHeightFt: 2.6,
+        alertDetails: [BHS_DETAIL]
+      }),
+      official: null,
+      waves: null
+    });
+    expect(html).not.toContain("<div class=\"wave-alert-band\"");
   });
 });

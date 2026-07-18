@@ -310,10 +310,12 @@ async function runFlagRecompute(env) {
         const sources = [];
 
         let alerts = null;
+        let alertDetails = null;
         if (beach.nws_zone) {
           const alertEntry = alertsMap.get(beach.nws_zone);
           if (alertEntry) {
             alerts = alertEntry.events;
+            alertDetails = alertEntry.details;
             sources.push({
               label: "NWS Alerts",
               url: alertEntry.sourceUrl
@@ -366,6 +368,7 @@ async function runFlagRecompute(env) {
         const inputs = {
           beachId: beach.id,
           alerts: alerts,
+          alertDetails: alertDetails,
           alertsCheckable: beach.nws_zone ? true : false,
           ripCurrentRisk: ripCurrentRisk,
           waveHeightFt: waveHeightFt,

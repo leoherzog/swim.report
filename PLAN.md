@@ -68,6 +68,17 @@ cross-module interface.
                                      // decided the color; feeds the detail page's "now" wave
                                      // stat so the UI never parses the reason string. Older
                                      // KV payloads lack it; renderers treat missing as null.
+      "alertDetails": [              // structured echo of the per-alert NWS details (sanitized:
+        { "event": "Beach Hazards Statement",   // entries without a string event dropped,
+          "onset": "2026-07-04T10:00:00.000Z",  // non-string/empty onset/ends -> null).
+          "ends": "2026-07-05T02:00:00.000Z" }  // ALWAYS present ([] when none) regardless of
+      ],                             // the deciding branch; feeds the detail page's hazard
+                                     // lane (name + time period above the wave strip) so the
+                                     // UI never parses the reason string. Older KV payloads
+                                     // lack it; renderers treat missing as [].
+      "ripCurrentRisk": null,        // structured echo of the SRF rip risk: "HIGH" |
+                                     // "MODERATE" | "LOW" | null (unrecognized values -> null).
+                                     // Also always present; feeds the hazard lane's rip band.
       "sources": [
         { "label": "NWS Alerts",
           "url": "https://api.weather.gov/alerts/active?zone=MIZ071" },
@@ -289,12 +300,26 @@ Pure module. No fetch, no Date, no env. Exports:
       // function, and the frontend colors the per-hour wave-forecast cells (section 9)
       // from it too, so the strip and the flag can never disagree on thresholds.
 
+    export function alertColorForEvent(eventName)
+      // Pure. The flag color a recognized NWS alert maps to ("High Surf Warning" ->
+      // "double-red"; the other ALERT_PRECEDENCE events -> "red"), null for any other
+      // event. Step 1 derives its color from this function and the frontend's hazard
+      // lane (section 9) colors alert bands from it, so they can never disagree.
+
+    export function ripRiskColor(risk)
+      // Pure. "HIGH" -> "red", "MODERATE" -> "yellow", anything else (LOW, null,
+      // garbage) -> null. Step 2 derives its color from this function and the hazard
+      // lane's rip band uses it too — the single home of that mapping.
+
     export function estimateFlag(inputs) // -> FlagEstimate (always returns, never throws)
-      // The returned FlagEstimate carries waveHeightFt (section 1): the input's value
-      // when finite, else null — echoed on EVERY branch, including alert-decided ones.
-      // Adding waveColorForHeight and the waveHeightFt echo changed no color decision,
-      // threshold, precedence, or reason string for any input, so RULES_VERSION did
-      // NOT bump (flag_history calibration rows stay comparable across the change).
+      // The returned FlagEstimate carries waveHeightFt, alertDetails, and
+      // ripCurrentRisk (section 1): structured echoes of the inputs, present on EVERY
+      // branch, including alert-decided ones (waveHeightFt: the input when finite else
+      // null; alertDetails: sanitized copy, [] default; ripCurrentRisk: known level
+      // else null). Adding waveColorForHeight and these echoes changed no color
+      // decision, threshold, precedence, or reason string for any input, so
+      // RULES_VERSION did NOT bump (flag_history calibration rows stay comparable
+      // across the change).
 
 ### estimateFlag inputs shape (contract with the cron orchestrator)
 
@@ -302,6 +327,11 @@ Pure module. No fetch, no Date, no env. Exports:
       beachId: "osm-node-123456",       // string
       alerts: ["Rip Current Statement"],// array of NWS event-name strings, [] if fetch OK
                                         // but no alerts, or null if the alerts fetch failed
+      alertDetails: [                   // per-alert details from fetchActiveAlertEvents
+        { event: "Rip Current Statement",  // (section 5): onset/ends ISO strings or null.
+          onset: "2026-07-04T10:00:00.000Z",  // Echoed (sanitized) into the output's
+          ends: "2026-07-05T02:00:00.000Z" }  // alertDetails; never affects the color
+      ],                                // decision. null/missing -> echoed as [].
       alertsCheckable: true,            // true | false | null (missing/undefined -> null):
                                         // true when the cron could look up alerts (beach
                                         // has an nws_zone; a transient fetch failure this
@@ -377,8 +407,9 @@ Return value: a FlagEstimate (section 1) with beachId, color, reason as above, t
 (the branch that decided the color: step 1 → "nws-alert", step 2 → "rip-current",
 step 3 → "wave-height", step 4 → "wind", step 5 LOW → "rip-current-low",
 step 5 otherwise → "no-data"), rules_version: RULES_VERSION, official: false,
-sources: inputs.sources (or []), updated: inputs.updated. Two calls with the same
-inputs return deeply-equal objects.
+sources: inputs.sources (or []), updated: inputs.updated, plus the structured
+echoes waveHeightFt / alertDetails / ripCurrentRisk (section 1). Two calls with
+the same inputs return deeply-equal objects.
 
 ## 5. Upstream clients
 
@@ -442,8 +473,16 @@ and cron paths.
       // zoneId: "MIZ071"
       // GET "https://api.weather.gov/alerts/active?zone=" + zoneId with User-Agent +
       // Accept: application/geo+json
-      // Success -> { events: ["Rip Current Statement", ...], sourceUrl: <that alerts URL> }
+      // Success -> { events: ["Rip Current Statement", ...],
+      //              details: [{ event, onset, ends }, ...],
+      //              sourceUrl: <that alerts URL> }
       //   events = json.features.map(f => f.properties.event), deduped, [] when no alerts.
+      //   details = one entry per alert feature (deduped only on exact
+      //   (event, onset, ends) repeats): onset falls back properties.onset ->
+      //   properties.effective -> null, ends falls back properties.ends ->
+      //   properties.expires -> null (non-empty strings only). Feeds the
+      //   FlagEstimate's alertDetails echo (sections 1, 4) for the detail page's
+      //   hazard lane.
       // Failure -> null
 
     export function wfoFromGridUrl(nwsGridUrl)
@@ -1082,7 +1121,9 @@ still needs real pagination (TODO.md).
 7. Per beach: assemble inputs (nulls for anything missing), including
    alertsCheckable: beach.nws_zone ? true : false (section 4 — a still-unenriched
    beach with nws_zone NULL gets the honesty caveat instead of a silent wave-only
-   green); sources = array of
+   green) and alertDetails from the zone's alerts result (null when the fetch
+   failed or the beach has no zone — estimateFlag echoes it into the stored
+   payload for the detail page's hazard lane); sources = array of
    { label, url } entries (section 1) for every source that returned data for THIS
    beach — alerts: "NWS Alerts"; SRF: "NWS Surf Zone Forecast";
    waves: waveSourceLabel(model) from WAVE_MODEL_LABELS
@@ -1441,7 +1482,16 @@ exporting a CSS string); render.js is the sole module the router imports.
 ### Page skeleton (both pages)
 
 - Document starts with "<!doctype html>" and the html element MUST be exactly:
-    <html lang="en" data-fa-kit-code="ddd41b2d81">
+    <html lang="en" class="wa-theme-matter wa-palette-mild wa-cloak" data-fa-kit-code="ddd41b2d81">
+  (theme + palette classes matching the kit stylesheets, plus wa-cloak for FOUC
+  handling; the server NEVER renders wa-dark or wa-light — see next bullet).
+- Color scheme: an inline BLOCKING <script> early in head (COLOR_SCHEME_SCRIPT,
+  src/frontend/colorSchemeScript.js — the Web Awesome "Detecting Color Scheme
+  Preference" pattern) reads matchMedia("(prefers-color-scheme: dark)"), toggles
+  the wa-dark class on document.documentElement, and subscribes to change events
+  so live OS switches restyle the open page. It sits BEFORE the theme stylesheet
+  links so a dark-preference visitor never sees a light flash. Bare
+  .wa-theme-matter defaults light, so no explicit wa-light class is used.
 - In head, load Web Awesome Pro via the version-pinned CDN kit (WA_KIT_BASE in
   render.js): the matter-theme, native, and utilities stylesheets plus the
   webawesome.loader.js module script.
@@ -1498,9 +1548,12 @@ exporting a CSS string); render.js is the sole module the router imports.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
   the display name (plus subtitle when applicable), estimated flag chip, and OFFICIAL
   badge when official is non-null.
-- Detail page, in order: back link; h1 title with a colorized flag icon on the left
-  (official color when available, else estimate color, else gray unknown) + display
-  name; optional beach-name subtitle; lat/lon meta line linking to OpenStreetMap.
+- Detail page, in order: a beach-identity block (div.beach-identity, a tight
+  wa-stack wa-gap-2xs nested in the main stack) holding back link; h1 title with a
+  colorized flag icon on the left (official color when available, else estimate
+  color, else gray unknown) + display name; optional beach-name subtitle; lat/lon
+  meta line linking to OpenStreetMap. The nested stack groups these lines tightly
+  and zero-margins its children, so .beach-title/.beach-subtitle carry no margins.
   Then the detail stack — answer first, exploration second: official card (if any) →
   estimate card → wave forecast section → wave map section → nearby-webcam section
   (if any); the lazy-loading map/webcam embeds follow the verdict and forecast as
@@ -1514,14 +1567,43 @@ exporting a CSS string); render.js is the sole module the router imports.
   card footer (slot="footer"); both are omitted (with their with-* attributes) when there
   is no estimate.
 - Wave forecast section (detail page only, between the estimate card and the wave map
-  section; helpers in src/frontend/waveStrip.js, pure, importing waveColorForHeight
-  from src/rules.js — the 2/4 ft thresholds are never restated in the frontend):
-  - Heading row: <h2>Wave forecast</h2> + the same ESTIMATE badge as the estimate card.
+  section; helpers in src/frontend/waveStrip.js, pure, importing waveColorForHeight /
+  alertColorForEvent / ripRiskColor from src/rules.js — the 2/4 ft thresholds and the
+  alert/rip color mappings are never restated in the frontend):
+  - NO section heading (the former <h2>Wave forecast</h2> + badge row was removed).
+    The ESTIMATE badge rides the "now" stat line instead; when the stat is absent
+    (legacy payload without waveHeightFt) a badge-only wa-cluster row still renders so
+    the section always carries the estimated framing (product invariant).
   - "Now" stat: estimate.waveHeightFt (section 1) rendered as toFixed(1) + " ft" with a
-    quiet "waves now" caption label (the section-level ESTIMATE badge already carries
-    the estimated-ness; no "(estimated)" suffix); omitted entirely when null/missing
-    (legacy payloads) — never "0 ft", never a placeholder dash. This is what still
-    renders for buoy-fallback beaches (which have no series).
+    quiet "waves now" caption label followed by the same ESTIMATE badge as the estimate
+    card, all in one wa-cluster <p> (no "(estimated)" suffix); omitted entirely when
+    null/missing (legacy payloads) — never "0 ft", never a placeholder dash. This is
+    what still renders for buoy-fallback beaches (which have no series).
+  - Hazard lane (between the per-model "now" caption and the strip; rendered ONLY when
+    a trimmed series exists — the lane needs the strip's timeline to position against):
+    computeHazardBands(estimate, series.totalHours, nowIso) in waveStrip.js returns
+    [{ kind, label, text, leftPct, widthPct, bgVar, fgVar, edgeVar }] — one band per
+    flag-relevant NWS alert (alertColorForEvent non-null) from estimate.alertDetails
+    overlapping the window, positioned by onset/ends snapped to whole hours (floor
+    start, ceil end, min 1 h; missing onset = already active, missing ends =
+    open-ended, both clamped to the window; exact (event, startHour, endHour) repeats
+    deduped), plus a full-window band when ripRiskColor(estimate.ripCurrentRisk) is
+    non-null (kind "rip" — the SRF product has no parseable period, so its text names
+    the source instead of claiming one: "Rip current risk HIGH — from the latest NWS
+    surf zone forecast"). Band colors use the SEMANTIC danger/warning theme-assignment
+    tokens (which adapt to light/dark, unlike raw tints): fill-quiet background /
+    on-quiet text / border-loud edge — red/double-red -> danger-*, yellow -> warning-*,
+    except the yellow edge uses warning-border-normal, not -loud, because warning-border-loud
+    resolves to yellow-50 which reads olive/mustard in the mild palette (see the palette
+    note above). double-red shares the red (danger) treatment; the label carries the
+    severity. renderHazardLane in render.js emits
+    one relative .wave-alert-lane row per band with an absolutely positioned
+    .wave-alert-band (left/width percentages and color tokens are per-instance inline
+    styles, the sanctioned case; role="note" tabindex="0"), the hazard name as a
+    CSS-ellipsized visible label, and a sibling wa-tooltip whose text — identical to
+    the band's aria-label — is the name plus period, e.g. "NWS alert: Beach Hazards
+    Statement — now through +14 h" (same range phrasing as the strip segments).
+    Legacy FlagEstimate payloads without the echo fields render no lane.
   - Strip: a plain flex row, Dark Sky style — <div class="wave-strip" role="list"
     aria-label="Wave height forecast for the next N hours"> of colored segment divs
     (renderWaveStrip in render.js; the former <wa-bar-chart> element, its slotted
@@ -1572,16 +1654,22 @@ exporting a CSS string); render.js is the sole module the router imports.
     now that the band strip is a plain flex row). Datasets: one per model in display order,
     values rounded to 1 decimal in the CONFIG ONLY (storage stays raw; default tooltips
     display config values verbatim), nulls preserved with spanGaps false (honest line
-    gaps), pointRadius 0, series colors var(--wa-color-blue-60) / var(--wa-color-purple-60)
+    gaps), points hidden via the --point-radius: 0 CSS custom property on the
+    .wave-model-chart rule in styles.js (not a restated pointRadius key in each dataset),
+    series colors var(--wa-color-blue-60) / var(--wa-color-purple-60)
     / var(--wa-color-cyan-60) — never green/yellow/red, which are reserved for flag
     semantics. Category labels "Now", "+1 h" ... ; the y axis is titled "ft" via the
-    slotted config's options.scales.y.title = { display: true, text: "ft" }
-    (emitted by buildWaveModelChartConfig; the element carries NO y-label
-    attribute — wa-line-chart's yLabel property is not attribute-reflected, so
-    y-label markup is dead, and the component deep-merges the slotted JSON over
-    its defaults so the config title wins);
-    plugins.title.display false. UNLIKE the band strip this chart keeps the default legend
-    and tooltips (comparison view).
+    element's yLabel="ft" attribute (NOT the slotted config — buildWaveModelChartConfig
+    emits no scales block). Empirically verified against the pinned webawesome@3.10.0
+    kit: wa-line-chart's yLabel attribute IS observed from parsed HTML and renders the
+    axis title, but ONLY in its camelCase spelling yLabel="ft" (the HTML parser
+    lowercases it to ylabel, which the component observes). The kebab spelling
+    y-label="ft" is DEAD — it renders no axis title — so y-label markup must never be
+    emitted (a test asserts the html does not contain "y-label="). The slotted config
+    still sets plugins.title.display false so the element's label attribute
+    ("Wave height by forecast model", an accessibility label) does not leak as a
+    visible chart title above the plot. UNLIKE the band strip this chart keeps the
+    default legend and tooltips (comparison view).
     label/description attributes + a visible fallback <p> carry waveModelSummary's
     prose ("Wave height by model, next N hours — ECMWF now 2.6 ft, ...", with
     "(no current reading)" for models null at hour 0). The flag and the band strip
@@ -1606,8 +1694,12 @@ exporting a CSS string); render.js is the sole module the router imports.
     placeholder).
 - Wave map section: a plain <iframe class="wave-map-frame" loading="lazy" allowfullscreen>
   (the former <wa-zoomable-frame> was replaced by a bare iframe — the Windy embed carries
-  its own zoom controls) with a title attribute ("Wave height map") for an accessible name,
-  embedding
+  its own zoom controls) wrapped in a
+  <div class="wa-frame:landscape wa-border-radius-m framed-embed"> (the wa-frame:landscape +
+  wa-border-radius-m utilities supply the 16:9 aspect-ratio, overflow clipping, and rounded
+  corners; .framed-embed adds only the 1px surface border; the iframe keeps width/height:100%
+  since wa-frame auto-fills only img/video), with a title attribute ("Wave height map") for
+  an accessible name, embedding
   "https://embed.windy.com/embed.html?...overlay=waves&product=ecmwfWaves&marker=true..." centered on
   the beach (lat/lon to 3 decimals). No caption — the embed carries Windy's own branding.
   Omitted entirely when the beach has no finite lat/lon. The iframe is fetched by the
@@ -1616,8 +1708,9 @@ exporting a CSS string); render.js is the sole module the router imports.
   the wave map section) when
   beach.webcam_player_url is a non-empty string; nothing rendered otherwise (including
   pre-migration rows where the webcam fields are undefined). Embeds the Windy player
-  URL in a plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> (same
-  bare-iframe wrapper as the wave map, replacing the former <wa-zoomable-frame>; its title
+  URL in a plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> wrapped in the
+  same <div class="wa-frame:landscape wa-border-radius-m framed-embed"> as the wave map
+  (replacing the former <wa-zoomable-frame>; its title
   attribute is the webcam title, or "Nearby webcam" when untitled), 16:9
   responsive, fetched by the BROWSER. Heading "Nearby webcam" — the caption must stay honest that the cam is
   NEARBY, not necessarily the beach itself: it shows beach.webcam_title (when
@@ -1744,7 +1837,10 @@ normalization, and null on HTTP/network failure. test/waveStrip.test.js covers t
 pure strip helpers (trimWaveSeries defensive/trimming behavior — including byModel
 validation/trimming, computeWaveRuns run-length encoding with its sum invariant and
 exact band label / var() token strings, waveStripSummary exact strings, the model
-helpers, and buildWaveModelChartConfig shape). test/renderWaveForecast.test.js
+helpers, buildWaveModelChartConfig shape, and computeHazardBands —
+positioning/clamping/hour-snapping, missing onset/ends defaults, out-of-window and
+non-precedence drops, exact-repeat dedupe, the rip band, and malformed-input
+degradation to []). test/renderWaveForecast.test.js
 covers the rendered section via renderDetailPage: detail-stack order (estimate card
 → forecast → wave map → webcam, anchored on rendered markers, not bare class names —
 those also ship in the embedded stylesheet), the flex-row strip's proportional
@@ -1752,10 +1848,16 @@ flex-grow segments and exact per-segment wa-tooltip / matching aria-label texts,
 visually-hidden prose summary, the per-model "now" caption and collapsed comparison
 disclosure, parsing the model chart's slotted JSON config back out and asserting
 datasets/labels/rounding end-to-end,
-the no-"</script" guard, fallback text === description, now-stat formatting, the
+the no-"</script" guard, fallback text === description, now-stat formatting (with
+the ESTIMATE badge on the stat line and no section heading), the hazard lane
+(positioned alert band + tooltip text, rip band, no lane for legacy estimates or
+without a series), the
 buoy case (stat without strip), legacy/absent payload omission, and the stale
 warning. test/flagRecompute.test.js additionally asserts the "waves:" KV write
 (24-entry hoursFt, top-of-hour startIso, TTL 7200) and its absence for all-null or
-failed wave fetches; test/router.test.js asserts handleDetail reads the "waves:"
-key.
+failed wave fetches, plus the alertDetails/ripCurrentRisk echoes landing in the
+"flag:" payload when the alerts fetch succeeds; test/router.test.js asserts
+handleDetail reads the "waves:" key. test/rules.test.js also covers
+alertColorForEvent / ripRiskColor and the alertDetails / ripCurrentRisk output
+echoes (sanitization, legacy defaults).
 
