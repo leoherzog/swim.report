@@ -93,8 +93,7 @@ const RULES = [
   // keeps its own aspect-ratio (these are plain iframes now, so the explicit
   // sizing is load-bearing).
   ".wave-map-frame,",
-  ".webcam-frame,",
-  ".wave-chart {",
+  ".webcam-frame {",
   "  display: block;",
   "  width: 100%;",
   "  border-radius: var(--wa-border-radius-m);",
@@ -107,7 +106,7 @@ const RULES = [
   "}",
 
   ".wave-map-frame {",
-  "  aspect-ratio: 4 / 3;",
+  "  aspect-ratio: 16 / 9;",
   "}",
 
   ".webcam-frame {",
@@ -120,6 +119,15 @@ const RULES = [
   "  align-items: center;",
   "  gap: var(--wa-space-2xs);",
   "  color: var(--wa-color-text-link);",
+  "  text-decoration: none;",
+  "}",
+
+  // Quiet coordinates link under the title (mirrors .back-link).
+  ".coords-link {",
+  "  display: inline-flex;",
+  "  align-items: center;",
+  "  gap: var(--wa-space-2xs);",
+  "  color: var(--wa-color-text-quiet);",
   "  text-decoration: none;",
   "}",
 
@@ -141,16 +149,26 @@ const RULES = [
   "  border-width: var(--wa-border-width-l);",
   "}",
 
-  // A short Dark Sky-style strip: fixed height, host bar border/radius zeroed
-  // (--border-width / --border-radius are wa-chart host custom properties), and
-  // aspect-ratio forced to auto to override the component's default 16/9.
-  // display/width/border-radius/overflow come from the shared framed-embed
-  // rule above.
-  ".wave-chart {",
+  // Tighter section spacing inside both flag cards (--spacing is wa-card's
+  // documented section-spacing custom property, default var(--wa-space-l)).
+  ".official-card,",
+  ".estimate-card {",
+  "  --spacing: var(--wa-space-m);",
+  "}",
+
+  // A short Dark Sky-style strip: a flex row of proportional colored segments
+  // (each segment's flex/background is a per-instance inline value).
+  ".wave-strip {",
+  "  display: flex;",
   "  height: var(--wa-space-3xl);",
-  "  aspect-ratio: auto;",
-  "  --border-width: 0px;",
-  "  --border-radius: 0px;",
+  "  border-radius: var(--wa-border-radius-m);",
+  "  overflow: hidden;",
+  "}",
+
+  // Draw the focus ring inset so overflow: hidden cannot clip it.
+  ".wave-strip-seg:focus-visible {",
+  "  outline: var(--wa-focus-ring);",
+  "  outline-offset: calc(-1 * var(--wa-focus-ring-width));",
   "}",
 
   ".wave-chart-hours {",
@@ -177,14 +195,33 @@ const RULES = [
   "  transform: none;",
   "}",
 
+  // Quiet plain-appearance disclosure line: tighter body spacing via the
+  // documented --spacing custom property, smaller quieter summary via the
+  // documented summary part.
+  ".wave-model-compare {",
+  "  --spacing: var(--wa-space-s);",
+  "}",
+
+  ".wave-model-compare::part(summary) {",
+  "  font-size: var(--wa-font-size-s);",
+  "  color: var(--wa-color-text-quiet);",
+  "}",
+
   // Model-comparison line chart inside the collapsed disclosure. Taller than the
   // strip (it's a real axis chart), aspect-ratio forced to auto to override the
-  // component default 16/9. The wa-details wrapper keeps its own default styling.
+  // component default 16/9.
   ".wave-model-chart {",
   "  display: block;",
   "  width: 100%;",
   "  height: 13rem;",
   "  aspect-ratio: auto;",
+  "}",
+
+  // Keep the list row's flag/badge cluster on one line and never squeezed by
+  // a long beach name (white-space inherits into the badge's shadow text).
+  ".beach-row-link > .wa-cluster {",
+  "  flex-shrink: 0;",
+  "  white-space: nowrap;",
   "}"
 ];
 

@@ -1456,7 +1456,9 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Colors come from the Web Awesome palette tokens (mild palette; no custom hex values):
   green var(--wa-color-green-50), yellow var(--wa-color-yellow-70), red
   var(--wa-color-red-50), double-red = the red token rendered as TWO stacked flag icons
-  plus the label "DOUBLE RED — water closed", unknown var(--wa-color-gray-50) gray with
+  plus the label "DOUBLE RED — water closed" on the detail cards (list-row chips use
+  the short "DOUBLE RED" — the full text wraps badly beside long park names),
+  unknown var(--wa-color-gray-50) gray with
   label "UNKNOWN". Yellow deliberately uses tint 70 (tint 50 in the mild palette reads
   as olive/mustard, not caution yellow); if the palette ever changes, re-verify the four
   flag colors remain visually distinct safety signals.
@@ -1475,9 +1477,10 @@ exporting a CSS string); render.js is the sole module the router imports.
   no official card is rendered at all.
 - Both cards share one skeleton (renderFlagCard in render.js): badge in slot="header",
   source labels in slot="header-actions" (official: hostname hyperlinked to the scraped
-  page — the one source that links out; estimate: plain-text labels, never hyperlinked
-  to the upstream data), flag row + optional detail
-  line + stale warning in the body, and an
+  page — the one source that links out; estimate: small filled-neutral pill wa-badges,
+  deliberately unlike the square outlined ESTIMATE badge, never variant="success" —
+  green is reserved for OFFICIAL — and never hyperlinked
+  to the upstream data), flag row + stale warning in the body, and an
   "Updated <wa-relative-time date=updated sync>" in slot="footer". Distinction comes from
   card class / appearance / badge, never from layout differences.
 - Stale-data warning: if (Date.parse(nowIso) - Date.parse(x.updated)) > 7200000 for either
@@ -1495,41 +1498,53 @@ exporting a CSS string); render.js is the sole module the router imports.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
   the display name (plus subtitle when applicable), estimated flag chip, and OFFICIAL
   badge when official is non-null.
-- Detail page, in order: h1 title with a colorized flag icon on the left (official color
-  when available, else estimate color, else gray unknown) + beach name; lat/lon meta line;
-  wave map section; official card (if any); estimate card with full reason + a
-  natural-language line describing which rule branch decided the color (mapped from
-  estimate.trigger via TRIGGER_DESCRIPTIONS in render.js; unknown/missing trigger
-  falls back to "Rules version: " + rules_version); wave forecast section (below);
-  nearby-webcam section (if any). On the estimate card the sources
-  render as plain-text labels in the
+- Detail page, in order: back link; h1 title with a colorized flag icon on the left
+  (official color when available, else estimate color, else gray unknown) + display
+  name; optional beach-name subtitle; lat/lon meta line linking to OpenStreetMap.
+  Then the detail stack — answer first, exploration second: official card (if any) →
+  estimate card → wave forecast section → wave map section → nearby-webcam section
+  (if any); the lazy-loading map/webcam embeds follow the verdict and forecast as
+  supporting exploration. The estimate card body shows the flag row (color name +
+  full reason) only — the former natural-language trigger line (TRIGGER_DESCRIPTIONS
+  and its "Rules version: " + rules_version fallback) was removed as redundant with
+  the reason. On the estimate card the sources
+  render as the pill badges described above in the
   card header's top-right (slot="header-actions", ESTIMATE badge in slot="header"),
   and the "Updated <wa-relative-time date=estimate.updated sync>" line renders in the
   card footer (slot="footer"); both are omitted (with their with-* attributes) when there
   is no estimate.
-- Wave forecast section (detail page only, between the estimate card and the webcam
+- Wave forecast section (detail page only, between the estimate card and the wave map
   section; helpers in src/frontend/waveStrip.js, pure, importing waveColorForHeight
   from src/rules.js — the 2/4 ft thresholds are never restated in the frontend):
   - Heading row: <h2>Wave forecast</h2> + the same ESTIMATE badge as the estimate card.
   - "Now" stat: estimate.waveHeightFt (section 1) rendered as toFixed(1) + " ft" with a
-    quiet "waves now (estimated)" label; omitted entirely when null/missing (legacy
-    payloads) — never "0 ft", never a placeholder dash. This is what still renders for
-    buoy-fallback beaches (which have no series).
-  - Strip: <wa-bar-chart class="wave-chart" index-axis="y" stacked min="0" max=(totalHours)
-    grid="none" without-legend without-tooltip without-animation label=... description=...>
-    (the dedicated <wa-bar-chart> element replaced the old generic <wa-chart type="bar">)
-    drawing a single-row horizontal stacked bar, Dark Sky style. The Chart.js config is
-    server-built JSON in
-    a slotted <script type="application/json"> (the component parses it; no inline JS;
-    "<" in the JSON is escaped to < so it can never close the script tag). Datasets
-    are consecutive same-color hour runs (computeWaveRuns over waveColorForHeight; null
-    hours are their own "No data" runs so run lengths always sum to the trimmed hour
-    count). Colors are var() token strings resolved by the component itself,
-    theme-reactively: green var(--wa-color-green-50), yellow var(--wa-color-yellow-70)
+    quiet "waves now" caption label (the section-level ESTIMATE badge already carries
+    the estimated-ness; no "(estimated)" suffix); omitted entirely when null/missing
+    (legacy payloads) — never "0 ft", never a placeholder dash. This is what still
+    renders for buoy-fallback beaches (which have no series).
+  - Strip: a plain flex row, Dark Sky style — <div class="wave-strip" role="list"
+    aria-label="Wave height forecast for the next N hours"> of colored segment divs
+    (renderWaveStrip in render.js; the former <wa-bar-chart> element, its slotted
+    Chart.js JSON config, and the buildWaveChartConfig helper were removed — the
+    model-comparison line chart below is now the only chart on the page). One
+    segment per run from computeWaveRuns over waveColorForHeight (null hours are
+    their own "No data" runs so run lengths always sum to the trimmed hour count),
+    sized by flex-grow = run.hours (proportional — no percentage rounding drift) and
+    colored by the run's palette token via an inline style (width/color are genuinely
+    per-instance values, the sanctioned inline-style case): green
+    var(--wa-color-green-50), yellow var(--wa-color-yellow-70)
     (tint 70 — see the palette note above), red var(--wa-color-red-50), no-data
     var(--wa-color-gray-50) (the unknown-flag gray: honest absence, never green).
-    Config sets scales x/y display false, plugins.title.display false (a non-empty
-    label attribute would otherwise enable the Chart.js title plugin), events: [].
+  - Per-segment tooltips (these REPLACED the former closing caption): each segment is
+    focusable (role="listitem" tabindex="0") with a sibling <wa-tooltip
+    for=(segment id "wave-seg-" + index)> whose text — always identical to that
+    segment's aria-label — is the band label + hour range, e.g. "Under 2 ft waves
+    (estimated) — now through +5 h", "2–4 ft waves (estimated) — +5 h to +8 h",
+    "4 ft or more waves (estimated) — ...", and "No wave data — ..." (the no-data
+    band drops the "(estimated)" suffix — absence is not an estimate). Band labels
+    live in waveStrip.js's BAND_DEFS and use an en dash ("2–4 ft"). wa-tooltip's
+    default "hover focus" trigger covers mouse, keyboard, and tap; tooltip hosts
+    render position:absolute, so the sibling elements add no layout space.
   - Trimming: trimWaveSeries drops the hours already elapsed between waves.startIso and
     nowIso (clamped 0..23; >= 24 h elapsed, malformed payloads, or all-null-after-trim
     -> null -> strip omitted). The first rendered cell is always the current hour. The
@@ -1549,8 +1564,12 @@ exporting a CSS string); render.js is the sole module the router imports.
     trimmed byModel has >= 2 models, a collapsed-by-default <wa-details
     summary="Compare wave models"> containing <wa-line-chart class="wave-model-chart"
     without-animation label=... description=...> (the dedicated
-    <wa-line-chart> element replaced the old generic <wa-chart type="line">) with the same
-    slotted-JSON config pattern as the strip. Datasets: one per model in display order,
+    <wa-line-chart> element replaced the old generic <wa-chart type="line">) configured
+    via a server-built Chart.js JSON config in a slotted
+    <script type="application/json"> (the component parses it; no inline JS; "<" in the
+    JSON is escaped to < so it can never close the script tag —
+    chartScriptAndFallback in render.js, whose sole remaining consumer is this chart
+    now that the band strip is a plain flex row). Datasets: one per model in display order,
     values rounded to 1 decimal in the CONFIG ONLY (storage stays raw; default tooltips
     display config values verbatim), nulls preserved with spanGaps false (honest line
     gaps), pointRadius 0, series colors var(--wa-color-blue-60) / var(--wa-color-purple-60)
@@ -1567,18 +1586,21 @@ exporting a CSS string); render.js is the sole module the router imports.
     prose ("Wave height by model, next N hours — ECMWF now 2.6 ft, ...", with
     "(no current reading)" for models null at hour 0). The flag and the band strip
     NEVER derive from byModel — composite hoursFt only.
-  - Hour ticks: an aria-hidden HTML row below the canvas — "Now" left, "+6 h"/"+12 h"/
+  - Hour ticks: an aria-hidden HTML row below the strip — "Now" left, "+6 h"/"+12 h"/
     "+18 h" absolutely positioned at server-computed percentages (only when < total),
     "+" + total + " h" pinned right. Relative labels are timezone-proof (no per-beach
     timezone exists in D1); a browser-local-time upgrade is deferred (TODO.md).
-  - Accessibility/fallback: label attribute -> canvas aria-label; description attribute
-    AND a visible slotted fallback <p> both carry waveStripSummary(runs) — a run-by-run
-    prose forecast ("Under 2 ft for 5 hours from now, then ..."). The fallback <p> shows
-    whenever the component hasn't upgraded (JS off / kit unreachable) and is hidden by
-    the component's display:none default slot once the chart draws.
-  - Stale warning (same 7200000 ms rule, keyed on waves.updated) inside the section;
-    closing caption (exact text): "Colored by estimated wave height only — green under
-    2 ft, yellow 2-4 ft, red 4 ft and up, gray no data. Not the official flag."
+  - Accessibility/fallback: the strip container's aria-label names the window ("Wave
+    height forecast for the next N hours"), every segment's aria-label matches its
+    tooltip text, and a visually-hidden <p> (class wa-visually-hidden, emitted after
+    the tooltips) carries waveStripSummary(runs) — a run-by-run prose forecast
+    ("Under 2 ft for 5 hours from now, then ..."). Being plain HTML the strip renders
+    with JS off / kit unreachable; only the tooltips need the component kit.
+  - Stale warning (same 7200000 ms rule, keyed on waves.updated) inside the section.
+    The former closing caption ("Colored by estimated wave height only — green under
+    2 ft, yellow 2-4 ft, red 4 ft and up, gray no data. Not the official flag.") was
+    DELETED — its content now lives in the per-segment tooltips, and the ESTIMATE
+    badge plus footer disclaimer keep the not-official framing on the page.
   - The whole section is omitted when there is neither a finite now-height nor a
     renderable series (all-null wave beaches: null is normal, no empty-chart
     placeholder).
@@ -1590,7 +1612,8 @@ exporting a CSS string); render.js is the sole module the router imports.
   the beach (lat/lon to 3 decimals). No caption — the embed carries Windy's own branding.
   Omitted entirely when the beach has no finite lat/lon. The iframe is fetched by the
   BROWSER — the request path still reads only D1/KV.
-- Nearby-webcam section (detail page only): rendered AFTER the estimate card when
+- Nearby-webcam section (detail page only): rendered LAST in the detail stack (after
+  the wave map section) when
   beach.webcam_player_url is a non-empty string; nothing rendered otherwise (including
   pre-migration rows where the webcam fields are undefined). Embeds the Windy player
   URL in a plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> (same
@@ -1718,11 +1741,17 @@ forecast_days=2 in the request URL, the 24-entry hoursFt window starting at the 
 hour of nowIso, per-hour model fallback (and models[] contents/order), meters->feet,
 the hoursFt[0] === waveHeightFt invariant, all-null series, single-location
 normalization, and null on HTTP/network failure. test/waveStrip.test.js covers the
-pure strip helpers (trimWaveSeries defensive/trimming behavior, computeWaveRuns
-run-length encoding and sum invariant, buildWaveChartConfig shape and exact var()
-color strings, waveStripSummary exact strings). test/renderWaveForecast.test.js
-covers the rendered section via renderDetailPage: placement, wa-bar-chart attributes,
-parsing the slotted JSON config back out and asserting datasets/colors end-to-end,
+pure strip helpers (trimWaveSeries defensive/trimming behavior — including byModel
+validation/trimming, computeWaveRuns run-length encoding with its sum invariant and
+exact band label / var() token strings, waveStripSummary exact strings, the model
+helpers, and buildWaveModelChartConfig shape). test/renderWaveForecast.test.js
+covers the rendered section via renderDetailPage: detail-stack order (estimate card
+→ forecast → wave map → webcam, anchored on rendered markers, not bare class names —
+those also ship in the embedded stylesheet), the flex-row strip's proportional
+flex-grow segments and exact per-segment wa-tooltip / matching aria-label texts, the
+visually-hidden prose summary, the per-model "now" caption and collapsed comparison
+disclosure, parsing the model chart's slotted JSON config back out and asserting
+datasets/labels/rounding end-to-end,
 the no-"</script" guard, fallback text === description, now-stat formatting, the
 buoy case (stat without strip), legacy/absent payload omission, and the stale
 warning. test/flagRecompute.test.js additionally asserts the "waves:" KV write

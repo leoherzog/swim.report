@@ -120,11 +120,14 @@ The detail page includes a **Wave forecast** section: a "now" wave-height stat (
 the estimate's structured `waveHeightFt`) plus a Dark Sky-style horizontal strip of
 the next up-to-24 hours of forecast wave height, colored by the same 2 ft / 4 ft
 thresholds the rules engine uses (gray for hours with no model data — common on the
-Great Lakes). The strip is drawn by the Web Awesome `wa-bar-chart` component from a
-server-built JSON config stored hourly in KV (`waves:` keys); it carries the same
-ESTIMATE badge as the estimate card, degrades to a prose forecast summary when JS or
-the component kit is unavailable, and is omitted entirely for beaches with no wave
-series (e.g. buoy-only readings, which still show the "now" stat).
+Great Lakes). The strip is a plain flex row of colored segments — one per run of
+consecutive same-band hours, sized proportionally — built server-side from the hourly
+KV wave series (`waves:` keys). Each segment carries a `wa-tooltip` (hover/focus/tap)
+and a matching `aria-label` naming its band and hour range ("2–4 ft waves (estimated)
+— +5 h to +8 h"), and a visually-hidden prose summary keeps the whole forecast
+readable by assistive tech. The section carries the same ESTIMATE badge as the
+estimate card and is omitted entirely for beaches with no wave series (e.g. buoy-only
+readings, which still show the "now" stat).
 
 When two or more wave models resolve for a beach, the section also shows each model's
 current reading ("ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft") and a

@@ -1,7 +1,9 @@
 // src/frontend/waveStrip.js
-// Pure helpers for the Dark Sky-style wave-height forecast strip on the detail
-// page. No fetch, no Date access at module scope beyond Date.parse on the
-// caller-supplied ISO strings (the strip is derived from data + nowIso passed
+// Pure helpers for the wave-height forecast on the detail page: trimming the
+// series, run-length encoding by color band (feeds the colored flex-row strip
+// in render.js), the prose summaries, and the model-comparison chart config.
+// No fetch, no Date access at module scope beyond Date.parse on the
+// caller-supplied ISO strings (everything is derived from data + nowIso passed
 // in by the router — never Date.now()). String concatenation with +, never
 // template literals. const/let only.
 //
@@ -18,7 +20,7 @@ import { waveColorForHeight } from "../rules.js";
 // palette; see PLAN.md section 9).
 const BAND_DEFS = {
   "green": { band: "green", label: "Under 2 ft", tokenVar: "var(--wa-color-green-50)" },
-  "yellow": { band: "yellow", label: "2-4 ft", tokenVar: "var(--wa-color-yellow-70)" },
+  "yellow": { band: "yellow", label: "2–4 ft", tokenVar: "var(--wa-color-yellow-70)" },
   "red": { band: "red", label: "4 ft or more", tokenVar: "var(--wa-color-red-50)" },
   "no-data": { band: "no-data", label: "No data", tokenVar: "var(--wa-color-gray-50)" }
 };
@@ -190,38 +192,6 @@ export function computeWaveRuns(hoursFt) {
   return runs;
 }
 
-// Build the Chart.js config for the horizontal stacked strip. Each run is one
-// single-bar dataset; the chart type, stacking, and the value-axis min/max all
-// come from the <wa-bar-chart> element and its attributes, NOT this config.
-// The caller stringifies this.
-export function buildWaveChartConfig(runs) {
-  const list = Array.isArray(runs) ? runs : [];
-  return {
-    data: {
-      labels: [""],
-      datasets: list.map(function (run) {
-        return {
-          label: run.label,
-          data: [run.hours],
-          backgroundColor: run.tokenVar,
-          barPercentage: 1,
-          categoryPercentage: 1
-        };
-      })
-    },
-    options: {
-      scales: {
-        x: { display: false },
-        y: { display: false }
-      },
-      plugins: {
-        title: { display: false }
-      },
-      events: []
-    }
-  };
-}
-
 // "hour" is singular only for a 1-hour run.
 function hourWord(n) {
   return n === 1 ? "hour" : "hours";
@@ -230,7 +200,7 @@ function hourWord(n) {
 // Lowercase the first character of a band label. The first run keeps its label
 // verbatim; every "then" run runs its label through this. Deterministic rule:
 // only "Under" and "No data" begin with an uppercase letter, so this yields
-// "under" / "no data" while leaving "2-4 ft" and "4 ft or more" (which begin
+// "under" / "no data" while leaving "2–4 ft" and "4 ft or more" (which begin
 // with a digit) unchanged.
 function lowerFirst(str) {
   if (str.length === 0) {
@@ -239,9 +209,9 @@ function lowerFirst(str) {
   return str.charAt(0).toLowerCase() + str.slice(1);
 }
 
-// Prose summary of the runs for accessibility (the chart's aria description)
+// Prose summary of the runs for accessibility (the strip's aria description)
 // and the pre-upgrade fallback paragraph, e.g.
-// "Under 2 ft for 5 hours from now, then 2-4 ft for 3 hours, then no data for
+// "Under 2 ft for 5 hours from now, then 2–4 ft for 3 hours, then no data for
 // 2 hours." Empty string for no runs.
 export function waveStripSummary(runs) {
   const list = Array.isArray(runs) ? runs : [];

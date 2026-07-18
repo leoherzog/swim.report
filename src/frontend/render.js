@@ -11,7 +11,6 @@ import { LIST_GEO_SCRIPT } from "./geoScript.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
-  buildWaveChartConfig,
   waveStripSummary,
   modelNowCaption,
   orderedModelIds,
@@ -42,6 +41,16 @@ const FLAG_LABELS = {
   "red": "RED",
   "double-red": "DOUBLE RED — water closed",
   "unknown": "UNKNOWN"
+};
+
+// Screen-reader label for the title flag icon only — the cards' and rows'
+// icons sit next to visible GREEN/YELLOW/... text and stay decorative.
+const FLAG_ICON_LABELS = {
+  "green": "Green flag",
+  "yellow": "Yellow flag",
+  "red": "Red flag",
+  "double-red": "Double red flags",
+  "unknown": "Flag status unknown"
 };
 
 export function escapeHtml(str) {
@@ -116,23 +125,32 @@ function renderStaleWarning(updatedIso) {
     "</wa-callout>";
 }
 
-function renderFlagIcon(color, sizeClass, slotName) {
+// labelText (optional): accessible name for a standalone icon (the detail-page
+// title). Without it the icon renders decorative (aria-hidden), which is right
+// wherever visible flag text sits next to it.
+function renderFlagIcon(color, sizeClass, slotName, labelText) {
   const normalized = normalizeColor(color);
   const colorClass = "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
   const iconClass = sizeClass + " " + colorClass;
   const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
   if (normalized === "double-red") {
-    return "<span" + slotAttr + " class=\"wa-cluster wa-gap-3xs\">" +
+    const labelAttrs = labelText
+      ? (" role=\"img\" aria-label=\"" + escapeHtml(labelText) + "\"")
+      : "";
+    return "<span" + slotAttr + labelAttrs + " class=\"wa-cluster wa-gap-3xs\">" +
       "<wa-icon name=\"flag\" class=\"" + iconClass + "\"></wa-icon>" +
       "<wa-icon name=\"flag\" class=\"" + iconClass + "\"></wa-icon>" +
       "</span>";
   }
-  return "<wa-icon" + slotAttr + " name=\"flag\" class=\"" + iconClass + "\"></wa-icon>";
+  const labelAttr = labelText ? (" label=\"" + escapeHtml(labelText) + "\"") : "";
+  return "<wa-icon" + slotAttr + labelAttr + " name=\"flag\" class=\"" + iconClass + "\"></wa-icon>";
 }
 
 function renderFlagChip(estimate) {
   const color = estimate ? normalizeColor(estimate.color) : "unknown";
-  const label = FLAG_LABELS[color];
+  // Short chip label only: the full "— water closed" text wraps badly beside
+  // long park names; the detail card keeps the full FLAG_LABELS text.
+  const label = color === "double-red" ? "DOUBLE RED" : FLAG_LABELS[color];
   return "<wa-badge variant=\"neutral\" appearance=\"outlined\">" +
     renderFlagIcon(color, "wa-font-size-l", "start") +
     escapeHtml(label) +
@@ -149,8 +167,8 @@ function renderOfficialBadge(sizeClass) {
     "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>";
 }
 
-// Shared wrapper for the small cluster of source labels on a card header,
-// used by renderSourceLabels and renderOfficialSourceLink.
+// Wrapper for the small source cluster on a card header; its single caller is
+// renderOfficialSourceLink (estimate sources render as badge chips instead).
 function sourceCluster(innerHtml) {
   return "<span class=\"wa-cluster wa-gap-xs wa-font-size-s\">" + innerHtml + "</span>";
 }
@@ -159,8 +177,10 @@ function sourceCluster(innerHtml) {
 // rendered as a hyperlink; only official scraper sources link out, see
 // renderOfficialSourceLink). Bare strings are the legacy shape — KV entries
 // written before the labeled format live for up to 2 h, so both must render
-// (as their hostname when URL-like). Returns plain-text labels for the card
-// header, or "" when empty.
+// (as their hostname when URL-like). Returns small badge chips for the card
+// header, or "" when empty. Quiet filled-neutral pills, deliberately unlike
+// the square outlined ESTIMATE badge — and never variant="success": green is
+// reserved for OFFICIAL.
 function renderSourceLabels(sources) {
   const list = Array.isArray(sources) ? sources : [];
   const items = [];
@@ -177,13 +197,15 @@ function renderSourceLabels(sources) {
       label = String(source);
     }
     if (label) {
-      items.push("<span>" + escapeHtml(label) + "</span>");
+      items.push("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>" +
+        escapeHtml(label) + "</wa-badge>");
     }
   }
   if (items.length === 0) {
     return "";
   }
-  return sourceCluster(items.join("\n"));
+  return "<span class=\"source-badges wa-cluster wa-gap-2xs wa-justify-content-end " +
+    "wa-font-size-2xs\">" + items.join("\n") + "</span>";
 }
 
 // Official cards are the one place a source renders as a hyperlink: the
@@ -208,35 +230,11 @@ function renderFlagRow(color, reason) {
     "</div>";
 }
 
-// Short description of which rule branch decided the color, keyed by the
-// estimate's trigger (set in src/rules.js). The specific values (wave height,
-// wind speed, alert name) already render in the reason line above this
-// caption, so these stay generic. Keep in sync with the precedence chain in
-// PLAN.md section 4.
-const TRIGGER_DESCRIPTIONS = {
-  "nws-alert": "Based on an active National Weather Service alert",
-  "rip-current": "Based on the forecast rip current risk",
-  "wave-height": "Based on the forecast wave height",
-  "wind": "Based on the forecast wind speed (no wave data available)",
-  "rip-current-low": "Based on the low rip current risk (no wave or wind data available)",
-  "no-data": "No usable data available"
-};
-
-function renderTriggerLine(estimate) {
-  const description = TRIGGER_DESCRIPTIONS[estimate.trigger];
-  if (description) {
-    return "<p class=\"wa-caption-s\">" + escapeHtml(description) + "</p>";
-  }
-  // Older KV payloads (written before triggers existed) fall back to the
-  // rules-version line for the remainder of their 2 h TTL.
-  return "<p class=\"wa-caption-s\">Rules version: " + escapeHtml(estimate.rules_version) + "</p>";
-}
-
 // Shared flag-card skeleton used by both the official and the estimate card so
 // their layouts stay identical: badge in the header (left), source labels in
-// header-actions (top right), flag row + optional detail line + stale warning
-// in the body, "Updated" in the footer. The with-* attributes track slotted
-// content per the wa-card SSR contract.
+// header-actions (top right), flag row + stale warning in the body, "Updated"
+// in the footer. The with-* attributes track slotted content per the wa-card
+// SSR contract.
 function renderFlagCard(options) {
   const attrs = " with-header" +
     (options.sourcesHtml ? " with-header-actions" : "") +
@@ -249,9 +247,6 @@ function renderFlagCard(options) {
     lines.push("<div slot=\"header-actions\">" + options.sourcesHtml + "</div>");
   }
   lines.push(renderFlagRow(options.color, options.reason));
-  if (options.detailHtml) {
-    lines.push(options.detailHtml);
-  }
   if (options.updated && isStale(options.nowIso, options.updated)) {
     lines.push(renderStaleWarning(options.updated));
   }
@@ -273,7 +268,6 @@ function renderEstimateCard(estimate, nowIso) {
     color: isMissing ? "unknown" : normalizeColor(estimate.color),
     reason: isMissing ? "No estimate available yet" : (estimate.reason || "No data available"),
     sourcesHtml: isMissing ? "" : renderSourceLabels(estimate.sources),
-    detailHtml: isMissing ? "" : renderTriggerLine(estimate),
     updated: isMissing ? null : (estimate.updated || null),
     nowIso: nowIso
   });
@@ -292,7 +286,6 @@ function renderOfficialCard(official, nowIso) {
     color: normalizeColor(official.color),
     reason: official.reason || "",
     sourcesHtml: sourcesHtml,
-    detailHtml: "",
     updated: official.updated || null,
     nowIso: nowIso
   });
@@ -538,7 +531,7 @@ function renderWebcam(beach) {
 // Quiet hour-tick row under the strip: "Now" pinned left, "+" + totalHours +
 // " h" pinned right, and interior +6/+12/+18 h marks positioned by a
 // server-computed left percentage (a genuinely per-instance value, so an inline
-// style is the right tool here). aria-hidden — the chart's own description
+// style is the right tool here). aria-hidden — the strip's aria-label/summary
 // already conveys the timeline to assistive tech.
 function renderWaveHourTicks(totalHours) {
   const parts = [];
@@ -558,7 +551,8 @@ function renderWaveHourTicks(totalHours) {
   return parts.join("");
 }
 
-// The slotted-JSON + pre-upgrade fallback-<p> tail shared by both wave charts:
+// The slotted-JSON + pre-upgrade fallback-<p> tail for the model-comparison
+// chart (its only remaining consumer — the band strip is now a plain flex row):
 // the config serialized to JSON with "<" escaped so it can never break out of
 // the <script>, followed by the prose summary as the fallback paragraph. This
 // is the single home for that XSS-hardening escape.
@@ -568,7 +562,43 @@ function chartScriptAndFallback(config, summary) {
     "<p class=\"wave-chart-fallback wa-caption-s\">" + escapeHtml(summary) + "</p>";
 }
 
-// The now-stat, per-model "now" caption, band-strip chart, and stale warning
+// Colored wave-strip: one flex segment per run, sized by flex-grow (run.hours —
+// proportional, no percentage rounding drift) and colored by the run's palette
+// token. width/background are genuinely per-instance values, the sanctioned
+// inline-style case. Each segment is focusable so wa-tooltip's default
+// "hover focus" trigger covers keyboard and tap; the tooltip and the segment's
+// aria-label carry the same text. Tooltip hosts render position: absolute, so
+// emitting them as siblings adds no layout space. The visually-hidden paragraph
+// preserves the prose summary for assistive tech.
+function renderWaveStrip(runs, totalHours, summaryText) {
+  const segs = [];
+  const tips = [];
+  let offset = 0;
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    const id = "wave-seg-" + i;
+    const start = offset;
+    const end = offset + run.hours;
+    offset = end;
+    const range = start === 0
+      ? ("now through +" + end + " h")
+      : ("+" + start + " h to +" + end + " h");
+    const text = run.band === "no-data"
+      ? ("No wave data — " + range)
+      : (run.label + " waves (estimated) — " + range);
+    segs.push("<div class=\"wave-strip-seg\" id=\"" + id + "\" role=\"listitem\"" +
+      " tabindex=\"0\" aria-label=\"" + escapeHtml(text) + "\"" +
+      " style=\"flex: " + run.hours + " " + run.hours + " 0%; background: " +
+      run.tokenVar + ";\"></div>");
+    tips.push("<wa-tooltip for=\"" + id + "\">" + escapeHtml(text) + "</wa-tooltip>");
+  }
+  return "<div class=\"wave-strip\" role=\"list\" aria-label=\"Wave height forecast " +
+    "for the next " + totalHours + " hours\">" + segs.join("") + "</div>" +
+    tips.join("") +
+    "<p class=\"wa-visually-hidden\">" + escapeHtml(summaryText) + "</p>";
+}
+
+// The now-stat, per-model "now" caption, band-strip block, and stale warning
 // pieces of the wave forecast. Returned as named parts (not pre-joined) so the
 // caller can interleave the model-comparison chart in the correct slot; hasNow
 // gates whether the whole section renders. Pure.
@@ -578,7 +608,7 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
   const nowStat = hasNow
     ? ("<p class=\"wave-now\"><span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">" +
         estimate.waveHeightFt.toFixed(1) + " ft</span> " +
-        "<span class=\"wave-now-label wa-caption-s\">waves now (estimated)</span></p>")
+        "<span class=\"wave-now-label wa-caption-s\">waves now</span></p>")
     : "";
 
   let chartBlock = "";
@@ -587,13 +617,8 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
   if (series) {
     const runs = computeWaveRuns(series.hoursFt);
     const summaryText = waveStripSummary(runs);
-    const config = buildWaveChartConfig(runs);
     const totalHours = series.totalHours;
-    const chartHtml = "<wa-bar-chart class=\"wave-chart\" index-axis=\"y\" " +
-      "stacked min=\"0\" max=\"" + String(totalHours) + "\" grid=\"none\" without-legend " +
-      "without-tooltip without-animation label=\"Wave height forecast for the next " +
-      String(totalHours) + " hours\" description=\"" + escapeHtml(summaryText) + "\">" +
-      chartScriptAndFallback(config, summaryText) + "</wa-bar-chart>";
+    const chartHtml = renderWaveStrip(runs, totalHours, summaryText);
     chartBlock = chartHtml + "\n" + renderWaveHourTicks(totalHours);
     if (isStale(nowIso, wavesUpdated)) {
       staleHtml = renderStaleWarning(wavesUpdated);
@@ -626,7 +651,8 @@ function renderWaveModelCompare(series) {
   }
   const modelConfig = buildWaveModelChartConfig(series);
   const modelSummary = waveModelSummary(series);
-  return "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\">" +
+  return "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\" " +
+    "appearance=\"plain\" icon-placement=\"start\">" +
     "<wa-line-chart class=\"wave-model-chart\" without-animation " +
     "label=\"Wave height by forecast model\" description=\"" +
     escapeHtml(modelSummary) + "\">" +
@@ -635,10 +661,10 @@ function renderWaveModelCompare(series) {
 }
 
 // Wave forecast section (detail page): a "now" wave-height stat plus a Dark
-// Sky-style horizontal color strip of the next up-to-24 hours, drawn by the
-// <wa-bar-chart> component from a slotted JSON config (no inline JS). Colored by
-// ESTIMATED wave height only — never the official flag. Returns "" when there
-// is neither a finite now-height nor a renderable series.
+// Sky-style horizontal color strip of the next up-to-24 hours (a flex row of
+// tooltip-carrying segments). Colored by ESTIMATED wave height only — never
+// the official flag. Returns "" when there is neither a finite now-height nor
+// a renderable series.
 function renderWaveForecast(estimate, waves, nowIso) {
   const series = trimWaveSeries(waves, nowIso);
   const strip = renderWaveStripParts(estimate, series, nowIso, waves && waves.updated);
@@ -669,9 +695,6 @@ function renderWaveForecast(estimate, waves, nowIso) {
   if (strip.staleHtml) {
     lines.push(strip.staleHtml);
   }
-  lines.push("<p class=\"wa-caption-s\">Colored by estimated wave height only — " +
-    "green under 2 ft, yellow 2-4 ft, red 4 ft and up, gray no data. " +
-    "Not the official flag.</p>");
   lines.push("</section>");
   return lines.join("\n");
 }
@@ -691,28 +714,33 @@ export function renderDetailPage(data) {
   // Title flag mirrors the best current reading: scraped official color when
   // available, otherwise the estimate (null-safe: no flag data renders gray).
   const titleColor = official ? official.color : (estimate ? estimate.color : null);
-  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl");
+  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null,
+    FLAG_ICON_LABELS[normalizeColor(titleColor)]);
 
   const subtitle = subtitleName(beach);
   const subtitleHtml = subtitle ?
     ("<p class=\"beach-subtitle\">" + escapeHtml(subtitle) + "</p>") : "";
 
+  // Coordinates link out to OpenStreetMap (consistent with the footer's OSM
+  // attribution), demoted to caption size.
+  const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
+    "#map=15/" + lat + "/" + lon;
+
   const headerBlock = "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
-    "<p class=\"wa-cluster wa-gap-2xs wa-color-text-quiet\">" +
-    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon +
-    "</p>";
+    "<p class=\"wa-caption-s\"><a class=\"coords-link\" href=\"" + escapeHtml(osmHref) +
+    "\" rel=\"noopener noreferrer\">" +
+    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
   const officialHtml = renderOfficialCard(official, nowIso);
   const estimateHtml = renderEstimateCard(estimate, nowIso);
 
+  // Answer first, exploration second: the flag verdict (official above
+  // estimate) leads, the forecast elaborates, and the lazy-loading map/webcam
+  // embeds follow as supporting exploration.
   const stackParts = [];
-  const waveMapHtml = renderWaveMap(beach);
-  if (waveMapHtml) {
-    stackParts.push(waveMapHtml);
-  }
   if (officialHtml) {
     stackParts.push(officialHtml);
   }
@@ -720,6 +748,10 @@ export function renderDetailPage(data) {
   const waveForecastHtml = renderWaveForecast(estimate, waves, nowIso);
   if (waveForecastHtml) {
     stackParts.push(waveForecastHtml);
+  }
+  const waveMapHtml = renderWaveMap(beach);
+  if (waveMapHtml) {
+    stackParts.push(waveMapHtml);
   }
   const webcamHtml = renderWebcam(beach);
   if (webcamHtml) {

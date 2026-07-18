@@ -1,9 +1,9 @@
 // test/renderWaveForecast.test.js
 // Covers the wave-forecast section on the detail page (src/frontend/render.js),
 // exercised through renderDetailPage (mirrors renderWebcam.test.js). Asserts the
-// section's placement, the <wa-bar-chart> attributes, the slotted Chart.js JSON
-// (parsed end-to-end), the "now" stat, the buoy/legacy/absent variants, the
-// stale warning, the ESTIMATE badge, and that the footer disclaimer survives.
+// section's placement, the colored flex-row strip and its per-segment tooltips,
+// the "now" stat, the buoy/legacy/absent variants, the stale warning, the
+// ESTIMATE badge, and that the footer disclaimer survives.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
@@ -97,7 +97,7 @@ function threeModelWaves() {
   });
 }
 
-const SUMMARY = "Under 2 ft for 5 hours from now, then 2-4 ft for 3 hours, " +
+const SUMMARY = "Under 2 ft for 5 hours from now, then 2–4 ft for 3 hours, " +
   "then 4 ft or more for 2 hours, then no data for 14 hours.";
 
 describe("wave-forecast section", () => {
@@ -111,63 +111,65 @@ describe("wave-forecast section", () => {
         webcam_title: "Cam"
       })
     });
-    const estimateIdx = html.indexOf("estimate-card");
+    // Match the rendered card's attribute, not the bare class name — a
+    // .estimate-card selector also ships in the embedded <head> stylesheet,
+    // which would make this order assertion vacuous.
+    const estimateIdx = html.indexOf("class=\"estimate-card\"");
     const waveIdx = html.indexOf("class=\"wave-forecast");
     const webcamIdx = html.indexOf("webcam-section");
     expect(estimateIdx).toBeGreaterThan(-1);
     expect(waveIdx).toBeGreaterThan(estimateIdx);
     expect(webcamIdx).toBeGreaterThan(waveIdx);
+    // The wave map demotes to supporting exploration: after the forecast,
+    // before the webcam. (Match the rendered <section> marker, not the bare
+    // class — .wave-map-frame also appears in the embedded stylesheet.)
+    const mapIdx = html.indexOf("<section class=\"wave-map");
+    expect(mapIdx).toBeGreaterThan(waveIdx);
+    expect(webcamIdx).toBeGreaterThan(mapIdx);
   });
 
-  it("sets the wa-bar-chart attributes, with max matching the trimmed hour count", () => {
+  it("renders the strip as a flex row of proportional colored segments", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({})
     });
-    expect(html).toContain("<wa-bar-chart class=\"wave-chart\"");
-    expect(html).toContain("index-axis=\"y\"");
-    expect(html).toContain("stacked");
-    expect(html).toContain("without-tooltip");
-    expect(html).toContain("min=\"0\"");
-    expect(html).toContain("max=\"24\"");
+    expect(html).toContain("<div class=\"wave-strip\" role=\"list\" " +
+      "aria-label=\"Wave height forecast for the next 24 hours\">");
+    expect(html).toContain("id=\"wave-seg-0\"");
+    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-green-50);\"");
+    expect(html).toContain("style=\"flex: 3 3 0%; background: var(--wa-color-yellow-70);\"");
+    expect(html).toContain("style=\"flex: 2 2 0%; background: var(--wa-color-red-50);\"");
+    expect(html).toContain("style=\"flex: 14 14 0%; background: var(--wa-color-gray-50);\"");
+    expect(html).toContain("tabindex=\"0\"");
   });
 
-  it("carries a parseable Chart.js config whose datasets match the runs and colors", () => {
+  it("carries a wa-tooltip per segment with band label and hour range", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({})
     });
-    const json = extractChartJson(html);
-    // Never a literal closing script tag inside the slotted JSON.
-    expect(json).not.toContain("</script");
-    const config = JSON.parse(json);
-    // The chart type comes from the <wa-bar-chart> element itself — the
-    // slotted config must not restate it.
-    expect(config.type).toBeUndefined();
-    expect(config.data.datasets).toHaveLength(4);
-    expect(config.data.datasets.map(function (d) { return d.label; })).toEqual([
-      "Under 2 ft", "2-4 ft", "4 ft or more", "No data"
-    ]);
-    expect(config.data.datasets.map(function (d) { return d.data[0]; })).toEqual([5, 3, 2, 14]);
-    expect(config.data.datasets.map(function (d) { return d.backgroundColor; })).toEqual([
-      "var(--wa-color-green-50)",
-      "var(--wa-color-yellow-70)",
-      "var(--wa-color-red-50)",
-      "var(--wa-color-gray-50)"
-    ]);
-    expect(config.options.plugins.title.display).toBe(false);
+    expect(html).toContain(
+      "<wa-tooltip for=\"wave-seg-0\">Under 2 ft waves (estimated) — now through +5 h</wa-tooltip>");
+    expect(html).toContain(
+      "<wa-tooltip for=\"wave-seg-1\">2–4 ft waves (estimated) — +5 h to +8 h</wa-tooltip>");
+    expect(html).toContain(
+      "<wa-tooltip for=\"wave-seg-2\">4 ft or more waves (estimated) — +8 h to +10 h</wa-tooltip>");
+    expect(html).toContain(
+      "<wa-tooltip for=\"wave-seg-3\">No wave data — +10 h to +24 h</wa-tooltip>");
   });
 
-  it("uses the same summary text for the aria description and the fallback paragraph", () => {
+  it("keeps the prose summary for assistive tech and mirrors tooltip text in aria-labels", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({})
     });
-    expect(html).toContain("description=\"" + SUMMARY + "\"");
-    expect(html).toContain("<p class=\"wave-chart-fallback wa-caption-s\">" + SUMMARY + "</p>");
+    expect(html).toContain("<p class=\"wa-visually-hidden\">" + SUMMARY + "</p>");
+    // Each segment's aria-label equals its tooltip text (spot-check the first).
+    expect(html).toContain(
+      "aria-label=\"Under 2 ft waves (estimated) — now through +5 h\"");
   });
 
   it("shows the 'now' wave stat with a toFixed(1) value", () => {
@@ -177,7 +179,7 @@ describe("wave-forecast section", () => {
       waves: wavesWith({})
     });
     expect(html).toContain("<span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">1.0 ft</span>");
-    expect(html).toContain("waves now (estimated)");
+    expect(html).toContain("waves now");
   });
 
   it("buoy-fallback beach (estimate height set, waves null) shows the stat but no chart", () => {
@@ -187,19 +189,19 @@ describe("wave-forecast section", () => {
       waves: null
     });
     expect(html).toContain("<span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">2.6 ft</span>");
-    expect(html).not.toContain("<wa-bar-chart");
+    expect(html).not.toContain("<div class=\"wave-strip\"");
     expect(html).not.toContain("<wa-line-chart");
     // The section heading still appears (the stat alone justifies it).
     expect(html).toContain("Wave forecast");
   });
 
-  it("legacy estimate without waveHeightFt but with a series renders the chart, no stat", () => {
+  it("legacy estimate without waveHeightFt but with a series renders the strip, no stat", () => {
     const html = render({
       estimate: estimateWith({}), // no waveHeightFt field
       official: null,
       waves: wavesWith({})
     });
-    expect(html).toContain("<wa-bar-chart");
+    expect(html).toContain("<div class=\"wave-strip\"");
     // The class ships in the stylesheet; assert the rendered span is absent.
     expect(html).not.toContain("<span class=\"wave-now-value");
   });
@@ -268,7 +270,8 @@ describe("wave-forecast model comparison", () => {
       official: null,
       waves: threeModelWaves()
     });
-    const open = "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\">";
+    const open = "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\" " +
+      "appearance=\"plain\" icon-placement=\"start\">";
     expect(html).toContain(open);
     // The y-axis unit rides in the slotted config, not on the element.
     expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation");
@@ -286,8 +289,8 @@ describe("wave-forecast model comparison", () => {
       waves: threeModelWaves()
     });
     const blocks = extractAllChartJson(html);
-    expect(blocks).toHaveLength(2);
-    const modelConfig = JSON.parse(blocks[1]);
+    expect(blocks).toHaveLength(1);
+    const modelConfig = JSON.parse(blocks[0]);
     // The chart type comes from the <wa-line-chart> element itself — the
     // slotted config must not restate it.
     expect(modelConfig.type).toBeUndefined();
@@ -305,14 +308,14 @@ describe("wave-forecast model comparison", () => {
     expect(modelConfig.options.scales.y.title).toEqual({ display: true, text: "ft" });
   });
 
-  it("never emits a literal closing script tag inside either JSON block", () => {
+  it("never emits a literal closing script tag inside the JSON block", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: threeModelWaves()
     });
     const blocks = extractAllChartJson(html);
-    expect(blocks).toHaveLength(2);
+    expect(blocks).toHaveLength(1);
     blocks.forEach(function (json) {
       expect(json).not.toContain("</script");
     });
@@ -339,7 +342,7 @@ describe("wave-forecast model comparison", () => {
     // The class names ship in the stylesheet regardless — match rendered markers.
     expect(html).not.toContain("<p class=\"wave-model-now");
     expect(html).not.toContain("<wa-details class=\"wave-model-compare");
-    expect(html).toContain("<wa-bar-chart class=\"wave-chart\"");
+    expect(html).toContain("<div class=\"wave-strip\"");
   });
 
   it("a legacy payload without byModel renders exactly as before (no caption/disclosure)", () => {
@@ -351,21 +354,8 @@ describe("wave-forecast model comparison", () => {
     // The class names ship in the stylesheet regardless — match rendered markers.
     expect(html).not.toContain("<p class=\"wave-model-now");
     expect(html).not.toContain("<wa-details class=\"wave-model-compare");
-    // The band strip is untouched.
-    expect(html).toContain("<wa-bar-chart class=\"wave-chart\"");
-    expect(extractAllChartJson(html)).toHaveLength(1);
-  });
-
-  it("leaves the band strip's own config unchanged when the model chart is added", () => {
-    const html = render({
-      estimate: estimateWith({ waveHeightFt: 1.0 }),
-      official: null,
-      waves: threeModelWaves()
-    });
-    const stripConfig = JSON.parse(extractAllChartJson(html)[0]);
-    expect(stripConfig.type).toBeUndefined();
-    expect(stripConfig.data.datasets.map(function (d) { return d.label; })).toEqual([
-      "Under 2 ft", "2-4 ft", "4 ft or more", "No data"
-    ]);
+    // The band strip is untouched, and no chart JSON ships at all.
+    expect(html).toContain("<div class=\"wave-strip\"");
+    expect(extractAllChartJson(html)).toHaveLength(0);
   });
 });

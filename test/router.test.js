@@ -370,22 +370,18 @@ describe("renderListPage proximity output", () => {
     });
     expect(html).toContain("with-header-actions");
     expect(html).toContain("<div slot=\"header-actions\">");
-    // Labels render as plain text — the upstream url is never hyperlinked.
-    expect(html).toContain("<span>ECMWF Wave Forecast</span>");
+    // Labels render as quiet badge chips — the upstream url is never hyperlinked.
+    expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>ECMWF Wave Forecast</wa-badge>");
     expect(html).not.toContain("https://open-meteo.com/en/docs/marine-weather-api");
-    expect(html).toContain("<span>NWS Surf Zone Forecast</span>");
+    expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>NWS Surf Zone Forecast</wa-badge>");
     // Legacy bare-string sources render as their hostname, unlinked.
-    expect(html).toContain("<span>api.weather.gov</span>");
+    expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>api.weather.gov</wa-badge>");
     expect(html).not.toContain("https://api.weather.gov");
     expect(html).toContain(
       "<div slot=\"footer\" class=\"wa-caption-s\">Updated " +
       "<wa-relative-time date=\"2026-07-05T12:00:00.000Z\" sync></wa-relative-time></div>"
     );
     expect(html).not.toContain("Sources:");
-    expect(html).toContain(
-      "Based on the forecast wave height"
-    );
-    expect(html).not.toContain("Rules version:");
   });
 
   it("renders the official card with the same layout: source top right, Updated in footer", () => {
@@ -403,7 +399,10 @@ describe("renderListPage proximity output", () => {
       },
       nowIso: "2026-07-05T14:30:00.000Z"
     });
-    const officialCard = html.slice(html.indexOf("official-card"), html.indexOf("estimate-card"));
+    // Slice on the rendered card markers — the bare class names also appear
+    // in the embedded stylesheet.
+    const officialCard = html.slice(html.indexOf("class=\"official-card\""),
+      html.indexOf("class=\"estimate-card\""));
     expect(officialCard).toContain("with-header-actions");
     expect(officialCard).toContain("<div slot=\"header-actions\">");
     // Scraped official sources are the one case that links out — hostname
@@ -417,23 +416,6 @@ describe("renderListPage proximity output", () => {
       "<wa-relative-time date=\"2026-07-05T14:00:00.000Z\" sync></wa-relative-time></div>"
     );
     expect(officialCard).not.toContain("Source:");
-  });
-
-  it("falls back to the rules-version line for payloads without a trigger", () => {
-    const html = renderDetailPage({
-      beach: { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" },
-      estimate: {
-        color: "green",
-        reason: "Estimated wave height 1.3 ft (below 2 ft)",
-        rules_version: "1.0.0",
-        official: false,
-        sources: [],
-        updated: "2026-07-05T12:00:00.000Z"
-      },
-      official: null,
-      nowIso: "2026-07-05T12:30:00.000Z"
-    });
-    expect(html).toContain("Rules version: 1.0.0");
   });
 
   it("omits header actions and footer when there is no estimate", () => {

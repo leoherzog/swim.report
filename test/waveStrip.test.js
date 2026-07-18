@@ -1,13 +1,12 @@
 // test/waveStrip.test.js
 // Pure-helper coverage for the wave-forecast strip (src/frontend/waveStrip.js):
 // trimming a 24-hour series to "now" forward, run-length encoding by color
-// band, the Chart.js config shape, and the prose summary. No fetch, no Date.now.
+// band, and the prose summary. No fetch, no Date.now.
 
 import { describe, it, expect } from "vitest";
 import {
   trimWaveSeries,
   computeWaveRuns,
-  buildWaveChartConfig,
   waveStripSummary,
   modelDisplayName,
   orderedModelIds,
@@ -344,7 +343,7 @@ describe("computeWaveRuns", () => {
     expect(runs).toHaveLength(3);
     expect(runs[0]).toMatchObject({ band: "green", hours: 3, label: "Under 2 ft",
       tokenVar: "var(--wa-color-green-50)" });
-    expect(runs[1]).toMatchObject({ band: "yellow", hours: 2, label: "2-4 ft",
+    expect(runs[1]).toMatchObject({ band: "yellow", hours: 2, label: "2–4 ft",
       tokenVar: "var(--wa-color-yellow-70)" });
     expect(runs[2]).toMatchObject({ band: "red", hours: 1, label: "4 ft or more",
       tokenVar: "var(--wa-color-red-50)" });
@@ -379,46 +378,15 @@ describe("computeWaveRuns", () => {
   });
 });
 
-describe("buildWaveChartConfig", () => {
-  it("builds one single-value dataset per run in order, colored by token var", () => {
-    const runs = [
-      { band: "green", tokenVar: "var(--wa-color-green-50)", label: "Under 2 ft", hours: 5 },
-      { band: "yellow", tokenVar: "var(--wa-color-yellow-70)", label: "2-4 ft", hours: 3 }
-    ];
-    const config = buildWaveChartConfig(runs);
-    // The chart type comes from the <wa-bar-chart> element, not this config.
-    expect(config.type).toBeUndefined();
-    expect(config.data.labels).toEqual([""]);
-    expect(config.data.datasets).toHaveLength(2);
-    expect(config.data.datasets[0]).toEqual({
-      label: "Under 2 ft",
-      data: [5],
-      backgroundColor: "var(--wa-color-green-50)",
-      barPercentage: 1,
-      categoryPercentage: 1
-    });
-    expect(config.data.datasets[1].backgroundColor).toBe("var(--wa-color-yellow-70)");
-    expect(config.data.datasets[1].data).toEqual([3]);
-  });
-
-  it("hides both scales, disables the title plugin, and sets events to []", () => {
-    const config = buildWaveChartConfig([]);
-    expect(config.options.scales.x.display).toBe(false);
-    expect(config.options.scales.y.display).toBe(false);
-    expect(config.options.plugins.title.display).toBe(false);
-    expect(config.options.events).toEqual([]);
-  });
-});
-
 describe("waveStripSummary", () => {
   it("builds the exact prose for a multi-run series", () => {
     const runs = [
       { band: "green", label: "Under 2 ft", hours: 5 },
-      { band: "yellow", label: "2-4 ft", hours: 3 },
+      { band: "yellow", label: "2–4 ft", hours: 3 },
       { band: "no-data", label: "No data", hours: 2 }
     ];
     expect(waveStripSummary(runs)).toBe(
-      "Under 2 ft for 5 hours from now, then 2-4 ft for 3 hours, then no data for 2 hours.");
+      "Under 2 ft for 5 hours from now, then 2–4 ft for 3 hours, then no data for 2 hours.");
   });
 
   it("uses the singular 'hour' for a 1-hour run", () => {
