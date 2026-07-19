@@ -159,6 +159,22 @@ of it is scoped for follow-up work.
 
 ## Scale-out
 
+- **Offline discovery + water classification (built; cutover pending).** Beach
+  discovery and water-body classification have moved out of the Worker cron into
+  an offline GitHub Actions batch job that bulk-loads D1 — see
+  `docs/offline-discovery.md`. `scripts/discovery-batch.js` (Deno) reuses the
+  discovery/classification code verbatim (`src/discovery.js`,
+  `src/clients/overpass.js`, `src/waterClass.js`), emits one idempotent `.sql`
+  delta, and `.github/workflows/discovery.yml` applies it with
+  `wrangler d1 execute --remote --file`. This removes the "N per run → park →
+  drip over days" backfill bottleneck and is the practical enabler for the
+  nationwide scale-out below (a batch tiling CONUS bboxes, no per-cron
+  rationing). **Cutover not yet done**: the two Worker crons (`47 8 * * *`
+  discovery, `37 1,7,13,19 * * *` classification) stay live until the GitHub
+  repo, the `CLOUDFLARE_API_TOKEN` secret, and a verified run exist — then
+  remove those two triggers from `wrangler.toml` and redeploy (checklist in the
+  doc).
+
 - **Flip the recompute rotation to demand-priority once the table outgrows one run.**
   The request path stamps `beaches.last_viewed` (migration 0007, 2026-07-13; detail
   page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`) but nothing reads

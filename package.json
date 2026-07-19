@@ -15,6 +15,7 @@
     "seed:flags": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*\"",
     "seed:classify": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=37+1,7,13,19+*+*+*\"",
     "deploy": "wrangler deploy",
+    "batch:discovery": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js",
     "test": "vitest run"
   },
   "devDependencies": {

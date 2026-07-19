@@ -43,6 +43,7 @@ Single Cloudflare Worker (`wrangler.toml`, modules syntax) that **estimates** be
    - `"17 3,9,15,21 * * *"` (4x daily): NWS point enrichment — beaches with `nws_zone` NULL get `nws_zone`/`nws_grid_url` via api.weather.gov/points, 75 per run.
    - `"29 4,10,16,22 * * *"` (4x daily): ECCC zone enrichment — Canadian beaches NWS enrichment permanently parked get `eccc_zone` (public forecast region NAME) via the GeoMet API, 50 per run.
    - `"31 9 * * *"` (daily): Windy webcam hydration, 100 lookups per run.
+3. **Offline path** (GitHub Actions, `scripts/discovery-batch.js` on Deno, NOT in the Worker): beach discovery + water-body classification are being moved here from the cron path. The batch reuses the discovery/classification code verbatim (`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`), emits one idempotent `.sql` delta, and bulk-loads it into D1 via `wrangler d1 execute --remote --file`. Same two-path invariant: it writes D1 out-of-band and the request path still reads only D1/KV. See `docs/offline-discovery.md` for the design and cutover checklist — until cutover the in-Worker `"47 8 * * *"` (discovery) and `"37 1,7,13,19 * * *"` (water classification) crons remain live.
 
 ### Single source of color
 

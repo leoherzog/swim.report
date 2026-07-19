@@ -167,11 +167,14 @@ describe("runWaterClassification", function () {
     expect(classUpdates[0].args).toEqual(["inland", WATER_CLASS_VERSION, "osm-way-inland"]);
   });
 
-  it("isolates per-beach: one flaky fetch leaves its row untouched, the next still classifies", async function () {
-    let call = 0;
-    vi.stubGlobal("fetch", function () {
-      call = call + 1;
-      if (call === 1) {
+  it("isolates per-beach: one down upstream leaves its row untouched, the next still classifies", async function () {
+    // Body-based so it is robust to the Overpass mirror failover (each beach's
+    // probe may hit more than one mirror). osm-way-a (osm_id way/10) is down on
+    // EVERY mirror -> a genuine transient, so its row must be left untouched;
+    // osm-way-b (way/11) classifies ocean via a coastline way.
+    vi.stubGlobal("fetch", function (url, init) {
+      const body = init && init.body ? decodeURIComponent(String(init.body)) : "";
+      if (body.indexOf("way(10)") !== -1) {
         return Promise.reject(new Error("network down"));
       }
       return overpassOk([

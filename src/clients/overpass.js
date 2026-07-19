@@ -7,6 +7,27 @@ import { fetchJson } from "./http.js";
 
 export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 
+// Failover mirrors, tried IN ORDER: the primary is the official FOSSGIS
+// instance (overpass-api.de) — our volume (~2 discovery queries + a few hundred
+// classification probes per day) sits far under its "< 10,000 queries/day,
+// < 1 GB/day" courtesy limit. When it is overloaded (it periodically returns a
+// server-side [timeout] "remark", which we treat as a failure) runQuery falls
+// through to Private.coffee's unlimited public instance. Mirrors are distinct
+// IPs, so trying the next one never violates any single instance's 2-slots/IP
+// limit. Deliberately excludes the VK Maps (Russia-operated) mirror.
+export const OVERPASS_MIRRORS = [
+  OVERPASS_URL,
+  "https://overpass.private.coffee/api/interpreter"
+];
+
+// Per-mirror transport-layer timeout. The queries carry their own server-side
+// [timeout:60]/[timeout:180], so a working-but-slow query returns well within
+// this; the client cap only exists to cut a mirror that hangs at the TCP layer
+// (no response at all) so failover to the next mirror stays snappy instead of
+// blocking an unattended run. Set above the largest server-side timeout (180 s)
+// plus headroom.
+export const OVERPASS_MIRROR_TIMEOUT_MS = 240000;
+
 // overpass-api.de rejects requests without a User-Agent with HTTP 406, and
 // Workers' fetch sends none by default.
 export const OVERPASS_USER_AGENT = "swim.report (hello@swim.report)";
@@ -26,28 +47,44 @@ function buildQuery(bbox) {
 }
 
 async function runQuery(query, label) {
-  const json = await fetchJson(OVERPASS_URL, {
-    method: "POST",
-    headers: { "User-Agent": OVERPASS_USER_AGENT },
-    body: new URLSearchParams({ data: query }),
-    label: "overpass: " + label
-  });
-  if (json === null) {
-    return null;
+  // Try each mirror in order; the first that returns a usable (non-truncated)
+  // body wins. A transport/HTTP failure or a server-side "remark" on one mirror
+  // falls through to the next. Only when ALL mirrors fail does runQuery return
+  // null, preserving the "null == failed fetch" contract its callers rely on.
+  for (let i = 0; i < OVERPASS_MIRRORS.length; i = i + 1) {
+    const mirror = OVERPASS_MIRRORS[i];
+    const json = await fetchJson(mirror, {
+      method: "POST",
+      headers: { "User-Agent": OVERPASS_USER_AGENT },
+      body: new URLSearchParams({ data: query }),
+      label: "overpass[" + mirror + "]: " + label,
+      timeoutMs: OVERPASS_MIRROR_TIMEOUT_MS
+    });
+    if (json === null) {
+      // Transport/HTTP failure — already logged by fetchJson; try next mirror.
+      continue;
+    }
+    // Overpass reports server-side runtime failures (most commonly the query
+    // hitting its [timeout:N] mid-output) via a "remark" field on an otherwise
+    // HTTP-200 body — and the elements array is then silently TRUNCATED. A
+    // partial element set must be treated as a failed fetch, never success:
+    // the sync's reconciliation pass would read every missing element as
+    // "gone from OSM" and delete legitimate beach rows.
+    if (typeof json.remark === "string" && json.remark.length > 0) {
+      console.log(
+        "overpass[" + mirror + "]: " + label + " query returned remark (treating as failure): " + json.remark
+      );
+      continue;
+    }
+    if (i > 0) {
+      console.log("overpass: " + label + " succeeded on fallback mirror " + mirror);
+    }
+    return Array.isArray(json.elements) ? json.elements : [];
   }
-  // Overpass reports server-side runtime failures (most commonly the query
-  // hitting its [timeout:N] mid-output) via a "remark" field on an otherwise
-  // HTTP-200 body — and the elements array is then silently TRUNCATED. A
-  // partial element set must be treated as a failed fetch, never success:
-  // the sync's reconciliation pass would read every missing element as
-  // "gone from OSM" and delete legitimate beach rows.
-  if (typeof json.remark === "string" && json.remark.length > 0) {
-    console.log(
-      "overpass: " + label + " query returned remark (treating as failure): " + json.remark
-    );
-    return null;
-  }
-  return Array.isArray(json.elements) ? json.elements : [];
+  console.log(
+    "overpass: " + label + " failed on all " + String(OVERPASS_MIRRORS.length) + " mirror(s)"
+  );
+  return null;
 }
 
 export async function fetchBeaches(bbox) {

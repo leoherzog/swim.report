@@ -1,0 +1,139 @@
+# Offline discovery + water classification (GitHub Actions)
+
+Beach **discovery** (OpenStreetMap/Overpass) and **water-body classification**
+are *pipeline* concerns — they run occasionally, tolerate hours of latency, and
+produce a table — not *serving* concerns. This directory's pipeline moves them
+out of the Cloudflare Worker cron and into an offline GitHub Actions batch job
+that bulk-loads production D1. The Worker keeps everything else: serving, the
+hourly flag recompute, the 6-hourly wave refresh, and NWS/ECCC/webcam
+enrichment.
+
+## Why
+
+The in-Worker crons `runOverpassSync` (`47 8 * * *`) and `runWaterClassification`
+(`37 1,7,13,19 * * *`) process a rationed handful of rows per invocation
+(`WATER_CLASS_LIMIT = 25`, `WATER_CLASS_DELTA_CAP = 25`) because a Worker
+invocation is bounded (CPU / subrequest / wall-clock caps) and Overpass allows
+only 2 slots per IP. That "N per run → park → drip over days" pattern is a
+workaround for platform limits, and the initial classification backfill of the
+~700-row pilot takes roughly a week of drips. README already anticipated a
+"one-time bulk backfill … outside the cron"; this **is** that backfill,
+generalized and scheduled.
+
+An offline job can run a plain loop for minutes, pace Overpass politely with no
+subrequest ceiling, and write the whole table at once. The same constraint that
+made continental scale-out slow (rationing 25–50 rows per cron window) disappears
+when discovery/classification is a batch that produces a table and the Worker
+just serves it.
+
+## The two-path rule still holds
+
+Nothing about the Worker changes. The **request path** still reads only D1 + KV.
+The **cron path** still owns the Worker's own upstream fetching. This batch job
+is a **third, offline path** that writes D1 out-of-band — it never runs inside
+the Worker.
+
+## Pieces
+
+- **`scripts/discovery-batch.js`** — Deno script. Imports the discovery +
+  classification logic *verbatim* from `src/` (`mergeBeachRows` from
+  `src/discovery.js`; `fetchBeaches` / `fetchParkBeaches` /
+  `fetchWaterClassSignals` from `src/clients/overpass.js`; `classifyWaterBody`
+  and the version/attempts constants from `src/waterClass.js`), so it can never
+  diverge from the Worker. It reads a D1 snapshot, fetches Overpass, classifies,
+  and emits **one idempotent `.sql` delta** (upserts + reconciliation deletes +
+  `flag_history` prune + `sync_meta` + `water_class` updates). It writes no
+  database itself.
+- **`.github/workflows/discovery.yml`** — schedules the job daily (and manual
+  `workflow_dispatch`), snapshots D1, runs the script, uploads the `.sql` as an
+  artifact, and applies it with `wrangler d1 execute --remote --file`.
+- **`src/discovery.js`** — the extracted pure merge logic, imported by BOTH the
+  Worker (`src/index.js`, which re-exports `mergeBeachRows` for tests) and the
+  batch script. Its only dependency is `src/geo.js`.
+
+The classifier itself is **reused, not authored here**: `classifyQueue()` in the
+script wraps the existing per-beach probe (`fetchWaterClassSignals` +
+`classifyWaterBody`) as a deliberate **seam**. To use a smarter bulk classifier
+(e.g. the segment-index approach in README's "One-time bulk backfill" note),
+replace that one call — or pass `--no-classify` and generate `water_class`
+`UPDATE`s from a separate tool. Everything else (queue construction, the
+NULL/version/attempts gate, SQL emission) stays put.
+
+## Faithful to the Worker's semantics
+
+The emitted SQL mirrors `runOverpassSync` exactly (`test/discoveryBatch.test.js`
+locks this down):
+
+- **Enrichment columns are preserved.** The upsert is
+  `INSERT … ON CONFLICT(id) DO UPDATE SET name, lat, lon, park_name, …` — it
+  never touches `nws_zone` / `nws_grid_url` / `eccc_zone` / `webcam_*`, so a bulk
+  reload can't clobber what the enrichment crons filled.
+- **Moved-centroid reset.** A re-discovered beach whose centroid moved > ~0.001°
+  has its `water_class` reset to re-classify (same `CASE WHEN abs(lat-…)` clause).
+- **Reconciliation is guarded.** Stale unnamed-park rows (`name = park_name`,
+  inside `PILOT_BBOX`, not produced this run) are deleted only when the run
+  produced ≥1 park row and the stale set is within the proportional rail
+  (`max(10, 25% of candidates)`) — a partial/truncated Overpass result never
+  mass-deletes. The Overpass client already treats a truncation `remark` as
+  failure, so a partial result never reaches the script.
+- **Whole-table classification.** The queue unifies the Worker's whole-table
+  `runWaterClassification` with `runOverpassSync`'s synchronous discovery-delta:
+  every beach (snapshot ∪ newly discovered, minus reconcile-deletes) where
+  `water_class IS NULL OR water_class_version < WATER_CLASS_VERSION` and
+  `water_class_attempts < WATER_CLASS_MAX_ATTEMPTS`. Decisions reset attempts to
+  0; clean-but-empty probes bump attempts; transient Overpass failures are
+  skipped (no bump) — identical to `classifyBeaches`.
+- **`flag_history` prune moves here.** The 90-day retention sweep that lived in
+  `runOverpassSync` is emitted by the batch job, so it survives the cutover.
+
+## Prerequisites
+
+1. **Migration 0009 applied to remote D1**: the `water_class` columns must exist.
+   `export CLOUDFLARE_API_TOKEN=…` (the `CLOUDFLARE_TOKEN` value from `.dev.vars`)
+   then `npx wrangler d1 migrations apply swim-report --remote`.
+2. **Repository secret `CLOUDFLARE_API_TOKEN`** (value = `.dev.vars`
+   `CLOUDFLARE_TOKEN`; a token with D1 edit scope on `swim-report`). No npm
+   private-registry tokens are needed — the workflow never runs `npm install`/
+   `npm ci` in the repo (which would reify package.json's private
+   `@web.awesome.me` / `@fortawesome` deps and fail). Every wrangler call goes
+   through `npx --yes wrangler@<pin>`, which fetches only wrangler from the
+   default registry and never consults the repo's `package.json`.
+
+## Running
+
+Locally (dry run — produce the SQL, don't apply; needs Deno + a snapshot):
+
+    export CLOUDFLARE_API_TOKEN=…   # from .dev.vars (CLOUDFLARE_TOKEN)
+    npx wrangler d1 execute swim-report --remote --json \
+      --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
+      > snapshot.json
+    deno run --allow-net --allow-read --allow-write \
+      scripts/discovery-batch.js --snapshot snapshot.json --out discovery-delta.sql
+    # inspect discovery-delta.sql, then apply when satisfied:
+    npx wrangler d1 execute swim-report --remote --file discovery-delta.sql
+
+Flags: `--no-classify` (discovery only), `--classify-limit N` (cap per run;
+0 = all), `--classify-delay-ms N` (default 300), `--now <iso>`.
+
+In CI: the workflow runs daily; a manual `workflow_dispatch` lets you choose
+`apply` (false = artifact-only dry run) and a `classify_limit`. Every run uploads
+`discovery-delta.sql` as an artifact for inspection.
+
+## Cutover (do this only after the repo + secret + a verified run exist)
+
+Until the offline job is live, **leave the two Worker crons in place** so
+production keeps discovering/classifying. When ready:
+
+1. Push this repo to GitHub, set the `CLOUDFLARE_API_TOKEN` secret, and confirm
+   migration 0009 is applied remotely.
+2. Run the workflow manually with `apply: false`, download the artifact, and
+   sanity-check the SQL (row counts, an expected `great_lake` / `inland` mix).
+3. Run it with `apply: true` and confirm D1 updated.
+4. **Only then** remove the two now-redundant triggers from `wrangler.toml`'s
+   `crons` array — `"47 8 * * *"` (discovery) and `"37 1,7,13,19 * * *"` (water
+   classification) — and `npm run deploy`. Leave `runOverpassSync` /
+   `runWaterClassification` defined in `src/index.js` (unscheduled, harmless) so
+   the change is a one-line revert if needed.
+
+After cutover the Worker's cron path is: hourly recompute, 6-hourly waves, and
+the three enrichment crons. Discovery + classification are the offline job's.

@@ -555,8 +555,11 @@ and return null.
 ### src/clients/http.js (shared transport layer)
 
     export async function fetchJson(url, opts)
-      // opts: { method, headers, body, label } — all optional; each init field is
-      // set only when supplied (a bare GET passes fetch(url, {})). Implements the
+      // opts: { method, headers, body, label, timeoutMs } — all optional; each
+      // init field is set only when supplied (a bare GET passes fetch(url, {})).
+      // timeoutMs (when > 0) bounds the request via an AbortController: on expiry
+      // fetch aborts and the catch returns null (used by the Overpass mirror
+      // failover so a hung mirror yields to the next). Implements the
       // shared fetch -> ok-check -> await response.json() -> catch pipeline: on a
       // non-2xx status logs label + " fetch failed: HTTP " + status, on any thrown
       // error (network, JSON parse) logs label + " fetch failed: " + err.message;
@@ -883,6 +886,24 @@ entirely when it is unset.
 ### src/clients/overpass.js
 
     export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+    export const OVERPASS_MIRRORS = [OVERPASS_URL,
+      "https://overpass.private.coffee/api/interpreter"];
+    export const OVERPASS_MIRROR_TIMEOUT_MS = 240000;
+
+      // runQuery (internal) tries OVERPASS_MIRRORS IN ORDER: the primary is the
+      // official FOSSGIS instance (overpass-api.de; our volume is far under its
+      // < 10k queries/day + < 1 GB/day courtesy limit), and when it is
+      // overloaded — a transport/HTTP failure OR a server-side [timeout]
+      // "remark" (truncated body) — runQuery falls through to Private.coffee's
+      // unlimited public instance. Only when EVERY mirror fails does it return
+      // null (the "null == failed fetch" contract callers rely on is unchanged).
+      // Mirrors are distinct IPs, so failover never breaches any one instance's
+      // 2-slots/IP limit. The VK Maps (Russia-operated) mirror is deliberately
+      // excluded. Each attempt carries a transport-layer timeout
+      // (OVERPASS_MIRROR_TIMEOUT_MS, via fetchJson's opt-in timeoutMs +
+      // AbortController) set above the largest server-side [timeout:180] so a
+      // mirror that hangs at the TCP layer yields to the next instead of
+      // blocking an unattended run; a working-but-slow query is never aborted.
 
     export async function fetchBeaches(bbox)
       // bbox: { minLon, minLat, maxLon, maxLat } (numbers)
@@ -1534,6 +1555,16 @@ burn no CPU so the paced run stays inside the scheduled invocation's time budget
 
 ### runOverpassSync (daily)
 
+NOTE (offline pipeline): discovery + water classification are being moved OUT of
+the Worker cron into an offline GitHub Actions batch job that bulk-loads D1
+(`scripts/discovery-batch.js`, `.github/workflows/discovery.yml`,
+`docs/offline-discovery.md`). That job reuses this exact logic verbatim — the
+merge cluster now lives in `src/discovery.js` (imported and re-exported by
+`src/index.js`), and the batch emits the identical upsert / reconciliation /
+`flag_history`-prune / classification SQL. The description below remains the
+authoritative contract for BOTH the in-Worker cron and the offline mirror. Until
+cutover (see the doc) the `47 8 * * *` and `37 1,7,13,19 * * *` crons stay live.
+
 Pilot seed region — Michigan / Great Lakes shoreline (Lakes Michigan, Huron, Erie coasts of
 the Lower and eastern Upper Peninsula):
 
@@ -1552,7 +1583,9 @@ do NOT attempt it now.
    its retry) has fully resolved -- the two Overpass queries are strictly
    sequential and never run concurrently with each other, since overpass-api.de
    allows only 2 slots per IP and 429s beyond that.
-3. mergeBeachRows(namedRows, parkBeaches) — pure, exported from src/index.js:
+3. mergeBeachRows(namedRows, parkBeaches) — pure; lives in src/discovery.js and
+   is re-exported from src/index.js (so the offline batch job imports the same
+   merge without pulling the Worker graph):
    - named beach also found inside a park -> parkName attached;
    - unnamed beach kept ONLY when park-associated. The LARGEST (by bbox area)
      unnamed beach per park ELEMENT (parkKey, so two same-named parks in different

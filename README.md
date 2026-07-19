@@ -315,6 +315,14 @@ crons on purpose: each upstream's rate-limit posture is independent, and a failu
 in one job never starves another (an aborted Overpass sync used to skip that
 night's NWS enrichment and webcam hydration entirely).
 
+> **Moving offline (staged).** The two discovery/classification crons below —
+> `47 8 * * *` (`runOverpassSync`) and `37 1,7,13,19 * * *`
+> (`runWaterClassification`) — are being relocated to an offline GitHub Actions
+> batch job that bulk-loads D1, so the "N-per-run / drip over days" backfill
+> becomes a single run. Both crons stay live until cutover; see
+> [`docs/offline-discovery.md`](docs/offline-discovery.md) and the one-time
+> bulk-backfill note later in this section.
+
 - `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
   the whole pilot table every run, so no flag ever outlives its 2 h KV TTL waiting
@@ -364,10 +372,13 @@ night's NWS enrichment and webcam hydration entirely).
   water bbox < ~4.5 ha, with coastline ways always counting as large) is
   dropped — this keeps tiny pond patches inside named natural areas from
   becoming beach rows, while a beach with no water mapped nearby is always
-  kept. Results are upserted into D1. Each Overpass query gets a single
-  delayed retry (60 s) on failure; if the named-beaches query fails twice the sync
-  aborts (existing data kept), and if only the park query fails twice the sync
-  degrades to named beaches only with existing `park_name` values left untouched.
+  kept. Results are upserted into D1. Each Overpass query first fails over across
+  mirrors (the official FOSSGIS instance, then Private.coffee's unlimited public
+  instance) so an overloaded primary doesn't abort the run, then gets a single
+  delayed retry (60 s) if every mirror failed; if the named-beaches query fails
+  twice the sync aborts (existing data kept), and if only the park query fails
+  twice the sync degrades to named beaches only with existing `park_name` values
+  left untouched.
 - `17 3,9,15,21 * * *` (4x daily; the 09:17 run picks up rows the 08:47 discovery
   just inserted) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
   `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
@@ -456,6 +467,14 @@ with `wrangler d1 execute swim-report --remote --file=…`. The reference implem
 is `classify_local.py` (the dry-run audit script). Expected distribution after
 resolution: ~368 `great_lake`, ~325 `inland`, 0 `ocean` (the pilot bbox has no
 saltwater coast).
+
+This bulk backfill — and daily discovery + classification generally — is being
+moved out of the Worker cron into an offline **GitHub Actions** batch job that
+bulk-loads D1 (`scripts/discovery-batch.js`, `.github/workflows/discovery.yml`).
+It reuses the Worker's discovery/classification code verbatim and emits an
+idempotent `.sql` delta applied with `wrangler d1 execute --remote --file`. See
+`docs/offline-discovery.md` for the design and the cutover checklist; until
+cutover the in-Worker `47 8 * * *` / `37 1,7,13,19 * * *` crons remain live.
 The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
 longer exist in wrangler 4.
 
@@ -489,6 +508,16 @@ the Canadian rows NWS parks) and the hourly cron starts writing
 flags. There is no remote equivalent of `npm run seed`; either wait for the
 crons or run a local dev server with `remote = true` bindings and trigger the
 scheduled-handler endpoints manually.
+
+For discovery + water classification specifically, the emerging seed strategy is
+the offline **GitHub Actions** batch job (`.github/workflows/discovery.yml` →
+`scripts/discovery-batch.js`): it runs the same discovery/classification code
+outside the Worker's per-invocation caps, emits one idempotent `.sql` delta, and
+bulk-loads it with `wrangler d1 execute --remote --file` — turning the multi-day
+drip into a single run. It's staged behind the in-Worker crons (they stay live
+until cutover); the design, prerequisites (repo secret `CLOUDFLARE_API_TOKEN`,
+migration 0009 applied remotely), and cutover checklist are in
+[`docs/offline-discovery.md`](docs/offline-discovery.md).
 
 `compatibility_date` is pinned — bump it to the current date occasionally when
 deploying. Structured logs land in the Cloudflare dashboard under
