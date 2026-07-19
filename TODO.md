@@ -19,14 +19,16 @@ of it is scoped for follow-up work.
   instance yet; if one shows up, the fix is a cheap follow-up water-relation
   membership probe, not reverting to `relation(around...)` (pathologically
   slow, >10 min server-side).
-- **Flag-worthy water classification** (migration 0009, `src/waterClass.js`,
-  `runWaterClassification` cron `37 1,7,13,19 * * *`). SHIPPED: each beach's adjacent
+- **Flag-worthy water classification** (migration 0009, `src/waterClass.js`).
+  SHIPPED, and as of the offline cutover it runs ONLY in the GitHub Actions batch
+  (`scripts/discovery-batch.js`, Deno) — the in-Worker `runWaterClassification` cron
+  (`37 1,7,13,19 * * *`) has been retired. Each beach's adjacent
   water body is probed via Overpass (vertex recurse-down anchor at 150 m / 120 m,
   `out ids tags bb`) and classified ocean / great_lake / inland by the pure
   `classifyWaterBody` (Great Lakes matched by wikidata QID, never by name). Inland +
   parked rows are hidden by the shared `FLAG_WORTHY_WATER_SQL` gate on every consumer
   (never deleted); still-unclassified NULL rows stay visible during backfill. The
-  nightly discovery run classifies its own new-beach delta synchronously and NULLs
+  offline discovery batch classifies its own new-beach delta synchronously and NULLs
   `water_class` when a re-discovered centroid moves > ~100 m. Open residuals:
   - **Node-only beaches** (`osm_id` = "node/N") have no polygon geometry, so only the
     point can be probed; a node set back from shore can miss (classify as parked/hidden).
@@ -49,8 +51,9 @@ of it is scoped for follow-up work.
   - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches linger in
     D1 (their KV flags self-expire at the 7200 s TTL). Harmless and cheap — left in place,
     not cleaned up.
-  - **The `ocean` branch stays dormant** until `PILOT_BBOX` reaches saltwater; in the
-    Great Lakes pilot every keeper is a Great Lake (shorelines are relation member ways,
+  - **The `ocean` branch stays dormant** until `REGIONS` gains a saltwater box (the
+    Pacific / Gulf / Atlantic boxes stubbed in `src/regions.js`); in the current
+    Great Lakes regions every keeper is a Great Lake (shorelines are relation member ways,
     not `natural=coastline`), so the audit found 0 ocean rows. Harmless: ocean and
     great_lake are both flag-worthy and pass the gate identically — only inland vs
     {ocean, great_lake} must be reliable, and it is.
@@ -159,21 +162,24 @@ of it is scoped for follow-up work.
 
 ## Scale-out
 
-- **Offline discovery + water classification (built; cutover pending).** Beach
-  discovery and water-body classification have moved out of the Worker cron into
-  an offline GitHub Actions batch job that bulk-loads D1 — see
-  `docs/offline-discovery.md`. `scripts/discovery-batch.js` (Deno) reuses the
-  discovery/classification code verbatim (`src/discovery.js`,
-  `src/clients/overpass.js`, `src/waterClass.js`), emits one idempotent `.sql`
-  delta, and `.github/workflows/discovery.yml` applies it with
-  `wrangler d1 execute --remote --file`. This removes the "N per run → park →
-  drip over days" backfill bottleneck and is the practical enabler for the
-  nationwide scale-out below (a batch tiling CONUS bboxes, no per-cron
-  rationing). **Cutover not yet done**: the two Worker crons (`47 8 * * *`
-  discovery, `37 1,7,13,19 * * *` classification) stay live until the GitHub
-  repo, the `CLOUDFLARE_API_TOKEN` secret, and a verified run exist — then
-  remove those two triggers from `wrangler.toml` and redeploy (checklist in the
-  doc).
+- ~~**Offline discovery + water classification (built; cutover pending).**~~ DONE —
+  cutover complete. Beach discovery and water-body classification now run ONLY in
+  the offline GitHub Actions batch (`scripts/discovery-batch.js`, Deno), which
+  bulk-loads D1 — see `docs/offline-discovery.md`. The two in-Worker crons
+  (`47 8 * * *` discovery / `runOverpassSync` and `37 1,7,13,19 * * *`
+  classification / `runWaterClassification`) have been REMOVED from `wrangler.toml`
+  and `CRON_JOBS`; the serving path, hourly flag recompute (`0 * * * *`), 6-hourly
+  wave refresh (`15 */6 * * *`), and NWS/ECCC/webcam enrichment crons are untouched.
+  The batch reuses the discovery/classification code verbatim (`src/discovery.js`,
+  `src/clients/overpass.js`, `src/waterClass.js`), imports `REGIONS` /
+  `pointInAnyRegion` from `src/regions.js`, tiles each region at
+  `TILE_MAX_SPAN_DEG = 2.0`, scopes reconciliation-delete candidates by
+  `pointInAnyRegion` (fail-safe: shrinking a box only removes delete candidates),
+  emits one idempotent `.sql` delta, and `.github/workflows/discovery.yml` applies
+  it with `wrangler d1 execute --remote --file`. This removed the "N per run →
+  park → drip over days" backfill bottleneck. Local `npm run seed` now runs the
+  Deno batch against local D1 (`--no-classify`); `npm run seed:classify` runs it
+  with classification; `npm run batch:discovery` runs the batch standalone.
 
 - **Flip the recompute rotation to demand-priority once the table outgrows one run.**
   The request path stamps `beaches.last_viewed` (migration 0007, 2026-07-13; detail
@@ -193,15 +199,18 @@ of it is scoped for follow-up work.
   run (plus one ECCC national fetch if Canadian beaches are included), regardless of
   zone count. (2) Queue-based stale-refresh (request path enqueues, consumer
   fetches) only if flagless gaps show up in practice.
-- **Nationwide Overpass scale-out.** `runOverpassSync` currently syncs a single pilot
-  bbox (`PILOT_BBOX`, Michigan / Great Lakes shoreline) once a day. Scaling to the
-  full US coastline means tiling CONUS coastal bboxes and queuing them (e.g. one tile
-  per night, or spread across multiple daily cron windows) rather than one big
-  Overpass query — large bbox queries risk Overpass API timeouts/rate limiting.
-  `MAX_BEACHES_PER_RUN = 1000` in `runFlagRecompute` must always cover the whole
-  `beaches` table: any beach past the limit has its 2 h KV TTL expire between
-  rotation turns and goes flagless, so growth past 1000 rows needs real pagination
-  or multiple invocations (or a TTL/cadence change to match).
+- **North America coastal expansion — add Pacific / Gulf / Atlantic boxes to
+  `src/regions.js`.** Discovery now tiles the `REGIONS` array in the offline batch
+  (`scripts/discovery-batch.js`, `TILE_MAX_SPAN_DEG = 2.0`), so scale-out is purely
+  additive: append coastal bboxes to `REGIONS` (commented-out Pacific / Gulf /
+  Atlantic placeholders are already stubbed at the bottom of the file) and the batch
+  tiles them automatically — no per-cron rationing, no big single Overpass query
+  (which would risk API timeouts / rate limiting). Adding a saltwater box also wakes
+  the dormant `ocean` branch of the water classifier. `MAX_BEACHES_PER_RUN = 1000` in
+  `runFlagRecompute` must always cover the whole `beaches` table: any beach past the
+  limit has its 2 h KV TTL expire between rotation turns and goes flagless, so growth
+  past 1000 rows needs real pagination or multiple invocations (or a TTL/cadence
+  change to match).
 
 ## Official-scraper fragility
 
@@ -329,7 +338,7 @@ multi-site, one test file each). Caveats worth remembering per scraper:
   statewide play but NOT implementable: Power Pages anonymous role is
   permission-denied and it sits behind Cloudflare Bot Management.
 - The built statewide integrations (Wisconsin DNR, Ohio BeachGuard, Chicago Park
-  District) mostly pay off when `PILOT_BBOX` expands beyond Michigan — each is worth
+  District) mostly pay off when `REGIONS` expands beyond Michigan — each is worth
   dozens of beaches at that point. Ohio's remaining registry ids (beyond the 51
   curated) need enumerating then.
 
@@ -369,13 +378,13 @@ multi-site, one test file each). Caveats worth remembering per scraper:
 
 Site capacity by scraper: South Haven ~9 sites, HDNW ~32, BLDHD 10, Metroparks 4,
 Lenawee 2, Michigan City 2, Ohio BeachGuard 51, Chicago ~23, Wisconsin DNR 441
-monitoring sites. Within the current Michigan-centric `PILOT_BBOX` that translates
+monitoring sites. Within the current Michigan-centric `REGIONS` coverage that translates
 to official status for roughly 40–60 of ~613 DB beaches (~7–10%) in season — actual
 counts depend on per-beach resolution (name/proximity) and each source's staleness
 gates, and shrink off-season by design. Chicago's lakefront and Wisconsin's Door
-County peninsula fall inside the bbox already; the rest of Wisconsin's 441 sites
-and Ohio's registry become disproportionately valuable once the Overpass bbox
-expands past the pilot. The 70+-beach prize (Michigan EGLE BeachGuard) remains
+County peninsula fall inside the covered regions already; the rest of Wisconsin's 441 sites
+and Ohio's registry become disproportionately valuable once the discovery regions
+expand past the pilot. The 70+-beach prize (Michigan EGLE BeachGuard) remains
 partnership-gated — see `docs/swimsmart-outreach-draft.md`.
 
 ## Free vs. paid Workers plan
@@ -391,10 +400,11 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
   beaches) and/or reduce cron frequency before deploying without a paid plan.
 - **Production went live 2026-07-13 (https://swim.report) — verify the account's
   Workers plan.** If the account is on Free, the hourly `runFlagRecompute` will hit
-  the 50-subrequest ceiling as soon as the discovery cron populates beaches (watch
-  the first few hourly runs in Workers Logs — observability is enabled with full
+  the 50-subrequest ceiling as soon as the offline discovery batch populates beaches
+  (watch the first few hourly runs in Workers Logs — observability is enabled with full
   head sampling). Also confirm the production database populated after the first
-  `47 8 * * *` discovery run and that enrichment is draining.
+  GitHub Actions discovery batch run (`.github/workflows/discovery.yml`) and that
+  enrichment is draining.
 
 ## Frontend
 

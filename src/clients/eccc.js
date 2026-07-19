@@ -1,8 +1,8 @@
 // src/clients/eccc.js
 // Thin client for Environment and Climate Change Canada's MSC GeoMet OGC API
 // (api.weather.gc.ca) — the Canadian counterpart to src/clients/nws.js for
-// beaches PILOT_BBOX sweeps in on the Ontario shoreline, which api.weather.gov
-// 404s forever. Two collections are used:
+// beaches the Great Lakes region set (src/regions.js) sweeps in on the Ontario
+// shoreline, which api.weather.gov 404s forever. Two collections are used:
 //   - weather-alerts: active public alerts as GeoJSON features carrying the
 //     REAL alert-region polygons, so one national fetch per run plus local
 //     point-in-polygon replaces any per-beach or per-zone lookup.

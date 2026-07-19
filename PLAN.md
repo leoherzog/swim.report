@@ -233,8 +233,8 @@ migrations/0003_enrichment_attempts.sql:
 
     ALTER TABLE beaches ADD COLUMN enrichment_attempts INTEGER NOT NULL DEFAULT 0;
 
-  Per-row counter of failed fetchPointMetadata attempts (see section 7 step 5).
-  Non-US points swept in by PILOT_BBOX (Ontario shoreline) 404 on
+  Per-row counter of failed fetchPointMetadata attempts (see runNwsEnrichment,
+  section 7). Non-US points swept in by the discovery REGIONS (Ontario shoreline) 404 on
   api.weather.gov and stay nws_zone IS NULL forever; without a cap they sort
   first under ORDER BY id and permanently occupy the enrichment batch, starving
   US beaches. The enrichment query skips rows at the cap
@@ -256,7 +256,7 @@ migrations/0005_webcams.sql:
     ALTER TABLE beaches ADD COLUMN webcam_player_url TEXT;
     ALTER TABLE beaches ADD COLUMN webcam_checked TEXT;
 
-  Nearest Windy webcam per beach, hydrated by the daily sync (section 7 step 6).
+  Nearest Windy webcam per beach, hydrated by runWebcamSync (section 7).
   webcam_checked is the completion timestamp of the last Windy lookup (set on
   success AND on a confirmed "no cam within radius"; left untouched on API
   failure so the row stays at the front of the recheck queue).
@@ -280,8 +280,8 @@ migrations/0006_flag_history.sql:
   step 9 writes ONE row per beach that has BOTH a fresh estimate AND a scraped
   official color in the same run (estimate-only beaches are NOT logged, so the table
   records estimated-vs-official PAIRS and never grows with all ~613 beaches hourly).
-  official_source = the resolving scraper id. Retention: the daily runOverpassSync
-  deletes rows older than FLAG_HISTORY_RETENTION_DAYS (90) at the top of the run
+  official_source = the resolving scraper id. Retention: the offline discovery batch
+  deletes rows older than FLAG_HISTORY_RETENTION_DAYS (90) at the top of its run
   (section 7).
 
 migrations/0007_last_viewed.sql:
@@ -302,7 +302,7 @@ migrations/0008_eccc.sql:
     ALTER TABLE beaches ADD COLUMN eccc_attempts INTEGER NOT NULL DEFAULT 0;
 
   ECCC (Environment and Climate Change Canada) enrichment for the Canadian
-  beaches PILOT_BBOX sweeps in on the Ontario shoreline. eccc_zone is the
+  beaches the discovery REGIONS sweep in on the Ontario shoreline. eccc_zone is the
   GeoMet public-standard-forecast-zones region NAME; eccc_attempts mirrors
   enrichment_attempts so points no Canadian region ever matches park at the
   cap (eccc_attempts >= 5) instead of occupying the enrichment batch forever.
@@ -602,6 +602,43 @@ and cron paths.
       // non-areal geometry (null, Point, missing coordinates) -> false, never
       // a throw. Used by the ECCC client to match beaches to alert-region
       // polygons.
+
+### src/regions.js (discovery expansion rail — pure data + one predicate, no imports)
+
+Not an upstream client — a pure, dependency-free module (no fetch, no Date, no I/O)
+that imports nothing, so the offline Deno batch (scripts/discovery-batch.js) imports it
+verbatim, exactly like src/geo.js and src/discovery.js. It replaces the single
+Michigan/Great-Lakes PILOT_BBOX with a CURATED SET of coastal bounding boxes tracing the
+whole Great Lakes shoreline (US + Canadian shores). Coastal boxes — not one continental
+rectangle — keep the discovery universe to actual coast: a lakes-enclosing rectangle would
+also enclose the continental interior, dense with inland lakes Overpass returns and the
+classifier drops (wasted query volume + inland-beach noise). Expansion is ADDITIVE: append
+boxes for a new coast (a commented Pacific/Gulf/Atlantic placeholder block sits at the
+bottom of the file, NOT in the live array) and everything downstream picks them up.
+
+    export const REGIONS
+      // Array of { name: string,
+      //            bbox: { minLon, minLat, maxLon, maxLat },  // decimal deg, WGS84;
+      //                                                       // SW corner < NE corner
+      //            note: string }.
+      // The nine live boxes trace the Great Lakes: Lake Superior; St. Marys River /
+      // Sault; Lake Michigan; Lake Huron + Georgian Bay; Lake St. Clair + St. Clair /
+      // Detroit Rivers; Lake Erie; Niagara River; Lake Ontario; Upper St. Lawrence /
+      // Thousand Islands. Boxes carry a ~10-20% inland margin so set-back beaches are
+      // captured; box SIZE is not the constraint — the offline batch auto-tiles each
+      // one at TILE_MAX_SPAN_DEG = 2.0 deg (tileBbox in scripts/discovery-batch.js)
+      // before any Overpass query, so a large box just becomes more (cheap) tiles.
+
+    export function pointInAnyRegion(lat, lon)
+      // Pure. Returns true iff (lat, lon) lies inside ANY REGIONS bbox, bounds
+      // inclusive. Non-number / non-finite (NaN / Infinity) lat or lon -> false, so a
+      // row with missing or garbage coordinates is never treated as in-region. This is
+      // the union-of-regions scope for the offline batch's stale-row reconciliation
+      // (reconcileStaleRows) in place of the old single PILOT_BBOX containment test: a
+      // D1 row is a delete CANDIDATE only when pointInAnyRegion is true for it, so
+      // shrinking or removing a box can only REMOVE rows from the delete-candidate set
+      // (fail-safe — an editing mistake under-deletes, never mass-deletes enriched
+      // rows).
 
 ### src/clients/nws.js
 
@@ -996,7 +1033,7 @@ entirely when it is unset.
       // OVERLAPS the beach's bounding box (overlap, not center containment —
       // shoreline beach polygons bulge lakeward past the park boundary), or null.
 
-    // --- Water-body classification (migration 0009, cron path only) ---
+    // --- Water-body classification (migration 0009, offline-batch path only) ---
     export const OCEAN_RADIUS_M = 150;       // coastline probe
     export const GREAT_LAKE_RADIUS_M = 150;  // lake-relation probe (audit-validated)
     export const INLAND_RADIUS_M = 120;      // the beach's OWN adjacent water only
@@ -1353,10 +1390,20 @@ guessed color). Full color semantics are in README.md's official-sources table.
 
 ## 7. Cron design (src/index.js)
 
+Beach discovery and water-body classification are NO LONGER in-Worker crons: the offline
+GitHub Actions batch (scripts/discovery-batch.js on Deno) is now the SOLE owner of both
+(cutover complete — the retired "47 8 * * *" runOverpassSync and "37 1,7,13,19 * * *"
+runWaterClassification crons are gone from wrangler.toml and CRON_JOBS; the discovery /
+classification logic they ran still lives in src/discovery.js, src/clients/overpass.js,
+and src/waterClass.js, imported verbatim by the batch — see the offline pipeline note
+under runOverpassSync below). The D1 schema (section 2) and the KV shapes (sections 1, 3)
+are UNCHANGED by the cutover: the offline batch writes the same D1 rows out-of-band and
+the request path still reads only D1/KV (the two-path rule holds).
+
 wrangler.toml triggers:
 
     [triggers]
-    crons = ["0 * * * *", "15 */6 * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *", "37 1,7,13,19 * * *"]
+    crons = ["0 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
@@ -1365,19 +1412,14 @@ matched job; an unrecognized cron is logged and ignored. The table:
                          fetch waves — see runWaveRefresh)
 - "15 */6 * * *"       → runWaveRefresh(env)    (6-hourly; owns ALL Open-Meteo/GLOS wave &
                          wind fetching, writes the "waveinput:"/"waves:" KV the hourly cron reads)
-- "47 8 * * *"         → runOverpassSync(env)   (daily, 08:47 UTC ≈ 3:47am EST / 4:47am EDT —
-                         off-peak for both US users and the Overpass API; discovery ONLY)
-- "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; the 09:17 run picks up rows the
-                         08:47 discovery just inserted)
+- "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; picks up rows the offline
+                         discovery batch inserted)
 - "29 4,10,16,22 * * *" → runEcccEnrichment(env) (4x daily, offset ~1h from the NWS trigger;
                          picks up rows the NWS runs have permanently parked)
-- "31 9 * * *"         → runWebcamSync(env)     (daily, shortly after discovery)
-- "37 1,7,13,19 * * *" → runWaterClassification(env) (4x daily; classifies adjacent water
-                         body via Overpass, hours avoid the 08:47 discovery + enrichment windows)
+- "31 9 * * *"         → runWebcamSync(env)     (daily)
 
-The seven jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
-independent and a failure in one never starves another (an aborted Overpass sync used to
-skip that night's NWS enrichment and webcam hydration entirely). The matched job is
+The five jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
+independent and a failure in one never starves another. The matched job is
 invoked via ctx.waitUntil with a top-level .catch that logs "index: scheduled <label>
 threw"; each runner logs its own summary line (counts of beaches processed, per-source
 failure counts).
@@ -1553,36 +1595,48 @@ Subrequest budget: ~7 paced marine batches (100/batch over ~613 beaches) + ≤62
 puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the inter-wave sleeps
 burn no CPU so the paced run stays inside the scheduled invocation's time budget.
 
-### runOverpassSync (daily)
+### Discovery pipeline (offline batch — formerly runOverpassSync)
 
-NOTE (offline pipeline): discovery + water classification are being moved OUT of
-the Worker cron into an offline GitHub Actions batch job that bulk-loads D1
-(`scripts/discovery-batch.js`, `.github/workflows/discovery.yml`,
-`docs/offline-discovery.md`). That job reuses this exact logic verbatim — the
-merge cluster now lives in `src/discovery.js` (imported and re-exported by
-`src/index.js`), and the batch emits the identical upsert / reconciliation /
-`flag_history`-prune / classification SQL. The description below remains the
-authoritative contract for BOTH the in-Worker cron and the offline mirror. Until
-cutover (see the doc) the `47 8 * * *` and `37 1,7,13,19 * * *` crons stay live.
+NOTE (offline pipeline): CUTOVER COMPLETE. Discovery + water classification now
+run ONLY in the offline GitHub Actions batch job that bulk-loads D1
+(`scripts/discovery-batch.js` on Deno, `.github/workflows/discovery.yml`,
+`docs/offline-discovery.md`) — the in-Worker `47 8 * * *` (runOverpassSync) and
+`37 1,7,13,19 * * *` (runWaterClassification) crons have been RETIRED from
+wrangler.toml and CRON_JOBS. The batch reuses this exact logic verbatim — the
+merge cluster lives in `src/discovery.js`, discovery/classification in
+`src/clients/overpass.js` + `src/waterClass.js`, the region rail in
+`src/regions.js` — and emits the identical upsert / reconciliation /
+`flag_history`-prune / classification SQL, bulk-loaded via
+`wrangler d1 execute --remote --file`. The two-path rule still holds: the batch
+writes D1 out-of-band and the request path reads only D1/KV. Locally, `npm run
+seed` now runs the batch against local D1
+(`deno run ... scripts/discovery-batch.js --out ./.seed.sql --no-classify` then
+`wrangler d1 execute swim-report --local --file ./.seed.sql`; `npm run
+seed:classify` runs it WITH classification). The description below remains the
+authoritative contract for that batch.
 
-Pilot seed region — Michigan / Great Lakes shoreline (Lakes Michigan, Huron, Erie coasts of
-the Lower and eastern Upper Peninsula):
+Discovery region — the Great Lakes shoreline, defined as the curated coastal boxes in
+REGIONS (src/regions.js, section 5). The old single PILOT_BBOX constant is GONE; the batch
+tiles every REGIONS bbox at TILE_MAX_SPAN_DEG = 2.0 deg (tileBbox) and runs each tile as a
+separate Overpass query. Wherever a step below refers to "the region", read it as the union
+of the tiled REGIONS boxes rather than one rectangle.
 
-    const PILOT_BBOX = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
+Nationwide scale-out (adding Pacific / Gulf / Atlantic coasts) is purely ADDITIVE — append
+boxes to REGIONS (section 5) — and is explicitly a TODO.md item; do NOT attempt it now.
 
-Nationwide scale-out (tiled bboxes over CONUS coasts, queued) is explicitly a TODO.md item —
-do NOT attempt it now.
-
-1. const namedRows = await fetchBeaches(PILOT_BBOX); if null, log, await sleep(60000)
-   (exported sleep(ms) helper wrapping setTimeout in a Promise), then retry ONCE. If
-   the retry also returns null, log and abort (keep existing data).
-2. const parkBeaches = await fetchParkBeaches(PILOT_BBOX); if null, log, await
-   sleep(60000), then retry ONCE. If the retry also returns null, log and DEGRADE:
-   continue with named rows only and leave every existing park_name untouched.
-   The fetchParkBeaches call (and its retry) only begins after fetchBeaches (and
-   its retry) has fully resolved -- the two Overpass queries are strictly
-   sequential and never run concurrently with each other, since overpass-api.de
-   allows only 2 slots per IP and 429s beyond that.
+1. namedRows = the concatenation of await fetchBeaches(tile) over every tile (the flat
+   tiled-REGIONS list). Each tile retries ONCE after sleep(60000) (exported sleep(ms)
+   helper wrapping setTimeout in a Promise) on null; if any tile is STILL null after its
+   retry, log and abort the whole run (keep existing data — never let a missing tile read
+   as "gone from OSM" and mass-delete).
+2. parkBeaches = the concatenation of await fetchParkBeaches(tile) over every tile; each
+   tile retries ONCE after sleep(60000) on null. If any tile is still null after its retry,
+   log and DEGRADE: continue with named rows only and leave every existing park_name
+   untouched (so the delete path in step 6 never runs against a region whose park query
+   partly failed). Within a tile the two Overpass queries are strictly sequential — the
+   fetchParkBeaches pass only begins after fetchBeaches has fully resolved — and tiles run
+   one at a time with a polite inter-tile gap, since overpass-api.de allows only 2 slots
+   per IP and 429s beyond that.
 3. mergeBeachRows(namedRows, parkBeaches) — pure; lives in src/discovery.js and
    is re-exported from src/index.js (so the offline batch job imports the same
    merge without pulling the Worker graph):
@@ -1615,25 +1669,30 @@ do NOT attempt it now.
    parkBeaches !== null — AND this run produced >= 1 park-containment row, i.e. a row
    with r.name === r.parkName). The upsert never deletes, so when OSM edits make a
    DIFFERENT unnamed beach the largest in a park the previously-kept row lingers next
-   to the new one. This pass SELECTs existing unnamed-origin park rows
-   (park_name IS NOT NULL AND name = park_name) within PILOT_BBOX and DELETEs any
-   whose id was NOT produced this run. Named beaches (name != park_name) are never
-   candidates. A proportional safety rail refuses the whole deletion when the stale
-   set exceeds max(OVERPASS_RECONCILE_MAX_DELETES = 10,
+   to the new one. This pass (reconcileStaleRows in scripts/discovery-batch.js) SELECTs
+   existing unnamed-origin park rows (park_name IS NOT NULL AND name = park_name) whose
+   coordinates fall inside ANY REGION — pointInAnyRegion(lat, lon) (src/regions.js), the
+   union of the tiled boxes, replacing the old single PILOT_BBOX containment test — and
+   DELETEs any whose id was NOT produced this run. Named beaches (name != park_name) are
+   never candidates. Scoping by pointInAnyRegion fails SAFE: shrinking or removing a box
+   only REMOVES rows from the delete-candidate set (an out-of-region row is left alone,
+   never deleted), so an editing mistake under-deletes rather than mass-deleting enriched
+   rows. A proportional safety rail refuses the whole deletion when the stale set exceeds
+   max(OVERPASS_RECONCILE_MAX_DELETES = 10,
    ceil(OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25 * candidates)) — a partial
    upstream response would otherwise mass-delete enriched rows (defense in depth
    behind runQuery's remark check, section 5). Each deletion is logged (id, name); the
-   sync-complete summary line gains a deleted_stale=<n> field. Internal to
-   runOverpassSync (not exported).
+   sync-complete summary line gains a deleted_stale=<n> field.
 
-In addition, the daily run prunes flag_history (migration 0006) BEFORE the Overpass
-fetches, in its own try/catch (so a pruning failure never costs a discovery day):
+In addition, the batch prunes flag_history (migration 0006) BEFORE the Overpass
+fetches, in its own try/catch (so a pruning failure never costs a discovery run):
 DELETE FROM flag_history WHERE observed_at < nowIso - FLAG_HISTORY_RETENTION_DAYS
 (90 days). Without this the calibration table grows unbounded (~1M rows/year in
 season).
 
-runOverpassSync is discovery ONLY — NWS point enrichment and webcam hydration run on
-their own cron triggers below, so an aborted Overpass run never costs an enrichment day.
+The batch is discovery + classification ONLY — NWS/ECCC point enrichment and webcam
+hydration run on their own in-Worker cron triggers below, so a failed discovery run never
+costs an enrichment day.
 
 ### runNwsEnrichment (4x daily: "17 3,9,15,21 * * *")
 
@@ -1654,8 +1713,8 @@ enrichment_attempts = enrichment_attempts + 1 WHERE id = ?. Ordering: fewest fai
 attempts first (fresh rows before retries), then RANDOM() — the old ORDER BY id drained
 every osm-node-* row before any osm-way-* row, leaving way-based beaches (Holland State
 Park) alert-blind for weeks. The attempts cap stops permanent failures — non-US points
-swept in by PILOT_BBOX (Ontario shoreline) that api.weather.gov 404s forever — from
-occupying the batch and starving US beaches; after 5 attempts a row is permanently parked
+swept in by the discovery REGIONS (Ontario shoreline) that api.weather.gov 404s forever —
+from occupying the batch and starving US beaches; after 5 attempts a row is permanently parked
 and no longer requeued. The per-run summary log reports attempted / enriched / failures /
 parked (rows with nws_zone IS NULL AND enrichment_attempts >= 5).
 
@@ -1700,14 +1759,15 @@ Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤
 subrequests per run. The stored player URL is only ever dereferenced by the visitor's
 BROWSER on the detail page — never by the request path.
 
-### runWaterClassification (4x daily: "37 1,7,13,19 * * *")
+### Water classification (offline batch — formerly runWaterClassification)
 
-Constants: WATER_CLASS_LIMIT = 25 (N per run — per-beach Overpass probing is
-rate-limited on the public endpoint, so keep the run small and polite; the one-time
-bulk backfill does the mass classification, this cron only drains the steady-state
-trickle plus any WATER_CLASS_VERSION re-drain), WATER_CLASS_MAX_ATTEMPTS = 5 (from
-src/waterClass.js), WATER_CLASS_DELTA_CAP = 25 (the synchronous discovery-delta bound
-below). Hours chosen to avoid the 08:47 discovery run and the enrichment windows.
+Also owned by the offline batch (retired as the in-Worker "37 1,7,13,19 * * *" cron); the
+classification decision + allowlist live in src/waterClass.js, unchanged. Constants:
+WATER_CLASS_LIMIT = 25 (N per pass — per-beach Overpass probing is rate-limited on the
+public endpoint, so keep each pass small and polite; the one-time bulk backfill does the
+mass classification, the steady-state pass only drains the trickle plus any
+WATER_CLASS_VERSION re-drain), WATER_CLASS_MAX_ATTEMPTS = 5 (from src/waterClass.js),
+WATER_CLASS_DELTA_CAP = 25 (the synchronous discovery-delta bound below).
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
@@ -1725,15 +1785,15 @@ the ~1/3 Overpass flake rate. Summary log reports attempted / classified / ocean
 great_lake / inland / bumped / parked (water_class IS NULL AND attempts >= 5) /
 hidden_inland (water_class = 'inland') — a NULL-hide with no metric is silent product
 loss, so these two counts are the required visibility. RULES_VERSION is UNAFFECTED by
-this cron (water_class has its own WATER_CLASS_VERSION).
+classification (water_class has its own WATER_CLASS_VERSION).
 
-Synchronous discovery-delta (end of runOverpassSync): after the upserts +
+Synchronous discovery-delta (end of the discovery pass): after the upserts +
 reconciliation, classify up to WATER_CLASS_DELTA_CAP rows matching the same selection,
-sequentially (reusing classifyBeaches — the shared per-beach loop the cron uses), so
-newly discovered beaches are essentially never left unclassified for a full cron cycle.
-Its own try/catch so a classification failure never costs the discovery run.
+sequentially (reusing classifyBeaches — the shared per-beach loop), so newly discovered
+beaches are essentially never left unclassified for a full cycle. Its own try/catch so a
+classification failure never costs the discovery run.
 
-Discovery-upsert centroid-move reset: the runOverpassSync ON CONFLICT(id) DO UPDATE (both
+Discovery-upsert centroid-move reset: the discovery ON CONFLICT(id) DO UPDATE (both
 the park and named-only branches) NULLs water_class / water_class_version and zeroes
 water_class_attempts when the centroid moved materially — CASE WHEN (abs(lat - ?3) > 0.001
 OR abs(lon - ?4) > 0.001) THEN NULL/0 ELSE <existing> END (0.001 deg ≈ 80-111 m at pilot
@@ -1859,7 +1919,7 @@ Routing table (method GET only; anything else → 405):
     enabled = true
 
     [triggers]
-    crons = ["0 * * * *", "15 */6 * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *", "37 1,7,13,19 * * *"]
+    crons = ["0 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
     [[d1_databases]]
     binding = "DB"

@@ -7,13 +7,13 @@
   "scripts": {
     "predev": "wrangler d1 migrations apply swim-report --local",
     "dev": "wrangler dev",
-    "seed": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*\"",
+    "seed": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js --out ./.seed.sql --no-classify && npx wrangler d1 execute swim-report --local --file ./.seed.sql",
     "seed:enrich": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*\"",
     "seed:eccc": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*\"",
     "seed:webcams": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*\"",
     "seed:waves": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*\"",
     "seed:flags": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*\"",
-    "seed:classify": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=37+1,7,13,19+*+*+*\"",
+    "seed:classify": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js --out ./.seed.sql && npx wrangler d1 execute swim-report --local --file ./.seed.sql",
     "deploy": "wrangler deploy",
     "batch:discovery": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js",
     "test": "vitest run"

@@ -30,7 +30,9 @@ can never confuse the two.
 Only **ocean and Great Lakes** beaches are shown. Beach flags exist only for those
 waters, so every beach is classified by its adjacent water body and inland-lake rows
 (Fremont Lake, Clinton Lakes) are hidden — classified and filtered out, never deleted.
-See [Cron jobs](#cron-jobs) (`runWaterClassification`).
+Discovery and water-body classification both run in the offline GitHub Actions batch
+(`scripts/discovery-batch.js`), not in the Worker; see [Discovery and classification
+(offline)](#discovery-and-classification-offline).
 
 This is a personal weather-data project, not a lifeguard service. It can be wrong. It
 can be stale (see the staleness warning below). If a beach has a physical flag posted,
@@ -219,7 +221,8 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 
 - Alerts are checked in `ALERT_PRECEDENCE` order, not the order they appear in the
   NWS response — "High Surf Warning" always wins over any other simultaneous alert.
-- Canadian beaches (swept in by the pilot bbox on the Ontario shoreline) use
+- Canadian beaches (the Great Lakes region set covers both the US and Canadian
+  shorelines) use
   Environment and Climate Change Canada instead: ECCC issues **no** rip current,
   high surf, or beach hazards product, so step 1b maps a curated set of severe
   weather **warnings** for hazards dangerous to people in or on the water
@@ -310,22 +313,21 @@ paint, and live OS switches apply without a reload.
 
 ### Cron jobs
 
-Seven scheduled triggers run in production (see `wrangler.toml`). They are separate
+Five scheduled triggers run in production (see `wrangler.toml`). They are separate
 crons on purpose: each upstream's rate-limit posture is independent, and a failure
-in one job never starves another (an aborted Overpass sync used to skip that
-night's NWS enrichment and webcam hydration entirely).
+in one job never starves another.
 
-> **Moving offline (staged).** The two discovery/classification crons below —
-> `47 8 * * *` (`runOverpassSync`) and `37 1,7,13,19 * * *`
-> (`runWaterClassification`) — are being relocated to an offline GitHub Actions
-> batch job that bulk-loads D1, so the "N-per-run / drip over days" backfill
-> becomes a single run. Both crons stay live until cutover; see
-> [`docs/offline-discovery.md`](docs/offline-discovery.md) and the one-time
-> bulk-backfill note later in this section.
+> **Discovery + classification are offline.** Beach discovery and water-body
+> classification no longer run in the Worker: the `47 8 * * *` (`runOverpassSync`)
+> and `37 1,7,13,19 * * *` (`runWaterClassification`) crons have been retired in
+> favor of the offline GitHub Actions batch (`scripts/discovery-batch.js`), which
+> bulk-loads D1 in a single run. See [Discovery and classification
+> (offline)](#discovery-and-classification-offline) below and
+> [`docs/offline-discovery.md`](docs/offline-discovery.md).
 
 - `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
-  the whole pilot table every run, so no flag ever outlives its 2 h KV TTL waiting
+  the whole beach directory every run, so no flag ever outlives its 2 h KV TTL waiting
   for a rotation turn), fetches the fast-changing safety signals (alerts and SRF
   rip-current risk) and reads each beach's stored wave inputs from KV (the
   `waveinput:` key the wave cron below writes) for the current wave height and the
@@ -356,31 +358,7 @@ night's NWS enrichment and webcam hydration entirely).
   between runs, so a transient throttle leaves the strip showing slightly-older-but-
   still-model-current data rather than blanking it. A beach whose fetch merely failed
   is left untouched so its last-good KV survives.
-- `47 8 * * *` (daily, ~03:47 America/New_York) — `runOverpassSync`, discovery
-  only: two Overpass API queries over the pilot bbox — (1) named `natural=beach` /
-  `leisure=beach_resort` elements, and (2) every `natural=beach` element (named or
-  not) that intersects a NAMED park polygon (`leisure=park`,
-  `leisure=nature_reserve`, or `boundary=protected_area`), plus those park polygons'
-  bounding boxes. Each park-contained beach is associated to the smallest
-  overlapping park bbox and stored with that `park_name`; unnamed park beaches are
-  kept one-per-park (the largest) and take the park's name, because most OSM
-  mappers name the park polygon (Holland State Park) rather than the beach way
-  inside it. The park query also fetches `natural=water` and `natural=coastline`
-  ways within 60 m of each candidate beach (ways only — proximity against water
-  relations would load the Great Lakes multipolygons and blow the query budget),
-  and an unnamed beach whose nearby water is all pond-sized (every overlapping
-  water bbox < ~4.5 ha, with coastline ways always counting as large) is
-  dropped — this keeps tiny pond patches inside named natural areas from
-  becoming beach rows, while a beach with no water mapped nearby is always
-  kept. Results are upserted into D1. Each Overpass query first fails over across
-  mirrors (the official FOSSGIS instance, then Private.coffee's unlimited public
-  instance) so an overloaded primary doesn't abort the run, then gets a single
-  delayed retry (60 s) if every mirror failed; if the named-beaches query fails
-  twice the sync aborts (existing data kept), and if only the park query fails
-  twice the sync degrades to named beaches only with existing `park_name` values
-  left untouched.
-- `17 3,9,15,21 * * *` (4x daily; the 09:17 run picks up rows the 08:47 discovery
-  just inserted) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
+- `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
   `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
   api.weather.gov/points. A beach without `nws_zone` silently skips the alert and
   rip-current rules in `runFlagRecompute`, so draining this queue fast is a safety
@@ -389,8 +367,8 @@ night's NWS enrichment and webcam hydration entirely).
   failed attempts first, then `RANDOM()` (the old `ORDER BY id` drained every
   node-based beach before any way-based one). Failures bump a per-beach
   `enrichment_attempts` counter (migration 0003); after 5 failed attempts a row is
-  parked and no longer requeued, so permanently-404ing non-US points (Ontario
-  shoreline swept in by the pilot bbox) can't starve US beaches.
+  parked and no longer requeued, so permanently-404ing non-US points (the Canadian
+  shoreline covered by the Great Lakes region set) can't starve US beaches.
 - `29 4,10,16,22 * * *` (4x daily, offset ~1h from the NWS trigger) —
   `runEcccEnrichment`: the Canadian counterpart. Beaches NWS enrichment
   permanently parked (`nws_zone` NULL at the attempts cap) get their ECCC public
@@ -416,65 +394,68 @@ night's NWS enrichment and webcam hydration entirely).
   leaves the row untouched (retried next night); a confirmed
   no-cam-within-radius answer clears the webcam columns and stamps the check
   time.
-- `37 1,7,13,19 * * *` (4x daily; hours avoid the 08:47 discovery run and the
-  enrichment windows) — `runWaterClassification`: classifies each beach's adjacent
-  water body as ocean / Great Lake / inland so inland-lake beaches can be hidden.
-  Up to 25 beaches per run — those still unclassified (or classified under an older
-  `WATER_CLASS_VERSION`) — get one Overpass probe anchored on the element's real
-  polygon vertices (recurse-down, 150 m / 120 m radii, `src/waterClass.js` +
-  `src/clients/overpass.js`), matched to a Great Lake by wikidata QID (never by name).
-  A clean probe that finds no flag-worthy water bumps a per-beach
-  `water_class_attempts` counter (migration 0009); after 5 such probes the row parks.
-  A transient Overpass failure never bumps it. This cron only drains the steady-state
-  trickle — the nightly discovery run also classifies its own new-beach delta
-  synchronously (up to 25 rows), and the **one-time bulk backfill** (below) does the
-  mass classification. Only ocean / Great Lakes rows (plus still-unclassified rows
-  during backfill) are shown anywhere; confirmed-inland rows are hidden, never deleted.
+
+Beach discovery and water-body classification are **not** in this list — they run
+offline (see [Discovery and classification (offline)](#discovery-and-classification-offline)).
+Only ocean / Great Lakes rows (plus still-unclassified rows during backfill) are
+shown anywhere; confirmed-inland rows are hidden, never deleted.
 
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
 developing via the scheduled-handler endpoint:
 
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=47+8+*+*+*"           # daily discovery sync
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"   # NWS point enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*"  # ECCC zone enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly wave refresh
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"            # hourly flag recompute
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=37+1,7,13,19+*+*+*"   # water-body classification
 
-`npm run seed` / `npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:webcams` /
-`npm run seed:waves` / `npm run seed:flags` / `npm run seed:classify` wrap these
-commands. The local database
+`npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:webcams` /
+`npm run seed:waves` / `npm run seed:flags` wrap these enrichment/wave/flag crons,
+while `npm run seed` and `npm run seed:classify` run the offline discovery batch
+against the local D1 (see [Discovery and classification
+(offline)](#discovery-and-classification-offline)). The local database
 starts empty — run
 `npm run seed` once after a fresh checkout (it queries the live Overpass API and takes
 a couple of minutes), then `npm run seed:enrich` a few times to give beaches their NWS
 zones (and `npm run seed:eccc` afterwards for the Canadian rows NWS parks — note the
 NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes before
 Canadian rows become ECCC candidates), and `npm run seed:classify` to classify their
-adjacent water bodies (25 per run, so repeat to drain locally — production uses the
-one-time bulk backfill below instead).
+adjacent water bodies.
 
-**One-time bulk backfill (production, user-authorized).** Classifying ~700 rows
-one-at-a-time against the rate-limited public Overpass endpoint is the wrong tool for
-the initial pass. Instead fetch each allowlisted Great Lake's member-way shoreline plus
-the ocean coastline ONCE (clipped to the beach region, ~7 network calls total), build a
-segment index, run the local point-to-segment distance test at 150 m per beach, and
-resolve any borderline (150 m–3 km) or large-bbox beach with the same actual-vertex
-Overpass probe the cron uses (this is what moves Sleeping Bear Dunes and the handful of
-large-polygon rows to their correct class). Then emit `UPDATE beaches SET water_class =
-?, water_class_version = <WATER_CLASS_VERSION> WHERE id = ?` statements and apply them
-with `wrangler d1 execute swim-report --remote --file=…`. The reference implementation
-is `classify_local.py` (the dry-run audit script). Expected distribution after
-resolution: ~368 `great_lake`, ~325 `inland`, 0 `ocean` (the pilot bbox has no
-saltwater coast).
+### Discovery and classification (offline)
 
-This bulk backfill — and daily discovery + classification generally — is being
-moved out of the Worker cron into an offline **GitHub Actions** batch job that
-bulk-loads D1 (`scripts/discovery-batch.js`, `.github/workflows/discovery.yml`).
-It reuses the Worker's discovery/classification code verbatim and emits an
-idempotent `.sql` delta applied with `wrangler d1 execute --remote --file`. See
-`docs/offline-discovery.md` for the design and the cutover checklist; until
-cutover the in-Worker `47 8 * * *` / `37 1,7,13,19 * * *` crons remain live.
+Beach discovery and water-body classification run **outside** the Worker, in an
+offline GitHub Actions batch job (`scripts/discovery-batch.js`, run on Deno via
+`.github/workflows/discovery.yml`). This keeps the two-path invariant — the batch
+writes D1 out-of-band and the request path still reads only D1/KV — while sidestepping
+the Worker's per-invocation subrequest caps that once forced the "N-per-run / drip
+over days" backfill. The batch reuses the discovery/classification code verbatim
+(`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`), emits one
+idempotent `.sql` delta, and bulk-loads it into D1 with
+`wrangler d1 execute --remote --file`.
+
+**Coverage.** Discovery is scoped to a curated set of coastal bounding boxes in
+`src/regions.js` (`REGIONS`) that trace the entire Great Lakes shoreline — both the
+US and the Canadian shores — rather than a single Michigan pilot box or one
+continental rectangle. Coastal boxes keep the discovery universe to actual shoreline:
+a continental rectangle would sweep in thousands of inland-lake "beach" elements that
+the classifier just drops, wasting Overpass query budget. Each region box is auto-tiled
+at `TILE_MAX_SPAN_DEG = 2.0` deg before any Overpass query runs, so box size is never
+the constraint — a large box simply becomes more tiles. The batch's stale-row
+reconciliation only treats a D1 row as a delete candidate if `pointInAnyRegion(lat, lon)`
+is true, and that check fails safe: shrinking or removing a box can only make the
+predicate false for more rows, which only *removes* delete candidates (an editing
+mistake under-deletes rather than over-deleting a real, enriched beach). **Expansion
+is additive**: bringing a new coast online (Pacific / Gulf / Atlantic) means appending
+boxes to `REGIONS` — discovery, tiling, and reconciliation all iterate the array and
+pick them up automatically (see the placeholder section at the bottom of
+`src/regions.js`).
+
+Classification matches each beach's adjacent water body to an allowlisted Great Lake
+by wikidata QID (never by name), so inland-lake rows can be hidden. Expected
+distribution across the Great Lakes region set is heavily `great_lake` / `inland` with
+0 `ocean` (no saltwater coast yet). See `docs/offline-discovery.md` for the full design.
+
 The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
 longer exist in wrangler 4.
 
@@ -501,22 +482,21 @@ IDs (see PLAN.md section 8 for the authoritative config).
     npx wrangler d1 migrations apply swim-report --remote      # after adding a migration
     npx wrangler tail                                          # live logs
 
-The production database starts empty on a fresh deploy — the `47 8 * * *`
-discovery cron populates beaches on its next run, then the `17 3,9,15,21 * * *`
-enrichment runs drain the NWS-zone queue (with `29 4,10,16,22 * * *` picking up
-the Canadian rows NWS parks) and the hourly cron starts writing
-flags. There is no remote equivalent of `npm run seed`; either wait for the
-crons or run a local dev server with `remote = true` bindings and trigger the
-scheduled-handler endpoints manually.
+The production database starts empty on a fresh deploy — the offline **GitHub
+Actions** discovery batch (`.github/workflows/discovery.yml` →
+`scripts/discovery-batch.js`) populates and classifies beaches (see [Discovery and
+classification (offline)](#discovery-and-classification-offline)), then the
+`17 3,9,15,21 * * *` enrichment runs drain the NWS-zone queue (with
+`29 4,10,16,22 * * *` picking up the Canadian rows NWS parks) and the hourly cron
+starts writing flags. There is no remote equivalent of the enrichment/wave/flag
+`npm run seed:*` wrappers; either wait for the crons or run a local dev server with
+`remote = true` bindings and trigger the scheduled-handler endpoints manually.
 
-For discovery + water classification specifically, the emerging seed strategy is
-the offline **GitHub Actions** batch job (`.github/workflows/discovery.yml` →
-`scripts/discovery-batch.js`): it runs the same discovery/classification code
-outside the Worker's per-invocation caps, emits one idempotent `.sql` delta, and
-bulk-loads it with `wrangler d1 execute --remote --file` — turning the multi-day
-drip into a single run. It's staged behind the in-Worker crons (they stay live
-until cutover); the design, prerequisites (repo secret `CLOUDFLARE_API_TOKEN`,
-migration 0009 applied remotely), and cutover checklist are in
+The discovery batch runs the same discovery/classification code outside the Worker's
+per-invocation caps, emits one idempotent `.sql` delta, and bulk-loads it with
+`wrangler d1 execute --remote --file` — turning the multi-day drip into a single run.
+Its prerequisites (repo secret `CLOUDFLARE_API_TOKEN`, migration 0009 applied
+remotely) and operational notes are in
 [`docs/offline-discovery.md`](docs/offline-discovery.md).
 
 `compatibility_date` is pinned — bump it to the current date occasionally when

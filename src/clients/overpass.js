@@ -8,9 +8,9 @@ import { fetchJson } from "./http.js";
 export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 
 // Failover mirrors, tried IN ORDER: the primary is the official FOSSGIS
-// instance (overpass-api.de) — our volume (~2 discovery queries + a few hundred
-// classification probes per day) sits far under its "< 10,000 queries/day,
-// < 1 GB/day" courtesy limit. When it is overloaded (it periodically returns a
+// instance (overpass-api.de) — our volume (two discovery queries per bbox tile,
+// ~a few dozen tiles, plus a few hundred classification probes per day) sits far
+// under its "< 10,000 queries/day, < 1 GB/day" courtesy limit. When it is overloaded (it periodically returns a
 // server-side [timeout] "remark", which we treat as a failure) runQuery falls
 // through to Private.coffee's unlimited public instance. Mirrors are distinct
 // IPs, so trying the next one never violates any single instance's 2-slots/IP

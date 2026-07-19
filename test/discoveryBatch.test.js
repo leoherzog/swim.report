@@ -19,7 +19,8 @@ import {
   deleteBeachSql,
   classifyUpdateSql,
   bumpAttemptsSql,
-  buildClassifyQueue
+  buildClassifyQueue,
+  tileBbox
 } from "../scripts/discovery-batch.js";
 import { WATER_CLASS_VERSION, WATER_CLASS_MAX_ATTEMPTS } from "../src/waterClass.js";
 
@@ -147,10 +148,10 @@ describe("reconcileStaleRows / deleteBeachSql single-source the delete set", fun
     expect(stale.map(function (r) { return r.id; })).toEqual(["osm-way-2"]);
     expect(reconciliationSql(snap, produced, 1)).toEqual(stale.map(function (r) { return deleteBeachSql(r.id); }));
   });
-  it("an out-of-bbox stale row is NOT in the delete set (so it also stays in the classify universe)", function () {
-    // Regression: deletedIds must equal the actually-deleted set. An out-of-bbox
-    // name===park_name row is never deleted, so it must never be excluded from
-    // classification.
+  it("an out-of-region stale row is NOT in the delete set (so it also stays in the classify universe)", function () {
+    // Regression: deletedIds must equal the actually-deleted set. An out-of-region
+    // name===park_name row (lat 50.0 is north of every REGION box) is never
+    // deleted, so it must never be excluded from classification.
     const snap = [parkRow("osm-way-in"), parkRow("osm-way-out", { lat: 50.0, lon: -86.0 })];
     const stale = reconcileStaleRows(snap, new Set(["osm-way-in"]), 1);
     const staleIds = stale.map(function (r) { return r.id; });
@@ -175,7 +176,8 @@ describe("syncMetaSql", function () {
 });
 
 describe("reconciliationSql safety rails", function () {
-  // Candidate = unnamed-origin park row (name === park_name) inside PILOT_BBOX.
+  // Candidate = unnamed-origin park row (name === park_name) inside any REGION
+  // (pointInAnyRegion). (43.0, -86.0) sits in the Lake Michigan box.
   function parkRow(id, extra) {
     return Object.assign({
       id: id, name: "Some Park", park_name: "Some Park", lat: 43.0, lon: -86.0
@@ -203,10 +205,89 @@ describe("reconciliationSql safety rails", function () {
     const deletes = reconciliationSql(snap, new Set(), 1);
     expect(deletes).toEqual([]);
   });
-  it("ignores candidates outside PILOT_BBOX", function () {
+  it("ignores candidates outside all regions", function () {
+    // (10.0, 10.0) is far outside every REGION box -> pointInAnyRegion false, so
+    // it is never a delete candidate.
     const snap = [parkRow("osm-way-1", { lat: 10.0, lon: 10.0 })];
     const deletes = reconciliationSql(snap, new Set(), 1);
     expect(deletes).toEqual([]);
+  });
+});
+
+describe("tileBbox", function () {
+  const PILOT = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
+
+  it("splits the pilot bbox into a ceil(span/max) grid", function () {
+    // 5.3 deg wide / 1.5 = ceil 4 cols; 5.0 deg tall / 1.5 = ceil 4 rows.
+    const tiles = tileBbox(PILOT, 1.5, 0.05);
+    expect(tiles.length).toBe(16);
+  });
+
+  it("keeps every base tile under maxSpan + 2*overlap on each side", function () {
+    const tiles = tileBbox(PILOT, 1.5, 0.05);
+    const maxAllowed = 1.5 + 2 * 0.05 + 1e-9;
+    for (const t of tiles) {
+      expect(t.maxLon - t.minLon).toBeLessThanOrEqual(maxAllowed);
+      expect(t.maxLat - t.minLat).toBeLessThanOrEqual(maxAllowed);
+    }
+  });
+
+  it("union-covers the whole bbox with no gaps and never exceeds it", function () {
+    const tiles = tileBbox(PILOT, 1.5, 0.05);
+    // Corners are inside some tile, and no tile spills past the original bbox
+    // (overlap is clamped to the edges).
+    for (const t of tiles) {
+      expect(t.minLon).toBeGreaterThanOrEqual(PILOT.minLon);
+      expect(t.minLat).toBeGreaterThanOrEqual(PILOT.minLat);
+      expect(t.maxLon).toBeLessThanOrEqual(PILOT.maxLon);
+      expect(t.maxLat).toBeLessThanOrEqual(PILOT.maxLat);
+    }
+    const covers = function (lon, lat) {
+      return tiles.some(function (t) {
+        return lon >= t.minLon && lon <= t.maxLon && lat >= t.minLat && lat <= t.maxLat;
+      });
+    };
+    expect(covers(PILOT.minLon, PILOT.minLat)).toBe(true);
+    expect(covers(PILOT.maxLon, PILOT.maxLat)).toBe(true);
+    expect(covers(-85.0, 44.0)).toBe(true); // interior point
+  });
+
+  it("interior base-grid seams overlap (no point falls between adjacent tiles)", function () {
+    // With overlap > 0, adjacent tiles share a band, so a point exactly on a base
+    // seam is inside both — never orphaned by floating-point drift.
+    const tiles = tileBbox(PILOT, 1.5, 0.05);
+    const lonStep = (PILOT.maxLon - PILOT.minLon) / 4;
+    const seamLon = PILOT.minLon + lonStep;
+    const hits = tiles.filter(function (t) {
+      return seamLon >= t.minLon && seamLon <= t.maxLon && 44.0 >= t.minLat && 44.0 <= t.maxLat;
+    });
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("returns a single tile when the bbox is smaller than maxSpan", function () {
+    const small = { minLon: -87.0, minLat: 41.6, maxLon: -86.5, maxLat: 42.0 };
+    const tiles = tileBbox(small, 1.5, 0.05);
+    expect(tiles.length).toBe(1);
+    // Overlap is clamped to the bbox, so the lone tile equals the input.
+    expect(tiles[0]).toEqual(small);
+  });
+
+  it("tiles at the production 2.0-deg span with no base tile exceeding it", function () {
+    // TILE_MAX_SPAN_DEG in discovery-batch.js is 2.0 (with 0.05 overlap): this is
+    // the span every REGION bbox is actually tiled at before any Overpass query.
+    // A REGION-sized box (Lake Michigan: 3.8 deg wide / 4.7 deg tall) at 2.0 deg
+    // -> ceil(3.8/2)=2 cols x ceil(4.7/2)=3 rows = 6 tiles.
+    const lakeMichigan = { minLon: -88.3, minLat: 41.5, maxLon: -84.5, maxLat: 46.2 };
+    const tiles = tileBbox(lakeMichigan, 2.0, 0.05);
+    expect(tiles.length).toBe(6);
+    const maxAllowed = 2.0 + 2 * 0.05 + 1e-9;
+    for (const t of tiles) {
+      expect(t.maxLon - t.minLon).toBeLessThanOrEqual(maxAllowed);
+      expect(t.maxLat - t.minLat).toBeLessThanOrEqual(maxAllowed);
+      // No tile spills past the region box (overlap clamps to the edges).
+      expect(t.minLon).toBeGreaterThanOrEqual(lakeMichigan.minLon);
+      expect(t.maxLon).toBeLessThanOrEqual(lakeMichigan.maxLon);
+    }
   });
 });
 

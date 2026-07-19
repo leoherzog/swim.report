@@ -26,13 +26,7 @@ import {
   GLCFS_WAVE_MODEL,
   SEAGULL_INFO_URL
 } from "./clients/glerl.js";
-import { fetchBeaches, fetchParkBeaches, fetchWaterClassSignals } from "./clients/overpass.js";
-import {
-  classifyWaterBody,
-  WATER_CLASS_VERSION,
-  WATER_CLASS_MAX_ATTEMPTS,
-  FLAG_WORTHY_WATER_SQL
-} from "./waterClass.js";
+import { FLAG_WORTHY_WATER_SQL } from "./waterClass.js";
 import { fetchNearestWebcam } from "./clients/windyWebcams.js";
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
 import { updateScraperHealth } from "./scraperHealth.js";
@@ -73,7 +67,6 @@ const KV_TTL_SECONDS = 7200;
 // the next refresh, so a transient upstream 429 leaves the strip showing
 // slightly older — but still model-current — data instead of blanking it.
 const WAVE_DATA_TTL_SECONDS = 25200;
-const PILOT_BBOX = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
 // Per RUN of the dedicated enrichment cron (4x daily = up to 300 points/day).
 // api.weather.gov publishes no numeric rate limit (it 429s with Retry-After
 // when unhappy); 75 sequential polite requests per run is well within
@@ -81,8 +74,9 @@ const PILOT_BBOX = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
 const NWS_ENRICHMENT_LIMIT = 75;
 // Rows that fail fetchPointMetadata this many times are permanently parked and
 // no longer queued for enrichment — otherwise non-US points (Ontario shoreline
-// swept in by PILOT_BBOX) that api.weather.gov 404s forever would occupy the
-// whole nightly batch and starve US beaches (TODO.md).
+// swept in by the Great Lakes region set, src/regions.js) that api.weather.gov
+// 404s forever would occupy the whole nightly batch and starve US beaches
+// (TODO.md).
 const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // ECCC zone enrichment (own cron, 4x daily): only rows NWS permanently parked
 // (nws_zone NULL at the attempts cap) are candidates — the Ontario-shoreline
@@ -91,26 +85,6 @@ const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // way the NWS cap parks non-US points.
 const ECCC_ENRICHMENT_LIMIT = 50;
 const ECCC_ENRICHMENT_MAX_ATTEMPTS = 5;
-// Both Overpass queries must never run concurrently with each other (or another
-// sync invocation) -- overpass-api.de allows only 2 slots per IP and 429s beyond
-// that. A single delayed retry smooths over most transient 429s/timeouts without
-// risking overlap, since the retry always fully resolves before the next query
-// starts (TODO.md "No Overpass retry inside the daily sync").
-const OVERPASS_RETRY_DELAY_MS = 60000;
-// Mass-delete rail for the stale park-beach reconciliation: a partial Overpass
-// result (the client already rejects bodies carrying a truncation "remark",
-// but this is defense in depth against any other partial-success mode) would
-// make every missing park's rows look stale. Normal OSM churn orphans at most
-// a handful of rows per day, so refuse to delete anything when the stale set
-// exceeds max(OVERPASS_RECONCILE_MAX_DELETES, 25% of the candidate rows) —
-// a legitimate wholesale change just waits for a human to raise the cap.
-const OVERPASS_RECONCILE_MAX_DELETES = 10;
-const OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25;
-// flag_history (migration 0006) retention: the calibration table pairs
-// estimated vs official colors and only needs a recent window for threshold
-// tuning; without pruning it grows unbounded (~1M rows/year in season). The
-// daily sync deletes rows older than this many days.
-const FLAG_HISTORY_RETENTION_DAYS = 90;
 // Webcam hydration (daily webcam cron): nearest Windy webcam player per
 // beach. Webcams appear and disappear slowly, so rows are rechecked on a
 // 14-day cadence; 100 lookups per night drains the pilot backlog in a few
@@ -119,19 +93,6 @@ const FLAG_HISTORY_RETENTION_DAYS = 90;
 // publishes no quota and 100/night is polite guesswork (TODO.md).
 const WEBCAM_ENRICHMENT_LIMIT = 100;
 const WEBCAM_RECHECK_MS = 14 * 86400000;
-// Per RUN of the water-classification cron (4x daily). Per-beach Overpass
-// probing is rate-limited on the public endpoint, so keep the run small and
-// polite — the one-time bulk backfill (README / docs) does the mass
-// classification; this cron only drains the steady-state trickle of newly
-// discovered beaches plus any WATER_CLASS_VERSION re-drain. The attempts cap
-// (WATER_CLASS_MAX_ATTEMPTS) is single-sourced in src/waterClass.js alongside
-// the gate that consumes it.
-const WATER_CLASS_LIMIT = 25;
-// Synchronous discovery-delta classification (end of runOverpassSync): bounds
-// the extra Overpass load the nightly discovery run takes on. The nightly
-// new-beach delta is normally tiny, so this keeps steady-state classification
-// lag ~= 0; anything beyond the cap falls to the dedicated cron.
-const WATER_CLASS_DELTA_CAP = 25;
 
 // Human-readable labels for estimate sources ({ label, url } entries — see
 // PLAN.md section 1). Wave labels name the model that actually supplied the
@@ -836,219 +797,6 @@ export function sleep(ms) {
   });
 }
 
-// Upsert a single sync_meta key/value with its updated timestamp. Returns the
-// D1 run() promise so callers can await it.
-function putSyncMeta(env, key, value, nowIso) {
-  return env.DB.prepare(
-    "INSERT INTO sync_meta (key, value, updated) VALUES (?1, ?2, ?3) " +
-    "ON CONFLICT(key) DO UPDATE SET value = ?2, updated = ?3"
-  ).bind(key, value, nowIso).run();
-}
-
-async function runOverpassSync(env) {
-  const nowIso = new Date().toISOString();
-  let processed = 0;
-
-  // flag_history retention sweep (daily). Runs BEFORE the Overpass fetches so
-  // an aborted discovery run never skips pruning, and in its own try/catch so
-  // a pruning failure never costs a discovery day.
-  try {
-    const cutoffIso = new Date(
-      Date.parse(nowIso) - FLAG_HISTORY_RETENTION_DAYS * 86400000
-    ).toISOString();
-    await env.DB.prepare(
-      "DELETE FROM flag_history WHERE observed_at < ?1"
-    ).bind(cutoffIso).run();
-  } catch (err) {
-    console.log("index: flag_history retention sweep failed: " + err.message);
-  }
-
-  try {
-    let namedRows = await fetchBeaches(PILOT_BBOX);
-    if (namedRows === null) {
-      console.log(
-        "index: fetchBeaches returned null, retrying once after " +
-        String(OVERPASS_RETRY_DELAY_MS) + "ms"
-      );
-      await sleep(OVERPASS_RETRY_DELAY_MS);
-      namedRows = await fetchBeaches(PILOT_BBOX);
-      if (namedRows === null) {
-        console.log("index: overpass sync aborted, fetchBeaches retry also returned null");
-        return;
-      }
-      console.log("index: fetchBeaches retry succeeded");
-    }
-
-    // Park containment: failures degrade to the named-only sync and leave
-    // every existing park_name untouched (legacy statement below). The retry
-    // only starts once the fetchBeaches call (and its own retry) has fully
-    // resolved above, so the two Overpass queries never overlap.
-    let parkBeaches = await fetchParkBeaches(PILOT_BBOX);
-    if (parkBeaches === null) {
-      console.log(
-        "index: fetchParkBeaches returned null, retrying once after " +
-        String(OVERPASS_RETRY_DELAY_MS) + "ms"
-      );
-      await sleep(OVERPASS_RETRY_DELAY_MS);
-      parkBeaches = await fetchParkBeaches(PILOT_BBOX);
-      if (parkBeaches === null) {
-        console.log("index: fetchParkBeaches retry also returned null, keeping existing park associations");
-      } else {
-        console.log("index: fetchParkBeaches retry succeeded");
-      }
-    }
-
-    const merged = mergeBeachRows(namedRows, parkBeaches === null ? [] : parkBeaches);
-    const statements = merged.rows.map(function (row) {
-      // A re-discovered beach whose centroid moved materially (> ~100 m;
-      // 0.001 deg ~ 80-111 m at pilot latitudes) may now sit on different
-      // water, so NULL out its water_class so it re-classifies. In SQLite's
-      // upsert, an unqualified column is the EXISTING row value and ?3/?4 are
-      // the new lat/lon.
-      const moved =
-        " CASE WHEN (abs(lat - ?3) > 0.001 OR abs(lon - ?4) > 0.001) THEN ";
-      if (parkBeaches === null) {
-        return env.DB.prepare(
-          "INSERT INTO beaches (id, name, lat, lon, osm_id) VALUES (?1, ?2, ?3, ?4, ?5) " +
-          "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, " +
-          "water_class = " + moved + "NULL ELSE water_class END, " +
-          "water_class_version = " + moved + "NULL ELSE water_class_version END, " +
-          "water_class_attempts = " + moved + "0 ELSE water_class_attempts END"
-        ).bind(row.id, row.name, row.lat, row.lon, row.osmId);
-      }
-      return env.DB.prepare(
-        "INSERT INTO beaches (id, name, lat, lon, osm_id, park_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6) " +
-        "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6, " +
-        "water_class = " + moved + "NULL ELSE water_class END, " +
-        "water_class_version = " + moved + "NULL ELSE water_class_version END, " +
-        "water_class_attempts = " + moved + "0 ELSE water_class_attempts END"
-      ).bind(row.id, row.name, row.lat, row.lon, row.osmId, row.parkName);
-    });
-
-    if (statements.length > 0) {
-      await env.DB.batch(statements);
-    }
-    processed = statements.length;
-
-    await putSyncMeta(env, "last_overpass_sync", nowIso, nowIso);
-    await putSyncMeta(env, "last_overpass_count", String(processed), nowIso);
-
-    // Stale park-beach reconciliation. The upsert above never deletes, so when
-    // OSM edits make a DIFFERENT unnamed beach the largest in a park, the
-    // previously-kept row lingers next to the newly-kept one (same park name,
-    // both rows). This pass deletes such orphaned park-containment rows.
-    //
-    // Runs ONLY after a fully successful sync (both Overpass queries returned):
-    // a degraded named-only run (parkBeaches === null) leaves park associations
-    // untouched, so it must never delete park rows. Identification: a
-    // park-containment row from mergeBeachRows is an UNNAMED-origin row whose
-    // display name IS its park name (name = park_name); a named beach that
-    // merely sits inside a park keeps its own OSM name (name != park_name) and
-    // is therefore never a deletion candidate. Safety rails:
-    //   - never delete a row with its own OSM beach name (SQL requires
-    //     name = park_name AND the row not being produced this run);
-    //   - never delete anything if this run produced ZERO park-containment rows
-    //     (a wholesale upstream change / empty park query must not mass-delete).
-    let deleted = 0;
-    if (parkBeaches !== null) {
-      const producedParkRows = merged.rows.filter(function (r) {
-        return r.parkName !== null && r.name === r.parkName;
-      });
-      if (producedParkRows.length === 0) {
-        console.log(
-          "index: overpass reconciliation skipped, run produced 0 park-containment rows"
-        );
-      } else {
-        try {
-          const producedIds = new Set(merged.rows.map(function (r) { return r.id; }));
-          const existing = await env.DB.prepare(
-            "SELECT id, name, lat, lon FROM beaches " +
-            "WHERE park_name IS NOT NULL AND name = park_name " +
-            "AND lat >= ?1 AND lat <= ?2 AND lon >= ?3 AND lon <= ?4"
-          ).bind(
-            PILOT_BBOX.minLat, PILOT_BBOX.maxLat, PILOT_BBOX.minLon, PILOT_BBOX.maxLon
-          ).all();
-          const existingRows = existing.results || [];
-          const staleRows = existingRows.filter(function (row) {
-            return !producedIds.has(row.id);
-          });
-          // Proportional safety rail: too many stale rows at once means a
-          // partial/truncated upstream result, not real OSM churn — skip the
-          // whole deletion rather than mass-delete enriched beach rows.
-          const deleteAllowance = Math.max(
-            OVERPASS_RECONCILE_MAX_DELETES,
-            Math.ceil(existingRows.length * OVERPASS_RECONCILE_MAX_DELETE_FRACTION)
-          );
-          if (staleRows.length > deleteAllowance) {
-            console.log(
-              "index: overpass reconciliation REFUSING to delete " +
-              String(staleRows.length) + " stale rows (allowance " +
-              String(deleteAllowance) + " of " + String(existingRows.length) +
-              " candidates) — probable partial Overpass response, keeping all rows"
-            );
-          } else if (staleRows.length > 0) {
-            const deleteStatements = staleRows.map(function (row) {
-              console.log(
-                "index: overpass reconciliation deleting stale park-beach row id=" +
-                row.id + " name=" + row.name
-              );
-              return env.DB.prepare("DELETE FROM beaches WHERE id = ?1").bind(row.id);
-            });
-            await env.DB.batch(deleteStatements);
-            deleted = staleRows.length;
-          }
-          console.log(
-            "index: overpass reconciliation complete, produced_park_rows=" +
-            String(producedParkRows.length) +
-            " candidates=" + String(existingRows.length) +
-            " deleted=" + String(deleted)
-          );
-        } catch (err) {
-          console.log("index: overpass reconciliation failed: " + err.message);
-        }
-      }
-    }
-
-    const withPark = merged.rows.filter(function (r) { return r.parkName !== null; }).length;
-    console.log(
-      "index: overpass sync complete, processed=" + String(processed) +
-      " with_park=" + String(withPark) +
-      " skipped_unnamed=" + String(merged.skippedUnnamed) +
-      " deleted_stale=" + String(deleted)
-    );
-
-    // Synchronous discovery-delta classification: classify up to
-    // WATER_CLASS_DELTA_CAP freshly-discovered (or version-stale) rows NOW, so
-    // new beaches are essentially never left unclassified for a full cron
-    // cycle. The nightly delta is normally a few rows; anything beyond the cap
-    // falls to the dedicated classification cron. Its own try/catch so a
-    // classification failure never costs the discovery run its result.
-    try {
-      const deltaResult = await env.DB.prepare(
-        "SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR water_class_version < " +
-        String(WATER_CLASS_VERSION) + ") AND water_class_attempts < " + String(WATER_CLASS_MAX_ATTEMPTS) +
-        " ORDER BY water_class_attempts ASC, RANDOM() LIMIT " + String(WATER_CLASS_DELTA_CAP)
-      ).all();
-      const deltaRows = deltaResult.results || [];
-      if (deltaRows.length > 0) {
-        const counts = await classifyBeaches(env, deltaRows);
-        console.log(
-          "index: overpass sync water-class delta complete, attempted=" + String(counts.attempted) +
-          " classified=" + String(counts.classified) +
-          " ocean=" + String(counts.ocean) +
-          " great_lake=" + String(counts.great_lake) +
-          " inland=" + String(counts.inland) +
-          " bumped=" + String(counts.bumped)
-        );
-      }
-    } catch (err) {
-      console.log("index: overpass sync water-class delta failed: " + err.message);
-    }
-  } catch (err) {
-    console.log("index: overpass sync failed: " + err.message);
-  }
-}
-
 // NWS point enrichment (own cron, 4x daily): beaches with nws_zone NULL get
 // their forecast zone + gridpoint URL from api.weather.gov/points. A beach
 // without nws_zone skips rules steps 1-2 (alerts, SRF rip risk) in
@@ -1127,7 +875,8 @@ async function runNwsEnrichment(env) {
 // ECCC zone enrichment (own cron, 4x daily, offset from the NWS trigger so
 // the two enrichment upstreams never share a failure window): beaches that
 // NWS point enrichment permanently parked (nws_zone NULL at the attempts cap
-// — the Ontario shoreline swept in by PILOT_BBOX) get their ECCC public
+// — the Ontario shoreline swept in by the Great Lakes region set,
+// src/regions.js) get their ECCC public
 // forecast region name from the GeoMet public-standard-forecast-zones
 // collection. A row with eccc_zone set is treated as Canadian by the hourly
 // recompute: it joins the single weather-alerts bbox fetch and loses the
@@ -1265,112 +1014,6 @@ async function runWebcamSync(env) {
   }
 }
 
-// Water-body classification (own cron, 4x daily): each beach's adjacent water
-// body is probed via Overpass (vertex recurse-down anchor at 150 m / 120 m —
-// see src/clients/overpass.js) and classified ocean / great_lake / inland by
-// the pure classifyWaterBody in src/waterClass.js. Only ocean + Great Lakes
-// beaches can ever carry a flag; inland rows are hidden (never deleted) by the
-// FLAG_WORTHY_WATER_SQL gate applied to every consumer. water_class_attempts
-// bumps ONLY on a clean-but-empty probe (a real "no flag-worthy water here"),
-// never on a transient Overpass failure, so permanently pond-only rows park at
-// the cap while the ~1/3 Overpass flake rate never wrongly parks a row.
-// Self-isolating: a D1 write failure here is logged and swallowed.
-async function bumpWaterClassAttempts(env, beachId) {
-  try {
-    await env.DB.prepare(
-      "UPDATE beaches SET water_class_attempts = water_class_attempts + 1 WHERE id = ?1"
-    ).bind(beachId).run();
-  } catch (updateErr) {
-    console.log("index: water class attempt bump failed for " + beachId + ": " + updateErr.message);
-  }
-}
-
-// Classify a batch of beach rows sequentially (never overlap Overpass calls —
-// respects the 2-slot/IP limit). Shared by the dedicated classification cron
-// and the synchronous discovery-delta step. Per-beach:
-//   - a transient fetch failure (null signals) -> no bump, row stays queued;
-//   - a decision (cls !== null) -> store water_class + version, RESET attempts
-//     to 0 (so a later version re-drain has a fresh budget);
-//   - a clean-but-empty answer (cls === null) -> bump attempts.
-// Returns a counts object for the completion log. Never throws.
-async function classifyBeaches(env, rows) {
-  const counts = {
-    attempted: 0, classified: 0, ocean: 0, great_lake: 0,
-    inland: 0, bumped: 0, transient: 0
-  };
-  for (const beach of rows) {
-    counts.attempted = counts.attempted + 1;
-    let signals = null;
-    try {
-      signals = await fetchWaterClassSignals(beach);
-    } catch (err) {
-      // fetchWaterClassSignals honors the data-or-null contract, but isolate
-      // defensively so one bad row never poisons the batch.
-      console.log("index: water class fetch threw for " + beach.id + ": " + err.message);
-      signals = null;
-    }
-    if (signals === null) {
-      counts.transient = counts.transient + 1;
-      continue;
-    }
-    const cls = classifyWaterBody(signals);
-    if (cls !== null) {
-      try {
-        await env.DB.prepare(
-          "UPDATE beaches SET water_class = ?1, water_class_version = ?2, water_class_attempts = 0 WHERE id = ?3"
-        ).bind(cls, WATER_CLASS_VERSION, beach.id).run();
-        counts.classified = counts.classified + 1;
-        counts[cls] = counts[cls] + 1;
-      } catch (err) {
-        console.log("index: water class store failed for " + beach.id + ": " + err.message);
-      }
-    } else {
-      counts.bumped = counts.bumped + 1;
-      await bumpWaterClassAttempts(env, beach.id);
-    }
-  }
-  return counts;
-}
-
-async function runWaterClassification(env) {
-  try {
-    const needsClass = await env.DB.prepare(
-      "SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR water_class_version < " +
-      String(WATER_CLASS_VERSION) + ") AND water_class_attempts < " + String(WATER_CLASS_MAX_ATTEMPTS) +
-      " ORDER BY water_class_attempts ASC, RANDOM() LIMIT " + String(WATER_CLASS_LIMIT)
-    ).all();
-    const toClassify = needsClass.results || [];
-    const counts = await classifyBeaches(env, toClassify);
-
-    // parked = looked, found no flag-worthy water, capped (hidden by the gate).
-    const parkedResult = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM beaches WHERE water_class IS NULL AND water_class_attempts >= " +
-      String(WATER_CLASS_MAX_ATTEMPTS)
-    ).first();
-    const parkedCount = parkedResult ? parkedResult.n : 0;
-    // hidden_inland = confirmed inland rows removed from every consumer. A
-    // NULL-hide with no metric is silent product loss — this is the required
-    // visibility (metric parity with the NWS parked-count line).
-    const hiddenResult = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM beaches WHERE water_class = 'inland'"
-    ).first();
-    const hiddenCount = hiddenResult ? hiddenResult.n : 0;
-
-    console.log(
-      "index: water classification complete, attempted=" + String(counts.attempted) +
-      " classified=" + String(counts.classified) +
-      " ocean=" + String(counts.ocean) +
-      " great_lake=" + String(counts.great_lake) +
-      " inland=" + String(counts.inland) +
-      " bumped=" + String(counts.bumped) +
-      " parked=" + String(parkedCount) +
-      " hidden_inland=" + String(hiddenCount)
-    );
-  } catch (err) {
-    console.log("index: water classification failed: " + err.message);
-  }
-}
-
 // Cron dispatch table (see the scheduled triggers in wrangler.toml).
 // Each entry pairs a cron expression with its runner and the label used in
 // the top-level throw log. Keeping this as data means adding a cron is one
@@ -1379,11 +1022,9 @@ async function runWaterClassification(env) {
 const CRON_JOBS = {
   "0 * * * *": { run: runFlagRecompute, label: "flag recompute" },
   "15 */6 * * *": { run: runWaveRefresh, label: "wave refresh" },
-  "47 8 * * *": { run: runOverpassSync, label: "overpass sync" },
   "17 3,9,15,21 * * *": { run: runNwsEnrichment, label: "nws enrichment" },
   "29 4,10,16,22 * * *": { run: runEcccEnrichment, label: "eccc enrichment" },
-  "31 9 * * *": { run: runWebcamSync, label: "webcam sync" },
-  "37 1,7,13,19 * * *": { run: runWaterClassification, label: "water classification" }
+  "31 9 * * *": { run: runWebcamSync, label: "webcam sync" }
 };
 
 export default {

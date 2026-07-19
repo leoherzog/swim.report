@@ -44,15 +44,37 @@ import {
   WATER_CLASS_VERSION,
   WATER_CLASS_MAX_ATTEMPTS
 } from "../src/waterClass.js";
+import { REGIONS, pointInAnyRegion } from "../src/regions.js";
 
-// --- Constants mirrored from src/index.js (keep in sync) --------------------
-// PILOT_BBOX and the discovery/reconciliation rails are defined in src/index.js
-// and are NOT exported there (exporting would drag the whole Worker import graph
-// into this process). They change rarely; the values below MUST match
-// src/index.js. The water-class constants ARE imported from src/waterClass.js
-// (their single source of truth), so they can never drift.
-const PILOT_BBOX = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
+// --- Constants --------------------------------------------------------------
+// The discovery regions and the point-in-region predicate come from the
+// standalone src/regions.js (pure data + one pure function, no Worker import
+// graph), so this offline batch and the Worker share ONE definition — the old
+// PILOT_BBOX duplicated-and-kept-in-sync-by-hand copy is gone. The reconciliation
+// rails below change rarely and stay local. The water-class constants ARE
+// imported from src/waterClass.js (their single source of truth), so they can
+// never drift.
 const OVERPASS_RETRY_DELAY_MS = 60000;
+// Overpass query tiling. Each REGION bbox is split into a grid of sub-boxes each
+// at most TILE_MAX_SPAN_DEG on a side. Empirically, named-query EXECUTION is only
+// seconds at <= ~4 deg^2 (a 0.5 deg dense box measured ~1.7s), while the original
+// 26.5 deg^2 pilot box hit Overpass's 60s server-side [timeout:60] cap and came
+// back a TRUNCATED remark (which the client correctly treats as a failure). A
+// 2.0 deg tile is <= 4 deg^2, keeping ~6x execution headroom under the 60s cap.
+// Wall-clock on public mirrors is dominated by queue latency, not query cost, so
+// making tiles smaller than this buys nothing; total tile count is bounded by the
+// coastal REGIONS (not a continental grid), which is what actually caps the run.
+// Tiles carry a small overlap so a beach or park polygon straddling a tile
+// boundary is captured whole in at least one tile (Overpass's (area.pa) park
+// containment needs the park's edge inside the tile). Residual: a park polygon
+// large enough to fully enclose a tile is not returned for that tile's park
+// query — keep TILE_MAX_SPAN_DEG smaller than any relevant protected area, and
+// the overlap covers the rest where the park edge lands in a neighbouring tile.
+const TILE_MAX_SPAN_DEG = 2.0;
+const TILE_OVERLAP_DEG = 0.05;
+// Polite gap between successive tile queries (Overpass courtesy). The happy path
+// has no retry delay, so without this the tiles would burst back-to-back.
+const OVERPASS_TILE_GAP_MS = 1000;
 const OVERPASS_RECONCILE_MAX_DELETES = 10;
 const OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25;
 const FLAG_HISTORY_RETENTION_DAYS = 90;
@@ -136,34 +158,129 @@ export function parseSnapshot(text) {
   return [];
 }
 
-// --- Discovery fetch (mirrors runOverpassSync's retry orchestration) --------
-// The two Overpass queries never overlap (overpass-api.de allows 2 slots/IP);
-// each gets a single delayed retry. namedRows null after retry => abort with no
-// output (never emit a partial that could drive reconciliation deletes).
-// parkBeaches null after retry => degrade to a named-only run (no park_name
-// updates, no reconciliation), exactly like the Worker.
-async function runDiscovery(retryMs) {
-  let namedRows = await fetchBeaches(PILOT_BBOX);
-  if (namedRows === null) {
-    log("fetchBeaches returned null, retrying once after " + String(retryMs) + "ms");
-    await sleep(retryMs);
-    namedRows = await fetchBeaches(PILOT_BBOX);
-    if (namedRows === null) {
-      throw new Error("fetchBeaches retry also returned null — aborting, no SQL emitted");
+// --- Bbox tiling ------------------------------------------------------------
+// Pure; exported for tests. Splits a bbox into a grid of sub-boxes each at most
+// maxSpanDeg on a side, then expands every tile by overlapDeg on all four edges
+// (clamped back inside the original bbox) so an element straddling a tile
+// boundary is captured whole in at least one tile. Column/row counts come from
+// ceil(span / maxSpanDeg), so the base tiles are evenly sized and always tile
+// the whole bbox with no gaps. A zero-area or sub-span bbox returns a single tile
+// equal to the input.
+export function tileBbox(bbox, maxSpanDeg, overlapDeg) {
+  const span = maxSpanDeg > 0 ? maxSpanDeg : 1;
+  const ov = overlapDeg > 0 ? overlapDeg : 0;
+  const lonSpan = bbox.maxLon - bbox.minLon;
+  const latSpan = bbox.maxLat - bbox.minLat;
+  const cols = Math.max(1, Math.ceil(lonSpan / span));
+  const rows = Math.max(1, Math.ceil(latSpan / span));
+  const lonStep = lonSpan / cols;
+  const latStep = latSpan / rows;
+  const tiles = [];
+  for (let r = 0; r < rows; r = r + 1) {
+    for (let c = 0; c < cols; c = c + 1) {
+      // Anchor interior edges on the step grid; snap the last column/row to the
+      // original max so floating-point drift can never leave a sliver uncovered.
+      const baseMinLon = bbox.minLon + c * lonStep;
+      const baseMinLat = bbox.minLat + r * latStep;
+      const baseMaxLon = c === cols - 1 ? bbox.maxLon : baseMinLon + lonStep;
+      const baseMaxLat = r === rows - 1 ? bbox.maxLat : baseMinLat + latStep;
+      tiles.push({
+        minLon: Math.max(bbox.minLon, baseMinLon - ov),
+        minLat: Math.max(bbox.minLat, baseMinLat - ov),
+        maxLon: Math.min(bbox.maxLon, baseMaxLon + ov),
+        maxLat: Math.min(bbox.maxLat, baseMaxLat + ov)
+      });
     }
-    log("fetchBeaches retry succeeded");
   }
+  return tiles;
+}
 
-  let parkBeaches = await fetchParkBeaches(PILOT_BBOX);
-  if (parkBeaches === null) {
-    log("fetchParkBeaches returned null, retrying once after " + String(retryMs) + "ms");
-    await sleep(retryMs);
-    parkBeaches = await fetchParkBeaches(PILOT_BBOX);
-    if (parkBeaches === null) {
-      log("fetchParkBeaches retry also returned null — degraded named-only run (no park updates, no reconciliation)");
-    } else {
-      log("fetchParkBeaches retry succeeded");
+// Dedup a list of Overpass beach/park-beach records by their OSM identity. Tiles
+// overlap, so a boundary element legitimately comes back from more than one tile;
+// keep the first-seen copy (the park bbox in `out ... bb` is full geometry, not
+// clipped to the tile, so the park association is identical across tiles).
+function dedupByOsm(list) {
+  const byKey = new Map();
+  for (const item of list) {
+    const key = item.osmType + "/" + String(item.osmId);
+    if (!byKey.has(key)) {
+      byKey.set(key, item);
     }
+  }
+  return Array.from(byKey.values());
+}
+
+// One tile's fetch with a single delayed retry (mirrors runOverpassSync's per-
+// query retry). Returns the rows, or null when still failed after the retry.
+async function fetchTileWithRetry(fetchFn, tile, label, retryMs) {
+  let rows = await fetchFn(tile);
+  if (rows === null) {
+    log(label + " returned null, retrying once after " + String(retryMs) + "ms");
+    await sleep(retryMs);
+    rows = await fetchFn(tile);
+    if (rows !== null) {
+      log(label + " retry succeeded");
+    }
+  }
+  return rows;
+}
+
+// --- Discovery fetch (mirrors runOverpassSync's retry orchestration) --------
+// Every REGION bbox is tiled (see TILE_MAX_SPAN_DEG) and the tiles concatenated
+// into one flat list; each tile runs the two Overpass queries in turn — they
+// never overlap (overpass-api.de allows 2 slots/IP) — with a single delayed retry
+// apiece and a polite inter-tile gap.
+//   named beaches: all-or-nothing. Any tile still null after its retry aborts the
+//     whole run with no SQL — a partial named set would drive the reconciliation
+//     pass to read the missing tiles' beaches as "gone from OSM" and delete them.
+//   park beaches: any tile still null after its retry degrades the WHOLE run to
+//     named-only (parkBeaches = null: no park_name updates, no reconciliation),
+//     exactly like the single-box Worker path when its park query failed. This
+//     guarantees the delete path never runs against a region whose park query we
+//     could not fetch.
+async function runDiscovery(retryMs) {
+  let tiles = [];
+  for (let i = 0; i < REGIONS.length; i = i + 1) {
+    tiles = tiles.concat(tileBbox(REGIONS[i].bbox, TILE_MAX_SPAN_DEG, TILE_OVERLAP_DEG));
+  }
+  log("discovery: " + String(REGIONS.length) + " region(s) tiled into " +
+    String(tiles.length) + " sub-box(es) (<= " + String(TILE_MAX_SPAN_DEG) + " deg each)");
+
+  const named = [];
+  for (let i = 0; i < tiles.length; i = i + 1) {
+    if (i > 0) {
+      await sleep(OVERPASS_TILE_GAP_MS);
+    }
+    const label = "fetchBeaches tile " + String(i + 1) + "/" + String(tiles.length);
+    const rows = await fetchTileWithRetry(fetchBeaches, tiles[i], label, retryMs);
+    if (rows === null) {
+      throw new Error(label + " returned null after retry — aborting, no SQL emitted");
+    }
+    for (const row of rows) {
+      named.push(row);
+    }
+  }
+  const namedRows = dedupByOsm(named);
+  log("named beaches: " + String(namedRows.length) + " unique across " + String(tiles.length) + " tile(s)");
+
+  const park = [];
+  let parkOk = true;
+  for (let i = 0; i < tiles.length; i = i + 1) {
+    await sleep(OVERPASS_TILE_GAP_MS);
+    const label = "fetchParkBeaches tile " + String(i + 1) + "/" + String(tiles.length);
+    const rows = await fetchTileWithRetry(fetchParkBeaches, tiles[i], label, retryMs);
+    if (rows === null) {
+      log(label + " returned null after retry — degrading to named-only run (no park updates, no reconciliation)");
+      parkOk = false;
+      break;
+    }
+    for (const row of rows) {
+      park.push(row);
+    }
+  }
+  const parkBeaches = parkOk ? dedupByOsm(park) : null;
+  if (parkOk) {
+    log("park beaches: " + String(parkBeaches.length) + " unique across " + String(tiles.length) + " tile(s)");
   }
   return { namedRows: namedRows, parkBeaches: parkBeaches };
 }
@@ -206,9 +323,9 @@ export function syncMetaSql(key, value, nowIso) {
 
 // Stale park-beach reconciliation, replicated from runOverpassSync with the same
 // proportional safety rail. Candidates are UNNAMED-origin park rows (name =
-// park_name) inside PILOT_BBOX from the D1 snapshot; stale = not produced this
-// run. Refuse the whole delete if the stale set exceeds the allowance (a
-// partial/truncated discovery must never mass-delete enriched rows).
+// park_name) inside any REGION (pointInAnyRegion) from the D1 snapshot; stale =
+// not produced this run. Refuse the whole delete if the stale set exceeds the
+// allowance (a partial/truncated discovery must never mass-delete enriched rows).
 export function deleteBeachSql(id) {
   return "DELETE FROM beaches WHERE id = " + sqlStr(id) + ";";
 }
@@ -224,19 +341,18 @@ export function deleteBeachSql(id) {
 // denominator differs, so the batch is at most STRICTER (refuses a delete the
 // Worker would allow). That is the safe direction for a "never mass-delete" rail,
 // so the pre-upsert basis is intentional.
+// NOTE on region scoping: the candidate set is bounded by pointInAnyRegion, so a
+// snapshot row outside every REGION bbox is never a delete candidate. Shrinking a
+// REGION box therefore only ever REMOVES delete candidates (fail-safe: never
+// mass-deletes rows a smaller discovery footprint no longer covers).
 export function reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount) {
   if (producedParkRowCount === 0) {
     log("reconciliation skipped, run produced 0 park-containment rows");
     return [];
   }
-  const inBbox = function (r) {
-    return typeof r.lat === "number" && typeof r.lon === "number" &&
-      r.lat >= PILOT_BBOX.minLat && r.lat <= PILOT_BBOX.maxLat &&
-      r.lon >= PILOT_BBOX.minLon && r.lon <= PILOT_BBOX.maxLon;
-  };
   const candidates = snapshotRows.filter(function (r) {
     return r.park_name !== null && r.park_name !== undefined &&
-      r.name === r.park_name && inBbox(r);
+      r.name === r.park_name && pointInAnyRegion(r.lat, r.lon);
   });
   const stale = candidates.filter(function (r) { return !producedIds.has(r.id); });
   const allowance = Math.max(

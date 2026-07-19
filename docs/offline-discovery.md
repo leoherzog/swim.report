@@ -11,7 +11,7 @@ enrichment.
 ## Why
 
 The in-Worker crons `runOverpassSync` (`47 8 * * *`) and `runWaterClassification`
-(`37 1,7,13,19 * * *`) process a rationed handful of rows per invocation
+(`37 1,7,13,19 * * *`) — now **retired** — processed a rationed handful of rows per invocation
 (`WATER_CLASS_LIMIT = 25`, `WATER_CLASS_DELTA_CAP = 25`) because a Worker
 invocation is bounded (CPU / subrequest / wall-clock caps) and Overpass allows
 only 2 slots per IP. That "N per run → park → drip over days" pattern is a
@@ -50,6 +50,13 @@ the Worker.
 - **`src/discovery.js`** — the extracted pure merge logic, imported by BOTH the
   Worker (`src/index.js`, which re-exports `mergeBeachRows` for tests) and the
   batch script. Its only dependency is `src/geo.js`.
+- **`src/regions.js`** — the discovery region set: `REGIONS` (a curated array of
+  coastal bounding boxes tracing the entire Great Lakes shoreline, US and
+  Canadian) plus the pure predicate `pointInAnyRegion(lat, lon)`. Pure data + one
+  function, no imports, so the Deno batch imports it verbatim like `src/geo.js`.
+  It replaces the old single Michigan `PILOT_BBOX`: `runDiscovery` tiles **every**
+  region, and `reconcileStaleRows` scopes its delete candidates through
+  `pointInAnyRegion` (see below).
 
 The classifier itself is **reused, not authored here**: `classifyQueue()` in the
 script wraps the existing per-beach probe (`fetchWaterClassSignals` +
@@ -61,8 +68,8 @@ NULL/version/attempts gate, SQL emission) stays put.
 
 ## Faithful to the Worker's semantics
 
-The emitted SQL mirrors `runOverpassSync` exactly (`test/discoveryBatch.test.js`
-locks this down):
+The emitted SQL mirrors what the retired `runOverpassSync` cron did
+(`test/discoveryBatch.test.js` locks this down):
 
 - **Enrichment columns are preserved.** The upsert is
   `INSERT … ON CONFLICT(id) DO UPDATE SET name, lat, lon, park_name, …` — it
@@ -71,11 +78,29 @@ locks this down):
 - **Moved-centroid reset.** A re-discovered beach whose centroid moved > ~0.001°
   has its `water_class` reset to re-classify (same `CASE WHEN abs(lat-…)` clause).
 - **Reconciliation is guarded.** Stale unnamed-park rows (`name = park_name`,
-  inside `PILOT_BBOX`, not produced this run) are deleted only when the run
-  produced ≥1 park row and the stale set is within the proportional rail
-  (`max(10, 25% of candidates)`) — a partial/truncated Overpass result never
-  mass-deletes. The Overpass client already treats a truncation `remark` as
-  failure, so a partial result never reaches the script.
+  inside a discovery region per `pointInAnyRegion`, not produced this run) are
+  deleted only when the run produced ≥1 park row and the stale set is within the
+  proportional rail (`max(10, 25% of candidates)`) — a partial/truncated Overpass
+  result never mass-deletes. The Overpass client already treats a truncation
+  `remark` as failure, so a partial result never reaches the script. Scoping the
+  candidate set by `pointInAnyRegion` **fails safe**: shrinking or removing a box
+  only ever drops rows from the delete-candidate set (they are left alone), never
+  adds one, so an over-tight box under-deletes rather than deleting a real,
+  enriched beach.
+- **Tiled discovery queries.** A single named-beach query over even one large
+  region box exceeds Overpass's server-side `[timeout:60]` and comes back a
+  truncated `remark`. `runDiscovery` iterates every box in `REGIONS` and
+  `tileBbox()` splits each into a grid of sub-boxes (≤ `TILE_MAX_SPAN_DEG`,
+  currently 2.0°, with a small edge overlap); each tile runs both queries with the
+  same single-retry-then-fail orchestration. Results are concatenated across all
+  tiles of all regions and deduped by OSM identity (`mergeBeachRows` also keys by
+  id, so the merge is idempotent). The all-or-nothing invariants are preserved
+  per-pass: **any** named tile still null after its retry aborts the whole run
+  with no SQL; **any** park tile still null degrades the whole run to named-only
+  (no reconciliation), so the delete path never runs against a region whose park
+  query failed. This is also the North America expansion rail — appending coastal
+  boxes to `REGIONS` fans out into per-tile queries that each stay under the
+  timeout, with no other code change.
 - **Whole-table classification.** The queue unifies the Worker's whole-table
   `runWaterClassification` with `runOverpassSync`'s synchronous discovery-delta:
   every beach (snapshot ∪ newly discovered, minus reconcile-deletes) where
@@ -115,25 +140,36 @@ Locally (dry run — produce the SQL, don't apply; needs Deno + a snapshot):
 Flags: `--no-classify` (discovery only), `--classify-limit N` (cap per run;
 0 = all), `--classify-delay-ms N` (default 300), `--now <iso>`.
 
+For **local dev**, `npm run seed` is now this same offline batch pointed at the
+local D1: it runs `scripts/discovery-batch.js --out ./.seed.sql --no-classify`
+(discovery only, no snapshot) and applies the delta with
+`wrangler d1 execute swim-report --local --file ./.seed.sql`. `npm run
+seed:classify` runs it without `--no-classify` to also emit `water_class`
+updates. Both replace the old "trigger the discovery cron" seed path, which no
+longer exists in the Worker.
+
 In CI: the workflow runs daily; a manual `workflow_dispatch` lets you choose
 `apply` (false = artifact-only dry run) and a `classify_limit`. Every run uploads
 `discovery-delta.sql` as an artifact for inspection.
 
-## Cutover (do this only after the repo + secret + a verified run exist)
+## Cutover (complete)
 
-Until the offline job is live, **leave the two Worker crons in place** so
-production keeps discovering/classifying. When ready:
+The offline job is now the **sole owner** of beach discovery and water-body
+classification. The two in-Worker triggers were retired:
 
-1. Push this repo to GitHub, set the `CLOUDFLARE_API_TOKEN` secret, and confirm
-   migration 0009 is applied remotely.
-2. Run the workflow manually with `apply: false`, download the artifact, and
-   sanity-check the SQL (row counts, an expected `great_lake` / `inland` mix).
-3. Run it with `apply: true` and confirm D1 updated.
-4. **Only then** remove the two now-redundant triggers from `wrangler.toml`'s
-   `crons` array — `"47 8 * * *"` (discovery) and `"37 1,7,13,19 * * *"` (water
-   classification) — and `npm run deploy`. Leave `runOverpassSync` /
-   `runWaterClassification` defined in `src/index.js` (unscheduled, harmless) so
-   the change is a one-line revert if needed.
+1. ✅ Repo pushed to GitHub, `CLOUDFLARE_API_TOKEN` secret set, migration 0009
+   applied remotely.
+2. ✅ Workflow verified with `apply: false` (artifact sanity-checked for row
+   counts and an expected `great_lake` / `inland` mix), then run with
+   `apply: true` and D1 confirmed updated.
+3. ✅ The two now-redundant triggers were removed from `wrangler.toml`'s `crons`
+   array — `"47 8 * * *"` (discovery) and `"37 1,7,13,19 * * *"` (water
+   classification) — and deployed. `runOverpassSync` / `runWaterClassification`
+   (and `PILOT_BBOX`) are gone from `src/index.js`; the merge logic survives only
+   as `mergeBeachRows` in `src/discovery.js`, imported by both the batch and the
+   tests.
 
-After cutover the Worker's cron path is: hourly recompute, 6-hourly waves, and
-the three enrichment crons. Discovery + classification are the offline job's.
+The Worker's remaining cron path is: hourly flag recompute (`"0 * * * *"`),
+6-hourly wave refresh (`"15 */6 * * *"`), and the NWS/ECCC/webcam enrichment crons
+(`"17 3,9,15,21"`, `"29 4,10,16,22"`, `"31 9"`). Discovery + classification are
+the offline job's alone.
