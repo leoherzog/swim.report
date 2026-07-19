@@ -84,9 +84,16 @@ jobs:
         # truncated snapshot (D1's --json response is size-capped) by comparing
         # the row count to SELECT COUNT(*).
         run: |
-          npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
+          # --json writes API errors (bad token, missing DB) to STDOUT, so a
+          # naive `> snapshot.json` swallows them and the step fails with a blank
+          # log. Capture the exit code and surface the file on failure.
+          if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
             --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
-            > snapshot.json
+            > snapshot.json; then
+            echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
+            cat snapshot.json
+            exit 1
+          fi
           echo "snapshot bytes: $(wc -c < snapshot.json)"
           total=$(npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
             --command "SELECT COUNT(*) AS n FROM beaches" \
@@ -119,4 +126,7 @@ jobs:
       - name: Apply SQL to production D1
         if: ${{ env.APPLY == 'true' }}
         run: |
-          npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file discovery-delta.sql
+          if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file discovery-delta.sql; then
+            echo "::error::wrangler apply failed (check CLOUDFLARE_API_TOKEN secret and delta SQL)"
+            exit 1
+          fi
