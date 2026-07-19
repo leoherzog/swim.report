@@ -20,7 +20,8 @@ import {
   classifyUpdateSql,
   bumpAttemptsSql,
   buildClassifyQueue,
-  tileBbox
+  tileBbox,
+  backoffDelayMs
 } from "../scripts/discovery-batch.js";
 import { WATER_CLASS_VERSION, WATER_CLASS_MAX_ATTEMPTS } from "../src/waterClass.js";
 
@@ -68,8 +69,38 @@ describe("parseArgs", function () {
     expect(a.classify).toBe(false);
     expect(a.classifyLimit).toBe(50);
   });
+  it("defaults discovery on; --no-discovery turns it off (classify-only mode)", function () {
+    expect(parseArgs([]).discovery).toBe(true);
+    const a = parseArgs(["--no-discovery", "--classify-limit", "150"]);
+    expect(a.discovery).toBe(false);
+    expect(a.classify).toBe(true);
+    expect(a.classifyLimit).toBe(150);
+  });
   it("throws on unknown argument", function () {
     expect(function () { return parseArgs(["--nope"]); }).toThrow();
+  });
+});
+
+describe("backoffDelayMs", function () {
+  // rand injected so the jitter is deterministic. rand()=0.5 -> jitter factor 0.
+  const noJitter = function () { return 0.5; };
+  it("is exponential in the retry number (base * 2^(retry-1)) with no jitter", function () {
+    expect(backoffDelayMs(1, 30000, 120000, noJitter)).toBe(30000);
+    expect(backoffDelayMs(2, 30000, 120000, noJitter)).toBe(60000);
+    expect(backoffDelayMs(3, 30000, 120000, noJitter)).toBe(120000);
+  });
+  it("caps the base delay at maxMs before jitter", function () {
+    // retry 5 -> 30000*16=480000 capped to 120000.
+    expect(backoffDelayMs(5, 30000, 120000, noJitter)).toBe(120000);
+  });
+  it("applies at most +/-20% jitter around the capped value", function () {
+    const lo = backoffDelayMs(2, 30000, 120000, function () { return 0; });   // -20%
+    const hi = backoffDelayMs(2, 30000, 120000, function () { return 1; });   // +20%
+    expect(lo).toBeCloseTo(48000, 5);   // 60000 * 0.8
+    expect(hi).toBeCloseTo(72000, 5);   // 60000 * 1.2
+  });
+  it("never returns negative", function () {
+    expect(backoffDelayMs(1, 0, 0, function () { return 0; })).toBe(0);
   });
 });
 

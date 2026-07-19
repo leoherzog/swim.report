@@ -1,0 +1,124 @@
+name: Water-body classification
+
+# Offline replacement for the retired in-Worker runWaterClassification
+# ("37 1,7,13,19 * * *") cron. Runs the classify-only half of
+# scripts/discovery-batch.js (--no-discovery --classify-limit N): NO Overpass
+# tiling, NO upserts, NO reconciliation, NO deletes — it reads the current D1
+# snapshot, probes Overpass for the water body next to each beach still needing
+# classification (up to CLASSIFY_LIMIT per run, lowest-attempts-first), and emits
+# ONLY water_class UPDATEs, bulk-loaded into production D1.
+#
+# WHY SEPARATE FROM discovery.yml: classification is hundreds of SEQUENTIAL
+# per-beach Overpass probes — the pipeline's long pole. Running it in its own
+# workflow with a bounded per-run limit lets it drain the queue over many short
+# runs on its own cadence, so it can never starve or blow the time budget of the
+# fast, delete-bearing discovery pass. A per-beach probe failure is non-fatal
+# (the row just stays queued for the next run), so this workflow has no
+# all-or-nothing abort. See docs/offline-discovery.md.
+#
+# Requires the same CLOUDFLARE_API_TOKEN repository secret as discovery.yml, and
+# likewise never runs `npm install` (npx --yes wrangler@<pin> only).
+
+on:
+  # 4x daily, offset from discovery.yml (47 8) and the Worker's own crons. Drains
+  # CLASSIFY_LIMIT beaches per run; repeat runs work through the backlog.
+  schedule:
+    - cron: "23 2,8,14,20 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply the generated SQL to production D1 (false = dry run, artifact only)"
+        type: boolean
+        default: true
+      classify_limit:
+        description: "Max beaches to (re)classify this run (0 = all eligible)"
+        type: string
+        default: "150"
+
+concurrency:
+  # The D1 write is not safely re-entrant — never let two classify runs overlap.
+  # A distinct group from discovery so classification and discovery CAN run
+  # concurrently (they touch disjoint columns: discovery writes name/lat/lon/
+  # park_name + deletes; classify writes only water_class*).
+  group: classify
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
+      DB_NAME: swim-report
+      WRANGLER_VERSION: "4"
+      APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
+      # Scheduled runs drain 150/run; manual runs can override (0 = all eligible).
+      CLASSIFY_LIMIT: ${{ github.event_name == 'schedule' && '150' || inputs.classify_limit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Set up Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # No npm install (see discovery.yml) — every wrangler call is npx --yes wrangler@<pin>.
+
+      - name: Snapshot current beaches from D1
+        # Read-only. Classification reads water_class/version/attempts to build its
+        # queue; the same SELECT + truncation guard as discovery.yml is used.
+        run: |
+          if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
+            --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
+            > snapshot.json; then
+            echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
+            cat snapshot.json
+            exit 1
+          fi
+          echo "snapshot bytes: $(wc -c < snapshot.json)"
+          total=$(npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
+            --command "SELECT COUNT(*) AS n FROM beaches" \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r[0].results[0].n)})")
+          snap=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < snapshot.json)
+          echo "snapshot rows: $snap / db rows: $total"
+          if [ "$snap" != "$total" ]; then
+            echo "::error::snapshot truncated ($snap of $total rows) — aborting so classification never runs on a partial table"
+            exit 1
+          fi
+
+      - name: Run classification (emit SQL)
+        run: |
+          deno run --allow-net --allow-read --allow-write \
+            scripts/discovery-batch.js \
+            --snapshot snapshot.json \
+            --out classify-delta.sql \
+            --no-discovery \
+            --classify-limit "${CLASSIFY_LIMIT:-150}"
+          echo "---- delta summary ----"
+          grep -c ';' classify-delta.sql | xargs echo "statements:"
+          head -n 20 classify-delta.sql
+
+      - name: Upload SQL delta artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: classify-delta-sql
+          path: classify-delta.sql
+          retention-days: 14
+
+      - name: Apply SQL to production D1
+        if: ${{ env.APPLY == 'true' }}
+        run: |
+          if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file classify-delta.sql; then
+            echo "::error::wrangler apply failed (check CLOUDFLARE_API_TOKEN secret and delta SQL)"
+            exit 1
+          fi

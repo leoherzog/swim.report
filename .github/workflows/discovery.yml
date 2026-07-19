@@ -1,10 +1,16 @@
-name: Beach discovery + water classification
+name: Beach discovery
 
-# Offline replacement for the in-Worker runOverpassSync (47 8 * * *) and
-# runWaterClassification (37 1,7,13,19 * * *) crons. Runs the SAME discovery +
-# classification code (scripts/discovery-batch.js imports it verbatim from src/),
-# emits one idempotent .sql delta, and bulk-loads it into production D1 with
-# `wrangler d1 execute --remote --file`. See docs/offline-discovery.md.
+# Offline replacement for the retired in-Worker runOverpassSync ("47 8 * * *")
+# cron. Runs the discovery half of scripts/discovery-batch.js (--no-classify):
+# Overpass tiling over the src/regions.js coastal region set -> beach upserts +
+# stale-row reconciliation (the ONLY delete path) + flag_history retention +
+# sync_meta, emitted as one idempotent .sql delta and bulk-loaded into production
+# D1 with `wrangler d1 execute --remote --file`.
+#
+# Water-body CLASSIFICATION is a SEPARATE workflow (classify.yml, --no-discovery):
+# it runs more often, drains the queue N beaches per run, and emits only
+# water_class UPDATEs — so a slow classify pass can never starve or blow the
+# time budget of this fast, delete-bearing discovery pass. See docs/offline-discovery.md.
 #
 # Requires one repository secret:
 #   CLOUDFLARE_API_TOKEN  — value = the CLOUDFLARE_TOKEN in .dev.vars (a token
@@ -17,21 +23,18 @@ name: Beach discovery + water classification
 
 on:
   # Daily, offset from the old in-Worker discovery cron's 08:47 UTC slot. GitHub
-  # cron is UTC and best-effort (can lag several minutes under load).
+  # cron is UTC and best-effort (can lag several minutes under load). A run that
+  # fails through a sustained Overpass outage simply defers to the next day; the
+  # per-tile backoff retries (scripts/discovery-batch.js) ride out short bursts.
   schedule:
     - cron: "47 8 * * *"
-  # Manual runs: choose whether to apply to D1 or just produce the .sql artifact,
-  # and cap classification for a quick incremental pass.
+  # Manual runs: choose whether to apply to D1 or just produce the .sql artifact.
   workflow_dispatch:
     inputs:
       apply:
         description: "Apply the generated SQL to production D1 (false = dry run, artifact only)"
         type: boolean
         default: true
-      classify_limit:
-        description: "Max beaches to (re)classify this run (0 = all eligible)"
-        type: string
-        default: "0"
 
 concurrency:
   # Overpass allows 2 slots per IP and the D1 write is not safely re-entrant —
@@ -45,7 +48,10 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 120 (not 90): the per-tile exponential-backoff retries added to ride out
+    # public-Overpass 504 bursts can extend a flaky run; a fast run still finishes
+    # in minutes. Classification (the former long pole) now lives in classify.yml.
+    timeout-minutes: 120
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       # A minimal D1-only API token can't enumerate GET /accounts to auto-discover
@@ -59,7 +65,6 @@ jobs:
       WRANGLER_VERSION: "4"
       # workflow_dispatch inputs are absent on scheduled runs — default there.
       APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
-      CLASSIFY_LIMIT: ${{ github.event_name == 'schedule' && '0' || inputs.classify_limit }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,17 +110,17 @@ jobs:
           snap=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < snapshot.json)
           echo "snapshot rows: $snap / db rows: $total"
           if [ "$snap" != "$total" ]; then
-            echo "::error::snapshot truncated ($snap of $total rows) — aborting so reconciliation/classification never run on a partial table"
+            echo "::error::snapshot truncated ($snap of $total rows) — aborting so reconciliation never runs on a partial table"
             exit 1
           fi
 
-      - name: Run discovery + classification (emit SQL)
+      - name: Run discovery (emit SQL)
         run: |
           deno run --allow-net --allow-read --allow-write \
             scripts/discovery-batch.js \
             --snapshot snapshot.json \
             --out discovery-delta.sql \
-            --classify-limit "${CLASSIFY_LIMIT:-0}"
+            --no-classify
           echo "---- delta summary ----"
           grep -c ';' discovery-delta.sql | xargs echo "statements:"
           head -n 20 discovery-delta.sql

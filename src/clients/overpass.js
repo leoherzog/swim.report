@@ -20,13 +20,24 @@ export const OVERPASS_MIRRORS = [
   "https://overpass.private.coffee/api/interpreter"
 ];
 
-// Per-mirror transport-layer timeout. The queries carry their own server-side
-// [timeout:60]/[timeout:180], so a working-but-slow query returns well within
-// this; the client cap only exists to cut a mirror that hangs at the TCP layer
-// (no response at all) so failover to the next mirror stays snappy instead of
-// blocking an unattended run. Set above the largest server-side timeout (180 s)
-// plus headroom.
+// Per-mirror transport-layer (AbortController) timeout — the DEFAULT cap, used by
+// the park and water-class queries. The queries carry their own server-side
+// [timeout:N], so a working-but-slow query returns well within this; the client
+// cap only exists to cut a mirror that hangs at the TCP layer (no response at
+// all) so failover to the next mirror stays snappy instead of blocking an
+// unattended run. MUST sit above the largest server-side timeout (park's 180 s)
+// PLUS queue-wait/transfer headroom — never equal to it, or a valid slow/queued
+// query gets aborted mid-flight.
 export const OVERPASS_MIRROR_TIMEOUT_MS = 240000;
+
+// Tighter transport cap for the NAMED beach query. Its server-side budget is
+// [timeout:90] (below), and empirically a healthy-but-loaded mirror answers a 2°
+// named tile in ~50-70 s while a sick mirror hangs for minutes (observed 226 s on
+// one attempt before a 504). 150 s = 90 s server budget + ~60 s queue/transfer
+// headroom: enough for a valid slow query, but it cuts a dead-hanging mirror
+// ~90 s sooner than the 240 s default so the discovery batch's per-tile retries
+// stay affordable within the GitHub Actions job budget.
+export const OVERPASS_NAMED_TIMEOUT_MS = 150000;
 
 // overpass-api.de rejects requests without a User-Agent with HTTP 406, and
 // Workers' fetch sends none by default.
@@ -38,7 +49,12 @@ function bboxLine(bbox) {
 
 function buildQuery(bbox) {
   const bb = bboxLine(bbox);
-  return "[out:json][timeout:60];\n" +
+  // [timeout:90], not 60: on a loaded public mirror even a small 2° tile runs
+  // right at a 60 s execution budget and gets truncated (observed "timed out
+  // after 62 seconds" on the western-Lake-Superior tile in CI). 90 s gives the
+  // valid-but-slow tile room to finish; the remark guard in runQuery still
+  // rejects anything that breaches 90 s, so no partial set can ever leak.
+  return "[out:json][timeout:90];\n" +
     "(\n" +
     "  nwr[\"natural\"=\"beach\"][\"name\"]" + bb + ";\n" +
     "  nwr[\"leisure\"=\"beach_resort\"][\"name\"]" + bb + ";\n" +
@@ -46,7 +62,10 @@ function buildQuery(bbox) {
     "out center tags;";
 }
 
-async function runQuery(query, label) {
+// timeoutMs is the per-mirror transport cap; defaults to OVERPASS_MIRROR_TIMEOUT_MS
+// (park/water-class), but the named query passes the tighter OVERPASS_NAMED_TIMEOUT_MS.
+async function runQuery(query, label, timeoutMs) {
+  const cap = typeof timeoutMs === "number" ? timeoutMs : OVERPASS_MIRROR_TIMEOUT_MS;
   // Try each mirror in order; the first that returns a usable (non-truncated)
   // body wins. A transport/HTTP failure or a server-side "remark" on one mirror
   // falls through to the next. Only when ALL mirrors fail does runQuery return
@@ -58,7 +77,7 @@ async function runQuery(query, label) {
       headers: { "User-Agent": OVERPASS_USER_AGENT },
       body: new URLSearchParams({ data: query }),
       label: "overpass[" + mirror + "]: " + label,
-      timeoutMs: OVERPASS_MIRROR_TIMEOUT_MS
+      timeoutMs: cap
     });
     if (json === null) {
       // Transport/HTTP failure — already logged by fetchJson; try next mirror.
@@ -88,7 +107,7 @@ async function runQuery(query, label) {
 }
 
 export async function fetchBeaches(bbox) {
-  const elements = await runQuery(buildQuery(bbox), "beaches");
+  const elements = await runQuery(buildQuery(bbox), "beaches", OVERPASS_NAMED_TIMEOUT_MS);
   if (elements === null) {
     return null;
   }

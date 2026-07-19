@@ -41,12 +41,29 @@ the Worker.
   `fetchWaterClassSignals` from `src/clients/overpass.js`; `classifyWaterBody`
   and the version/attempts constants from `src/waterClass.js`), so it can never
   diverge from the Worker. It reads a D1 snapshot, fetches Overpass, classifies,
-  and emits **one idempotent `.sql` delta** (upserts + reconciliation deletes +
-  `flag_history` prune + `sync_meta` + `water_class` updates). It writes no
-  database itself.
-- **`.github/workflows/discovery.yml`** — schedules the job daily (and manual
-  `workflow_dispatch`), snapshots D1, runs the script, uploads the `.sql` as an
-  artifact, and applies it with `wrangler d1 execute --remote --file`.
+  and emits **one idempotent `.sql` delta**. The two halves are selected by flag:
+  `--no-classify` emits the discovery delta (upserts + reconciliation deletes +
+  `flag_history` prune + `sync_meta`), `--no-discovery` emits the classify delta
+  (`water_class` UPDATEs only), and running with neither flag emits both. Passing
+  both `--no-discovery` and `--no-classify` is a guarded error (nothing to do). It
+  writes no database itself.
+- **`.github/workflows/discovery.yml`** — schedules the **discovery** half daily
+  (`47 8 * * *`, plus manual `workflow_dispatch`), snapshots D1, runs the script
+  with `--no-classify` (Overpass tiling → upserts + stale-row reconciliation +
+  `flag_history` retention + `sync_meta`; no `water_class` UPDATEs), uploads the
+  `.sql` as an artifact, and applies it with `wrangler d1 execute --remote
+  --file`. `timeout-minutes: 120`.
+- **`.github/workflows/classify.yml`** — schedules the **water-classification**
+  half 4× daily (`23 2,8,14,20 * * *`, plus `workflow_dispatch`), running the
+  script with `--no-discovery --classify-limit 150` (classify-only: no tiling, no
+  upserts, no reconciliation, no deletes; emits **only** `water_class` UPDATEs,
+  150 per run, draining the NULL/stale queue over repeated runs). It lives in its
+  own workflow — and a distinct concurrency group (`classify`, disjoint from
+  discovery's) so the two can run concurrently — because classification is
+  hundreds of **sequential** per-beach Overpass probes, the pipeline's long pole:
+  bundled into discovery it threatened the job's time budget and coupled its
+  flakiness to discovery. A single per-beach probe failure is non-fatal (the row
+  stays queued for the next run), so classify has no all-or-nothing abort.
 - **`src/discovery.js`** — the extracted pure merge logic, imported by BOTH the
   Worker (`src/index.js`, which re-exports `mergeBeachRows` for tests) and the
   batch script. Its only dependency is `src/geo.js`.
@@ -88,19 +105,34 @@ The emitted SQL mirrors what the retired `runOverpassSync` cron did
   adds one, so an over-tight box under-deletes rather than deleting a real,
   enriched beach.
 - **Tiled discovery queries.** A single named-beach query over even one large
-  region box exceeds Overpass's server-side `[timeout:60]` and comes back a
-  truncated `remark`. `runDiscovery` iterates every box in `REGIONS` and
-  `tileBbox()` splits each into a grid of sub-boxes (≤ `TILE_MAX_SPAN_DEG`,
-  currently 2.0°, with a small edge overlap); each tile runs both queries with the
-  same single-retry-then-fail orchestration. Results are concatenated across all
-  tiles of all regions and deduped by OSM identity (`mergeBeachRows` also keys by
-  id, so the merge is idempotent). The all-or-nothing invariants are preserved
-  per-pass: **any** named tile still null after its retry aborts the whole run
-  with no SQL; **any** park tile still null degrades the whole run to named-only
-  (no reconciliation), so the delete path never runs against a region whose park
-  query failed. This is also the North America expansion rail — appending coastal
-  boxes to `REGIONS` fans out into per-tile queries that each stay under the
-  timeout, with no other code change.
+  region box exceeds Overpass's server-side timeout and comes back a truncated
+  `remark`. `runDiscovery` iterates every box in `REGIONS` and `tileBbox()` splits
+  each into a grid of sub-boxes (≤ `TILE_MAX_SPAN_DEG`, currently 2.0°, with a
+  small edge overlap); even so a 2° tile needs ~53–67 s to answer even on a healthy
+  mirror, so the named query runs `[timeout:90]` (raised from `[timeout:60]`, which
+  left near-zero margin) under a tighter per-query transport cap
+  `OVERPASS_NAMED_TIMEOUT_MS = 150000` (must exceed the 90 s server budget plus
+  queue/transfer slack; the park and water-class queries keep the 240000 default).
+  Results are concatenated across all tiles of all regions and deduped by OSM
+  identity (`mergeBeachRows` also keys by id, so the merge is idempotent). The
+  all-or-nothing invariants are preserved per-pass: **any** named tile still null
+  after its retries aborts the whole run with no SQL; **any** park tile still null
+  degrades the whole run to named-only (no reconciliation), so the delete path
+  never runs against a region whose park query failed. This is also the North
+  America expansion rail — appending coastal boxes to `REGIONS` fans out into
+  per-tile queries that each stay under the timeout, with no other code change.
+- **Overpass burst resilience.** The public mirrors periodically return HTTP 504
+  overload bursts on both hosts at once. Each per-tile fetch therefore makes
+  `OVERPASS_TILE_ATTEMPTS = 3` bounded exponential-backoff-plus-jitter retries
+  (`backoffDelayMs`, base 30 s, cap 120 s), replacing the old single fixed retry —
+  spreading attempts across several minutes rides out a transient burst, while the
+  cap means a **sustained** outage fails fast and defers to the next scheduled run
+  rather than burning the whole job window. Adding more mirrors was investigated
+  and is **not** safe right now, so the list stays `overpass-api.de` +
+  `private.coffee`: `kumi.systems` shares Private.coffee's backend (false
+  redundancy), and regional instances (e.g. `overpass.osm.ch`) return **empty** for
+  North America — a fast-empty result is dangerous here because it could drive
+  reconciliation deletes.
 - **Whole-table classification.** The queue unifies the Worker's whole-table
   `runWaterClassification` with `runOverpassSync`'s synchronous discovery-delta:
   every beach (snapshot ∪ newly discovered, minus reconcile-deletes) where
@@ -137,8 +169,10 @@ Locally (dry run — produce the SQL, don't apply; needs Deno + a snapshot):
     # inspect discovery-delta.sql, then apply when satisfied:
     npx wrangler d1 execute swim-report --remote --file discovery-delta.sql
 
-Flags: `--no-classify` (discovery only), `--classify-limit N` (cap per run;
-0 = all), `--classify-delay-ms N` (default 300), `--now <iso>`.
+Flags: `--no-classify` (discovery only), `--no-discovery` (classify only; the two
+are mutually exclusive halves and passing both is a guarded error),
+`--classify-limit N` (cap per run; 0 = all), `--classify-delay-ms N`
+(default 300), `--now <iso>`.
 
 For **local dev**, `npm run seed` is now this same offline batch pointed at the
 local D1: it runs `scripts/discovery-batch.js --out ./.seed.sql --no-classify`
@@ -148,9 +182,11 @@ seed:classify` runs it without `--no-classify` to also emit `water_class`
 updates. Both replace the old "trigger the discovery cron" seed path, which no
 longer exists in the Worker.
 
-In CI: the workflow runs daily; a manual `workflow_dispatch` lets you choose
-`apply` (false = artifact-only dry run) and a `classify_limit`. Every run uploads
-`discovery-delta.sql` as an artifact for inspection.
+In CI: `discovery.yml` runs daily and `classify.yml` runs 4× daily (in their own
+concurrency groups, so they may overlap — they touch disjoint columns); each has a
+manual `workflow_dispatch` that lets you choose `apply` (false = artifact-only dry
+run) and a `classify_limit`. Every run uploads `discovery-delta.sql` as an
+artifact for inspection.
 
 ## Cutover (complete)
 

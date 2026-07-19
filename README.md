@@ -425,14 +425,25 @@ adjacent water bodies.
 ### Discovery and classification (offline)
 
 Beach discovery and water-body classification run **outside** the Worker, in an
-offline GitHub Actions batch job (`scripts/discovery-batch.js`, run on Deno via
-`.github/workflows/discovery.yml`). This keeps the two-path invariant — the batch
-writes D1 out-of-band and the request path still reads only D1/KV — while sidestepping
-the Worker's per-invocation subrequest caps that once forced the "N-per-run / drip
-over days" backfill. The batch reuses the discovery/classification code verbatim
+offline GitHub Actions batch job (`scripts/discovery-batch.js`, run on Deno). They
+are split across **two independent workflows** so a slow or failing classification
+run never blocks discovery: `.github/workflows/discovery.yml` runs daily (beach
+discovery + stale-row reconciliation) and `.github/workflows/classify.yml` runs 4×
+daily (water-body classification only, up to 150 beaches/run, draining the
+unclassified queue). This keeps the two-path invariant — the batch writes D1
+out-of-band and the request path still reads only D1/KV — while sidestepping the
+Worker's per-invocation subrequest caps that once forced the "N-per-run / drip over
+days" backfill. The batch reuses the discovery/classification code verbatim
 (`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`), emits one
 idempotent `.sql` delta, and bulk-loads it into D1 with
 `wrangler d1 execute --remote --file`.
+
+Overpass is fetched defensively: the named query carries a 90 s server-side timeout
+and each per-tile fetch retries with bounded exponential backoff + jitter (3
+attempts) to ride out public-Overpass 504 overload bursts. A tile that still fails is
+simply deferred to the next scheduled run rather than aborting the batch. No extra
+mirrors are used — the regional mirrors return empty for North America (unsafe), and
+kumi shares Private.coffee's backend.
 
 **Coverage.** Discovery is scoped to a curated set of coastal bounding boxes in
 `src/regions.js` (`REGIONS`) that trace the entire Great Lakes shoreline — both the
@@ -483,8 +494,9 @@ IDs (see PLAN.md section 8 for the authoritative config).
     npx wrangler tail                                          # live logs
 
 The production database starts empty on a fresh deploy — the offline **GitHub
-Actions** discovery batch (`.github/workflows/discovery.yml` →
-`scripts/discovery-batch.js`) populates and classifies beaches (see [Discovery and
+Actions** batch (`scripts/discovery-batch.js`, split across
+`.github/workflows/discovery.yml` for discovery and `.github/workflows/classify.yml`
+for water-body classification) populates and classifies beaches (see [Discovery and
 classification (offline)](#discovery-and-classification-offline)), then the
 `17 3,9,15,21 * * *` enrichment runs drain the NWS-zone queue (with
 `29 4,10,16,22 * * *` picking up the Canadian rows NWS parks) and the hourly cron

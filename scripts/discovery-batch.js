@@ -54,7 +54,16 @@ import { REGIONS, pointInAnyRegion } from "../src/regions.js";
 // rails below change rarely and stay local. The water-class constants ARE
 // imported from src/waterClass.js (their single source of truth), so they can
 // never drift.
-const OVERPASS_RETRY_DELAY_MS = 60000;
+// Per-tile fetch resilience. Public Overpass mirrors flake in bursts (in CI both
+// mirrors returned HTTP 504 for an ~8-minute window and the run aborted on tile
+// 1/33). One retry lands inside the same burst; OVERPASS_TILE_ATTEMPTS total tries
+// (1 initial + 2 retries) with exponential backoff + jitter spread the attempts
+// across several minutes so the last one usually lands after the burst clears.
+// Attempts are capped (not unbounded) so a SUSTAINED outage fails fast and defers
+// to the next scheduled run rather than grinding the whole 33-tile pass for hours.
+const OVERPASS_TILE_ATTEMPTS = 3;
+const OVERPASS_RETRY_BASE_MS = 30000;   // first retry delay; doubles each retry
+const OVERPASS_RETRY_MAX_MS = 120000;   // cap on any single backoff sleep
 // Overpass query tiling. Each REGION bbox is split into a grid of sub-boxes each
 // at most TILE_MAX_SPAN_DEG on a side. Empirically, named-query EXECUTION is only
 // seconds at <= ~4 deg^2 (a 0.5 deg dense box measured ~1.7s), while the original
@@ -121,6 +130,7 @@ export function parseArgs(argv) {
   const args = {
     snapshot: null,
     out: "discovery-delta.sql",
+    discovery: true,        // --no-discovery => classify-only run (no Overpass tiling, no upserts/reconciliation)
     classify: true,
     classifyLimit: 0,       // 0 = classify the entire eligible queue
     classifyDelayMs: 300,   // polite gap between per-beach Overpass probes
@@ -130,6 +140,7 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === "--snapshot") { args.snapshot = argv[++i]; }
     else if (a === "--out") { args.out = argv[++i]; }
+    else if (a === "--no-discovery") { args.discovery = false; }
     else if (a === "--no-classify") { args.classify = false; }
     else if (a === "--classify-limit") { args.classifyLimit = parseInt(argv[++i], 10) || 0; }
     else if (a === "--classify-delay-ms") { args.classifyDelayMs = parseInt(argv[++i], 10) || 0; }
@@ -210,16 +221,38 @@ function dedupByOsm(list) {
   return Array.from(byKey.values());
 }
 
-// One tile's fetch with a single delayed retry (mirrors runOverpassSync's per-
-// query retry). Returns the rows, or null when still failed after the retry.
-async function fetchTileWithRetry(fetchFn, tile, label, retryMs) {
+// Pure; exported for tests. Backoff delay (ms) before retry number `retry`
+// (1-based: the 1st retry, 2nd retry, ...). Exponential base * 2^(retry-1),
+// capped at maxMs, then ±20% jitter so paced tiles do not resonate with a mirror's
+// recovery cycle. `rand` is injectable (defaults to Math.random) for deterministic
+// tests. Never returns negative.
+export function backoffDelayMs(retry, baseMs, maxMs, rand) {
+  const r = typeof rand === "function" ? rand : Math.random;
+  const raw = baseMs * Math.pow(2, retry - 1);
+  const capped = Math.min(raw, maxMs);
+  const jitter = capped * 0.2 * (r() * 2 - 1); // +/- 20%
+  const delay = capped + jitter;
+  return delay > 0 ? delay : 0;
+}
+
+// One tile's fetch with bounded, backing-off retries. Runs fetchFn up to
+// OVERPASS_TILE_ATTEMPTS times (each call is itself a full 2-mirror failover in
+// the Overpass client); returns the rows on the first success, or null only after
+// every attempt fails. Sleeps backoffDelayMs between attempts. The null contract
+// is unchanged, so every caller's failure handling (the named all-or-nothing
+// abort, the park degrade) is preserved exactly.
+async function fetchTileWithRetry(fetchFn, tile, label) {
   let rows = await fetchFn(tile);
-  if (rows === null) {
-    log(label + " returned null, retrying once after " + String(retryMs) + "ms");
-    await sleep(retryMs);
+  let attempt = 1;
+  while (rows === null && attempt < OVERPASS_TILE_ATTEMPTS) {
+    const delay = backoffDelayMs(attempt, OVERPASS_RETRY_BASE_MS, OVERPASS_RETRY_MAX_MS);
+    log(label + " returned null (attempt " + String(attempt) + "/" + String(OVERPASS_TILE_ATTEMPTS) +
+      "), retrying after " + String(Math.round(delay)) + "ms");
+    await sleep(delay);
     rows = await fetchFn(tile);
+    attempt = attempt + 1;
     if (rows !== null) {
-      log(label + " retry succeeded");
+      log(label + " succeeded on attempt " + String(attempt));
     }
   }
   return rows;
@@ -228,17 +261,17 @@ async function fetchTileWithRetry(fetchFn, tile, label, retryMs) {
 // --- Discovery fetch (mirrors runOverpassSync's retry orchestration) --------
 // Every REGION bbox is tiled (see TILE_MAX_SPAN_DEG) and the tiles concatenated
 // into one flat list; each tile runs the two Overpass queries in turn — they
-// never overlap (overpass-api.de allows 2 slots/IP) — with a single delayed retry
-// apiece and a polite inter-tile gap.
-//   named beaches: all-or-nothing. Any tile still null after its retry aborts the
-//     whole run with no SQL — a partial named set would drive the reconciliation
+// never overlap (overpass-api.de allows 2 slots/IP) — with bounded backing-off
+// retries apiece (fetchTileWithRetry) and a polite inter-tile gap.
+//   named beaches: all-or-nothing. Any tile still null after all retries aborts
+//     the whole run with no SQL — a partial named set would drive the reconciliation
 //     pass to read the missing tiles' beaches as "gone from OSM" and delete them.
-//   park beaches: any tile still null after its retry degrades the WHOLE run to
+//   park beaches: any tile still null after all retries degrades the WHOLE run to
 //     named-only (parkBeaches = null: no park_name updates, no reconciliation),
 //     exactly like the single-box Worker path when its park query failed. This
 //     guarantees the delete path never runs against a region whose park query we
 //     could not fetch.
-async function runDiscovery(retryMs) {
+async function runDiscovery() {
   let tiles = [];
   for (let i = 0; i < REGIONS.length; i = i + 1) {
     tiles = tiles.concat(tileBbox(REGIONS[i].bbox, TILE_MAX_SPAN_DEG, TILE_OVERLAP_DEG));
@@ -252,7 +285,7 @@ async function runDiscovery(retryMs) {
       await sleep(OVERPASS_TILE_GAP_MS);
     }
     const label = "fetchBeaches tile " + String(i + 1) + "/" + String(tiles.length);
-    const rows = await fetchTileWithRetry(fetchBeaches, tiles[i], label, retryMs);
+    const rows = await fetchTileWithRetry(fetchBeaches, tiles[i], label);
     if (rows === null) {
       throw new Error(label + " returned null after retry — aborting, no SQL emitted");
     }
@@ -268,7 +301,7 @@ async function runDiscovery(retryMs) {
   for (let i = 0; i < tiles.length; i = i + 1) {
     await sleep(OVERPASS_TILE_GAP_MS);
     const label = "fetchParkBeaches tile " + String(i + 1) + "/" + String(tiles.length);
-    const rows = await fetchTileWithRetry(fetchParkBeaches, tiles[i], label, retryMs);
+    const rows = await fetchTileWithRetry(fetchParkBeaches, tiles[i], label);
     if (rows === null) {
       log(label + " returned null after retry — degrading to named-only run (no park updates, no reconciliation)");
       parkOk = false;
@@ -524,8 +557,20 @@ async function classifyQueue(queue, limit, delayMs) {
 
 async function main() {
   const args = parseArgs(Deno.args);
+  // The batch runs in one of two modes, split across two GitHub Actions jobs so a
+  // slow classify pass can never starve the fast, delete-bearing discovery pass:
+  //   DISCOVERY  (default, discovery.yml --no-classify): Overpass tiling ->
+  //     upserts + stale-row reconciliation (the ONLY delete path) + retention +
+  //     sync_meta. No classification.
+  //   CLASSIFY-ONLY (classify.yml --no-discovery --classify-limit N): NO Overpass
+  //     tiling, NO upserts, NO reconciliation, NO deletes — emits ONLY water-class
+  //     UPDATEs for snapshot rows still needing classification, N per run.
+  if (!args.discovery && !args.classify) {
+    throw new Error("--no-discovery with --no-classify does nothing — pick at least one mode");
+  }
   const nowIso = args.now || new Date().toISOString();
-  log("start now=" + nowIso + " out=" + args.out + " classify=" + String(args.classify));
+  log("start now=" + nowIso + " out=" + args.out +
+    " discovery=" + String(args.discovery) + " classify=" + String(args.classify));
 
   let snapshotRows = [];
   if (args.snapshot) {
@@ -535,67 +580,75 @@ async function main() {
     log("no --snapshot given: reconciliation deletes and classification-queue skipping will be conservative (treats table as empty)");
   }
 
-  const discovery = await runDiscovery(OVERPASS_RETRY_DELAY_MS);
-  const hasPark = discovery.parkBeaches !== null;
-  const merged = mergeBeachRows(
-    discovery.namedRows,
-    discovery.parkBeaches === null ? [] : discovery.parkBeaches
-  );
-  log("discovery merged rows=" + String(merged.rows.length) +
-    " skipped_unnamed=" + String(merged.skippedUnnamed) + " park_query=" + String(hasPark));
-
-  const producedIds = new Set(merged.rows.map(function (r) { return r.id; }));
-  const producedParkRowCount = merged.rows.filter(function (r) {
-    return r.parkName !== null && r.name === r.parkName;
-  }).length;
-
   const out = [];
   out.push("-- swim.report offline discovery + water-class delta");
   out.push("-- generated: " + nowIso);
-  out.push("-- merged_rows: " + String(merged.rows.length) + ", park_query: " + String(hasPark));
+  out.push("-- mode: discovery=" + String(args.discovery) + " classify=" + String(args.classify));
   out.push("");
 
-  // 1. flag_history retention sweep (moved here from runOverpassSync).
-  const cutoffIso = new Date(Date.parse(nowIso) - FLAG_HISTORY_RETENTION_DAYS * 86400000).toISOString();
-  out.push("-- flag_history retention (" + String(FLAG_HISTORY_RETENTION_DAYS) + " days)");
-  out.push("DELETE FROM flag_history WHERE observed_at < " + sqlStr(cutoffIso) + ";");
-  out.push("");
-
-  // 2. Beach upserts (enrichment columns — nws_zone/eccc_zone/webcam_* — are
-  //    untouched by ON CONFLICT, exactly as the Worker upsert preserves them).
-  out.push("-- beach upserts (" + String(merged.rows.length) + ")");
-  for (const row of merged.rows) {
-    out.push(upsertSql(row, hasPark));
-  }
-  out.push("");
-
-  // 3. Stale park-beach reconciliation (only on a full park run + snapshot).
-  //    deletedIds is derived from the SAME staleRows that produce the DELETEs, so
-  //    the classify-universe exclusion set is exactly the set actually deleted
-  //    (never a superset that could drop a still-present row from classification).
+  // Inputs to the classification queue. In classify-only mode nothing is
+  // discovered or deleted, so the queue is exactly (snapshot rows needing class).
+  let mergedRows = [];
   let deletedIds = new Set();
-  if (hasPark && args.snapshot) {
-    const staleRows = reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount);
-    if (staleRows.length > 0) {
-      out.push("-- stale park-beach reconciliation (" + String(staleRows.length) + ")");
-      for (const r of staleRows) { out.push(deleteBeachSql(r.id)); }
-      out.push("");
+
+  if (args.discovery) {
+    const discovery = await runDiscovery();
+    const hasPark = discovery.parkBeaches !== null;
+    const merged = mergeBeachRows(
+      discovery.namedRows,
+      discovery.parkBeaches === null ? [] : discovery.parkBeaches
+    );
+    mergedRows = merged.rows;
+    log("discovery merged rows=" + String(merged.rows.length) +
+      " skipped_unnamed=" + String(merged.skippedUnnamed) + " park_query=" + String(hasPark));
+
+    const producedIds = new Set(merged.rows.map(function (r) { return r.id; }));
+    const producedParkRowCount = merged.rows.filter(function (r) {
+      return r.parkName !== null && r.name === r.parkName;
+    }).length;
+
+    // 1. flag_history retention sweep (moved here from runOverpassSync).
+    const cutoffIso = new Date(Date.parse(nowIso) - FLAG_HISTORY_RETENTION_DAYS * 86400000).toISOString();
+    out.push("-- flag_history retention (" + String(FLAG_HISTORY_RETENTION_DAYS) + " days)");
+    out.push("DELETE FROM flag_history WHERE observed_at < " + sqlStr(cutoffIso) + ";");
+    out.push("");
+
+    // 2. Beach upserts (enrichment columns — nws_zone/eccc_zone/webcam_* — are
+    //    untouched by ON CONFLICT, exactly as the Worker upsert preserves them).
+    out.push("-- beach upserts (" + String(merged.rows.length) + ")");
+    for (const row of merged.rows) {
+      out.push(upsertSql(row, hasPark));
     }
-    deletedIds = new Set(staleRows.map(function (r) { return r.id; }));
-  } else if (hasPark && !args.snapshot) {
-    log("reconciliation skipped: no snapshot to compare against");
+    out.push("");
+
+    // 3. Stale park-beach reconciliation (only on a full park run + snapshot).
+    //    deletedIds is derived from the SAME staleRows that produce the DELETEs, so
+    //    the classify-universe exclusion set is exactly the set actually deleted
+    //    (never a superset that could drop a still-present row from classification).
+    if (hasPark && args.snapshot) {
+      const staleRows = reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount);
+      if (staleRows.length > 0) {
+        out.push("-- stale park-beach reconciliation (" + String(staleRows.length) + ")");
+        for (const r of staleRows) { out.push(deleteBeachSql(r.id)); }
+        out.push("");
+      }
+      deletedIds = new Set(staleRows.map(function (r) { return r.id; }));
+    } else if (hasPark && !args.snapshot) {
+      log("reconciliation skipped: no snapshot to compare against");
+    }
+
+    // 4. sync_meta bookkeeping.
+    out.push("-- sync_meta");
+    out.push(syncMetaSql("last_overpass_sync", nowIso, nowIso));
+    out.push(syncMetaSql("last_overpass_count", String(merged.rows.length), nowIso));
+    out.push("");
+  } else {
+    log("discovery skipped (--no-discovery): classify-only run — no Overpass tiling, no upserts, no reconciliation, no deletes");
   }
 
-  // 4. sync_meta bookkeeping.
-  out.push("-- sync_meta");
-  out.push(syncMetaSql("last_overpass_sync", nowIso, nowIso));
-  out.push(syncMetaSql("last_overpass_count", String(merged.rows.length), nowIso));
-  out.push("");
-
-  // 5. Water-body classification (the pipeline's slow part; offline it just
-  //    loops, no per-run cap unless --classify-limit).
+  // 5. Water-body classification (the pipeline's slow part; runs as its own job).
   if (args.classify) {
-    const queue = buildClassifyQueue(snapshotRows, merged.rows, deletedIds);
+    const queue = buildClassifyQueue(snapshotRows, mergedRows, deletedIds);
     log("classification queue=" + String(queue.length) +
       (args.classifyLimit > 0 ? " (limit " + String(args.classifyLimit) + ")" : " (all)"));
     const result = await classifyQueue(queue, args.classifyLimit, args.classifyDelayMs);

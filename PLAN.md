@@ -926,8 +926,20 @@ entirely when it is unset.
     export const OVERPASS_MIRRORS = [OVERPASS_URL,
       "https://overpass.private.coffee/api/interpreter"];
     export const OVERPASS_MIRROR_TIMEOUT_MS = 240000;
+    export const OVERPASS_NAMED_TIMEOUT_MS = 150000;
+      // Per-query transport cap for the named-beach query (fetchBeaches): its
+      // server-side budget is only [timeout:90], so a 150 s transport ceiling
+      // trims a hung named query without waiting out the full mirror cap. The
+      // park (fetchParkBeaches) and water-class probes keep the larger
+      // OVERPASS_MIRROR_TIMEOUT_MS because their server-side [timeout:180]
+      // legitimately runs longer.
 
-      // runQuery (internal) tries OVERPASS_MIRRORS IN ORDER: the primary is the
+    // runQuery(query, label, timeoutMs) — internal; the optional third param
+    // is the per-attempt transport timeout passed through to fetchJson's
+    // timeoutMs, DEFAULTING to OVERPASS_MIRROR_TIMEOUT_MS when omitted (park +
+    // water-class callers). fetchBeaches passes OVERPASS_NAMED_TIMEOUT_MS.
+
+      // runQuery tries OVERPASS_MIRRORS IN ORDER: the primary is the
       // official FOSSGIS instance (overpass-api.de; our volume is far under its
       // < 10k queries/day + < 1 GB/day courtesy limit), and when it is
       // overloaded — a transport/HTTP failure OR a server-side [timeout]
@@ -936,17 +948,18 @@ entirely when it is unset.
       // null (the "null == failed fetch" contract callers rely on is unchanged).
       // Mirrors are distinct IPs, so failover never breaches any one instance's
       // 2-slots/IP limit. The VK Maps (Russia-operated) mirror is deliberately
-      // excluded. Each attempt carries a transport-layer timeout
-      // (OVERPASS_MIRROR_TIMEOUT_MS, via fetchJson's opt-in timeoutMs +
-      // AbortController) set above the largest server-side [timeout:180] so a
-      // mirror that hangs at the TCP layer yields to the next instead of
-      // blocking an unattended run; a working-but-slow query is never aborted.
+      // excluded. Each attempt carries a transport-layer timeout (the caller's
+      // timeoutMs — OVERPASS_MIRROR_TIMEOUT_MS by default, OVERPASS_NAMED_TIMEOUT_MS
+      // for the named query — via fetchJson's opt-in timeoutMs + AbortController)
+      // set above that query's server-side [timeout] so a mirror that hangs at
+      // the TCP layer yields to the next instead of blocking an unattended run;
+      // a working-but-slow query is never aborted.
 
     export async function fetchBeaches(bbox)
       // bbox: { minLon, minLat, maxLon, maxLat } (numbers)
       // POST OVERPASS_URL, body "data=" + encodeURIComponent(query) where query is
       // (Overpass bbox order is south,west,north,east):
-      //   [out:json][timeout:60];
+      //   [out:json][timeout:90];
       //   (
       //     nwr["natural"="beach"]["name"](minLat,minLon,maxLat,maxLon);
       //     nwr["leisure"="beach_resort"]["name"](minLat,minLon,maxLat,maxLon);
@@ -1599,20 +1612,40 @@ burn no CPU so the paced run stays inside the scheduled invocation's time budget
 
 NOTE (offline pipeline): CUTOVER COMPLETE. Discovery + water classification now
 run ONLY in the offline GitHub Actions batch job that bulk-loads D1
-(`scripts/discovery-batch.js` on Deno, `.github/workflows/discovery.yml`,
-`docs/offline-discovery.md`) — the in-Worker `47 8 * * *` (runOverpassSync) and
-`37 1,7,13,19 * * *` (runWaterClassification) crons have been RETIRED from
-wrangler.toml and CRON_JOBS. The batch reuses this exact logic verbatim — the
-merge cluster lives in `src/discovery.js`, discovery/classification in
-`src/clients/overpass.js` + `src/waterClass.js`, the region rail in
-`src/regions.js` — and emits the identical upsert / reconciliation /
-`flag_history`-prune / classification SQL, bulk-loaded via
-`wrangler d1 execute --remote --file`. The two-path rule still holds: the batch
-writes D1 out-of-band and the request path reads only D1/KV. Locally, `npm run
-seed` now runs the batch against local D1
+(`scripts/discovery-batch.js` on Deno, `docs/offline-discovery.md`) — the
+in-Worker `47 8 * * *` (runOverpassSync) and `37 1,7,13,19 * * *`
+(runWaterClassification) crons have been RETIRED from wrangler.toml and
+CRON_JOBS. The batch reuses this exact logic verbatim — the merge cluster lives
+in `src/discovery.js`, discovery/classification in `src/clients/overpass.js` +
+`src/waterClass.js`, the region rail in `src/regions.js` — and emits the
+identical upsert / reconciliation / `flag_history`-prune / classification SQL,
+bulk-loaded via `wrangler d1 execute --remote --file`. The two-path rule still
+holds: the batch writes D1 out-of-band and the request path reads only D1/KV.
+
+The batch runs in one of TWO mutually-exclusive modes, selected by flags parsed
+in parseArgs (whose `discovery` field defaults to true), split across TWO
+GitHub Actions workflows so a slow per-beach classify pass never delays the
+daily discovery upserts:
+- DISCOVERY-ONLY (`--no-classify`, `.github/workflows/discovery.yml`, daily
+  `47 8 * * *`, job timeout 120 min): the full runDiscovery() path below —
+  tiling, upserts, stale-row reconciliation, `flag_history` retention prune, and
+  the sync_meta stamps. Emits NO water_class UPDATEs.
+- CLASSIFY-ONLY (`--no-discovery --classify-limit N`, `.github/workflows/classify.yml`,
+  4x daily `23 2,8,14,20 * * *`, concurrency group `classify`): NO tiling, NO
+  upserts, NO reconciliation, NO deletes — it emits ONLY water_class UPDATEs for
+  the snapshot rows still needing classification, up to `--classify-limit N`
+  (the workflow passes 150). The delete-safety invariant is therefore PRESERVED
+  by construction: classify-only mode produces zero deletes and zero upserts
+  (verified), and stale-row reconciliation (with its full park query + the
+  proportional safety rail) still runs ONLY in discovery mode.
+Passing both `--no-classify` and `--no-discovery` (nothing to do) is a guarded
+error. The mode split is purely operational: the D1 schema (section 2) and the KV
+shapes (sections 1, 3) are UNCHANGED, and the request path still reads only D1/KV.
+
+Locally, `npm run seed` runs the batch against local D1 in discovery-only mode
 (`deno run ... scripts/discovery-batch.js --out ./.seed.sql --no-classify` then
 `wrangler d1 execute swim-report --local --file ./.seed.sql`; `npm run
-seed:classify` runs it WITH classification). The description below remains the
+seed:classify` runs the classify-only mode). The description below remains the
 authoritative contract for that batch.
 
 Discovery region — the Great Lakes shoreline, defined as the curated coastal boxes in
@@ -1624,16 +1657,28 @@ of the tiled REGIONS boxes rather than one rectangle.
 Nationwide scale-out (adding Pacific / Gulf / Atlantic coasts) is purely ADDITIVE — append
 boxes to REGIONS (section 5) — and is explicitly a TODO.md item; do NOT attempt it now.
 
+runDiscovery() takes NO arguments (the old runDiscovery(retryMs) retry-delay
+parameter is gone — the delay is now computed per attempt, see below).
+
+    export function backoffDelayMs(retry, baseMs, maxMs, rand)
+      // Pure (rand injectable — defaults to Math.random — so tests are
+      // deterministic). Exponential backoff for the per-tile retry: baseMs *
+      // 2^(retry-1), capped at maxMs, with +/-20% jitter. This is the sleep the
+      // tile retry waits between attempts.
+
 1. namedRows = the concatenation of await fetchBeaches(tile) over every tile (the flat
-   tiled-REGIONS list). Each tile retries ONCE after sleep(60000) (exported sleep(ms)
-   helper wrapping setTimeout in a Promise) on null; if any tile is STILL null after its
-   retry, log and abort the whole run (keep existing data — never let a missing tile read
-   as "gone from OSM" and mass-delete).
+   tiled-REGIONS list). Each tile is fetched via fetchTileWithRetry(fetchFn, tile, label),
+   which retries up to OVERPASS_TILE_ATTEMPTS = 3 times on null, sleeping
+   backoffDelayMs(retry, ...) between attempts (exported sleep(ms) helper wrapping
+   setTimeout in a Promise); if a tile is STILL null after its last attempt, log and abort
+   the whole run (keep existing data — never let a missing tile read as "gone from OSM" and
+   mass-delete). The null contract is unchanged — an exhausted tile is still null.
 2. parkBeaches = the concatenation of await fetchParkBeaches(tile) over every tile; each
-   tile retries ONCE after sleep(60000) on null. If any tile is still null after its retry,
-   log and DEGRADE: continue with named rows only and leave every existing park_name
-   untouched (so the delete path in step 6 never runs against a region whose park query
-   partly failed). Within a tile the two Overpass queries are strictly sequential — the
+   tile is fetched through the same fetchTileWithRetry (up to OVERPASS_TILE_ATTEMPTS
+   attempts with backoffDelayMs). If any tile is still null after its last attempt, log and
+   DEGRADE: continue with named rows only and leave every existing park_name untouched (so
+   the delete path in step 6 never runs against a region whose park query partly failed).
+   Within a tile the two Overpass queries are strictly sequential — the
    fetchParkBeaches pass only begins after fetchBeaches has fully resolved — and tiles run
    one at a time with a polite inter-tile gap, since overpass-api.de allows only 2 slots
    per IP and 429s beyond that.
@@ -1759,20 +1804,26 @@ Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤
 subrequests per run. The stored player URL is only ever dereferenced by the visitor's
 BROWSER on the detail page — never by the request path.
 
-### Water classification (offline batch — formerly runWaterClassification)
+### Water classification (offline batch classify-only mode — formerly runWaterClassification)
 
-Also owned by the offline batch (retired as the in-Worker "37 1,7,13,19 * * *" cron); the
+Owned by the offline batch's CLASSIFY-ONLY mode (retired as the in-Worker
+"37 1,7,13,19 * * *" cron), now its OWN GitHub Actions workflow
+(`.github/workflows/classify.yml`, 4x daily "23 2,8,14,20 * * *", concurrency group
+`classify`, run with `--no-discovery --classify-limit N`) so per-beach Overpass probing
+never delays the daily discovery upserts. This mode does NO tiling, NO upserts, NO
+reconciliation, and NO deletes — it emits ONLY the water_class UPDATEs below. The
 classification decision + allowlist live in src/waterClass.js, unchanged. Constants:
-WATER_CLASS_LIMIT = 25 (N per pass — per-beach Overpass probing is rate-limited on the
-public endpoint, so keep each pass small and polite; the one-time bulk backfill does the
-mass classification, the steady-state pass only drains the trickle plus any
-WATER_CLASS_VERSION re-drain), WATER_CLASS_MAX_ATTEMPTS = 5 (from src/waterClass.js),
-WATER_CLASS_DELTA_CAP = 25 (the synchronous discovery-delta bound below).
+WATER_CLASS_MAX_ATTEMPTS = 5 (from src/waterClass.js). The per-pass row count is set by
+`--classify-limit N` (the classify.yml workflow passes 150) — per-beach Overpass probing
+is rate-limited on the public endpoint, but the pass stays sequential and polite; the
+one-time bulk backfill did the mass classification, the steady-state pass only drains the
+trickle of newly-discovered rows plus any WATER_CLASS_VERSION re-drain.
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
-water_class_attempts ASC, RANDOM() LIMIT 25 (fresh-first then random; re-drain on a
-version bump; skip parked). Per beach SEQUENTIALLY (never overlap Overpass calls —
+water_class_attempts ASC, RANDOM() LIMIT <--classify-limit N> (fresh-first then random;
+re-drain on a version bump; skip parked). Per beach SEQUENTIALLY (never overlap Overpass
+calls —
 respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
 - signals === null (TRANSIENT) → log, continue, NO bump (row stays queued);
 - cls = classifyWaterBody(signals); cls !== null → UPDATE beaches SET water_class = ?,
@@ -1787,11 +1838,11 @@ hidden_inland (water_class = 'inland') — a NULL-hide with no metric is silent 
 loss, so these two counts are the required visibility. RULES_VERSION is UNAFFECTED by
 classification (water_class has its own WATER_CLASS_VERSION).
 
-Synchronous discovery-delta (end of the discovery pass): after the upserts +
-reconciliation, classify up to WATER_CLASS_DELTA_CAP rows matching the same selection,
-sequentially (reusing classifyBeaches — the shared per-beach loop), so newly discovered
-beaches are essentially never left unclassified for a full cycle. Its own try/catch so a
-classification failure never costs the discovery run.
+No in-line classification runs during discovery: the two modes are separate (see the
+offline-pipeline note above), so DISCOVERY-ONLY emits zero water_class UPDATEs and newly
+discovered rows are picked up by the next classify-only workflow run (4x daily). This keeps
+discovery-only's SQL delta purely upserts + reconciliation + the flag_history prune +
+sync_meta, so the delete-safety invariant is confined to the one mode that can delete.
 
 Discovery-upsert centroid-move reset: the discovery ON CONFLICT(id) DO UPDATE (both
 the park and named-only branches) NULLs water_class / water_class_version and zeroes

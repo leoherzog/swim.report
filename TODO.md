@@ -175,11 +175,29 @@ of it is scoped for follow-up work.
   `pointInAnyRegion` from `src/regions.js`, tiles each region at
   `TILE_MAX_SPAN_DEG = 2.0`, scopes reconciliation-delete candidates by
   `pointInAnyRegion` (fail-safe: shrinking a box only removes delete candidates),
-  emits one idempotent `.sql` delta, and `.github/workflows/discovery.yml` applies
-  it with `wrangler d1 execute --remote --file`. This removed the "N per run →
+  emits one idempotent `.sql` delta, and applies it with
+  `wrangler d1 execute --remote --file`. This removed the "N per run →
   park → drip over days" backfill bottleneck. Local `npm run seed` now runs the
   Deno batch against local D1 (`--no-classify`); `npm run seed:classify` runs it
   with classification; `npm run batch:discovery` runs the batch standalone.
+
+- ~~**Split discovery and classification into separate workflows.**~~ DONE — the
+  offline batch is now driven by TWO independent GitHub Actions workflows so a slow
+  or failing classification run never blocks discovery: `.github/workflows/discovery.yml`
+  (daily, beach discovery + reconciliation) and `.github/workflows/classify.yml` (4×
+  daily, water-body classification only, 150 beaches/run draining the unclassified
+  queue). Discovery and classification no longer share a job.
+
+- ~~**Offline discovery failing on public-Overpass 504 timeouts.**~~ MITIGATED — the
+  named Overpass query timeout was raised 60 s → 90 s, and each per-tile fetch now
+  retries with bounded exponential backoff + jitter (3 attempts) to ride out
+  public-Overpass 504 overload bursts; a tile that still fails is deferred to the next
+  scheduled run rather than aborting the batch. No new mirrors were added — regional
+  mirrors return empty for North America (unsafe) and kumi shares Private.coffee's
+  backend. Residual: this is a mitigation, not a cure. The deeper fix for chronic
+  public-Overpass flakiness is a **self-hosted Overpass instance** (or a paid/reliable
+  endpoint) so discovery no longer rides shared public infrastructure; until then
+  backoff retries + next-run deferral are the safety net.
 
 - **Flip the recompute rotation to demand-priority once the table outgrows one run.**
   The request path stamps `beaches.last_viewed` (migration 0007, 2026-07-13; detail
