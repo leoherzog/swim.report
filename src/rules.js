@@ -4,7 +4,7 @@
 // complete FlagEstimate object out. This is the ONLY place in the codebase
 // where a flag color is decided for an estimate.
 
-export const RULES_VERSION = "1.3.0";
+export const RULES_VERSION = "1.4.0";
 
 // Caveat appended to the reason when the cron reports that weather alerts
 // were not checkable for this beach (neither NWS nor ECCC enrichment has
@@ -13,18 +13,71 @@ export const RULES_VERSION = "1.3.0";
 // alert-verified.
 export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
 
+// NWS alerts that SHORT-CIRCUIT the estimate at step 1, in precedence order
+// (first match wins the color and reason). Beach-hazard products, life-threatening
+// severe-weather WARNINGS (tornado, severe thunderstorm), high-wind and
+// lakeshore/coastal-flood WARNINGS, plus the marine WARNINGS (storm/gale/special
+// marine — matched via a beach's marine_zone) — all map to red or double-red, so
+// their top precedence can only raise, never lower, the flag. ORDER MATTERS: the
+// loop takes the first match regardless of color, so every double-red MUST precede
+// every red or a red would shadow it. NWS WATCHES / ADVISORIES are deliberately NOT
+// here: they are yellow and would mask a wave-height red if they short-circuited,
+// so they are floored in separately (NWS_FLOOR_PRECEDENCE / step 6) where they can
+// only upgrade a green/unknown estimate.
 export const ALERT_PRECEDENCE = [
+  // double-red (most severe) — must come first so a later red cannot shadow them
+  "Tornado Warning",
   "High Surf Warning",
+  "Storm Warning",                // marine, sustained >= 48 kt
+  // red
+  "Severe Thunderstorm Warning",
   "Beach Hazards Statement",
   "High Surf Advisory",
-  "Rip Current Statement"
+  "Rip Current Statement",
+  "High Wind Warning",
+  "Gale Warning",                 // marine, 34-47 kt
+  "Special Marine Warning",       // marine, short-fused severe
+  "Lakeshore Flood Warning",
+  "Coastal Flood Warning"
+];
+
+// NWS severe-weather WATCHES and wind/flood/marine ADVISORIES, all mapped to
+// yellow. Applied as a floor at step 6 (raise green/unknown to yellow, never
+// downgrade a higher color), NOT as a step-1 short-circuit — see the
+// ALERT_PRECEDENCE note above. "Floor" names the mechanism (step-6 worst-of),
+// which is what unifies these members, not any single alert subtype.
+export const NWS_FLOOR_PRECEDENCE = [
+  "Tornado Watch",
+  "Severe Thunderstorm Watch",
+  "High Wind Watch",
+  "Wind Advisory",
+  "Lake Wind Advisory",
+  "Small Craft Advisory",         // marine
+  "Lakeshore Flood Advisory",
+  "Coastal Flood Advisory"
 ];
 
 const ALERT_COLOR_MAP = {
+  "Tornado Warning": "double-red",
   "High Surf Warning": "double-red",
+  "Storm Warning": "double-red",
+  "Severe Thunderstorm Warning": "red",
   "Beach Hazards Statement": "red",
   "High Surf Advisory": "red",
-  "Rip Current Statement": "red"
+  "Rip Current Statement": "red",
+  "High Wind Warning": "red",
+  "Gale Warning": "red",
+  "Special Marine Warning": "red",
+  "Lakeshore Flood Warning": "red",
+  "Coastal Flood Warning": "red",
+  "Tornado Watch": "yellow",
+  "Severe Thunderstorm Watch": "yellow",
+  "High Wind Watch": "yellow",
+  "Wind Advisory": "yellow",
+  "Lake Wind Advisory": "yellow",
+  "Small Craft Advisory": "yellow",
+  "Lakeshore Flood Advisory": "yellow",
+  "Coastal Flood Advisory": "yellow"
 };
 
 // Environment and Climate Change Canada issues NO beach-specific hazard
@@ -55,11 +108,12 @@ const ECCC_ALERT_COLOR_MAP = {
   "wind warning": "red"
 };
 
-// The flag color a recognized alert maps to — NWS events (ALERT_PRECEDENCE,
-// Title Case) and ECCC events (ECCC_ALERT_PRECEDENCE, lowercase) share one
-// lookup since the two namespaces can never collide — or null for any other
-// event. Exported so the frontend's hazard lane colors alert bands from the
-// exact same mapping the flag decision uses.
+// The flag color a recognized alert maps to — NWS events (ALERT_PRECEDENCE
+// warnings plus NWS_FLOOR_PRECEDENCE watches/advisories, Title Case) and ECCC
+// events (ECCC_ALERT_PRECEDENCE, lowercase) share one lookup since the two
+// namespaces can never collide — or null for any other event. Exported so the
+// frontend's hazard lane colors alert bands from the exact same mapping the flag
+// decision uses.
 export function alertColorForEvent(eventName) {
   if (Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)) {
     return ALERT_COLOR_MAP[eventName];
@@ -232,12 +286,30 @@ export function estimateFlag(inputs) {
     }
   }
 
+  // Step 6: NWS yellow-alert floor. An active severe-weather WATCH or wind/flood/
+  // marine ADVISORY raises an otherwise green or unknown estimate to yellow, but
+  // NEVER downgrades a higher color already decided by a warning, rip risk, or
+  // wave/wind (worst-of, not strict short-circuit). Kept out of ALERT_PRECEDENCE
+  // precisely so a yellow alert can never mask a wave-height red — the concern
+  // that leaves ECCC watches unmapped, resolved for NWS by flooring instead.
+  if (alerts !== null && (color === "green" || color === "unknown")) {
+    for (let i = 0; i < NWS_FLOOR_PRECEDENCE.length; i++) {
+      const eventName = NWS_FLOOR_PRECEDENCE[i];
+      if (alerts.indexOf(eventName) !== -1) {
+        color = "yellow";
+        reason = "Active NWS alert: " + eventName;
+        trigger = "nws-floor";
+        break;
+      }
+    }
+  }
+
   // Honesty caveat: when alerts were not checkable for this beach (neither
   // nws_zone nor eccc_zone resolved yet), say so explicitly so a
   // wave/wind/no-data estimate is never read as "alerts were checked and none
   // were active". Skipped only when an alert itself decided the color
   // (contradictory input — alerts were evidently available).
-  if (alertsCheckable === false && trigger !== "nws-alert" && trigger !== "eccc-alert") {
+  if (alertsCheckable === false && trigger !== "nws-alert" && trigger !== "eccc-alert" && trigger !== "nws-floor") {
     reason = reason + " (" + ALERTS_UNAVAILABLE_CAVEAT + ")";
   }
 

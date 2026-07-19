@@ -25,6 +25,8 @@ function makeBeachRow(overrides) {
     enrichment_attempts: 0,
     eccc_zone: null,
     eccc_attempts: 0,
+    marine_zone: null,
+    marine_attempts: 0,
     recompute_updated: null,
     webcam_id: null,
     webcam_title: null,
@@ -186,6 +188,104 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
       ends: "2026-07-16T06:00:00Z"
     }]);
     expect(estimate.ripCurrentRisk).toBeNull();
+  });
+
+  it("marine-zone alert (Gale Warning) matched via marine_zone -> red, NWS Marine Alerts source", async function () {
+    // The national feed carries a Gale Warning zoned to the MARINE zone LMZ874,
+    // not the beach's land nws_zone. The recompute must match it via marine_zone
+    // and merge it into the estimate.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gov/alerts/active") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              features: [{
+                properties: {
+                  event: "Gale Warning",
+                  onset: "2026-07-15T14:00:00Z",
+                  ends: "2026-07-16T06:00:00Z",
+                  geocode: { UGC: ["LMZ874"] },
+                  affectedZones: ["https://api.weather.gov/zones/marine/LMZ874"]
+                }
+              }]
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-4",
+        name: "Test Beach Delta",
+        nws_zone: "MIZ056",
+        marine_zone: "LMZ874",
+        nws_grid_url: null // no WFO -> SRF skipped
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-4").value);
+    expect(estimate.color).toBe("red");
+    expect(estimate.reason).toBe("Active NWS alert: Gale Warning");
+    expect(estimate.alertDetails).toEqual([{
+      event: "Gale Warning",
+      onset: "2026-07-15T14:00:00Z",
+      ends: "2026-07-16T06:00:00Z"
+    }]);
+    const sourceLabels = estimate.sources.map(function (s) { return s.label; });
+    expect(sourceLabels).toContain("NWS Marine Alerts");
+  });
+
+  it("marine Small Craft Advisory floors a wave green up to yellow via marine_zone", async function () {
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gov/alerts/active") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              features: [{
+                properties: {
+                  event: "Small Craft Advisory",
+                  onset: null,
+                  ends: null,
+                  geocode: { UGC: ["LMZ874"] },
+                  affectedZones: []
+                }
+              }]
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    // Seed a calm wave input (< 2 ft) so steps 1-5 land on green; the marine
+    // advisory floor (step 6) must raise it to yellow.
+    const made = makeEnv(
+      [
+        makeBeachRow({
+          id: "osm-node-5",
+          name: "Test Beach Epsilon",
+          nws_zone: "MIZ056",
+          marine_zone: "LMZ874",
+          nws_grid_url: null
+        })
+      ],
+      { "waveinput:osm-node-5": { waveHeightFt: 1.0, model: "ecmwf_wam025" } }
+    );
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-5").value);
+    expect(estimate.color).toBe("yellow");
+    expect(estimate.reason).toBe("Active NWS alert: Small Craft Advisory");
+    expect(estimate.trigger).toBe("nws-floor");
   });
 
   it("Canadian beach (eccc_zone set) with a containing ECCC alert polygon -> ECCC red, no caveat", async function () {

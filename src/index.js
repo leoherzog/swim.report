@@ -11,7 +11,8 @@ import {
   alertsUrlForZone,
   wfoFromGridUrl,
   fetchLatestSrfText,
-  fetchPointMetadata
+  fetchPointMetadata,
+  resolveMarineZone
 } from "./clients/nws.js";
 import {
   fetchActiveEcccAlerts,
@@ -85,6 +86,16 @@ const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // way the NWS cap parks non-US points.
 const ECCC_ENRICHMENT_LIMIT = 50;
 const ECCC_ENRICHMENT_MAX_ATTEMPTS = 5;
+// Marine zone enrichment (own cron, 4x daily): US beaches (nws_zone set) get the
+// adjacent marine forecast zone id via an offshore probe of api.weather.gov.
+// Each beach costs up to 1 + 2*8 = 17 sequential subrequests (point + two 8-way
+// rings, first hit wins — most resolve in far fewer), so the per-run limit is
+// kept low to stay well under the Workers subrequest cap; the queue drains once
+// and marine alerts are a BONUS signal (land alerts + waves still flag without
+// it), so a slow drain and a low attempts cap that parks probe-less inland
+// points are both fine.
+const MARINE_ENRICHMENT_LIMIT = 20;
+const MARINE_ENRICHMENT_MAX_ATTEMPTS = 5;
 // Webcam hydration (daily webcam cron): nearest Windy webcam player per
 // beach. Webcams appear and disappear slowly, so rows are rechecked on a
 // 14-day cadence; 100 lookups per night drains the pilot backlog in a few
@@ -239,17 +250,22 @@ async function runFlagRecompute(env) {
     ).all();
     const beaches = beachesResult.results || [];
 
-    // Step 3: alerts — ONE national fetch, matched to the run's distinct
-    // nws_zone values locally (nwsAlertsForZone). Costs a single subrequest
-    // regardless of zone count, so nationwide scale-out never multiplies
-    // alert calls. A failed fetch maps every zone to null (per-beach
-    // alertsCheckable stays true, mirroring the old per-zone failure mode).
-    // Each zone's entry keeps the zone-scoped provenance URL for its beaches'
-    // source entries.
+    // Step 3: alerts — ONE national fetch, matched to the run's distinct zone
+    // ids locally (nwsAlertsForZone). Costs a single subrequest regardless of
+    // zone count, so nationwide scale-out never multiplies alert calls. A failed
+    // fetch maps every zone to null (per-beach alertsCheckable stays true,
+    // mirroring the old per-zone failure mode). Each zone's entry keeps the
+    // zone-scoped provenance URL for its beaches' source entries.
+    //
+    // Both a beach's land forecast zone (nws_zone, e.g. "MIZ056") and its
+    // adjacent marine zone (marine_zone, e.g. "LMZ874") go through the SAME map:
+    // marine warnings (Gale/Storm/Special Marine) and Small Craft Advisory are
+    // zoned to the marine zone, not the land one, but they ride the same national
+    // feed and the two id namespaces (MIZ.. vs LMZ..) can never collide.
     const zones = Array.from(
       new Set(
         beaches
-          .map(function (b) { return b.nws_zone; })
+          .reduce(function (acc, b) { return acc.concat([b.nws_zone, b.marine_zone]); }, [])
           .filter(function (z) { return z !== null && z !== undefined; })
       )
     );
@@ -351,15 +367,23 @@ async function runFlagRecompute(env) {
 
         let alerts = null;
         let alertDetails = null;
-        if (beach.nws_zone) {
-          const alertEntry = alertsMap.get(beach.nws_zone);
-          if (alertEntry) {
-            alerts = alertEntry.events;
-            alertDetails = alertEntry.details;
-            sources.push({
-              label: "NWS Alerts",
-              url: alertEntry.sourceUrl
-            });
+        const landEntry = beach.nws_zone ? alertsMap.get(beach.nws_zone) : null;
+        const marineEntry = beach.marine_zone ? alertsMap.get(beach.marine_zone) : null;
+        if (landEntry || marineEntry) {
+          // US beach: land forecast-zone alerts plus adjacent marine-zone alerts
+          // (Gale/Storm/Special Marine/Small Craft), both matched from the ONE
+          // national NWS fetch. concat leaves alerts null only when BOTH entries
+          // are absent — a failed fetch (null map entry) or an unenriched zone —
+          // so a real failure keeps alertsCheckable true with no false caveat. No
+          // dedup: alerts is read only via indexOf, and estimateFlag/the hazard
+          // lane already tolerate repeated events.
+          alerts = (landEntry ? landEntry.events : []).concat(marineEntry ? marineEntry.events : []);
+          alertDetails = (landEntry ? landEntry.details : []).concat(marineEntry ? marineEntry.details : []);
+          if (landEntry) {
+            sources.push({ label: "NWS Alerts", url: landEntry.sourceUrl });
+          }
+          if (marineEntry) {
+            sources.push({ label: "NWS Marine Alerts", url: marineEntry.sourceUrl });
           }
         } else if (beach.eccc_zone && ecccAlerts !== null) {
           // Canadian beach: match the run's single ECCC fetch to this point
@@ -427,7 +451,7 @@ async function runFlagRecompute(env) {
           beachId: beach.id,
           alerts: alerts,
           alertDetails: alertDetails,
-          alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false,
+          alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false,
           ripCurrentRisk: ripCurrentRisk,
           waveHeightFt: waveHeightFt,
           windSpeedMph: windSpeedMph,
@@ -946,6 +970,76 @@ async function runEcccEnrichment(env) {
   }
 }
 
+// Marine zone enrichment (own cron, 4x daily, offset from the other enrichment
+// triggers): US beaches (nws_zone set) get their adjacent marine forecast zone
+// id (e.g. "LMZ874") via resolveMarineZone's offshore probe, so the hourly
+// recompute can match NWS marine warnings (Gale/Storm/Special Marine) and Small
+// Craft Advisory for them from the national /alerts/active fetch it already
+// makes. Gated to nws_zone NOT NULL: Canadian marine waters belong to ECCC, not
+// NWS. A definitive "no marine zone nearby" ({ marineZone: null }) AND a
+// transient fetch failure (null) both count an attempt so an inland or
+// probe-resistant point parks at the cap instead of re-probing forever.
+async function bumpMarineAttempts(env, beachId) {
+  try {
+    await env.DB.prepare(
+      "UPDATE beaches SET marine_attempts = marine_attempts + 1 WHERE id = ?1"
+    ).bind(beachId).run();
+  } catch (updateErr) {
+    console.log("index: marine enrichment attempt bump failed for " + beachId + ": " + updateErr.message);
+  }
+}
+
+async function runMarineEnrichment(env) {
+  let enriched = 0;
+  let enrichmentFailures = 0;
+
+  try {
+    const needsEnrichment = await env.DB.prepare(
+      "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NOT NULL AND marine_zone IS NULL " +
+      "AND marine_attempts < " + String(MARINE_ENRICHMENT_MAX_ATTEMPTS) + " AND " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY marine_attempts ASC, RANDOM() LIMIT " +
+      String(MARINE_ENRICHMENT_LIMIT)
+    ).all();
+    const toEnrich = needsEnrichment.results || [];
+    for (const beach of toEnrich) {
+      try {
+        const resolved = await resolveMarineZone(beach.lat, beach.lon);
+        if (resolved !== null && resolved.marineZone !== null) {
+          await env.DB.prepare(
+            "UPDATE beaches SET marine_zone = ?1 WHERE id = ?2"
+          ).bind(resolved.marineZone, beach.id).run();
+          enriched = enriched + 1;
+        } else {
+          // null = the first probe failed to fetch (transient); { marineZone:
+          // null } = probes succeeded but no marine zone is nearby. Both count
+          // an attempt so unresolvable rows eventually park.
+          enrichmentFailures = enrichmentFailures + 1;
+          await bumpMarineAttempts(env, beach.id);
+        }
+      } catch (err) {
+        enrichmentFailures = enrichmentFailures + 1;
+        console.log("index: marine enrichment failed for " + beach.id + ": " + err.message);
+        await bumpMarineAttempts(env, beach.id);
+      }
+    }
+
+    const parkedResult = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM beaches WHERE nws_zone IS NOT NULL AND marine_zone IS NULL " +
+      "AND marine_attempts >= " + String(MARINE_ENRICHMENT_MAX_ATTEMPTS)
+    ).first();
+    const parkedCount = parkedResult ? parkedResult.n : 0;
+
+    console.log(
+      "index: marine enrichment complete, attempted=" + String(toEnrich.length) +
+      " enriched=" + String(enriched) +
+      " failures=" + String(enrichmentFailures) +
+      " parked=" + String(parkedCount)
+    );
+  } catch (err) {
+    console.log("index: marine enrichment failed: " + err.message);
+  }
+}
+
 // Webcam hydration (own cron, daily): for beaches never checked
 // (webcam_checked IS NULL sorts first in SQLite ASC) or last checked over
 // 14 days ago, ask the Windy Webcams API for the nearest active cam and
@@ -1024,6 +1118,7 @@ const CRON_JOBS = {
   "15 */6 * * *": { run: runWaveRefresh, label: "wave refresh" },
   "17 3,9,15,21 * * *": { run: runNwsEnrichment, label: "nws enrichment" },
   "29 4,10,16,22 * * *": { run: runEcccEnrichment, label: "eccc enrichment" },
+  "23 1,7,13,19 * * *": { run: runMarineEnrichment, label: "marine enrichment" },
   "31 9 * * *": { run: runWebcamSync, label: "webcam sync" }
 };
 

@@ -26,6 +26,8 @@ enabled = true
 # 17 3,9,15,21 * * * — NWS point enrichment, 4x daily
 # 29 4,10,16,22 * * * — ECCC zone enrichment, 4x daily (Canadian beaches the
 #                    NWS enrichment permanently parked)
+# 23 1,7,13,19 * * * — NWS marine zone enrichment, 4x daily (US beaches get their
+#                    adjacent marine zone so marine warnings/small-craft match)
 # 31 9 * * *       — daily Windy webcam hydration
 #
 # Beach discovery (Overpass) and water-body classification NO LONGER run in the
@@ -33,7 +35,7 @@ enabled = true
 # (scripts/discovery-batch.js), which emits an idempotent SQL delta bulk-loaded
 # into D1 out-of-band. The request path still reads only D1/KV.
 [triggers]
-crons = ["0 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+crons = ["0 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "23 1,7,13,19 * * *", "31 9 * * *"]
 
 [[d1_databases]]
 binding = "DB"

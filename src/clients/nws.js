@@ -189,6 +189,69 @@ export async function fetchLatestSrfText(wfo) {
   };
 }
 
+// Marine forecast zone ids (e.g. "LMZ874") whose polygon contains a point, as a
+// string array (possibly empty), or null on any fetch/parse failure. Marine
+// polygons cover open water, so a shore point usually returns [] —
+// resolveMarineZone probes offshore to compensate.
+async function fetchMarineZonesAtPoint(lat, lon) {
+  const url = "https://api.weather.gov/zones?type=marine&point=" +
+    lat.toFixed(4) + "," + lon.toFixed(4);
+  const json = await fetchNwsJson(url, "marine zones at " + lat + "," + lon);
+  if (json === null) {
+    return null;
+  }
+  const features = Array.isArray(json.features) ? json.features : [];
+  const zones = [];
+  for (let i = 0; i < features.length; i++) {
+    const props = features[i] && features[i].properties ? features[i].properties : null;
+    if (props && typeof props.id === "string" && props.id.length > 0) {
+      zones.push(props.id);
+    }
+  }
+  return zones;
+}
+
+// Concentric offshore probe offsets (degrees, ~5.5 km and ~11 km latitudinally):
+// a beach point sits on land outside every marine polygon, so we sample the
+// point itself, then rings of 8 compass directions at increasing distance, and
+// take the FIRST marine zone hit — nearest wins because the rings widen outward.
+// Which direction is "offshore" is unknown per beach, so all 8 are tried; land
+// (or across-lake) directions simply return no marine zone.
+const MARINE_PROBE_RINGS_DEG = [0.05, 0.10];
+const MARINE_PROBE_DIRECTIONS = [
+  [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]
+];
+
+// Resolve a beach (lat/lon) to its adjacent NWS marine forecast zone id.
+// Returns:
+//   { marineZone: "LMZ874" }  — a zone was found (at the point or a probe ring)
+//   { marineZone: null }      — probes succeeded but NO marine zone is nearby
+//                               (inland lake) — a definitive "none", so the
+//                               caller parks it rather than re-probing forever
+//   null                      — the FIRST lookup failed to fetch (transient);
+//                               caller counts an attempt and retries next run
+// Never throws (fetchMarineZonesAtPoint upholds the data-or-null contract).
+export async function resolveMarineZone(lat, lon) {
+  const atPoint = await fetchMarineZonesAtPoint(lat, lon);
+  if (atPoint === null) {
+    return null;
+  }
+  if (atPoint.length > 0) {
+    return { marineZone: atPoint[0] };
+  }
+  for (let r = 0; r < MARINE_PROBE_RINGS_DEG.length; r++) {
+    const d = MARINE_PROBE_RINGS_DEG[r];
+    for (let k = 0; k < MARINE_PROBE_DIRECTIONS.length; k++) {
+      const dir = MARINE_PROBE_DIRECTIONS[k];
+      const probed = await fetchMarineZonesAtPoint(lat + dir[0] * d, lon + dir[1] * d);
+      if (probed !== null && probed.length > 0) {
+        return { marineZone: probed[0] };
+      }
+    }
+  }
+  return { marineZone: null };
+}
+
 export async function fetchPointMetadata(lat, lon) {
   const url = "https://api.weather.gov/points/" + lat.toFixed(4) + "," + lon.toFixed(4);
   const json = await fetchNwsJson(url, "points for " + lat + "," + lon);

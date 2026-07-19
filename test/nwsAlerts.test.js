@@ -9,7 +9,8 @@ import {
   NWS_USER_AGENT,
   alertsUrlForZone,
   fetchAllActiveAlerts,
-  nwsAlertsForZone
+  nwsAlertsForZone,
+  resolveMarineZone
 } from "../src/clients/nws.js";
 
 // A single alert feature. overrides.props merge into properties (so an
@@ -198,5 +199,67 @@ describe("alertsUrlForZone", function () {
   it("returns the zone-scoped active-alerts URL", function () {
     expect(alertsUrlForZone("MIZ071"))
       .toBe("https://api.weather.gov/alerts/active?zone=MIZ071");
+  });
+});
+
+describe("resolveMarineZone", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  // Build a marine /zones FeatureCollection with the given zone ids.
+  function marineZones(ids) {
+    return okJson({
+      features: ids.map(function (id) {
+        return { properties: { id: id, name: id + " name" } };
+      })
+    });
+  }
+
+  // Stub fetch so only points matching one of matchPrefixes (a substring of the
+  // "point=lat,lon" query) return a zone; everything else returns empty. Also
+  // records every requested point= value for probe-count assertions.
+  function stubMarine(matchSubstr, zoneId, requested) {
+    vi.stubGlobal("fetch", function (url) {
+      if (requested) {
+        requested.push(url);
+      }
+      if (matchSubstr !== null && url.indexOf(matchSubstr) !== -1) {
+        return marineZones([zoneId]);
+      }
+      return marineZones([]);
+    });
+  }
+
+  it("returns the zone at the exact point without probing when present", async function () {
+    const requested = [];
+    // The un-nudged point is lat.toFixed(4),lon.toFixed(4) = 42.7750,-86.2110.
+    stubMarine("point=42.7750,-86.2110", "LMZ844", requested);
+    const result = await resolveMarineZone(42.775, -86.211);
+    expect(result).toEqual({ marineZone: "LMZ844" });
+    expect(requested.length).toBe(1); // no offshore probe needed
+  });
+
+  it("finds the zone via an offshore probe when the shore point is empty", async function () {
+    const requested = [];
+    // Only the first ring, west direction (lon - 0.10 -> -86.3110) has a zone.
+    stubMarine("point=42.7750,-86.3110", "LMZ874", requested);
+    const result = await resolveMarineZone(42.775, -86.211);
+    expect(result).toEqual({ marineZone: "LMZ874" });
+    expect(requested.length).toBeGreaterThan(1); // probed offshore
+  });
+
+  it("returns { marineZone: null } when no probe finds a marine zone", async function () {
+    stubMarine(null, null, null); // every point returns empty
+    const result = await resolveMarineZone(45.0, -84.0);
+    expect(result).toEqual({ marineZone: null });
+  });
+
+  it("returns null when the first lookup fails to fetch (transient)", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 500, json: function () { return Promise.resolve({}); } });
+    });
+    const result = await resolveMarineZone(42.775, -86.211);
+    expect(result).toBeNull();
   });
 });

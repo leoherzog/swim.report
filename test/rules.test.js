@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   RULES_VERSION,
   ALERT_PRECEDENCE,
+  NWS_FLOOR_PRECEDENCE,
   ECCC_ALERT_PRECEDENCE,
   ALERTS_UNAVAILABLE_CAVEAT,
   waveColorForHeight,
@@ -35,11 +36,50 @@ function baseInputs(overrides) {
 describe("ALERT_PRECEDENCE", function () {
   it("lists alerts in the documented precedence order", function () {
     expect(ALERT_PRECEDENCE).toEqual([
+      "Tornado Warning",
       "High Surf Warning",
+      "Storm Warning",
+      "Severe Thunderstorm Warning",
       "Beach Hazards Statement",
       "High Surf Advisory",
-      "Rip Current Statement"
+      "Rip Current Statement",
+      "High Wind Warning",
+      "Gale Warning",
+      "Special Marine Warning",
+      "Lakeshore Flood Warning",
+      "Coastal Flood Warning"
     ]);
+  });
+
+  it("lists every double-red before every red (first-match loop must not shadow a double-red)", function () {
+    const firstRed = ALERT_PRECEDENCE.findIndex(function (e) {
+      return alertColorForEvent(e) === "red";
+    });
+    const lastDoubleRed = ALERT_PRECEDENCE.reduce(function (acc, e, i) {
+      return alertColorForEvent(e) === "double-red" ? i : acc;
+    }, -1);
+    expect(lastDoubleRed).toBeLessThan(firstRed);
+  });
+});
+
+describe("NWS_FLOOR_PRECEDENCE", function () {
+  it("lists NWS yellow watches/advisories in the documented order", function () {
+    expect(NWS_FLOOR_PRECEDENCE).toEqual([
+      "Tornado Watch",
+      "Severe Thunderstorm Watch",
+      "High Wind Watch",
+      "Wind Advisory",
+      "Lake Wind Advisory",
+      "Small Craft Advisory",
+      "Lakeshore Flood Advisory",
+      "Coastal Flood Advisory"
+    ]);
+  });
+
+  it("every NWS_FLOOR_PRECEDENCE event maps to yellow", function () {
+    NWS_FLOOR_PRECEDENCE.forEach(function (e) {
+      expect(alertColorForEvent(e)).toBe("yellow");
+    });
   });
 });
 
@@ -78,11 +118,195 @@ describe("estimateFlag - alerts (step 1)", function () {
 
   it("6. unknown alert event is ignored, falls through to waves", function () {
     const result = estimateFlag(baseInputs({
-      alerts: ["Tornado Warning"],
+      alerts: ["Winter Storm Warning"],
       waveHeightFt: 1.0
     }));
     expect(result.color).toBe("green");
     expect(result.reason).toBe("Estimated wave height 1.0 ft (below 2 ft)");
+  });
+
+  it("7. Tornado Warning -> double-red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Tornado Warning"] }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Tornado Warning");
+  });
+
+  it("8. Severe Thunderstorm Warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Severe Thunderstorm Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Severe Thunderstorm Warning");
+  });
+
+  it("9. Tornado Warning wins over a lower simultaneous NWS alert", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Rip Current Statement", "Tornado Warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.reason).toBe("Active NWS alert: Tornado Warning");
+  });
+
+  it("10. a severe-weather WARNING is not downgraded by a wave green", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Severe Thunderstorm Warning"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active NWS alert: Severe Thunderstorm Warning");
+  });
+
+  it("11. High Wind Warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["High Wind Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: High Wind Warning");
+  });
+
+  it("12. Lakeshore Flood Warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Lakeshore Flood Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active NWS alert: Lakeshore Flood Warning");
+  });
+
+  it("13. Coastal Flood Warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Coastal Flood Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active NWS alert: Coastal Flood Warning");
+  });
+
+  it("14. marine Gale Warning -> red, Special Marine Warning -> red", function () {
+    expect(estimateFlag(baseInputs({ alerts: ["Gale Warning"] })).color).toBe("red");
+    expect(estimateFlag(baseInputs({ alerts: ["Special Marine Warning"] })).color).toBe("red");
+  });
+
+  it("15. marine Storm Warning -> double-red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Storm Warning"] }));
+    expect(result.color).toBe("double-red");
+    expect(result.reason).toBe("Active NWS alert: Storm Warning");
+  });
+
+  it("16. a double-red Storm Warning is NOT shadowed by a co-active red", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Rip Current Statement", "Storm Warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.reason).toBe("Active NWS alert: Storm Warning");
+  });
+});
+
+describe("estimateFlag - NWS yellow watch/advisory floor (step 6)", function () {
+  it("Tornado Watch raises a wave green to yellow", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tornado Watch"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Tornado Watch");
+  });
+
+  it("Severe Thunderstorm Watch raises a wave green to yellow", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Severe Thunderstorm Watch"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Severe Thunderstorm Watch");
+  });
+
+  it("Tornado Watch raises an unknown (no data) to yellow", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Tornado Watch"] }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Tornado Watch");
+  });
+
+  it("a watch NEVER downgrades a higher wave-height red", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tornado Watch"],
+      waveHeightFt: 5.0
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.reason).toBe("Estimated wave height 5.0 ft (at or above 4 ft)");
+  });
+
+  it("a watch NEVER downgrades a rip-current red", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tornado Watch"],
+      ripCurrentRisk: "HIGH"
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("rip-current");
+  });
+
+  it("a watch leaves an existing wave yellow unchanged", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tornado Watch"],
+      waveHeightFt: 3.0
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.reason).toBe("Estimated wave height 3.0 ft (at or above 2 ft)");
+  });
+
+  it("a warning still wins outright over a co-active watch", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tornado Watch", "Tornado Warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Tornado Warning");
+  });
+
+  it("a watch-decided color suppresses the alerts-not-checkable caveat", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tornado Watch"],
+      alertsCheckable: false
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.reason).toBe("Active NWS alert: Tornado Watch");
+    expect(result.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+  });
+
+  it("Wind Advisory raises a wave green to yellow", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Wind Advisory"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Wind Advisory");
+  });
+
+  it("each wind/flood/marine advisory floors green -> yellow", function () {
+    ["High Wind Watch", "Lake Wind Advisory", "Small Craft Advisory",
+     "Lakeshore Flood Advisory", "Coastal Flood Advisory"].forEach(function (event) {
+      const result = estimateFlag(baseInputs({ alerts: [event], waveHeightFt: 1.0 }));
+      expect(result.color).toBe("yellow");
+      expect(result.trigger).toBe("nws-floor");
+      expect(result.reason).toBe("Active NWS alert: " + event);
+    });
+  });
+
+  it("an advisory NEVER downgrades a wave-height red", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Wind Advisory"],
+      waveHeightFt: 5.0
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("wave-height");
+  });
+
+  it("a warning wins outright over a co-active advisory", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Wind Advisory", "High Wind Warning"]
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: High Wind Warning");
   });
 });
 
@@ -335,8 +559,8 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
 });
 
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
-  it("bumped RULES_VERSION for the ECCC alerts + caveat-wording change", function () {
-    expect(RULES_VERSION).toBe("1.3.0");
+  it("bumped RULES_VERSION for the NWS severe-weather alerts + watch floor", function () {
+    expect(RULES_VERSION).toBe("1.4.0");
   });
 
   it("wave-only green with alertsCheckable false appends the caveat", function () {
@@ -412,12 +636,28 @@ describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", functio
 });
 
 describe("alertColorForEvent / ripRiskColor", function () {
-  it("maps every ALERT_PRECEDENCE event to its flag color, unknown events to null", function () {
+  it("maps every ALERT_PRECEDENCE / NWS_FLOOR_PRECEDENCE event to its flag color, unknown events to null", function () {
+    expect(alertColorForEvent("Tornado Warning")).toBe("double-red");
     expect(alertColorForEvent("High Surf Warning")).toBe("double-red");
+    expect(alertColorForEvent("Storm Warning")).toBe("double-red");
+    expect(alertColorForEvent("Severe Thunderstorm Warning")).toBe("red");
     expect(alertColorForEvent("Beach Hazards Statement")).toBe("red");
     expect(alertColorForEvent("High Surf Advisory")).toBe("red");
     expect(alertColorForEvent("Rip Current Statement")).toBe("red");
-    expect(alertColorForEvent("Tornado Warning")).toBeNull();
+    expect(alertColorForEvent("High Wind Warning")).toBe("red");
+    expect(alertColorForEvent("Gale Warning")).toBe("red");
+    expect(alertColorForEvent("Special Marine Warning")).toBe("red");
+    expect(alertColorForEvent("Lakeshore Flood Warning")).toBe("red");
+    expect(alertColorForEvent("Coastal Flood Warning")).toBe("red");
+    expect(alertColorForEvent("Tornado Watch")).toBe("yellow");
+    expect(alertColorForEvent("Severe Thunderstorm Watch")).toBe("yellow");
+    expect(alertColorForEvent("High Wind Watch")).toBe("yellow");
+    expect(alertColorForEvent("Wind Advisory")).toBe("yellow");
+    expect(alertColorForEvent("Lake Wind Advisory")).toBe("yellow");
+    expect(alertColorForEvent("Small Craft Advisory")).toBe("yellow");
+    expect(alertColorForEvent("Lakeshore Flood Advisory")).toBe("yellow");
+    expect(alertColorForEvent("Coastal Flood Advisory")).toBe("yellow");
+    expect(alertColorForEvent("Winter Storm Warning")).toBeNull();
     expect(alertColorForEvent("toString")).toBeNull(); // prototype key, not a mapping
   });
 
@@ -437,6 +677,10 @@ describe("alertColorForEvent / ripRiskColor", function () {
 
   it("alertAuthorityForEvent attributes events to their issuing body", function () {
     expect(alertAuthorityForEvent("High Surf Warning")).toBe("NWS");
+    expect(alertAuthorityForEvent("Tornado Warning")).toBe("NWS");
+    expect(alertAuthorityForEvent("Tornado Watch")).toBe("NWS");
+    expect(alertAuthorityForEvent("Gale Warning")).toBe("NWS");
+    expect(alertAuthorityForEvent("Wind Advisory")).toBe("NWS");
     expect(alertAuthorityForEvent("wind warning")).toBe("Environment Canada");
     expect(alertAuthorityForEvent("heat warning")).toBeNull();
     expect(alertAuthorityForEvent("toString")).toBeNull();

@@ -452,7 +452,7 @@ describe("wave-forecast hazard lane", () => {
     const html = render({
       estimate: estimateWith({
         waveHeightFt: 1.0,
-        alertDetails: [{ event: "Tornado Warning", onset: null, ends: null }]
+        alertDetails: [{ event: "Winter Storm Warning", onset: null, ends: null }]
       }),
       official: null,
       waves: wavesWith({})

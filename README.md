@@ -100,7 +100,7 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.2.0",
+        "rules_version": "1.4.0",
         "official": false,
         "waveHeightFt": 2.62,
         "alertDetails": [],
@@ -189,16 +189,25 @@ IP-derived location and must never be shared across visitors.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.3.0`. Given the same inputs it always returns the same output.
+`rules_version` is `1.4.0`. Given the same inputs it always returns the same output.
 
-Precedence is strict: the first matching rule wins, evaluated top to bottom.
+Precedence is strict: the first matching rule (steps 1–5) wins, evaluated top to
+bottom. Step 6 is the sole exception — an NWS severe-weather **watch** acts as a
+yellow *floor*, raising a green/unknown result to yellow but never downgrading a
+higher color (see the notes below).
 
 | # | Signal | Source | Condition | Color | Reason |
 |---|--------|--------|-----------|-------|--------|
-| 1 | Active NWS alert | `api.weather.gov/alerts/active` (matched by `nws_zone`) | Event = "High Surf Warning" | double-red | "Active NWS alert: High Surf Warning" |
+| 1 | Active NWS alert | `api.weather.gov/alerts/active` (land matched by `nws_zone`, marine by `marine_zone`) | Event = "Tornado Warning" | double-red | "Active NWS alert: Tornado Warning" |
+| 1 | Active NWS alert | same | Event = "High Surf Warning" | double-red | "Active NWS alert: High Surf Warning" |
+| 1 | Active NWS alert | marine (`marine_zone`) | Event = "Storm Warning" | double-red | "Active NWS alert: Storm Warning" |
+| 1 | Active NWS alert | same | Event = "Severe Thunderstorm Warning" | red | "Active NWS alert: Severe Thunderstorm Warning" |
 | 1 | Active NWS alert | same | Event = "Beach Hazards Statement" | red | "Active NWS alert: Beach Hazards Statement" |
 | 1 | Active NWS alert | same | Event = "High Surf Advisory" | red | "Active NWS alert: High Surf Advisory" |
 | 1 | Active NWS alert | same | Event = "Rip Current Statement" | red | "Active NWS alert: Rip Current Statement" |
+| 1 | Active NWS alert | same | Event = "High Wind Warning" | red | "Active NWS alert: High Wind Warning" |
+| 1 | Active NWS alert | marine (`marine_zone`) | Event = "Gale Warning" or "Special Marine Warning" | red | "Active NWS alert: Gale Warning" |
+| 1 | Active NWS alert | same | Event = "Lakeshore Flood Warning" or "Coastal Flood Warning" | red | "Active NWS alert: Lakeshore Flood Warning" |
 | 1b | Active ECCC alert (Canadian beaches) | `api.weather.gc.ca` `weather-alerts` collection, matched by alert-region polygon | Event = "tornado warning" | double-red | "Active Environment Canada alert: tornado warning" |
 | 1b | Active ECCC alert | same | Event = "storm surge warning" | double-red | "Active Environment Canada alert: storm surge warning" |
 | 1b | Active ECCC alert | same | Event = "squall warning" | red | "Active Environment Canada alert: squall warning" |
@@ -215,12 +224,39 @@ Precedence is strict: the first matching rule wins, evaluated top to bottom.
 | 4 | Wind | same | below both thresholds | green | "No wave data; wind S mph sustained, G mph gusts (below advisory thresholds)" |
 | 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
 | 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models" |
+| 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Tornado, Severe Thunderstorm, High Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
 
 Notes on the precedence design (all intentional, see `src/rules.js` and
 `test/rules.test.js`):
 
 - Alerts are checked in `ALERT_PRECEDENCE` order, not the order they appear in the
-  NWS response — "High Surf Warning" always wins over any other simultaneous alert.
+  NWS response — the top of that list ("Tornado Warning", then "High Surf Warning",
+  both double-red) wins over any other simultaneous alert.
+- Step 1 also maps life-threatening severe-weather **warnings** (Tornado Warning →
+  double-red, Severe Thunderstorm Warning → red), the **high-wind and lakeshore/
+  coastal-flood warnings** (High Wind / Lakeshore Flood / Coastal Flood Warning →
+  red), and the **marine warnings** (Storm Warning → double-red; Gale Warning and
+  Special Marine Warning → red). Because these are all red/double-red at the top of
+  precedence they can only ever raise the flag, never lower it below what waves/wind
+  would show. **Ordering constraint:** the step-1 loop takes the first matching event
+  regardless of color, so `ALERT_PRECEDENCE` lists every double-red before every red —
+  otherwise a red could shadow a co-active double-red (e.g. Storm Warning).
+- **Marine** alerts (Storm/Gale/Special Marine Warning, Small Craft Advisory) are
+  issued for a beach's adjacent *marine* zone (e.g. `LMZ874`), not its land
+  `nws_zone`. A US beach's `marine_zone` is resolved once by the marine-enrichment
+  cron (an offshore probe of `api.weather.gov/zones?type=marine`) and matched from the
+  **same** national `/alerts/active` fetch — no extra upstream call. Marine alerts are
+  a bonus signal: a beach without a resolved `marine_zone` still flags on land alerts
+  and waves. Canadian marine waters belong to ECCC, so marine enrichment is gated to
+  US beaches (`nws_zone` set).
+- NWS yellow **watches and advisories** (Tornado / Severe Thunderstorm / High Wind
+  Watch; Wind / Lake Wind / Small Craft / Lakeshore Flood / Coastal Flood Advisory —
+  `NWS_FLOOR_PRECEDENCE`) map to yellow but are deliberately NOT part of the step-1
+  short-circuit. They are applied as a floor at step 6: they raise a green or unknown
+  estimate to yellow, but never downgrade a higher color a warning, rip risk, or
+  wave/wind already decided. This is the same masking concern that keeps ECCC watches
+  unmapped — resolved for NWS by flooring rather than exclusion, so a 4 ft-wave red is
+  never masked down to a watch/advisory yellow.
 - Canadian beaches (the Great Lakes region set covers both the US and Canadian
   shorelines) use
   Environment and Climate Change Canada instead: ECCC issues **no** rip current,
@@ -256,7 +292,7 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 
 Every `FlagEstimate` carries: `color`, a human-readable `reason`, `trigger` (which
 precedence branch decided the color: `nws-alert`, `eccc-alert`, `rip-current`,
-`wave-height`, `wind`, `rip-current-low`, or `no-data` — the detail page renders
+`wave-height`, `wind`, `rip-current-low`, `no-data`, or `nws-floor` — the detail page renders
 this as a natural-language explanation), `rules_version`, `official: false`, `sources`
 (`{ label, url }` entries for the data actually used for that beach), and `updated`
 (ISO 8601 UTC).
@@ -313,7 +349,7 @@ paint, and live OS switches apply without a reload.
 
 ### Cron jobs
 
-Five scheduled triggers run in production (see `wrangler.toml`). They are separate
+Six scheduled triggers run in production (see `wrangler.toml`). They are separate
 crons on purpose: each upstream's rate-limit posture is independent, and a failure
 in one job never starves another.
 
@@ -379,6 +415,18 @@ in one job never starves another.
   Canada alerts check and stops carrying the alerts-unavailable caveat; rows no
   Canadian region matches park at their own 5-attempt cap (`eccc_attempts`,
   migration 0008).
+- `23 1,7,13,19 * * *` (4x daily, offset from the other enrichment triggers) —
+  `runMarineEnrichment`: US beaches (`nws_zone` set) get their adjacent NWS **marine
+  forecast zone** id (e.g. `LMZ874`, `marine_zone`, migration 0010) via
+  `resolveMarineZone` — an offshore probe of `api.weather.gov/zones?type=marine`
+  (the beach point sits on land outside every marine polygon, so it samples the
+  point then two 8-way rings ~5.5/11 km out, nearest hit wins). Up to 20 beaches/run
+  (each costs up to ~17 sequential probe subrequests, kept well under the Workers
+  cap). Once set, the hourly recompute matches **marine warnings** (Storm/Gale/
+  Special Marine) and **Small Craft Advisory** from the same national `/alerts/active`
+  fetch. A point no marine zone is near (inland) parks at a 5-attempt cap
+  (`marine_attempts`); marine alerts are a bonus, so a parked beach still flags on
+  land alerts and waves. Gated to US beaches — Canadian marine waters are ECCC's.
 - `31 9 * * *` (daily) — `runWebcamSync`: hydrates each beach's nearest **Windy
   webcam** (`src/clients/windyWebcams.js`, Webcams API v3 free tier): up to 100
   beaches/night — never-checked rows first, then rows last checked more than
@@ -405,12 +453,14 @@ developing via the scheduled-handler endpoint:
 
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"   # NWS point enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*"  # ECCC zone enrichment
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=23+1,7,13,19+*+*+*"   # NWS marine zone enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly wave refresh
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"            # hourly flag recompute
 
-`npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:webcams` /
-`npm run seed:waves` / `npm run seed:flags` wrap these enrichment/wave/flag crons,
+`npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:marine` /
+`npm run seed:webcams` / `npm run seed:waves` / `npm run seed:flags` wrap these
+enrichment/wave/flag crons,
 while `npm run seed` and `npm run seed:classify` run the offline discovery batch
 against the local D1 (see [Discovery and classification
 (offline)](#discovery-and-classification-offline)). The local database

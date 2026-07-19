@@ -465,7 +465,7 @@ describe("computeHazardBands", () => {
           onset: "2026-07-04T00:00:00.000Z", ends: "2026-07-05T06:00:00.000Z" }, // ended
         { event: "Beach Hazards Statement",
           onset: "2026-07-07T00:00:00.000Z", ends: "2026-07-08T00:00:00.000Z" }, // not yet
-        { event: "Tornado Warning", onset: null, ends: null },                    // not flag-relevant
+        { event: "Winter Storm Warning", onset: null, ends: null },               // not flag-relevant
         "garbage", null                                                           // malformed
       ]
     }), 24, NOW);
