@@ -220,14 +220,25 @@ describe("wave-forecast section", () => {
     expect(html).not.toContain("class=\"wave-forecast wa-stack");
   });
 
-  it("shows the stale-data warning when waves.updated is more than 2 h old", () => {
+  it("shows the stale-data warning when waves.updated is more than 8 h old", () => {
+    // The wave strip refreshes on the 6-hourly wave cron, so its staleness
+    // threshold is 8 h (a clearly-missed cycle), not the flag's 2 h.
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({ updated: "2026-07-05T03:00:00.000Z" }) // 9 h before now
+    });
+    expect(html).toContain("Stale data — last updated " +
+      "<wa-relative-time date=\"2026-07-05T03:00:00.000Z\" sync></wa-relative-time>");
+  });
+
+  it("does NOT warn on wave data a few hours old (within the 6-hourly cadence)", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({ updated: "2026-07-05T09:00:00.000Z" }) // 3 h before now
     });
-    expect(html).toContain("Stale data — last updated " +
-      "<wa-relative-time date=\"2026-07-05T09:00:00.000Z\" sync></wa-relative-time>");
+    expect(html).not.toContain("Stale data — last updated");
   });
 
   it("puts the ESTIMATE badge on the now-stat line, with no section heading", () => {

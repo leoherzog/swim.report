@@ -19,16 +19,56 @@ of it is scoped for follow-up work.
   instance yet; if one shows up, the fix is a cheap follow-up water-relation
   membership probe, not reverting to `relation(around...)` (pathologically
   slow, >10 min server-side).
-- **Open-Meteo 429s on burst-fired marine batches.** `runFlagRecompute` fires all
-  ~14 marine batches concurrently (`Promise.allSettled`); Open-Meteo weights a
-  50-location call as ~50 calls, so a full pilot run bursts ~700+ weighted calls
-  against the free tier's ~600/minute ceiling and roughly half the batches came back
-  HTTP 429 in local testing (2026-07-13; `waves=185` then `206` of ~250 eligible).
-  Degradation is correct (affected beaches fall to wind/no-data and skip the `waves:`
-  write, recovering next hour), but wave coverage would improve by running the
-  batches sequentially or with a small inter-batch delay — the hourly cron has
-  plenty of wall-clock headroom. Verify whether production (Cloudflare egress IPs)
-  sees the same limiting before tuning.
+- **Flag-worthy water classification** (migration 0009, `src/waterClass.js`,
+  `runWaterClassification` cron `37 1,7,13,19 * * *`). SHIPPED: each beach's adjacent
+  water body is probed via Overpass (vertex recurse-down anchor at 150 m / 120 m,
+  `out ids tags bb`) and classified ocean / great_lake / inland by the pure
+  `classifyWaterBody` (Great Lakes matched by wikidata QID, never by name). Inland +
+  parked rows are hidden by the shared `FLAG_WORTHY_WATER_SQL` gate on every consumer
+  (never deleted); still-unclassified NULL rows stay visible during backfill. The
+  nightly discovery run classifies its own new-beach delta synchronously and NULLs
+  `water_class` when a re-discovered centroid moves > ~100 m. Open residuals:
+  - **Node-only beaches** (`osm_id` = "node/N") have no polygon geometry, so only the
+    point can be probed; a node set back from shore can miss (classify as parked/hidden).
+    An accepted residual — most set-back beaches are ways/relations, which the vertex
+    probe handles.
+  - **The 5 borderline beaches** (Willow Beach `relation/18085900`, Sleeping Bear Dunes
+    Wilderness `relation/2995932`, Marcus Park `way/1281416984`, Sylvan Beach Kids Beach
+    `way/1416352164`, Beaver Islands SW Beach `way/165410459`): resolved by the vertex
+    probe in the backfill — eyeball their final class once after the backfill runs.
+  - **Per-beach relation-`around` cost.** The lake-relation probe is scoped to one
+    beach's vertices at 150 m with `[timeout:60]` at a small N/run, so it is acceptable;
+    if it proves slow in practice the documented fallback is a recurse-**up** probe
+    (`way[natural=water](around.a:150)` → `rel(bw)` → read their `wikidata`), which never
+    loads full multipolygon geometry.
+  - **Parked rows** sit at `WATER_CLASS_MAX_ATTEMPTS = 5` (matches the enrichment caps);
+    revisit the cap if parked counts climb. A version bump does NOT un-park empty-parked
+    rows (adding a lake QID cannot rescue a beach that had no nearby water at all); if
+    ever needed, `UPDATE beaches SET water_class_attempts = 0 WHERE water_class IS NULL`
+    re-opens them.
+  - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches linger in
+    D1 (their KV flags self-expire at the 7200 s TTL). Harmless and cheap — left in place,
+    not cleaned up.
+  - **The `ocean` branch stays dormant** until `PILOT_BBOX` reaches saltwater; in the
+    Great Lakes pilot every keeper is a Great Lake (shorelines are relation member ways,
+    not `natural=coastline`), so the audit found 0 ocean rows. Harmless: ocean and
+    great_lake are both flag-worthy and pass the gate identically — only inland vs
+    {ocean, great_lake} must be reliable, and it is.
+- ~~**Open-Meteo 429s on burst-fired marine batches.**~~ ADDRESSED — wave/wind
+  fetching moved OUT of the hourly `runFlagRecompute` into a dedicated 6-hourly cron
+  (`runWaveRefresh`, cron `15 */6 * * *`) that writes the `waveinput:`/`waves:` KV the
+  hourly recompute now READS instead of fetching. Two changes killed the 429s: (1) the
+  marine models only publish every 6–12 h, so the 6-hourly cadence stops the 6–12×
+  wasted hourly refetch; (2) `batchByBeach` no longer bursts all batches at once — it
+  runs them in concurrency-limited waves (`OPEN_METEO_CONCURRENCY = 2`, `OPEN_METEO_BATCH
+  = 100`) with a gap between waves (`OPEN_METEO_BATCH_GAP_MS = 12000`) and one backoff
+  retry on a throttled batch (`OPEN_METEO_RETRY_MS = 60000`), all tunable via numeric env
+  overrides (tests zero them). The marine request also dropped the unused
+  `wave_direction`/`wave_period` variables (`&hourly=wave_height` only), cutting the
+  request's Open-Meteo weight ~3×. The 7 h wave-data KV TTL (`WAVE_DATA_TTL_SECONDS =
+  25200`) means a transient 429 leaves the strip showing slightly-older-but-still-model-
+  current data instead of blanking. Remaining: confirm production (Cloudflare egress IPs)
+  stays under the limit with the paced cadence.
 - **GLCFS gridded wave source is still down.** The Great Lakes wave gap-fill
   (`src/clients/glerl.js`) uses nearest-GLOS-Seagull-buoy observations because the
   true gridded GLCFS source (erddap.axiomdatascience.com) is hard-down — 100% HTTP
@@ -324,15 +364,15 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
 
 ## Free vs. paid Workers plan
 
-- The hourly `runFlagRecompute` cron's subrequest budget (~1500 subrequests/run for the
-  pilot region at `MAX_BEACHES_PER_RUN = 1000`, per PLAN.md section 7 — Ohio BeachGuard
-  alone is 51 per-id GETs, and the wave-forecast feature adds up to ~613 `waves:` KV
-  puts) assumes the
-  Workers **Paid** plan (10,000 subrequests/invocation, no daily KV-write cap). The
-  **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day quota are not
-  sufficient at this cadence and beach count. For a free-plan demo, drop
-  `MAX_BEACHES_PER_RUN` way down (e.g. 10-15 beaches) and/or reduce cron frequency
-  before deploying without a paid plan.
+- The cron subrequest budgets assume the Workers **Paid** plan (10,000
+  subrequests/invocation, no daily KV-write cap). The hourly `runFlagRecompute` runs
+  alert + SRF + scraper fetches plus up to ~700 `flag:`/`official:` KV writes (Ohio
+  BeachGuard alone is 51 per-id GETs; it no longer fetches waves), and the 6-hourly
+  `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy + wind fetches plus up to
+  ~1200 `waveinput:`/`waves:` KV writes (per PLAN.md section 7). The **Free** plan's
+  50-subrequest ceiling and 1000 KV-writes/day quota are not sufficient at this cadence
+  and beach count. For a free-plan demo, drop `MAX_BEACHES_PER_RUN` way down (e.g. 10-15
+  beaches) and/or reduce cron frequency before deploying without a paid plan.
 - **Production went live 2026-07-13 (https://swim.report) — verify the account's
   Workers plan.** If the account is on Free, the hourly `runFlagRecompute` will hit
   the 50-subrequest ceiling as soon as the discovery cron populates beaches (watch

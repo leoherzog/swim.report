@@ -326,3 +326,117 @@ export async function fetchParkBeaches(bbox) {
   }
   return out;
 }
+
+// --- Water-body classification -------------------------------------------
+// Per-beach probe that decides whether a beach's adjacent water body is
+// flag-worthy (ocean / Great Lake) or inland. Used ONLY from the cron path
+// (the classification cron and the synchronous discovery-delta step). The
+// signals it returns feed classifyWaterBody in src/waterClass.js; the
+// classification DECISION and the Great Lakes allowlist live there.
+//
+// Radii (validated / conservative in the 2026-07-18 audit of 698 prod
+// beaches): the 325 genuine-inland beaches are all >= 3 km from any Great
+// Lake, so a 150 m probe never wrongly hides a real shore beach while
+// avoiding the cross-water false positive a wide radius caused.
+export const OCEAN_RADIUS_M = 150;       // coastline probe (validated safe band)
+export const GREAT_LAKE_RADIUS_M = 150;  // lake-relation probe (the 150 m the audit validated)
+export const INLAND_RADIUS_M = 120;      // tighter: the beach's OWN adjacent water only
+
+// Turn a stored osm_id ("way/N" | "relation/N" | "node/N") into the Overpass
+// recurse-down anchor that seeds the `around` probe on the element's REAL
+// member vertices — never the centroid (set-back beaches miss) and never the
+// bbox rectangle (large polygons like Sleeping Bear mis-classify). Returns the
+// anchor statement string that binds set .a, or null when the id is
+// unparseable. A node has no member geometry, so it anchors on the point
+// itself (a real residual for node-only beaches).
+export function buildWaterClassAnchor(osmId) {
+  if (typeof osmId !== "string") {
+    return null;
+  }
+  const match = osmId.match(/^(way|relation|node)\/(\d+)$/);
+  if (match === null) {
+    return null;
+  }
+  const kind = match[1];
+  const id = match[2];
+  if (kind === "node") {
+    return "node(" + id + ")->.a;";
+  }
+  return kind + "(" + id + ");>->.a;";
+}
+
+// Build the water-class Overpass query for one beach. Vertex recurse-down
+// anchor, `out ids tags bb` — NEVER `out geom` (Lake Superior's multipolygon
+// geometry is tens of MB). Returns the query string, or null when the beach's
+// osm_id cannot be anchored.
+export function buildWaterClassQuery(osmId) {
+  const anchor = buildWaterClassAnchor(osmId);
+  if (anchor === null) {
+    return null;
+  }
+  return "[out:json][timeout:60];\n" +
+    anchor + "\n" +
+    "(\n" +
+    "  way[\"natural\"=\"coastline\"](around.a:" + String(OCEAN_RADIUS_M) + ");\n" +
+    "  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:" + String(GREAT_LAKE_RADIUS_M) + ");\n" +
+    "  way[\"natural\"=\"water\"](around.a:" + String(INLAND_RADIUS_M) + ");\n" +
+    ");\n" +
+    "out ids tags bb;";
+}
+
+// Pure; exported for tests. Reduces the raw Overpass elements from the
+// water-class query into the `signals` object classifyWaterBody consumes:
+//   - any natural=coastline way        -> coastlinePresent = true;
+//   - each water=lake relation          -> tags.wikidata pushed into nearbyLakeQids;
+//   - any natural=water WAY whose bb    -> nearbyWayWater = true (the existing
+//     area >= WATER_MIN_AREA_DEG2          pond threshold keeps a puddle from counting).
+export function parseWaterClassElements(elements) {
+  const signals = {
+    coastlinePresent: false,
+    nearbyLakeQids: [],
+    nearbyWayWater: false
+  };
+  if (!Array.isArray(elements)) {
+    return signals;
+  }
+  for (let i = 0; i < elements.length; i++) {
+    const element = elements[i];
+    const tags = element.tags || {};
+    if (element.type === "way" && tags.natural === "coastline") {
+      signals.coastlinePresent = true;
+    } else if (element.type === "relation" && tags.natural === "water" && tags.water === "lake") {
+      if (typeof tags.wikidata === "string" && tags.wikidata !== "") {
+        signals.nearbyLakeQids.push(tags.wikidata);
+      }
+    } else if (element.type === "way" && tags.natural === "water") {
+      const bounds = elementBounds(element);
+      if (bounds !== null && bboxAreaDeg2(bounds) >= WATER_MIN_AREA_DEG2) {
+        signals.nearbyWayWater = true;
+      }
+    }
+  }
+  return signals;
+}
+
+// Fetch the water-class signals for one beach. Async, never throws (the
+// module's data-or-null, never-throw contract). Returns:
+//   - null  = TRANSIENT failure (HTTP error, JSON failure, a truncation
+//             remark, or an unparseable osm_id) -> the caller must NOT bump
+//             water_class_attempts, the row stays queued;
+//   - a signals object = a CLEAN answer (even when every signal is empty). An
+//             all-empty clean answer makes classifyWaterBody return null, and
+//             THAT is the only path that bumps attempts.
+// This is the whole attempts semantics: bump only on a clean-but-empty
+// classification, never on the ~1/3 Overpass flake rate.
+export async function fetchWaterClassSignals(beach) {
+  const query = buildWaterClassQuery(beach.osm_id);
+  if (query === null) {
+    console.log("overpass: water class skipped, unparseable osm_id " + String(beach.osm_id));
+    return null;
+  }
+  const elements = await runQuery(query, "water class " + String(beach.id));
+  if (elements === null) {
+    return null;
+  }
+  return parseWaterClassElements(elements);
+}

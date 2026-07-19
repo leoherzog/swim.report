@@ -23,7 +23,13 @@ import {
   GLCFS_WAVE_MODEL,
   SEAGULL_INFO_URL
 } from "./clients/glerl.js";
-import { fetchBeaches, fetchParkBeaches } from "./clients/overpass.js";
+import { fetchBeaches, fetchParkBeaches, fetchWaterClassSignals } from "./clients/overpass.js";
+import {
+  classifyWaterBody,
+  WATER_CLASS_VERSION,
+  WATER_CLASS_MAX_ATTEMPTS,
+  FLAG_WORTHY_WATER_SQL
+} from "./waterClass.js";
 import { fetchNearestWebcam } from "./clients/windyWebcams.js";
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
 import { updateScraperHealth } from "./scraperHealth.js";
@@ -35,8 +41,31 @@ import { updateScraperHealth } from "./scraperHealth.js";
 // subrequests worst case, well under the paid plan's 10,000/invocation).
 // Real pagination is still required for nationwide scale-out (TODO.md).
 const MAX_BEACHES_PER_RUN = 1000;
-const OPEN_METEO_BATCH = 50;
+// Open-Meteo's keyless API applies a per-minute WEIGHTED rate limit (cost scales
+// with locations x variables x models x days) plus per-hour/day caps, and it
+// throttles per source IP — which for a Cloudflare Worker is a shared egress
+// pool. Firing every batch of a ~700 beach run at once (the old
+// Promise.allSettled fan-out) burst past the per-minute ceiling: the first
+// batches succeeded and the rest got HTTP 429, so every remaining beach fell
+// back to the buoy (a single now-reading, no hourly series) and the detail-page
+// strip went blank. Two fixes, together: (1) wave/wind fetching moved OUT of the
+// hourly estimate into a dedicated 6-hourly cron (runWaveRefresh) — the marine
+// models only publish every 6-12 h, so hourly refetching was 6-12x wasted quota;
+// (2) that cron paces its batches (small concurrency window, a gap between
+// waves, one backoff retry on a throttled batch) to stay under the per-minute
+// limit. Sleeps burn no CPU, so the paced run stays well inside the scheduled
+// invocation's time budget.
+const OPEN_METEO_BATCH = 100;
+const OPEN_METEO_CONCURRENCY = 2;
+const OPEN_METEO_BATCH_GAP_MS = 12000;
+const OPEN_METEO_RETRY_MS = 60000;
 const KV_TTL_SECONDS = 7200;
+// Wave inputs and the WaveSeries strip data are refreshed on the 6-hourly wave
+// cron, so their KV must outlive the gap between runs (plus slack for a failed
+// run): a 7 h TTL guarantees a beach's last-good wave data is still readable at
+// the next refresh, so a transient upstream 429 leaves the strip showing
+// slightly older — but still model-current — data instead of blanking it.
+const WAVE_DATA_TTL_SECONDS = 25200;
 const PILOT_BBOX = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
 // Per RUN of the dedicated enrichment cron (4x daily = up to 300 points/day).
 // api.weather.gov publishes no numeric rate limit (it 429s with Retry-After
@@ -83,6 +112,19 @@ const FLAG_HISTORY_RETENTION_DAYS = 90;
 // publishes no quota and 100/night is polite guesswork (TODO.md).
 const WEBCAM_ENRICHMENT_LIMIT = 100;
 const WEBCAM_RECHECK_MS = 14 * 86400000;
+// Per RUN of the water-classification cron (4x daily). Per-beach Overpass
+// probing is rate-limited on the public endpoint, so keep the run small and
+// polite — the one-time bulk backfill (README / docs) does the mass
+// classification; this cron only drains the steady-state trickle of newly
+// discovered beaches plus any WATER_CLASS_VERSION re-drain. The attempts cap
+// (WATER_CLASS_MAX_ATTEMPTS) is single-sourced in src/waterClass.js alongside
+// the gate that consumes it.
+const WATER_CLASS_LIMIT = 25;
+// Synchronous discovery-delta classification (end of runOverpassSync): bounds
+// the extra Overpass load the nightly discovery run takes on. The nightly
+// new-beach delta is normally tiny, so this keeps steady-state classification
+// lag ~= 0; anything beyond the cap falls to the dedicated cron.
+const WATER_CLASS_DELTA_CAP = 25;
 
 // Human-readable labels for estimate sources ({ label, url } entries — see
 // PLAN.md section 1). Wave labels name the model that actually supplied the
@@ -123,31 +165,66 @@ function chunk(items, size) {
   return out;
 }
 
-// Shared batch scaffolding for the Open-Meteo wave (step 5) and wind (step 6)
-// passes: chunk the points into OPEN_METEO_BATCH-sized batches, fetch them
-// concurrently with Promise.allSettled, then dispatch per batch. On a
-// fulfilled non-null batch, onEntry(point, entry) fires for each point that
-// has a result row; on a rejected/null batch, onBatchFail(batch) fires once.
-// The wave-null sentinel handling and failure logging live in the callbacks,
-// so this helper carries no upstream-specific behavior.
-async function batchByBeach(points, fetchFn, onEntry, onBatchFail) {
+// Pacing knobs for batchByBeach, read from env with a fallback to the module
+// constants so a run can be tuned (or, in tests, zeroed to run instantly)
+// without a code change. Numeric env overrides only.
+function batchTiming(env) {
+  const gap = env && typeof env.OPEN_METEO_BATCH_GAP_MS === "number"
+    ? env.OPEN_METEO_BATCH_GAP_MS : OPEN_METEO_BATCH_GAP_MS;
+  const retry = env && typeof env.OPEN_METEO_RETRY_MS === "number"
+    ? env.OPEN_METEO_RETRY_MS : OPEN_METEO_RETRY_MS;
+  const concurrency = env && typeof env.OPEN_METEO_CONCURRENCY === "number"
+    ? env.OPEN_METEO_CONCURRENCY : OPEN_METEO_CONCURRENCY;
+  return { gapMs: gap, retryMs: retry, concurrency: Math.max(1, concurrency) };
+}
+
+// Fetch one batch, retrying once after a backoff when the first attempt returns
+// null. The clients collapse a 429 / 5xx / network error to null (their
+// data-or-null contract), so a null here is exactly the transient-throttle case
+// the backoff is meant to ride out. A second null gives up (onBatchFail).
+async function fetchBatchWithRetry(batch, fetchFn, retryMs) {
+  const first = await fetchFn(batch);
+  if (first !== null) {
+    return first;
+  }
+  await sleep(retryMs);
+  return fetchFn(batch);
+}
+
+// Shared batch scaffolding for the wave cron's Open-Meteo wave and wind passes:
+// chunk the points, then fetch the chunks in small concurrency-limited waves
+// with a gap between waves so the run never bursts past Open-Meteo's per-minute
+// weighted rate limit (the burst that used to 429 most of the run and blank the
+// strip). On a fulfilled non-null batch (possibly via its one retry),
+// onEntry(point, entry) fires for each point with a result row; a still-null or
+// rejected batch fires onBatchFail(batch) once. The wave-null sentinel handling
+// and failure logging live in the callbacks, so this helper carries no
+// upstream-specific behavior.
+async function batchByBeach(points, fetchFn, onEntry, onBatchFail, timing) {
+  const t = timing || { gapMs: OPEN_METEO_BATCH_GAP_MS, retryMs: OPEN_METEO_RETRY_MS, concurrency: OPEN_METEO_CONCURRENCY };
   const batches = chunk(points, OPEN_METEO_BATCH);
-  const settled = await Promise.allSettled(
-    batches.map(function (batch) { return fetchFn(batch); })
-  );
-  for (let i = 0; i < settled.length; i = i + 1) {
-    const s = settled[i];
-    const batch = batches[i];
-    if (s.status === "fulfilled" && s.value !== null) {
-      const data = s.value;
-      for (const point of batch) {
-        const entry = data.results[point.beachId];
-        if (entry) {
-          onEntry(point, entry);
+  for (let start = 0; start < batches.length; start = start + t.concurrency) {
+    if (start > 0) {
+      await sleep(t.gapMs);
+    }
+    const wave = batches.slice(start, start + t.concurrency);
+    const settled = await Promise.allSettled(
+      wave.map(function (batch) { return fetchBatchWithRetry(batch, fetchFn, t.retryMs); })
+    );
+    for (let k = 0; k < settled.length; k = k + 1) {
+      const s = settled[k];
+      const batch = wave[k];
+      if (s.status === "fulfilled" && s.value !== null) {
+        const data = s.value;
+        for (const point of batch) {
+          const entry = data.results[point.beachId];
+          if (entry) {
+            onEntry(point, entry);
+          }
         }
+      } else {
+        onBatchFail(batch);
       }
-    } else {
-      onBatchFail(batch);
     }
   }
 }
@@ -167,17 +244,16 @@ function waveNullPoints(beaches, waveResults) {
     });
 }
 
+// Hourly estimate recompute. Reads the freshest alerts / rip-current risk every
+// hour (the fast-changing safety signals) but takes wave height and the wind
+// fallback from KV that the 6-hourly wave cron (runWaveRefresh) wrote — the
+// marine models only publish every 6-12 h, so refetching them hourly was wasted
+// quota and the burst that got the whole run 429'd. No Open-Meteo fetch is
+// reachable from here.
 async function runFlagRecompute(env) {
   const nowIso = new Date().toISOString();
-  // Top of the run's UTC hour: the wave series' hoursFt[0] is the current-hour
-  // forecast, so its startIso must anchor to the hour boundary, not the exact
-  // run time. Computed once per run and reused for every beach's WaveSeries.
-  const wavesStartDate = new Date(Date.parse(nowIso));
-  wavesStartDate.setUTCMinutes(0, 0, 0);
-  const wavesStartIso = wavesStartDate.toISOString();
   let estimateCount = 0;
   let officialCount = 0;
-  let wavesCount = 0;
   let failureCount = 0;
 
   // Calibration signal (migration 0006): capture per-beach estimate and
@@ -190,7 +266,8 @@ async function runFlagRecompute(env) {
 
   try {
     const beachesResult = await env.DB.prepare(
-      "SELECT * FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+      "SELECT * FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
     ).all();
     const beaches = beachesResult.results || [];
 
@@ -275,89 +352,31 @@ async function runFlagRecompute(env) {
       }
     }
 
-    // Step 5: waves, batched.
-    const waveResults = new Map();
-    const wavePoints = beaches.map(function (b) {
-      return { beachId: b.id, lat: b.lat, lon: b.lon };
-    });
-    await batchByBeach(
-      wavePoints,
-      function (batch) { return fetchWaveHeightsFt(batch, nowIso); },
-      function (point, entry) {
-        waveResults.set(point.beachId, {
-          waveHeightFt: entry.waveHeightFt,
-          model: entry.model,
-          hoursFt: entry.hoursFt,
-          models: entry.models,
-          byModel: entry.byModel
-        });
-      },
-      function (batch) {
-        for (const point of batch) {
-          // hoursFt: null (not an all-null array) marks "fetch failed" distinctly
-          // from "fetched, all cells masked" so step 7 can skip the waves KV write
-          // in both cases without rescanning the series.
-          waveResults.set(point.beachId, { waveHeightFt: null, model: null, hoursFt: null, models: [], byModel: {} });
+    // Step 5: wave inputs — READ ONLY, never fetched here. The 6-hourly wave
+    // cron (runWaveRefresh) wrote a "waveinput:" + id payload
+    // ({ waveHeightFt, model, windSpeedMph, windGustMph, updated }) per beach;
+    // the estimate consumes the current wave height and the wind fallback from
+    // it. A missing key (wave cron hasn't run yet, or its data has aged past the
+    // 7 h TTL) simply yields no wave input — the estimate degrades to the wind
+    // fallback or "unknown", never a wrong flag. Prefetch all keys concurrently
+    // in chunks so the per-beach loop below stays synchronous.
+    const waveInputs = new Map();
+    const inputChunks = chunk(beaches, 50);
+    for (const group of inputChunks) {
+      const fetched = await Promise.all(
+        group.map(function (b) {
+          return env.FLAGS.get("waveinput:" + b.id, { type: "json" })
+            .catch(function () { return null; });
+        })
+      );
+      for (let i = 0; i < group.length; i = i + 1) {
+        if (fetched[i]) {
+          waveInputs.set(group[i].id, fetched[i]);
         }
-        console.log("index: wave batch failed for " + String(batch.length) + " beaches");
-      }
-    );
-
-    // Step 5b: Great Lakes buoy gap-filler. Open-Meteo's wave models commonly
-    // return masked/null cells on the Great Lakes; for beaches still
-    // wave-null, ask the GLOS Seagull buoy client (src/clients/glerl.js).
-    // Where Open-Meteo answered, behavior is unchanged. One call — the client
-    // dedups platform fetches internally and caps them at 62 subrequests
-    // (budget math in glerl.js), so the run stays well under the 1000
-    // subrequest/invocation limit even on a fully wave-null hour.
-    const glcfsPoints = waveNullPoints(beaches, waveResults);
-    if (glcfsPoints.length > 0) {
-      try {
-        const glcfsData = await fetchGlcfsWaveHeightsFt(glcfsPoints, nowIso);
-        if (glcfsData !== null) {
-          for (const point of glcfsPoints) {
-            const entry = glcfsData.results[point.beachId];
-            if (entry && entry.waveHeightFt !== null) {
-              // Buoys are nearest-point now-observations with no hourly series,
-              // so preserve whatever hoursFt/models the Open-Meteo pass left on
-              // the entry (both null/empty when Open-Meteo also missed) — never
-              // synthesize a series from a single buoy reading.
-              const existing = waveResults.get(point.beachId);
-              const merged = existing
-                ? { hoursFt: existing.hoursFt, models: existing.models, byModel: existing.byModel }
-                : { hoursFt: null, models: [], byModel: {} };
-              merged.waveHeightFt = entry.waveHeightFt;
-              merged.model = entry.model;
-              waveResults.set(point.beachId, merged);
-            }
-          }
-        } else {
-          console.log("index: glcfs wave gap-fill failed for " + String(glcfsPoints.length) + " beaches");
-        }
-      } catch (err) {
-        console.log("index: glcfs wave gap-fill threw: " + err.message);
       }
     }
 
-    // Step 6: wind, only for beaches whose wave height is null. Recomputed
-    // fresh — step 5b may have gap-filled some beaches out of the wave-null set.
-    const windResults = new Map();
-    const windPoints = waveNullPoints(beaches, waveResults);
-    await batchByBeach(
-      windPoints,
-      function (batch) { return fetchWinds(batch); },
-      function (point, entry) {
-        windResults.set(point.beachId, {
-          windSpeedMph: entry.windSpeedMph,
-          windGustMph: entry.windGustMph
-        });
-      },
-      function (batch) {
-        console.log("index: wind batch failed for " + String(batch.length) + " beaches");
-      }
-    );
-
-    // Step 7: per-beach estimate, isolated failures.
+    // Step 6: per-beach estimate, isolated failures.
     for (const beach of beaches) {
       try {
         const sources = [];
@@ -401,22 +420,27 @@ async function runFlagRecompute(env) {
           }
         }
 
+        // Wave height and the wind fallback both come from the wave cron's
+        // stored input (or are absent when it has no fresh data for this beach).
+        const waveInput = waveInputs.get(beach.id);
+
         let waveHeightFt = null;
-        const waveEntry = waveResults.get(beach.id);
-        if (waveEntry && waveEntry.waveHeightFt !== null) {
-          waveHeightFt = waveEntry.waveHeightFt;
+        if (waveInput && typeof waveInput.waveHeightFt === "number") {
+          waveHeightFt = waveInput.waveHeightFt;
           sources.push({
-            label: waveSourceLabel(waveEntry.model),
-            url: waveSourceUrl(waveEntry.model)
+            label: waveSourceLabel(waveInput.model),
+            url: waveSourceUrl(waveInput.model)
           });
         }
 
-        let windSpeedMph = null;
-        let windGustMph = null;
-        const windEntry = windResults.get(beach.id);
-        if (windEntry && (windEntry.windSpeedMph !== null || windEntry.windGustMph !== null)) {
-          windSpeedMph = windEntry.windSpeedMph;
-          windGustMph = windEntry.windGustMph;
+        // Wind is only a fallback for wave-null beaches (the wave cron only
+        // records it for them), and only names its source when it is the signal
+        // actually in play — i.e. no wave height was available.
+        let windSpeedMph = waveInput && typeof waveInput.windSpeedMph === "number"
+          ? waveInput.windSpeedMph : null;
+        let windGustMph = waveInput && typeof waveInput.windGustMph === "number"
+          ? waveInput.windGustMph : null;
+        if (waveHeightFt === null && (windSpeedMph !== null || windGustMph !== null)) {
           sources.push({
             label: "Wind Forecast",
             url: OPEN_METEO_FORECAST_URL
@@ -451,33 +475,8 @@ async function runFlagRecompute(env) {
           { expirationTtl: KV_TTL_SECONDS }
         );
 
-        // WaveSeries for the detail-page 24 h chart. Written only when the
-        // wave entry carries a real hourly series with at least one finite
-        // cell — a fetch failure (hoursFt null), an all-masked series, or a
-        // buoy-only gap-fill (hoursFt preserved null/all-masked) writes no
-        // "waves:" key so the old one expires naturally. Same TTL as the flag.
-        if (waveEntry && Array.isArray(waveEntry.hoursFt) &&
-            waveEntry.hoursFt.some(function (v) { return typeof v === "number" && isFinite(v); })) {
-          const models = waveEntry.models || [];
-          const waveSeries = {
-            beachId: beach.id,
-            startIso: wavesStartIso,
-            hoursFt: waveEntry.hoursFt,
-            models: models,
-            byModel: waveEntry.byModel || {},
-            sources: [{
-              label: models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models",
-              url: OPEN_METEO_MARINE_URL
-            }],
-            updated: nowIso
-          };
-          await env.FLAGS.put(
-            "waves:" + beach.id,
-            JSON.stringify(waveSeries),
-            { expirationTtl: KV_TTL_SECONDS }
-          );
-          wavesCount = wavesCount + 1;
-        }
+        // The detail-page WaveSeries ("waves:" + id) is written by the wave
+        // cron, not here — this loop only reads wave inputs.
         estimatesByBeach.set(beach.id, {
           color: estimate.color,
           rulesVersion: estimate.rules_version
@@ -616,13 +615,206 @@ async function runFlagRecompute(env) {
     console.log(
       "index: flag recompute complete, beaches=" + String(beaches.length) +
       " estimates=" + String(estimateCount) +
-      " waves=" + String(wavesCount) +
       " officials=" + String(officialCount) +
       " history=" + String(historyCount) +
       " failures=" + String(failureCount)
     );
   } catch (err) {
     console.log("index: flag recompute failed: " + err.message);
+  }
+}
+
+// 6-hourly wave refresh (cron path). Owns ALL Open-Meteo/GLOS wave & wind
+// fetching — deliberately separate from the hourly estimate so the marine
+// models (which only publish every 6-12 h) are fetched at their own cadence,
+// and so the fetching is paced (batchByBeach) to stay under Open-Meteo's
+// per-minute weighted rate limit instead of bursting and getting 429'd. Writes
+// two KV shapes per beach at the 7 h wave-data TTL: "waveinput:" + id (what the
+// hourly estimate reads for wave height + the wind fallback) and "waves:" + id
+// (the detail-page 24 h strip series, only when a real hourly series exists).
+// A beach whose marine fetch merely failed this run is left untouched so its
+// last-good KV rides the TTL — the same graceful-degradation contract the strip
+// series has always had.
+async function runWaveRefresh(env) {
+  const nowIso = new Date().toISOString();
+  // Anchor the series start to the top of the run's UTC hour: hoursFt[0] is the
+  // current-hour forecast, so the strip trims from the hour boundary.
+  const wavesStartDate = new Date(Date.parse(nowIso));
+  wavesStartDate.setUTCMinutes(0, 0, 0);
+  const wavesStartIso = wavesStartDate.toISOString();
+  const timing = batchTiming(env);
+  let inputCount = 0;
+  let seriesCount = 0;
+
+  try {
+    const beachesResult = await env.DB.prepare(
+      "SELECT id, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+    ).all();
+    const beaches = beachesResult.results || [];
+
+    // Step 1: waves (marine), paced.
+    const waveResults = new Map();
+    const wavePoints = beaches.map(function (b) {
+      return { beachId: b.id, lat: b.lat, lon: b.lon };
+    });
+    await batchByBeach(
+      wavePoints,
+      function (batch) { return fetchWaveHeightsFt(batch, nowIso); },
+      function (point, entry) {
+        waveResults.set(point.beachId, {
+          waveHeightFt: entry.waveHeightFt,
+          model: entry.model,
+          hoursFt: entry.hoursFt,
+          models: entry.models,
+          byModel: entry.byModel
+        });
+      },
+      function (batch) {
+        for (const point of batch) {
+          // hoursFt: null (not an all-null array) marks "fetch failed" distinctly
+          // from "fetched, all cells masked" so the write step below can PRESERVE
+          // a failed beach's last-good KV instead of clobbering it with a null.
+          waveResults.set(point.beachId, { waveHeightFt: null, model: null, hoursFt: null, models: [], byModel: {} });
+        }
+        console.log("index: wave batch failed for " + String(batch.length) + " beaches");
+      },
+      timing
+    );
+
+    // Step 2: Great Lakes buoy gap-filler. Open-Meteo's wave models commonly
+    // return masked/null cells on the Great Lakes; for beaches still wave-null,
+    // ask the GLOS Seagull buoy client. One call — the client dedups platform
+    // fetches internally and caps them, so this stays well under the subrequest
+    // budget even on a fully wave-null run.
+    const glcfsPoints = waveNullPoints(beaches, waveResults);
+    if (glcfsPoints.length > 0) {
+      try {
+        const glcfsData = await fetchGlcfsWaveHeightsFt(glcfsPoints, nowIso);
+        if (glcfsData !== null) {
+          for (const point of glcfsPoints) {
+            const entry = glcfsData.results[point.beachId];
+            if (entry && entry.waveHeightFt !== null) {
+              // Buoys are nearest-point now-observations with no hourly series,
+              // so preserve whatever hoursFt/models the Open-Meteo pass left on
+              // the entry (both null/empty when Open-Meteo also missed) — never
+              // synthesize a series from a single buoy reading.
+              const existing = waveResults.get(point.beachId);
+              const merged = existing
+                ? { hoursFt: existing.hoursFt, models: existing.models, byModel: existing.byModel }
+                : { hoursFt: null, models: [], byModel: {} };
+              merged.waveHeightFt = entry.waveHeightFt;
+              merged.model = entry.model;
+              waveResults.set(point.beachId, merged);
+            }
+          }
+        } else {
+          console.log("index: glcfs wave gap-fill failed for " + String(glcfsPoints.length) + " beaches");
+        }
+      } catch (err) {
+        console.log("index: glcfs wave gap-fill threw: " + err.message);
+      }
+    }
+
+    // Step 3: wind, only for beaches whose wave height is still null (the wind
+    // fallback the estimate uses when every wave model is null). Recomputed
+    // fresh — step 2 may have gap-filled some beaches out of the wave-null set.
+    const windResults = new Map();
+    const windPoints = waveNullPoints(beaches, waveResults);
+    await batchByBeach(
+      windPoints,
+      function (batch) { return fetchWinds(batch); },
+      function (point, entry) {
+        windResults.set(point.beachId, {
+          windSpeedMph: entry.windSpeedMph,
+          windGustMph: entry.windGustMph
+        });
+      },
+      function (batch) {
+        console.log("index: wind batch failed for " + String(batch.length) + " beaches");
+      },
+      timing
+    );
+
+    // Step 4: persist per-beach wave inputs (+ the strip series), isolated
+    // failures. A beach whose marine fetch failed AND got no buoy fill is
+    // SKIPPED so its last-good "waveinput:"/"waves:" KV survives the TTL rather
+    // than being overwritten by a transient null (graceful degradation).
+    for (const beach of beaches) {
+      try {
+        const waveEntry = waveResults.get(beach.id);
+        const windEntry = windResults.get(beach.id);
+        const waveHeightFt = waveEntry ? waveEntry.waveHeightFt : null;
+        const windSpeedMph = windEntry && typeof windEntry.windSpeedMph === "number"
+          ? windEntry.windSpeedMph : null;
+        const windGustMph = windEntry && typeof windEntry.windGustMph === "number"
+          ? windEntry.windGustMph : null;
+
+        // hoursFt === null is the batch-failure sentinel (vs. an array of nulls
+        // for a fetched-but-masked cell). A failed marine fetch with no buoy
+        // reading has nothing trustworthy to record — leave the old KV alone.
+        const marineFetchFailed = !waveEntry || waveEntry.hoursFt === null;
+        if (waveHeightFt === null && marineFetchFailed) {
+          continue;
+        }
+        // Fetched cleanly but nothing usable (masked, no buoy, no wind) — also
+        // skip; the old key expires on its own.
+        if (waveHeightFt === null && windSpeedMph === null && windGustMph === null) {
+          continue;
+        }
+
+        const waveInput = {
+          beachId: beach.id,
+          waveHeightFt: waveHeightFt,
+          model: waveEntry ? waveEntry.model : null,
+          windSpeedMph: windSpeedMph,
+          windGustMph: windGustMph,
+          updated: nowIso
+        };
+        await env.FLAGS.put(
+          "waveinput:" + beach.id,
+          JSON.stringify(waveInput),
+          { expirationTtl: WAVE_DATA_TTL_SECONDS }
+        );
+        inputCount = inputCount + 1;
+
+        // WaveSeries for the detail-page 24 h strip: only when the entry carries
+        // a real hourly series with at least one finite cell (a masked series or
+        // buoy-only reading writes no series so the old one expires naturally).
+        if (waveEntry && Array.isArray(waveEntry.hoursFt) &&
+            waveEntry.hoursFt.some(function (v) { return typeof v === "number" && isFinite(v); })) {
+          const models = waveEntry.models || [];
+          const waveSeries = {
+            beachId: beach.id,
+            startIso: wavesStartIso,
+            hoursFt: waveEntry.hoursFt,
+            models: models,
+            byModel: waveEntry.byModel || {},
+            sources: [{
+              label: models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models",
+              url: OPEN_METEO_MARINE_URL
+            }],
+            updated: nowIso
+          };
+          await env.FLAGS.put(
+            "waves:" + beach.id,
+            JSON.stringify(waveSeries),
+            { expirationTtl: WAVE_DATA_TTL_SECONDS }
+          );
+          seriesCount = seriesCount + 1;
+        }
+      } catch (err) {
+        console.log("index: wave input write failed for beach " + beach.id + ": " + err.message);
+      }
+    }
+
+    console.log(
+      "index: wave refresh complete, beaches=" + String(beaches.length) +
+      " inputs=" + String(inputCount) +
+      " series=" + String(seriesCount)
+    );
+  } catch (err) {
+    console.log("index: wave refresh failed: " + err.message);
   }
 }
 
@@ -787,6 +979,11 @@ export function mergeBeachRows(namedRows, parkBeaches) {
 }
 
 export function sleep(ms) {
+  // A non-positive delay (e.g. pacing zeroed in tests) resolves immediately
+  // rather than arming a timer.
+  if (!(ms > 0)) {
+    return Promise.resolve();
+  }
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);
   });
@@ -856,15 +1053,28 @@ async function runOverpassSync(env) {
 
     const merged = mergeBeachRows(namedRows, parkBeaches === null ? [] : parkBeaches);
     const statements = merged.rows.map(function (row) {
+      // A re-discovered beach whose centroid moved materially (> ~100 m;
+      // 0.001 deg ~ 80-111 m at pilot latitudes) may now sit on different
+      // water, so NULL out its water_class so it re-classifies. In SQLite's
+      // upsert, an unqualified column is the EXISTING row value and ?3/?4 are
+      // the new lat/lon.
+      const moved =
+        " CASE WHEN (abs(lat - ?3) > 0.001 OR abs(lon - ?4) > 0.001) THEN ";
       if (parkBeaches === null) {
         return env.DB.prepare(
           "INSERT INTO beaches (id, name, lat, lon, osm_id) VALUES (?1, ?2, ?3, ?4, ?5) " +
-          "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4"
+          "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, " +
+          "water_class = " + moved + "NULL ELSE water_class END, " +
+          "water_class_version = " + moved + "NULL ELSE water_class_version END, " +
+          "water_class_attempts = " + moved + "0 ELSE water_class_attempts END"
         ).bind(row.id, row.name, row.lat, row.lon, row.osmId);
       }
       return env.DB.prepare(
         "INSERT INTO beaches (id, name, lat, lon, osm_id, park_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6) " +
-        "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6"
+        "ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6, " +
+        "water_class = " + moved + "NULL ELSE water_class END, " +
+        "water_class_version = " + moved + "NULL ELSE water_class_version END, " +
+        "water_class_attempts = " + moved + "0 ELSE water_class_attempts END"
       ).bind(row.id, row.name, row.lat, row.lon, row.osmId, row.parkName);
     });
 
@@ -959,6 +1169,34 @@ async function runOverpassSync(env) {
       " skipped_unnamed=" + String(merged.skippedUnnamed) +
       " deleted_stale=" + String(deleted)
     );
+
+    // Synchronous discovery-delta classification: classify up to
+    // WATER_CLASS_DELTA_CAP freshly-discovered (or version-stale) rows NOW, so
+    // new beaches are essentially never left unclassified for a full cron
+    // cycle. The nightly delta is normally a few rows; anything beyond the cap
+    // falls to the dedicated classification cron. Its own try/catch so a
+    // classification failure never costs the discovery run its result.
+    try {
+      const deltaResult = await env.DB.prepare(
+        "SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR water_class_version < " +
+        String(WATER_CLASS_VERSION) + ") AND water_class_attempts < " + String(WATER_CLASS_MAX_ATTEMPTS) +
+        " ORDER BY water_class_attempts ASC, RANDOM() LIMIT " + String(WATER_CLASS_DELTA_CAP)
+      ).all();
+      const deltaRows = deltaResult.results || [];
+      if (deltaRows.length > 0) {
+        const counts = await classifyBeaches(env, deltaRows);
+        console.log(
+          "index: overpass sync water-class delta complete, attempted=" + String(counts.attempted) +
+          " classified=" + String(counts.classified) +
+          " ocean=" + String(counts.ocean) +
+          " great_lake=" + String(counts.great_lake) +
+          " inland=" + String(counts.inland) +
+          " bumped=" + String(counts.bumped)
+        );
+      }
+    } catch (err) {
+      console.log("index: overpass sync water-class delta failed: " + err.message);
+    }
   } catch (err) {
     console.log("index: overpass sync failed: " + err.message);
   }
@@ -995,7 +1233,8 @@ async function runNwsEnrichment(env) {
   try {
     const needsEnrichment = await env.DB.prepare(
       "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < " +
-      String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " ORDER BY enrichment_attempts ASC, RANDOM() LIMIT " +
+      String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " AND " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY enrichment_attempts ASC, RANDOM() LIMIT " +
       String(NWS_ENRICHMENT_LIMIT)
     ).all();
     const toEnrich = needsEnrichment.results || [];
@@ -1066,7 +1305,8 @@ async function runEcccEnrichment(env) {
     const needsEnrichment = await env.DB.prepare(
       "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts >= " +
       String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " AND eccc_zone IS NULL AND eccc_attempts < " +
-      String(ECCC_ENRICHMENT_MAX_ATTEMPTS) + " ORDER BY eccc_attempts ASC, RANDOM() LIMIT " +
+      String(ECCC_ENRICHMENT_MAX_ATTEMPTS) + " AND " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY eccc_attempts ASC, RANDOM() LIMIT " +
       String(ECCC_ENRICHMENT_LIMIT)
     ).all();
     const toEnrich = needsEnrichment.results || [];
@@ -1131,8 +1371,9 @@ async function runWebcamSync(env) {
   try {
     const webcamCutoffIso = new Date(Date.parse(nowIso) - WEBCAM_RECHECK_MS).toISOString();
     const webcamDueResult = await env.DB.prepare(
-      "SELECT id, lat, lon FROM beaches WHERE webcam_checked IS NULL OR webcam_checked < ?1 " +
-      "ORDER BY webcam_checked ASC, id ASC LIMIT " + String(WEBCAM_ENRICHMENT_LIMIT)
+      "SELECT id, lat, lon FROM beaches WHERE (webcam_checked IS NULL OR webcam_checked < ?1) " +
+      "AND " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY webcam_checked ASC, id ASC LIMIT " + String(WEBCAM_ENRICHMENT_LIMIT)
     ).bind(webcamCutoffIso).all();
     const webcamDue = webcamDueResult.results || [];
     for (const beach of webcamDue) {
@@ -1177,17 +1418,125 @@ async function runWebcamSync(env) {
   }
 }
 
-// Cron dispatch table (see the four scheduled triggers in wrangler.toml).
+// Water-body classification (own cron, 4x daily): each beach's adjacent water
+// body is probed via Overpass (vertex recurse-down anchor at 150 m / 120 m —
+// see src/clients/overpass.js) and classified ocean / great_lake / inland by
+// the pure classifyWaterBody in src/waterClass.js. Only ocean + Great Lakes
+// beaches can ever carry a flag; inland rows are hidden (never deleted) by the
+// FLAG_WORTHY_WATER_SQL gate applied to every consumer. water_class_attempts
+// bumps ONLY on a clean-but-empty probe (a real "no flag-worthy water here"),
+// never on a transient Overpass failure, so permanently pond-only rows park at
+// the cap while the ~1/3 Overpass flake rate never wrongly parks a row.
+// Self-isolating: a D1 write failure here is logged and swallowed.
+async function bumpWaterClassAttempts(env, beachId) {
+  try {
+    await env.DB.prepare(
+      "UPDATE beaches SET water_class_attempts = water_class_attempts + 1 WHERE id = ?1"
+    ).bind(beachId).run();
+  } catch (updateErr) {
+    console.log("index: water class attempt bump failed for " + beachId + ": " + updateErr.message);
+  }
+}
+
+// Classify a batch of beach rows sequentially (never overlap Overpass calls —
+// respects the 2-slot/IP limit). Shared by the dedicated classification cron
+// and the synchronous discovery-delta step. Per-beach:
+//   - a transient fetch failure (null signals) -> no bump, row stays queued;
+//   - a decision (cls !== null) -> store water_class + version, RESET attempts
+//     to 0 (so a later version re-drain has a fresh budget);
+//   - a clean-but-empty answer (cls === null) -> bump attempts.
+// Returns a counts object for the completion log. Never throws.
+async function classifyBeaches(env, rows) {
+  const counts = {
+    attempted: 0, classified: 0, ocean: 0, great_lake: 0,
+    inland: 0, bumped: 0, transient: 0
+  };
+  for (const beach of rows) {
+    counts.attempted = counts.attempted + 1;
+    let signals = null;
+    try {
+      signals = await fetchWaterClassSignals(beach);
+    } catch (err) {
+      // fetchWaterClassSignals honors the data-or-null contract, but isolate
+      // defensively so one bad row never poisons the batch.
+      console.log("index: water class fetch threw for " + beach.id + ": " + err.message);
+      signals = null;
+    }
+    if (signals === null) {
+      counts.transient = counts.transient + 1;
+      continue;
+    }
+    const cls = classifyWaterBody(signals);
+    if (cls !== null) {
+      try {
+        await env.DB.prepare(
+          "UPDATE beaches SET water_class = ?1, water_class_version = ?2, water_class_attempts = 0 WHERE id = ?3"
+        ).bind(cls, WATER_CLASS_VERSION, beach.id).run();
+        counts.classified = counts.classified + 1;
+        counts[cls] = counts[cls] + 1;
+      } catch (err) {
+        console.log("index: water class store failed for " + beach.id + ": " + err.message);
+      }
+    } else {
+      counts.bumped = counts.bumped + 1;
+      await bumpWaterClassAttempts(env, beach.id);
+    }
+  }
+  return counts;
+}
+
+async function runWaterClassification(env) {
+  try {
+    const needsClass = await env.DB.prepare(
+      "SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR water_class_version < " +
+      String(WATER_CLASS_VERSION) + ") AND water_class_attempts < " + String(WATER_CLASS_MAX_ATTEMPTS) +
+      " ORDER BY water_class_attempts ASC, RANDOM() LIMIT " + String(WATER_CLASS_LIMIT)
+    ).all();
+    const toClassify = needsClass.results || [];
+    const counts = await classifyBeaches(env, toClassify);
+
+    // parked = looked, found no flag-worthy water, capped (hidden by the gate).
+    const parkedResult = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM beaches WHERE water_class IS NULL AND water_class_attempts >= " +
+      String(WATER_CLASS_MAX_ATTEMPTS)
+    ).first();
+    const parkedCount = parkedResult ? parkedResult.n : 0;
+    // hidden_inland = confirmed inland rows removed from every consumer. A
+    // NULL-hide with no metric is silent product loss — this is the required
+    // visibility (metric parity with the NWS parked-count line).
+    const hiddenResult = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM beaches WHERE water_class = 'inland'"
+    ).first();
+    const hiddenCount = hiddenResult ? hiddenResult.n : 0;
+
+    console.log(
+      "index: water classification complete, attempted=" + String(counts.attempted) +
+      " classified=" + String(counts.classified) +
+      " ocean=" + String(counts.ocean) +
+      " great_lake=" + String(counts.great_lake) +
+      " inland=" + String(counts.inland) +
+      " bumped=" + String(counts.bumped) +
+      " parked=" + String(parkedCount) +
+      " hidden_inland=" + String(hiddenCount)
+    );
+  } catch (err) {
+    console.log("index: water classification failed: " + err.message);
+  }
+}
+
+// Cron dispatch table (see the scheduled triggers in wrangler.toml).
 // Each entry pairs a cron expression with its runner and the label used in
 // the top-level throw log. Keeping this as data means adding a cron is one
 // row, and the unknown-cron fallback below stays the single place that logs
 // an unrecognized trigger.
 const CRON_JOBS = {
   "0 * * * *": { run: runFlagRecompute, label: "flag recompute" },
+  "15 */6 * * *": { run: runWaveRefresh, label: "wave refresh" },
   "47 8 * * *": { run: runOverpassSync, label: "overpass sync" },
   "17 3,9,15,21 * * *": { run: runNwsEnrichment, label: "nws enrichment" },
   "29 4,10,16,22 * * *": { run: runEcccEnrichment, label: "eccc enrichment" },
-  "31 9 * * *": { run: runWebcamSync, label: "webcam sync" }
+  "31 9 * * *": { run: runWebcamSync, label: "webcam sync" },
+  "37 1,7,13,19 * * *": { run: runWaterClassification, label: "water classification" }
 };
 
 export default {

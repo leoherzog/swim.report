@@ -55,10 +55,23 @@ cross-module interface.
       webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
                                      // string or null: Windy embed player URL (live variant
                                      // preferred when the cam offers one)
-      webcam_checked: "2026-07-06T08:47:12.000Z"
+      webcam_checked: "2026-07-06T08:47:12.000Z",
                                      // string or null: when the Windy lookup last COMPLETED
                                      // for this row (success or confirmed no-cam); null =
                                      // never checked. Drives the 14-day recheck queue.
+      water_class: "great_lake",     // string or null: adjacent water body (migration 0009).
+                                     // null (unclassified) | 'ocean' | 'great_lake' |
+                                     // 'inland'. Only 'ocean'/'great_lake' are flag-worthy;
+                                     // 'inland' is hidden by the FLAG_WORTHY_WATER_SQL gate
+                                     // (section 7). Decided by classifyWaterBody
+                                     // (src/waterClass.js) from Overpass signals.
+      water_class_attempts: 0,       // number: per-row count of successful-but-empty
+                                     // classification probes (mirrors enrichment_attempts).
+                                     // Rows at WATER_CLASS_MAX_ATTEMPTS park (hidden). A
+                                     // transient Overpass failure never bumps it.
+      water_class_version: 1         // number or null: the WATER_CLASS_VERSION under which
+                                     // water_class was decided; bumping the constant
+                                     // re-drains rows below it. INDEPENDENT of RULES_VERSION.
     }
 
 ### FlagEstimate (output of estimateFlag; the KV value under "flag:" + beachId)
@@ -123,9 +136,9 @@ before this shape existed.
 
     {
       "beachId": "osm-node-123456",
-      "startIso": "2026-07-12T15:00:00.000Z",   // the run's nowIso truncated to the top of
-                                                // its UTC hour: hoursFt[0] is the forecast
-                                                // for THIS hour
+      "startIso": "2026-07-12T15:00:00.000Z",   // the wave-refresh run's nowIso truncated to
+                                                // the top of its UTC hour: hoursFt[0] is the
+                                                // forecast for THIS hour
       "hoursFt": [2.62, 2.43, null, ...],       // exactly 24 entries, feet, raw floats (NO
                                                 // rounding — hoursFt[0] must stay identical
                                                 // to the FlagEstimate's waveHeightFt so the
@@ -152,12 +165,41 @@ before this shape existed.
       "updated": "2026-07-12T15:00:03.000Z"
     }
 
-Written by the hourly cron ONLY when the beach's Open-Meteo series has at least one
+Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data TTL
+(WAVE_DATA_TTL_SECONDS = 25200) ONLY when the beach's Open-Meteo series has at least one
 finite hour — a fetch failure, an all-masked series, an all-zero series (Open-Meteo's
 masked-cell signature; the client treats it as no data), or a buoy-only gap-fill (buoys
 are nearest-point now-observations with no hourly series; one is never synthesized)
 writes no key, so absent means "no series to show" and the detail page simply omits
-the forecast strip. Feeds the detail page's 24 h wave chart (section 9).
+the forecast strip. NOT written by the hourly recompute (which no longer fetches waves).
+Feeds the detail page's 24 h wave chart (section 9).
+
+### WaveInput (KV value under "waveinput:" + beachId)
+
+    {
+      "beachId": "osm-node-123456",
+      "waveHeightFt": 2.62,          // number (feet) or null — the current-hour wave reading
+                                     // (marine composite hour-0, or a buoy gap-fill), what the
+                                     // hourly estimate consumes as inputs.waveHeightFt
+      "model": "ecmwf_wam025",       // string or null: the model that supplied waveHeightFt
+                                     // (GLCFS_WAVE_MODEL for a buoy reading); drives the
+                                     // estimate's wave source label
+      "windSpeedMph": null,          // number (mph) or null — the wind FALLBACK, recorded ONLY
+      "windGustMph": null,           // number (mph) or null   for beaches still wave-null after
+                                     // the marine + buoy passes (the estimate's wind fallback)
+      "updated": "2026-07-12T15:00:03.000Z"
+    }
+
+Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data TTL
+(WAVE_DATA_TTL_SECONDS = 25200) and read by the hourly runFlagRecompute, which takes the
+current wave height and the wind fallback for its estimate from this payload instead of a
+live fetch. Written ONLY when the run produced something usable for the beach: a wave
+height (from the marine models or the buoy gap-fill) OR a wind fallback reading. A beach
+whose marine fetch merely FAILED this run (the hoursFt === null batch-failure sentinel)
+with no buoy reading is SKIPPED so its last-good key rides the TTL — the same
+graceful-degradation contract the WaveSeries has; a fetched-but-fully-masked beach with no
+buoy and no wind is skipped too. Absent/expired key → the hourly estimate simply has no
+wave input this run (degrades to the wind fallback or "unknown", never a wrong flag).
 
 ## 2. D1 schema — migrations/
 
@@ -268,6 +310,29 @@ migrations/0008_eccc.sql:
   enrichment_attempts >= 5) are ECCC-enrichment candidates, so a US beach is
   never ECCC-looked-up before api.weather.gov has definitively rejected it.
 
+migrations/0009_water_class.sql:
+
+    ALTER TABLE beaches ADD COLUMN water_class TEXT;
+    ALTER TABLE beaches ADD COLUMN water_class_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE beaches ADD COLUMN water_class_version INTEGER;
+
+  Flag-worthy water-body classification. Beach flags exist only for oceans and
+  the Great Lakes, but neither Overpass discovery path checks the adjacent
+  water body, so the table admits hundreds of inland-lake beaches (Fremont Lake
+  Park, Clinton Lakes Dog Beach) that can never carry a flag. Each beach's
+  adjacent water body is probed (Overpass vertex recurse-down anchor) and
+  classified by classifyWaterBody (src/waterClass.js); inland rows are hidden
+  (never deleted) by the FLAG_WORTHY_WATER_SQL gate (section 7). water_class:
+  NULL (unclassified) | 'ocean' | 'great_lake' | 'inland'. water_class_attempts
+  mirrors enrichment_attempts: a successful-but-empty probe (no flag-worthy
+  water found) bumps it and rows at WATER_CLASS_MAX_ATTEMPTS (5) park; a
+  transient Overpass failure never bumps it. water_class_version is the
+  WATER_CLASS_VERSION under which the row was decided; bumping the constant
+  re-drains rows below it. INDEPENDENT of RULES_VERSION — this governs water-body
+  classification, not flag color, so RULES_VERSION does NOT bump for this
+  feature. No index: every gate query already range-scans on other predicates,
+  and the classification-cron selection is a small LIMITed scan.
+
 - idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
   key "last_overpass_count" (value = String(count)).
@@ -283,11 +348,16 @@ Binding name: FLAGS (single namespace for both key families).
   { expirationTtl: 7200 }.
 - Key "official:" + beachId → JSON.stringify(OfficialFlag). Written by hourly cron with
   { expirationTtl: 7200 }.
-- Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by hourly cron with
-  { expirationTtl: 7200 }, and only when the series has >= 1 finite hour (section 1).
-  Read ONLY by the detail route (the list page must not gain per-row reads). Absent
-  key → the detail page omits the wave-forecast strip (the "now" stat can still
-  render from FlagEstimate.waveHeightFt).
+- Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the 6-hourly wave cron
+  (runWaveRefresh) with { expirationTtl: 25200 }, and only when the series has >= 1 finite
+  hour (section 1). Read ONLY by the detail route (the list page must not gain per-row
+  reads). Absent key → the detail page omits the wave-forecast strip (the "now" stat can
+  still render from FlagEstimate.waveHeightFt).
+- Key "waveinput:" + beachId → JSON.stringify(WaveInput). Written by the 6-hourly wave cron
+  (runWaveRefresh) with { expirationTtl: 25200 }, and only when the run produced a usable
+  wave height or a wind fallback for the beach (section 1). Read by the hourly
+  runFlagRecompute — the current wave height + wind fallback for the estimate come from
+  here, NOT a live fetch. Absent key → the estimate has no wave input this run.
 - Key "scraperhealth:" + scraperId → JSON { consecutiveNulls, lastSuccess,
   lastFailure }. Written by the hourly cron with NO expirationTtl (the failure
   streak must survive across runs). See section 7 step 8.
@@ -392,9 +462,12 @@ Pure module. No fetch, no Date, no env. Exports:
                                         // checkable), null for legacy callers (no
                                         // caveat). Drives the reason caveat after step 5.
       ripCurrentRisk: "HIGH",           // "HIGH" | "MODERATE" | "LOW" | null
-      waveHeightFt: 3.2,                // number (feet, already converted) or null
-      windSpeedMph: 18,                 // number (mph, sustained) or null
-      windGustMph: 27,                  // number (mph) or null
+      waveHeightFt: 3.2,                // number (feet, already converted) or null. The cron
+                                        // now reads this from the "waveinput:" + beachId KV
+                                        // the 6-hourly wave cron wrote (section 1/3), NOT a
+                                        // live fetch; the shape into estimateFlag is unchanged.
+      windSpeedMph: 18,                 // number (mph, sustained) or null — wind FALLBACK, also
+      windGustMph: 27,                  // number (mph) or null   from the "waveinput:" KV
       sources: [{ label, url }],        // array of source entries (may be []); passed through verbatim
       updated: "2026-07-04T15:00:03.000Z" // ISO string; passed through verbatim
     }
@@ -665,13 +738,17 @@ locally via pointInGeometry (src/geo.js).
     export const WAVE_MODEL_ORDER = ["ecmwf_wam025", "ncep_gfswave025", "meteofrance_wave"];
 
     export async function fetchWaveHeightsFt(points, nowIso)
-      // points: [{ beachId, lat, lon }], max 50 per call (caller enforces batching).
+      // points: [{ beachId, lat, lon }]; the caller (runWaveRefresh) enforces batching at
+      // OPEN_METEO_BATCH = 100 per call and paces the batches under the API rate limit.
       // nowIso: ISO string used to select the hourly index — NO Date.now() inside.
       // One GET to "https://marine-api.open-meteo.com/v1/marine?latitude=" +
       //   lats.join(",") + "&longitude=" + lons.join(",") +
-      //   "&hourly=wave_height,wave_direction,wave_period" +
+      //   "&hourly=wave_height" +
       //   "&models=" + WAVE_MODEL_ORDER.join(",") +
       //   "&forecast_days=2&timezone=UTC"
+      //   Only wave_height is requested — wave_direction/wave_period were fetched but never
+      //   consumed (modelHoursSlice reads only wave_height_<model>) and tripled the request's
+      //   Open-Meteo weighted cost, pushing the batch burst over the API's rate limit.
       // Response: array of location objects when multiple coords are sent (a single object
       //   when one coord — normalize to array). With multiple models the hourly variables
       //   are suffixed per model, e.g. hourly.wave_height_ecmwf_wam025. forecast_days=2
@@ -707,7 +784,7 @@ locally via pointInGeometry (src/geo.js).
       // Total request failure -> null.
 
     export async function fetchWinds(points)
-      // points: [{ beachId, lat, lon }], max 50 per call.
+      // points: [{ beachId, lat, lon }]; caller batches at OPEN_METEO_BATCH = 100 per call.
       // One GET to "https://api.open-meteo.com/v1/forecast?latitude=" + lats.join(",") +
       //   "&longitude=" + lons.join(",") +
       //   "&current=wind_speed_10m,wind_gusts_10m&wind_speed_unit=mph&timezone=UTC"
@@ -897,6 +974,59 @@ entirely when it is unset.
       // Pure, exported for tests. Smallest-bbox-area park whose bounding box
       // OVERLAPS the beach's bounding box (overlap, not center containment —
       // shoreline beach polygons bulge lakeward past the park boundary), or null.
+
+    // --- Water-body classification (migration 0009, cron path only) ---
+    export const OCEAN_RADIUS_M = 150;       // coastline probe
+    export const GREAT_LAKE_RADIUS_M = 150;  // lake-relation probe (audit-validated)
+    export const INLAND_RADIUS_M = 120;      // the beach's OWN adjacent water only
+
+    export function buildWaterClassAnchor(osmId)   // + buildWaterClassQuery(osmId)
+      // Pure, exported for tests. Turn a stored osm_id ("way/N" | "relation/N" |
+      // "node/N") into the Overpass recurse-down anchor that seeds the `around`
+      // probe on the element's REAL member vertices — "way(N);>->.a;" /
+      // "relation(N);>->.a;" / "node(N)->.a;" — never the centroid (set-back
+      // beaches miss) and never the bbox rectangle (large polygons like Sleeping
+      // Bear mis-classify). null for an unparseable id. buildWaterClassQuery wraps
+      // it in the full query at 150 m/120 m with `out ids tags bb` — NEVER
+      // `out geom` (Lake Superior's multipolygon geometry is tens of MB).
+
+    export function parseWaterClassElements(elements)
+      // Pure, exported for tests. Raw Overpass elements -> the signals object
+      // classifyWaterBody consumes: any natural=coastline way -> coastlinePresent;
+      // each water=lake RELATION's wikidata -> nearbyLakeQids; any natural=water
+      // WAY whose bb area >= WATER_MIN_AREA_DEG2 -> nearbyWayWater.
+
+    export async function fetchWaterClassSignals(beach)
+      // Async, never throws. Builds the query from beach.osm_id and runs it via
+      // runQuery. null = TRANSIENT failure (HTTP error, JSON failure, truncation
+      // remark, or unparseable osm_id) -> caller must NOT bump attempts. A signals
+      // object = a CLEAN answer (even all-empty). The whole attempts semantics:
+      // bump only on a clean-but-empty classification, never on the ~1/3 Overpass
+      // flake rate.
+
+### src/waterClass.js (pure, versioned; the single home of the classification decision + allowlist DATA)
+
+    export const WATER_CLASS_VERSION = 1;   // bump on allowlist/predicate change; re-drains
+                                            // rows below it. INDEPENDENT of RULES_VERSION.
+    export const GREAT_LAKE_QIDS = { "Q1066": "Lake Superior", "Q1169": "Lake Michigan",
+      "Q1383": "Lake Huron", "Q5492": "Lake Erie", "Q1062": "Lake Ontario",
+      "Q736707": "Lake St. Clair" };   // wikidata QID -> name. Matched by QID, NEVER by name
+                                       // (a POND named "Lake Superior" exists). Major bays
+                                       // (Georgian/Green/Saginaw) resolve to the parent QID.
+    export const WATER_CLASS_MAX_ATTEMPTS = 5;   // park cap (matches enrichment caps)
+    export const FLAG_WORTHY_WATER_SQL           // canonical HIDE-UNTIL-FLAG-WORTHY gate:
+      // "(water_class IN ('ocean','great_lake') OR (water_class IS NULL AND
+      //   water_class_attempts < 5))" — a single shared SQL fragment so every
+      // consumer's WHERE clause is byte-identical and cannot drift.
+
+    export function isGreatLakeQid(qid)          // true iff qid is an allowlisted string
+    export function isFlagWorthyWater(beach)     // JS mirror of the gate for per-row 404s
+    export function classifyWaterBody(signals)
+      // Pure, never throws. Precedence ocean > great_lake > inland. signals =
+      // { coastlinePresent: bool, nearbyLakeQids: [string], nearbyWayWater: bool }.
+      // Returns 'ocean' | 'great_lake' | 'inland' | null. null == "saw nothing
+      // usable" -> caller bumps attempts; NEVER returned for a transient failure
+      // (that path stops at fetchWaterClassSignals returning null).
 
 ## 6. Official sources
 
@@ -1205,12 +1335,15 @@ guessed color). Full color semantics are in README.md's official-sources table.
 wrangler.toml triggers:
 
     [triggers]
-    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+    crons = ["0 * * * *", "15 */6 * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *", "37 1,7,13,19 * * *"]
 
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
 matched job; an unrecognized cron is logged and ignored. The table:
-- "0 * * * *"          → runFlagRecompute(env)  (hourly)
+- "0 * * * *"          → runFlagRecompute(env)  (hourly; reads wave inputs from KV, does NOT
+                         fetch waves — see runWaveRefresh)
+- "15 */6 * * *"       → runWaveRefresh(env)    (6-hourly; owns ALL Open-Meteo/GLOS wave &
+                         wind fetching, writes the "waveinput:"/"waves:" KV the hourly cron reads)
 - "47 8 * * *"         → runOverpassSync(env)   (daily, 08:47 UTC ≈ 3:47am EST / 4:47am EDT —
                          off-peak for both US users and the Overpass API; discovery ONLY)
 - "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; the 09:17 run picks up rows the
@@ -1218,8 +1351,10 @@ matched job; an unrecognized cron is logged and ignored. The table:
 - "29 4,10,16,22 * * *" → runEcccEnrichment(env) (4x daily, offset ~1h from the NWS trigger;
                          picks up rows the NWS runs have permanently parked)
 - "31 9 * * *"         → runWebcamSync(env)     (daily, shortly after discovery)
+- "37 1,7,13,19 * * *" → runWaterClassification(env) (4x daily; classifies adjacent water
+                         body via Overpass, hours avoid the 08:47 discovery + enrichment windows)
 
-The five jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
+The seven jobs are deliberately SEPARATE crons so each upstream's rate-limit posture is
 independent and a failure in one never starves another (an aborted Overpass sync used to
 skip that night's NWS enrichment and webcam hydration entirely). The matched job is
 invoked via ctx.waitUntil with a top-level .catch that logs "index: scheduled <label>
@@ -1228,7 +1363,10 @@ failure counts).
 
 ### runFlagRecompute (hourly)
 
-Constants: MAX_BEACHES_PER_RUN = 1000, OPEN_METEO_BATCH = 50, KV_TTL_SECONDS = 7200.
+Constants: MAX_BEACHES_PER_RUN = 1000, KV_TTL_SECONDS = 7200. (The Open-Meteo batch/pacing
+constants — OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY, OPEN_METEO_BATCH_GAP_MS,
+OPEN_METEO_RETRY_MS, WAVE_DATA_TTL_SECONDS — belong to runWaveRefresh; the hourly cron no
+longer fetches Open-Meteo.)
 
 MAX_BEACHES_PER_RUN must cover the WHOLE beaches table in one run: the KV TTL is 2 h,
 so any beach not reached every other hourly run has its flag expire and shows "no data"
@@ -1236,8 +1374,6 @@ until its next rotation turn. 1000 covers the pilot with headroom; nationwide sc
 still needs real pagination (TODO.md).
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run).
-   Also computed once per run: wavesStartIso = nowIso truncated to the top of its UTC
-   hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries in step 7.
 2. SELECT * FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT 1000
    (recompute_updated is migration 0004; NULLs sort first, so never-recomputed rows and
    the longest-waiting rows always go first — a fair rotation if the table ever exceeds
@@ -1258,22 +1394,15 @@ still needs real pagination (TODO.md).
    rows; a failed fetch (null) just means those beaches get alerts: null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
-5. Waves: fetchWaveHeightsFt in batches of 50 (Promise.allSettled across batches; a failed
-   batch yields nulls for its beaches only). Each per-beach entry carries the client's
-   full shape { waveHeightFt, model, hoursFt, models, byModel } (section 5). Failed-batch
-   fallback entries use hoursFt: null (NOT an all-null array — distinguishes "fetch failed"
-   from "fetched, all cells masked" without rescanning; both skip the waves KV write),
-   models: [], and byModel: {}.
-   5b. Great Lakes buoy gap-fill: for beaches STILL wave-null after step 5, one
-   fetchGlcfsWaveHeightsFt(points, nowIso) call (src/clients/glerl.js — it dedups
-   buoy fetches internally, <= 62 subrequests). Non-null readings overwrite ONLY the
-   beach entry's waveHeightFt and model (model: GLCFS_WAVE_MODEL), PRESERVING the
-   entry's hoursFt/models/byModel from step 5 — buoys are nearest-point now-observations with
-   no hourly series, and one is never synthesized. Where Open-Meteo answered, behavior
-   is unchanged. A null return (total failure) just logs — the affected beaches fall
-   through to wind as before.
-6. Wind: only for beaches whose waveHeightFt is null after steps 5 + 5b — fetchWinds
-   in batches of 50.
+5. Wave inputs: READ ONLY — the hourly cron performs NO Open-Meteo or GLOS fetch. The
+   6-hourly wave cron (runWaveRefresh) wrote a "waveinput:" + id payload (section 1:
+   { waveHeightFt, model, windSpeedMph, windGustMph, updated }) per beach; prefetch all of
+   them from KV concurrently in chunks of 50 (env.FLAGS.get(..., { type: "json" }), each
+   guarded so a failed get yields no input) into a Map. A missing key (the wave cron
+   hasn't run yet, or its data aged past the 7 h TTL) simply yields no wave input — the
+   estimate degrades to the wind fallback or "unknown", never a wrong flag.
+6. (Wind is no longer fetched here — the wind fallback the estimate uses is carried on the
+   waveinput payload, recorded by runWaveRefresh only for beaches still wave-null there.)
 7. Per beach: assemble inputs (nulls for anything missing), including
    alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false (section 4 —
    a beach enriched for neither authority gets the honesty caveat instead of a
@@ -1287,20 +1416,15 @@ still needs real pagination (TODO.md).
    { label, url } entries (section 1) for every source that returned data for THIS
    beach — alerts: "NWS Alerts", or "Environment Canada Alerts" with url
    ECCC_ALERTS_INFO_URL for Canadian beaches; SRF: "NWS Surf Zone Forecast";
-   waves: waveSourceLabel(model) from WAVE_MODEL_LABELS
+   waves: waveSourceLabel(waveInput.model) from WAVE_MODEL_LABELS
    (GLCFS_WAVE_MODEL -> "GLOS Buoy Observations") with url
-   waveSourceUrl(model) (Open-Meteo marine docs, or SEAGULL_INFO_URL for buoy
+   waveSourceUrl(waveInput.model) (Open-Meteo marine docs, or SEAGULL_INFO_URL for buoy
    readings — always a human-readable page, never the raw API request); wind:
-   "Wind Forecast" — updated = nowIso; call estimateFlag;
+   "Wind Forecast" (only when waveHeightFt is null and a wind fallback is present).
+   waveHeightFt, windSpeedMph, and windGustMph all come from the beach's "waveinput:" KV
+   payload (step 5), not a live fetch; updated = nowIso; call estimateFlag;
    env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate), { expirationTtl: 7200 }).
-   Then, still inside the same per-beach try/catch: if the beach's wave entry has an
-   Array hoursFt with >= 1 finite number, build the WaveSeries (section 1: beachId,
-   startIso = wavesStartIso, hoursFt raw, models, byModel (entry's, defaulting {}),
-   sources label =
-   models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models" with url
-   OPEN_METEO_MARINE_URL, updated = nowIso) and
-   env.FLAGS.put("waves:" + beach.id, ..., { expirationTtl: 7200 }); count writes and
-   report " waves=" + count on the run's summary log line.
+   The "waves:" WaveSeries is NOT written here — the wave cron owns it (see runWaveRefresh).
 8. Officials: group beaches by findScraper(beach) id; call each distinct scraper's
    scrape(nowIso) ONCE per run; for every matched beach resolve the shared result via
    scrapeOfficialFlagFromResult(beach, scraper, result) and write the returned
@@ -1342,19 +1466,71 @@ still needs real pagination (TODO.md).
    UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
 
 Subrequest budget (paid plan, 10,000/invocation): 1 NWS national alerts call (step 3) +
-1 ECCC national alerts call (step 3b) + ~2×15 SRF calls +
-~13 marine batches + ≤62 GLCFS buoy (2 catalogs + ≤60 deduped platform fetches, step 5b) +
-≤13 wind batches + ~62 official-scraper fetches (one scrape() per matched scraper; South
-Haven uses 2 fetches, Ohio BeachGuard now issues ONE GET per OHIO_SITES entry = 51, the
-rest 1 each) + ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch
-(step 9, only when >= 1 estimate/official pair exists) + ≤700 flag/official KV puts +
-≤613 waves KV puts (step 7 — only beaches with >= 1 finite forecast hour) ≈ 1500 at the
-full ~613-row pilot table, still well under 10,000. Both authorities' alerts are now ONE
-national fetch each — no longer a call per distinct zone — so alert cost stays flat as the
-table grows. Free plan
+1 ECCC national alerts call (step 3b) + ~2×15 SRF calls + ~13 waveinput KV gets batches
+(≤613 gets, step 5 — no upstream marine/GLOS/wind fetch anymore) + ~62 official-scraper
+fetches (one scrape() per matched scraper; South Haven uses 2 fetches, Ohio BeachGuard now
+issues ONE GET per OHIO_SITES entry = 51, the rest 1 each) + ~2 scraper-health KV ops per
+matched scraper + ≤1 flag_history D1 batch (step 9, only when >= 1 estimate/official pair
+exists) + ≤700 flag/official KV puts ≈ well under 10,000 at the full ~613-row pilot table.
+Both authorities' alerts are now ONE national fetch each — no longer a call per distinct
+zone — so alert cost stays flat as the table grows. Free plan
 (50 subrequests, 1000 KV writes/day) is NOT sufficient at this cadence — README must state
 the paid-plan assumption; alternatively cap MAX_BEACHES_PER_RUN low for a free-plan demo
 (TODO.md).
+
+### runWaveRefresh (6-hourly: "15 */6 * * *")
+
+Constants: OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY = 2, OPEN_METEO_BATCH_GAP_MS =
+12000, OPEN_METEO_RETRY_MS = 60000, WAVE_DATA_TTL_SECONDS = 25200 (7 h). The three pacing
+knobs are read via batchTiming(env) with numeric env overrides of the same names (tests
+zero them to run instantly); MAX_BEACHES_PER_RUN = 1000 covers the whole table as the
+hourly cron does.
+
+Owns ALL upstream wave/wind fetching that used to live in the hourly recompute — the
+Open-Meteo marine wave batch, the GLOS Seagull buoy gap-fill, and the Open-Meteo wind
+fallback. It is a SEPARATE, less-frequent cron because Open-Meteo's marine models only
+publish every 6–12 h, so refetching hourly was 6–12× wasted quota; the 6-hourly cadence
+plus paced batching keeps the run under Open-Meteo's per-minute weighted rate limit (the
+old hourly Promise.allSettled fan-out burst past it, got the tail of the run HTTP 429'd,
+and blanked the detail-page strip). The 7 h TTL outlives the gap between runs (plus slack
+for one failed run), so a transient 429 leaves the strip showing slightly-older-but-still-
+model-current data instead of blanking it.
+
+1. const nowIso = new Date().toISOString(); wavesStartIso = nowIso truncated to the top of
+   its UTC hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries.
+   SELECT id, lat, lon FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT 1000.
+2. Waves (marine), PACED: batchByBeach chunks the points (OPEN_METEO_BATCH = 100) and runs
+   the chunks in concurrency-limited waves (OPEN_METEO_CONCURRENCY at a time) with a gap
+   (OPEN_METEO_BATCH_GAP_MS) between waves and ONE backoff retry (OPEN_METEO_RETRY_MS) on a
+   throttled (null) batch — never the all-at-once fan-out that got 429'd. Each per-beach
+   entry carries the client's full shape { waveHeightFt, model, hoursFt, models, byModel }
+   (section 5). A still-failed batch stores the hoursFt: null batch-failure sentinel (NOT
+   an all-null array — distinguishes "fetch failed" from "fetched, all cells masked"),
+   models: [], byModel: {}.
+3. Great Lakes buoy gap-fill: for beaches STILL wave-null, one fetchGlcfsWaveHeightsFt(
+   points, nowIso) call (src/clients/glerl.js — dedups buoy fetches internally, <= 62
+   subrequests). Non-null readings overwrite ONLY the entry's waveHeightFt and model
+   (model: GLCFS_WAVE_MODEL), PRESERVING hoursFt/models/byModel — buoys are nearest-point
+   now-observations with no hourly series, and one is never synthesized.
+4. Wind: only for beaches whose waveHeightFt is still null (recomputed fresh — step 3 may
+   have gap-filled some out of the wave-null set) — fetchWinds, paced by the same
+   batchByBeach.
+5. Persist per beach, isolated failures. Write "waveinput:" + id → WaveInput (section 1:
+   { beachId, waveHeightFt, model, windSpeedMph, windGustMph, updated }) with
+   { expirationTtl: 25200 } ONLY when the run produced something usable — a wave height OR
+   a wind fallback. A beach whose marine fetch merely FAILED (hoursFt === null sentinel)
+   with no buoy reading is SKIPPED so its last-good KV rides the TTL; a fetched-but-masked
+   beach with no buoy and no wind is skipped too. Then, when the entry has an Array hoursFt
+   with >= 1 finite number, also write "waves:" + id → WaveSeries (section 1: startIso =
+   wavesStartIso, hoursFt raw, models, byModel, sources label =
+   models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models" with url
+   OPEN_METEO_MARINE_URL) with { expirationTtl: 25200 }. Summary log reports beaches /
+   inputs / series counts.
+
+Subrequest budget: ~7 paced marine batches (100/batch over ~613 beaches) + ≤62 GLCFS buoy
+(2 catalogs + ≤60 deduped platform fetches) + ≤7 paced wind batches + ≤613 waveinput KV
+puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the inter-wave sleeps
+burn no CPU so the paced run stays inside the scheduled invocation's time budget.
 
 ### runOverpassSync (daily)
 
@@ -1491,6 +1667,62 @@ Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤
 subrequests per run. The stored player URL is only ever dereferenced by the visitor's
 BROWSER on the detail page — never by the request path.
 
+### runWaterClassification (4x daily: "37 1,7,13,19 * * *")
+
+Constants: WATER_CLASS_LIMIT = 25 (N per run — per-beach Overpass probing is
+rate-limited on the public endpoint, so keep the run small and polite; the one-time
+bulk backfill does the mass classification, this cron only drains the steady-state
+trickle plus any WATER_CLASS_VERSION re-drain), WATER_CLASS_MAX_ATTEMPTS = 5 (from
+src/waterClass.js), WATER_CLASS_DELTA_CAP = 25 (the synchronous discovery-delta bound
+below). Hours chosen to avoid the 08:47 discovery run and the enrichment windows.
+
+SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
+water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
+water_class_attempts ASC, RANDOM() LIMIT 25 (fresh-first then random; re-drain on a
+version bump; skip parked). Per beach SEQUENTIALLY (never overlap Overpass calls —
+respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
+- signals === null (TRANSIENT) → log, continue, NO bump (row stays queued);
+- cls = classifyWaterBody(signals); cls !== null → UPDATE beaches SET water_class = ?,
+  water_class_version = ?, water_class_attempts = 0 WHERE id = ? (reset attempts on a
+  decision so a later version re-drain has a fresh budget);
+- cls === null (CLEAN but empty) → bumpWaterClassAttempts (self-isolating, like
+  bumpAttempts / bumpEcccAttempts).
+The whole attempts semantics: bump ONLY on a clean-but-empty classification, never on
+the ~1/3 Overpass flake rate. Summary log reports attempted / classified / ocean /
+great_lake / inland / bumped / parked (water_class IS NULL AND attempts >= 5) /
+hidden_inland (water_class = 'inland') — a NULL-hide with no metric is silent product
+loss, so these two counts are the required visibility. RULES_VERSION is UNAFFECTED by
+this cron (water_class has its own WATER_CLASS_VERSION).
+
+Synchronous discovery-delta (end of runOverpassSync): after the upserts +
+reconciliation, classify up to WATER_CLASS_DELTA_CAP rows matching the same selection,
+sequentially (reusing classifyBeaches — the shared per-beach loop the cron uses), so
+newly discovered beaches are essentially never left unclassified for a full cron cycle.
+Its own try/catch so a classification failure never costs the discovery run.
+
+Discovery-upsert centroid-move reset: the runOverpassSync ON CONFLICT(id) DO UPDATE (both
+the park and named-only branches) NULLs water_class / water_class_version and zeroes
+water_class_attempts when the centroid moved materially — CASE WHEN (abs(lat - ?3) > 0.001
+OR abs(lon - ?4) > 0.001) THEN NULL/0 ELSE <existing> END (0.001 deg ≈ 80-111 m at pilot
+latitudes; in SQLite's upsert an unqualified column is the EXISTING value and ?3/?4 are the
+new lat/lon), so a beach that moved to different water re-classifies.
+
+### Flag-worthy gate (HIDE-UNTIL-FLAG-WORTHY) — a cross-cutting invariant
+
+Inland beaches are never DELETED; every consumer filters to flag-worthy water via ONE
+shared clause, FLAG_WORTHY_WATER_SQL (src/waterClass.js): "(water_class IN
+('ocean','great_lake') OR (water_class IS NULL AND water_class_attempts < 5))". It shows
+confirmed keepers PLUS still-pending unclassified rows and hides confirmed inland +
+parked-unresolved. During backfill a still-pending NULL row stays visible so the live
+site is never blanked; post-backfill no pending NULLs remain and the clause collapses to
+the pure "water_class IN ('ocean','great_lake')" state with no second code change. Applied
+at: buildHomeStatement (home list, both branches + ?q=), handleApiBeaches (map bbox),
+runFlagRecompute, runWaveRefresh, runNwsEnrichment, runEcccEnrichment, runWebcamSync
+(AND-ed into each SELECT); handleDetail and handleApiFlag use the JS mirror
+isFlagWorthyWater to 404 a non-flag-worthy row. The enrichers gate ONLY drops confirmed
+inland — a NULL-pending row still enriches, so classification never stacks in front of the
+NWS→park→ECCC pipeline.
+
 ## 8. HTTP surface (src/router.js, src/index.js)
 
 src/index.js:
@@ -1594,7 +1826,7 @@ Routing table (method GET only; anything else → 405):
     enabled = true
 
     [triggers]
-    crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+    crons = ["0 * * * *", "15 */6 * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *", "37 1,7,13,19 * * *"]
 
     [[d1_databases]]
     binding = "DB"
@@ -1899,7 +2131,10 @@ exporting a CSS string); render.js is the sole module the router imports.
     the tooltips) carries waveStripSummary(runs) — a run-by-run prose forecast
     ("Under 2 ft for 5 hours from now, then ..."). Being plain HTML the strip renders
     with JS off / kit unreachable; only the tooltips need the component kit.
-  - Stale warning (same 7200000 ms rule, keyed on waves.updated) inside the section.
+  - Stale warning (WAVE_STALE_MS = 28800000 ms / 8 h, keyed on waves.updated) inside the
+    section — a LONGER threshold than the flag cards' 2 h STALE_MS because the wave strip
+    refreshes on the 6-hourly wave cron (its KV lives 7 h and the marine models publish
+    only every 6-12 h), so a few-hours-old strip is model-current, not stale.
     The former closing caption ("Colored by estimated wave height only — green under
     2 ft, yellow 2-4 ft, red 4 ft and up, gray no data. Not the official flag.") was
     DELETED — its content now lives in the per-segment tooltips, and the ESTIMATE
@@ -2102,9 +2337,12 @@ the ESTIMATE badge on the stat line and no section heading), the hazard lane
 (positioned alert band + tooltip text, rip band, no lane for legacy estimates or
 without a series), the
 buoy case (stat without strip), legacy/absent payload omission, and the stale
-warning. test/flagRecompute.test.js additionally asserts the "waves:" KV write
-(24-entry hoursFt, top-of-hour startIso, TTL 7200) and its absence for all-null or
-failed wave fetches, plus the alertDetails/ripCurrentRisk echoes landing in the
+warning. test/flagRecompute.test.js additionally asserts the runWaveRefresh wave-cron
+writes — the "waveinput:" and "waves:" KV puts (24-entry hoursFt, top-of-hour startIso,
+TTL 25200) and their absence for all-null, masked, or failed wave fetches (last-good rides
+the TTL) — and that runFlagRecompute READS the "waveinput:" key for its wave height + wind
+fallback (degrading to unknown when the key is absent) rather than fetching, plus the
+alertDetails/ripCurrentRisk echoes landing in the
 "flag:" payload when the alerts fetch succeeds, and the Canadian path: an
 eccc_zone beach inside a stubbed GeoMet alert polygon gets the ECCC red with the
 "Environment Canada Alerts" source and no caveat, one outside every polygon gets

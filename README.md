@@ -27,6 +27,11 @@ Estimates and official readings are rendered in visually distinct UI elements
 everywhere they appear, and the API always keeps them in separate fields so a client
 can never confuse the two.
 
+Only **ocean and Great Lakes** beaches are shown. Beach flags exist only for those
+waters, so every beach is classified by its adjacent water body and inland-lake rows
+(Fremont Lake, Clinton Lakes) are hidden — classified and filtered out, never deleted.
+See [Cron jobs](#cron-jobs) (`runWaterClassification`).
+
 This is a personal weather-data project, not a lifeguard service. It can be wrong. It
 can be stale (see the staleness warning below). If a beach has a physical flag posted,
 that flag — and any lifeguard on duty — is the actual authority, not this site.
@@ -35,13 +40,15 @@ that flag — and any lifeguard on duty — is the actual authority, not this si
 
 The HTTP request path never calls any upstream API. It only reads pre-computed data
 from D1 (beach directory) and KV (flag estimates / official readings), which are kept
-fresh by two scheduled cron jobs.
+fresh by scheduled cron jobs (see [Cron jobs](#cron-jobs) below — the hourly recompute
+and a 6-hourly wave refresh).
 
 ### `GET /api/beaches?bbox=minLon,minLat,maxLon,maxLat`
 
 Returns beaches from the D1 directory inside the given bounding box. `bbox` is
 required: exactly four comma-separated finite numbers, with `minLon < maxLon` and
-`minLat < maxLat`.
+`minLat < maxLat`. Results exclude confirmed-inland beaches (only ocean / Great
+Lakes rows are returned; still-unclassified rows remain visible during backfill).
 
 Example request:
 
@@ -105,7 +112,8 @@ Example response:
       "official": null
     }
 
-Unknown `beachId` (no matching D1 row) returns `404`:
+Unknown `beachId` (no matching D1 row) returns `404`. A confirmed-inland beach
+returns `404` too — it is not flag-worthy, so it is treated as not found:
 
     { "error": "beach not found" }
 
@@ -118,7 +126,10 @@ Liveness check, no upstream/DB access:
 ### `GET /` and `GET /beach/:beachId`
 
 Server-rendered HTML pages: a beach list and a beach detail page, built entirely from
-D1 + KV data (see the frontend contract in `src/frontend/render.js`).
+D1 + KV data (see the frontend contract in `src/frontend/render.js`). Both exclude
+confirmed-inland beaches: they are absent from the list and search, and a detail page
+for one returns `404` (only ocean / Great Lakes rows, plus still-unclassified rows
+during backfill, are shown).
 
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from
 the estimate's structured `waveHeightFt`) plus a Dark Sky-style horizontal strip of
@@ -299,7 +310,7 @@ paint, and live OS switches apply without a reload.
 
 ### Cron jobs
 
-Five scheduled triggers run in production (see `wrangler.toml`). They are separate
+Seven scheduled triggers run in production (see `wrangler.toml`). They are separate
 crons on purpose: each upstream's rate-limit posture is independent, and a failure
 in one job never starves another (an aborted Overpass sync used to skip that
 night's NWS enrichment and webcam hydration entirely).
@@ -307,7 +318,10 @@ night's NWS enrichment and webcam hydration entirely).
 - `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
   the whole pilot table every run, so no flag ever outlives its 2 h KV TTL waiting
-  for a rotation turn), fetches alerts, SRF, and Open-Meteo wave/wind data. Both
+  for a rotation turn), fetches the fast-changing safety signals (alerts and SRF
+  rip-current risk) and reads each beach's stored wave inputs from KV (the
+  `waveinput:` key the wave cron below writes) for the current wave height and the
+  wind fallback — it performs **no** Open-Meteo or GLOS fetch itself. Both
   alert authorities are fetched nationally once per run and matched to beaches
   locally — one `api.weather.gov/alerts/active` fetch matched by `nws_zone`, and one
   GeoMet `weather-alerts` fetch matched per beach by alert-region polygon
@@ -316,10 +330,24 @@ night's NWS enrichment and webcam hydration entirely).
   them through `estimateFlag`, runs the official-source scrapers (once per distinct
   matched scraper, resolved per beach, with KV-backed health monitoring), and
   writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
-  TTL. Beaches whose Open-Meteo wave data comes back null (common on the Great
-  Lakes) get a second chance from `src/clients/glerl.js`: nearest GLOS Seagull
-  wave buoy within 25 km, freshest observation within 2 h, before falling back to
-  the wind-only estimate.
+  TTL. A missing `waveinput:` key (wave cron hasn't run, or its data aged out) just
+  means no wave input that run — the estimate falls back to wind or `unknown`, never
+  a wrong flag.
+- `15 */6 * * *` (6-hourly) — `runWaveRefresh`: owns **all** upstream wave and wind
+  fetching. It fetches Open-Meteo marine wave heights, gap-fills Great-Lakes
+  wave-null beaches from the nearest GLOS Seagull wave buoy (within 25 km, freshest
+  observation within 2 h, `src/clients/glerl.js`), and fetches the Open-Meteo wind
+  fallback for beaches still wave-null, then writes two KV shapes per beach at a 7 h
+  TTL: `waveinput:` + beachId (the wave height + wind fallback the hourly estimate
+  reads) and `waves:` + beachId (the detail page's 24 h forecast strip, only when a
+  real hourly series exists). It runs 6-hourly rather than hourly because Open-Meteo's
+  marine models only publish every 6–12 h, so hourly refetching was wasted quota; the
+  fetches are also paced (small concurrency window, a gap between batch waves, one
+  backoff retry on a throttled batch) to stay under Open-Meteo's per-minute weighted
+  rate limit instead of bursting and getting HTTP 429'd. The 7 h TTL outlives the gap
+  between runs, so a transient throttle leaves the strip showing slightly-older-but-
+  still-model-current data rather than blanking it. A beach whose fetch merely failed
+  is left untouched so its last-good KV survives.
 - `47 8 * * *` (daily, ~03:47 America/New_York) — `runOverpassSync`, discovery
   only: two Overpass API queries over the pilot bbox — (1) named `natural=beach` /
   `leisure=beach_resort` elements, and (2) every `natural=beach` element (named or
@@ -377,6 +405,20 @@ night's NWS enrichment and webcam hydration entirely).
   leaves the row untouched (retried next night); a confirmed
   no-cam-within-radius answer clears the webcam columns and stamps the check
   time.
+- `37 1,7,13,19 * * *` (4x daily; hours avoid the 08:47 discovery run and the
+  enrichment windows) — `runWaterClassification`: classifies each beach's adjacent
+  water body as ocean / Great Lake / inland so inland-lake beaches can be hidden.
+  Up to 25 beaches per run — those still unclassified (or classified under an older
+  `WATER_CLASS_VERSION`) — get one Overpass probe anchored on the element's real
+  polygon vertices (recurse-down, 150 m / 120 m radii, `src/waterClass.js` +
+  `src/clients/overpass.js`), matched to a Great Lake by wikidata QID (never by name).
+  A clean probe that finds no flag-worthy water bumps a per-beach
+  `water_class_attempts` counter (migration 0009); after 5 such probes the row parks.
+  A transient Overpass failure never bumps it. This cron only drains the steady-state
+  trickle — the nightly discovery run also classifies its own new-beach delta
+  synchronously (up to 25 rows), and the **one-time bulk backfill** (below) does the
+  mass classification. Only ocean / Great Lakes rows (plus still-unclassified rows
+  during backfill) are shown anywhere; confirmed-inland rows are hidden, never deleted.
 
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
 developing via the scheduled-handler endpoint:
@@ -385,24 +427,46 @@ developing via the scheduled-handler endpoint:
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"   # NWS point enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*"  # ECCC zone enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly wave refresh
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"            # hourly flag recompute
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=37+1,7,13,19+*+*+*"   # water-body classification
 
 `npm run seed` / `npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:webcams` /
-`npm run seed:flags` wrap these five commands. The local database starts empty — run
+`npm run seed:waves` / `npm run seed:flags` / `npm run seed:classify` wrap these
+commands. The local database
+starts empty — run
 `npm run seed` once after a fresh checkout (it queries the live Overpass API and takes
 a couple of minutes), then `npm run seed:enrich` a few times to give beaches their NWS
 zones (and `npm run seed:eccc` afterwards for the Canadian rows NWS parks — note the
 NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes before
-Canadian rows become ECCC candidates).
+Canadian rows become ECCC candidates), and `npm run seed:classify` to classify their
+adjacent water bodies (25 per run, so repeat to drain locally — production uses the
+one-time bulk backfill below instead).
+
+**One-time bulk backfill (production, user-authorized).** Classifying ~700 rows
+one-at-a-time against the rate-limited public Overpass endpoint is the wrong tool for
+the initial pass. Instead fetch each allowlisted Great Lake's member-way shoreline plus
+the ocean coastline ONCE (clipped to the beach region, ~7 network calls total), build a
+segment index, run the local point-to-segment distance test at 150 m per beach, and
+resolve any borderline (150 m–3 km) or large-bbox beach with the same actual-vertex
+Overpass probe the cron uses (this is what moves Sleeping Bear Dunes and the handful of
+large-polygon rows to their correct class). Then emit `UPDATE beaches SET water_class =
+?, water_class_version = <WATER_CLASS_VERSION> WHERE id = ?` statements and apply them
+with `wrangler d1 execute swim-report --remote --file=…`. The reference implementation
+is `classify_local.py` (the dry-run audit script). Expected distribution after
+resolution: ~368 `great_lake`, ~325 `inland`, 0 `ocean` (the pilot bbox has no
+saltwater coast).
 The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
 longer exist in wrangler 4.
 
-**Paid-plan assumption**: the hourly job's subrequest budget (~950 subrequests/run for
-the pilot region: alert + SRF + wave + GLOS buoy gap-fill + wind + scraper fetches —
-Ohio BeachGuard alone is now 51 per-id GETs — plus up to ~700 KV reads/writes) exceeds
-the free plan's 50-subrequest ceiling (the paid
-plan allows 10,000 per invocation). Production deployment assumes the Workers Paid
-plan. See `TODO.md` for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
+**Paid-plan assumption**: the cron subrequest budgets exceed the free plan's
+50-subrequest ceiling (the paid plan allows 10,000 per invocation). The hourly
+`runFlagRecompute` runs alert + SRF + scraper fetches plus up to ~700 KV
+reads/writes (it no longer fetches waves — Ohio BeachGuard alone is 51 per-id GETs), and
+the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy gap-fill + wind
+fetches plus up to ~1200 `waveinput:`/`waves:` KV writes — each well under 10,000 but far
+past the free ceiling. Production deployment assumes the Workers Paid plan. See `TODO.md`
+for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
 
 ## Deployment
 

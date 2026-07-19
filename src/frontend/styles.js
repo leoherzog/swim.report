@@ -269,6 +269,21 @@ const RULES = [
   ".home-map-marker wa-icon {",
   "  display: block;",
   "  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));",
+  "}",
+
+  // MapLibre's default (compact) attribution control is a native <details> whose
+  // toggle is a <summary class=\"maplibregl-ctrl-attrib-button\"> — the round \"i\"
+  // info button. Web Awesome's native-element styling themes every bare <summary>
+  // with `& summary { padding: var(--wa-space-m) }` (16px), which has no idea this
+  // <details> belongs to the map. That padding exceeds MapLibre's declared 24px
+  // (border-box) button width, forcing it to a 32px minimum; MapLibre's icon uses
+  // the default `background-repeat: repeat` with no background-size, so the 24px
+  // \"i\" tiles and a partial second copy bleeds in — the stray glyph below the
+  // icon. Resetting the padding restores the native 24x24 button so the collapsed
+  // control matches the standard openfreemap.org rendering. The single class
+  // (0,1,0) outranks Web Awesome's `& summary` (0,0,2).
+  ".maplibregl-ctrl-attrib-button {",
+  "  padding: 0;",
   "}"
 ];
 

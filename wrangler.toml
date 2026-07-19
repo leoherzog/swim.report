@@ -28,8 +28,13 @@ enabled = true
 # 29 4,10,16,22 * * * — ECCC zone enrichment, 4x daily (Canadian beaches the
 #                    NWS enrichment permanently parked)
 # 31 9 * * *       — daily Windy webcam hydration
+# 37 1,7,13,19 * * * — water-body classification, 4x daily (ocean/great_lake/
+#                    inland; hours avoid the 8:47 discovery run and the
+#                    enrichment windows). The one-time bulk backfill does the
+#                    mass classification; this cron drains the steady-state
+#                    trickle plus any WATER_CLASS_VERSION re-drain.
 [triggers]
-crons = ["0 * * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+crons = ["0 * * * *", "15 */6 * * *", "47 8 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *", "37 1,7,13,19 * * *"]
 
 [[d1_databases]]
 binding = "DB"

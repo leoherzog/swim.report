@@ -40,9 +40,19 @@ function makeBeachRow(overrides) {
   return row;
 }
 
-function makeEnv(beachRows) {
+// kvSeed pre-populates KV reads (e.g. a "waveinput:" + id payload the hourly
+// estimate reads); values are the already-parsed objects a { type: "json" } get
+// resolves to. The env also zeroes the wave cron's pacing so batchByBeach never
+// arms a real timer (its gap/retry sleeps) during a test.
+function makeEnv(beachRows, kvSeed) {
   const kvPuts = new Map();
+  const kvGets = kvSeed instanceof Map
+    ? kvSeed
+    : new Map(Object.entries(kvSeed || {}));
   const env = {
+    OPEN_METEO_BATCH_GAP_MS: 0,
+    OPEN_METEO_RETRY_MS: 0,
+    OPEN_METEO_CONCURRENCY: 8,
     DB: {
       prepare: function (sql) {
         return {
@@ -59,8 +69,8 @@ function makeEnv(beachRows) {
       }
     },
     FLAGS: {
-      get: function () {
-        return Promise.resolve(null);
+      get: function (key) {
+        return Promise.resolve(kvGets.has(key) ? kvGets.get(key) : null);
       },
       put: function (key, value, opts) {
         kvPuts.set(key, { value: value, opts: opts });
@@ -68,11 +78,15 @@ function makeEnv(beachRows) {
       }
     }
   };
-  return { env: env, kvPuts: kvPuts };
+  return { env: env, kvPuts: kvPuts, kvGets: kvGets };
 }
 
 function runHourlyCron(env) {
   return runScheduledCron(env, "0 * * * *");
+}
+
+function runWaveCron(env) {
+  return runScheduledCron(env, "15 */6 * * *");
 }
 
 describe("runFlagRecompute input assembly - alertsCheckable", function () {
@@ -448,10 +462,14 @@ describe("runFlagRecompute flag_history calibration logging", function () {
   });
 });
 
-// The hourly cron writes a "waves:" + beachId WaveSeries alongside each "flag:"
-// put, but ONLY when the beach has a real hourly wave series (>=1 finite cell).
-// A fetch failure, an all-masked series, or a buoy-only gap-fill (no series)
-// writes no "waves:" key, while the "flag:" put is always made.
+// The 6-hourly WAVE cron (runWaveRefresh) owns all Open-Meteo/GLOS fetching. It
+// writes a "waveinput:" + id payload (what the hourly estimate reads for wave
+// height + the wind fallback) and, only when the beach has a real hourly wave
+// series (>=1 finite cell), a "waves:" + id WaveSeries for the detail-page
+// strip. A fetch failure leaves both keys untouched (last-good rides the TTL);
+// an all-masked series with no buoy/wind writes neither. Both use the 7 h
+// wave-data TTL (25200 s), not the 2 h flag TTL.
+const WAVE_DATA_TTL = 25200;
 const MARINE_HOST = "marine-api.open-meteo.com";
 const OPEN_METEO_MARINE_URL = "https://open-meteo.com/en/docs/marine-weather-api";
 
@@ -490,13 +508,13 @@ function marineOkResponse(payload) {
   });
 }
 
-describe("runFlagRecompute wave series (waves: KV)", function () {
+describe("runWaveRefresh wave inputs + series (waveinput:/waves: KV)", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
-  it("writes a 24-entry WaveSeries anchored to the run's top-of-hour, plus the flag", async function () {
+  it("writes a 24-entry WaveSeries anchored to the run's top-of-hour, plus the waveinput", async function () {
     // Freeze Date so the hour index (16) and top-of-hour startIso are
     // deterministic; only Date is faked so real timers are untouched.
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -515,16 +533,25 @@ describe("runFlagRecompute wave series (waves: KV)", function () {
     const made = makeEnv([
       makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
     ]);
-    await runHourlyCron(made.env);
+    await runWaveCron(made.env);
 
-    // The flag put is always present.
-    const flagPut = made.kvPuts.get("flag:osm-node-1");
-    expect(flagPut).toBeDefined();
+    // The waveinput put carries the current wave height + model for the
+    // estimate, at the wave-data TTL.
+    const inputPut = made.kvPuts.get("waveinput:osm-node-1");
+    expect(inputPut).toBeDefined();
+    expect(inputPut.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
+    const input = JSON.parse(inputPut.value);
+    expect(input.beachId).toBe("osm-node-1");
+    expect(input.model).toBe("ecmwf_wam025");
+    // 0.5 m -> ~1.6404 ft.
+    expect(input.waveHeightFt).toBeCloseTo(1.64042, 4);
+    expect(input.windSpeedMph).toBe(null);
+    expect(input.updated).toBe("2026-07-15T16:20:33.000Z");
 
     // The waves put is present with the specced shape.
     const wavesPut = made.kvPuts.get("waves:osm-node-1");
     expect(wavesPut).toBeDefined();
-    expect(wavesPut.opts).toEqual({ expirationTtl: 7200 });
+    expect(wavesPut.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
     const series = JSON.parse(wavesPut.value);
     expect(series.beachId).toBe("osm-node-1");
     expect(series.startIso).toBe("2026-07-15T16:00:00.000Z");
@@ -544,12 +571,13 @@ describe("runFlagRecompute wave series (waves: KV)", function () {
     expect(series.byModel["ecmwf_wam025"][0]).toBe(series.hoursFt[0]);
   });
 
-  it("writes NO waves: when the marine series is fully masked (all-null), but still writes flag:", async function () {
+  it("writes NEITHER key when the marine series is fully masked with no buoy/wind", async function () {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
 
     // Marine returns a real series shape but every model masked (null) — the
-    // Great Lakes norm. Buoy gap-fill and wind both fall through to null here.
+    // Great Lakes norm. Buoy gap-fill and wind both fall through to null here,
+    // so there is nothing usable to record; the old keys expire on their own.
     vi.stubGlobal("fetch", function (url) {
       const target = typeof url === "string" ? url : (url && url.url) || "";
       if (target.indexOf(MARINE_HOST) !== -1) {
@@ -561,13 +589,13 @@ describe("runFlagRecompute wave series (waves: KV)", function () {
     const made = makeEnv([
       makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
     ]);
-    await runHourlyCron(made.env);
+    await runWaveCron(made.env);
 
-    expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-1")).toBeUndefined();
     expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
   });
 
-  it("writes NO waves: when the marine fetch fails entirely, but still writes flag:", async function () {
+  it("writes NEITHER key when the marine fetch fails entirely (last-good rides the TTL)", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -575,20 +603,20 @@ describe("runFlagRecompute wave series (waves: KV)", function () {
     const made = makeEnv([
       makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
     ]);
-    await runHourlyCron(made.env);
+    await runWaveCron(made.env);
 
-    expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-1")).toBeUndefined();
     expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
   });
 
-  it("buoy gap-fill supplies the flag reading but never a waves: series", async function () {
+  it("buoy gap-fill writes a waveinput reading but never a waves: series", async function () {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
 
     // Marine masked -> beach is wave-null -> GLOS Seagull buoy gap-fills a
     // now-observation. The buoy carries no hourly series, so the preserved
-    // (all-masked) hoursFt must yield no waves: put even though flag: gets the
-    // buoy reading.
+    // (all-masked) hoursFt must yield no waves: put even though waveinput gets
+    // the buoy reading.
     vi.stubGlobal("fetch", function (url) {
       const target = typeof url === "string" ? url : (url && url.url) || "";
       if (target.indexOf(MARINE_HOST) !== -1) {
@@ -643,13 +671,71 @@ describe("runFlagRecompute wave series (waves: KV)", function () {
     const made = makeEnv([
       makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
     ]);
+    await runWaveCron(made.env);
+
+    const inputPut = made.kvPuts.get("waveinput:osm-node-1");
+    expect(inputPut).toBeDefined();
+    const input = JSON.parse(inputPut.value);
+    // The buoy reading (1.0 m -> ~3.28 ft) is recorded for the estimate.
+    expect(input.waveHeightFt).toBeCloseTo(3.28084, 4);
+    // ...but there is no hourly series to publish.
+    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+  });
+});
+
+// The hourly estimate no longer fetches Open-Meteo — it READS the wave cron's
+// "waveinput:" + id KV. A seeded wave height must flow through to the flag
+// color; a missing key must degrade honestly (no wave input, no crash).
+describe("runFlagRecompute reads waveinput: KV", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("uses a seeded wave height (>=4 ft -> red) with the model's source label", async function () {
+    // No network needed: the hourly path only reads KV. Fail all fetch to
+    // prove no upstream call is reachable from the request-assembly path.
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const seed = new Map();
+    seed.set("waveinput:osm-node-1", {
+      beachId: "osm-node-1",
+      waveHeightFt: 4.5,
+      model: "ecmwf_wam025",
+      windSpeedMph: null,
+      windGustMph: null,
+      updated: "2026-07-15T12:00:00.000Z"
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ], seed);
     await runHourlyCron(made.env);
 
     const flagPut = made.kvPuts.get("flag:osm-node-1");
     expect(flagPut).toBeDefined();
-    // The buoy reading (1.0 m -> ~3.28 ft) drove a non-unknown estimate.
-    expect(JSON.parse(flagPut.value).color).not.toBe("unknown");
-    // ...but there is no hourly series to publish.
+    const estimate = JSON.parse(flagPut.value);
+    // 4.5 ft crosses the 4 ft red threshold.
+    expect(estimate.color).toBe("red");
+    const labels = estimate.sources.map(function (s) { return s.label; });
+    expect(labels).toContain("ECMWF Wave Forecast");
+    // The hourly path must never write the strip series (that is the wave cron).
     expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+  });
+
+  it("degrades to unknown when no waveinput: key exists", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runHourlyCron(made.env);
+
+    const flagPut = made.kvPuts.get("flag:osm-node-1");
+    expect(flagPut).toBeDefined();
+    expect(JSON.parse(flagPut.value).color).toBe("unknown");
   });
 });

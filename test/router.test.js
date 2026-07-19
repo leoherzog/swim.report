@@ -161,6 +161,68 @@ describe("handleHome ?q= search over the full table", () => {
   });
 });
 
+describe("flag-worthy water gate", () => {
+  const GATE = "water_class IN ('ocean','great_lake')";
+
+  it("composes the gate into the home-list WHERE (no query)", async () => {
+    const { env, statements } = makeEnv([]);
+    await handleRequest(homeRequest(""), env);
+    expect(statements[0].sql).toContain(GATE);
+    expect(statements[0].sql).toContain("water_class IS NULL AND water_class_attempts < 5");
+  });
+
+  it("ANDs the gate after the LIKE clause on a ?q= search", async () => {
+    const { env, statements } = makeEnv([]);
+    await handleRequest(homeRequest("?q=oval"), env);
+    expect(statements[0].sql).toContain("LIKE ?1 ESCAPE '\\'");
+    expect(statements[0].sql).toContain(" AND " + "(water_class IN ('ocean','great_lake')");
+  });
+
+  it("ANDs the gate into the /api/beaches bbox SELECT", async () => {
+    const { env, statements } = makeEnv([]);
+    await handleRequest(getRequest("/api/beaches?bbox=-87,41,-82,47"), env);
+    expect(statements[0].sql).toContain(GATE);
+  });
+
+  it("404s the detail page for a confirmed-inland beach", async () => {
+    const inland = { id: "b-in", name: "Fremont Lake", lat: 43.4, lon: -85.9, osm_id: "way/1", water_class: "inland", water_class_attempts: 0 };
+    const { env } = viewEnv(inland);
+    const res = await handleRequest(getRequest("/beach/b-in"), env);
+    expect(res.status).toBe(404);
+  });
+
+  it("renders the detail page for a NULL-pending beach (still visible during backfill)", async () => {
+    const pending = { id: "b-p", name: "Oval Beach", lat: 42.6, lon: -86.2, osm_id: "way/2", water_class: null, water_class_attempts: 0 };
+    const { env } = viewEnv(pending);
+    const res = await handleRequest(getRequest("/beach/b-p"), env);
+    expect(res.status).toBe(200);
+  });
+
+  it("renders the detail page for a confirmed great_lake beach", async () => {
+    const keeper = { id: "b-gl", name: "South Beach", lat: 42.4, lon: -86.3, osm_id: "way/3", water_class: "great_lake", water_class_attempts: 0 };
+    const { env } = viewEnv(keeper);
+    const res = await handleRequest(getRequest("/beach/b-gl"), env);
+    expect(res.status).toBe(200);
+  });
+
+  it("hides a parked-unresolved beach (NULL at the attempts cap) from the detail page", async () => {
+    const parked = { id: "b-parked", name: "Puddle", lat: 43.4, lon: -85.9, osm_id: "way/4", water_class: null, water_class_attempts: 5 };
+    const { env } = viewEnv(parked);
+    const res = await handleRequest(getRequest("/beach/b-parked"), env);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s /api/flag for a confirmed-inland beach and 200s a keeper", async () => {
+    const inland = { id: "b-in", name: "Fremont Lake", lat: 43.4, lon: -85.9, osm_id: "way/1", last_viewed: null, water_class: "inland", water_class_attempts: 0 };
+    const inRes = await handleRequest(getRequest("/api/flag/b-in"), viewEnv(inland).env);
+    expect(inRes.status).toBe(404);
+
+    const keeper = { id: "b-gl", name: "South Beach", lat: 42.4, lon: -86.3, osm_id: "way/3", last_viewed: null, water_class: "great_lake", water_class_attempts: 0 };
+    const okRes = await handleRequest(getRequest("/api/flag/b-gl"), viewEnv(keeper).env);
+    expect(okRes.status).toBe(200);
+  });
+});
+
 describe("handleHome bulk KV wiring", () => {
   // Regression pin for the bulk-get plumbing: the flag: map must feed the
   // estimate slot (the row's flag chip color) and the official: map the
@@ -661,7 +723,7 @@ describe("last_viewed demand stamping", () => {
     const { env, statements } = viewEnv(beachViewed(null));
     const ctx = makeCtx();
     await handleRequest(getRequest("/api/flag/b-1"), env, ctx);
-    expect(statements[0].sql).toContain("SELECT id, last_viewed FROM beaches");
+    expect(statements[0].sql).toContain("SELECT id, last_viewed, water_class, water_class_attempts FROM beaches");
     await Promise.all(ctx.promises);
     expect(updateStatements(statements).length).toBe(1);
   });

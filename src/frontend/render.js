@@ -21,7 +21,12 @@ import {
   waveModelSummary
 } from "./waveStrip.js";
 
+// The flag estimate recomputes hourly, so 2 h without an update is genuinely
+// stale. The wave strip is refreshed on the 6-hourly wave cron (its KV lives
+// 7 h and the marine models only publish every 6–12 h), so it is only stale
+// once it has clearly missed a cycle — an 8 h threshold, not the 2 h flag one.
 const STALE_MS = 7200000;
+const WAVE_STALE_MS = 28800000;
 
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
@@ -92,7 +97,7 @@ function flagIconColorClass(color) {
   return "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
 }
 
-function isStale(nowIso, updatedIso) {
+function isStale(nowIso, updatedIso, thresholdMs) {
   if (!nowIso || !updatedIso) {
     return false;
   }
@@ -101,7 +106,8 @@ function isStale(nowIso, updatedIso) {
   if (Number.isNaN(now) || Number.isNaN(updated)) {
     return false;
   }
-  return (now - updated) > STALE_MS;
+  const limit = typeof thresholdMs === "number" ? thresholdMs : STALE_MS;
+  return (now - updated) > limit;
 }
 
 function isUrlLike(value) {
@@ -719,7 +725,7 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
     const totalHours = series.totalHours;
     const chartHtml = renderWaveStrip(runs, totalHours, summaryText);
     chartBlock = chartHtml + "\n" + renderWaveHourTicks(totalHours);
-    if (isStale(nowIso, wavesUpdated)) {
+    if (isStale(nowIso, wavesUpdated, WAVE_STALE_MS)) {
       staleHtml = renderStaleWarning(wavesUpdated);
     }
 

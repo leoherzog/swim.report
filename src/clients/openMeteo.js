@@ -87,8 +87,14 @@ async function fetchLocations(url, label) {
 }
 
 export async function fetchWaveHeightsFt(points, nowIso) {
+  // Only wave_height is consumed (modelHoursSlice reads wave_height_<model>);
+  // wave_direction/wave_period were dead weight that tripled the request's
+  // Open-Meteo cost and pushed the hourly batch burst over the API's weighted
+  // rate limit (HTTP 429), starving every beach's series and blanking the
+  // detail-page strip. Requesting the single variable we use keeps us inside
+  // the limit.
   const url = "https://marine-api.open-meteo.com/v1/marine?" + latLonQuery(points) +
-    "&hourly=wave_height,wave_direction,wave_period" +
+    "&hourly=wave_height" +
     "&models=" + WAVE_MODEL_ORDER.join(",") +
     "&forecast_days=2&timezone=UTC";
   try {

@@ -1,5 +1,6 @@
 import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/render.js";
 import { distanceMi } from "./geo.js";
+import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 
 // Re-exported so existing importers (tests) keep working after the haversine
 // consolidation into src/geo.js.
@@ -143,7 +144,12 @@ const LIKE_WHERE =
 // caller-supplied LIMIT. Resulting SQL strings are byte-identical to the
 // hand-written per-branch queries this replaces.
 function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
-  const where = hasQuery ? LIKE_WHERE : "";
+  // Every home-page branch hides confirmed-inland (and parked-unresolved)
+  // beaches via the canonical flag-worthy gate: AND it after the LIKE clause
+  // when a query is present, use it as the WHERE otherwise.
+  const where = hasQuery
+    ? LIKE_WHERE + " AND " + FLAG_WORTHY_WATER_SQL
+    : " WHERE " + FLAG_WORTHY_WATER_SQL;
   const order = orderByClause ? " ORDER BY " + orderByClause : "";
   const stmt = env.DB.prepare(
     "SELECT * FROM beaches" + where + order + " LIMIT " + String(limit)
@@ -221,7 +227,9 @@ async function handleHome(env, location, rawQuery, nearParam) {
 
 async function handleDetail(env, ctx, beachId) {
   const beach = await env.DB.prepare("SELECT * FROM beaches WHERE id = ?1").bind(beachId).first();
-  if (!beach) {
+  // A confirmed-inland beach (or a parked-unresolved one) is not flag-worthy,
+  // so it 404s exactly like a missing row — the same gate the home list uses.
+  if (!beach || !isFlagWorthyWater(beach)) {
     const html = renderErrorPage({ status: 404, message: "Beach not found" });
     return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
   }
@@ -257,7 +265,8 @@ async function handleApiBeaches(env, url) {
   }
   const result = await env.DB.prepare(
     "SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
-    "AND lat >= ?2 AND lat <= ?4 LIMIT " + String(API_BEACHES_LIMIT)
+    "AND lat >= ?2 AND lat <= ?4 AND " + FLAG_WORTHY_WATER_SQL +
+    " LIMIT " + String(API_BEACHES_LIMIT)
   ).bind(bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat).all();
   const rows = result.results || [];
   return Response.json(
@@ -268,9 +277,11 @@ async function handleApiBeaches(env, url) {
 
 async function handleApiFlag(env, ctx, beachId) {
   const beach = await env.DB.prepare(
-    "SELECT id, last_viewed FROM beaches WHERE id = ?1"
+    "SELECT id, last_viewed, water_class, water_class_attempts FROM beaches WHERE id = ?1"
   ).bind(beachId).first();
-  if (!beach) {
+  // A confirmed-inland (or parked-unresolved) beach 404s like a missing row,
+  // matching the detail page and the flag-worthy gate on the list/map.
+  if (!beach || !isFlagWorthyWater(beach)) {
     // Plain max-age (no stale-while-revalidate): a just-discovered beach
     // should stop 404ing within a minute, not linger stale for the SWR window.
     return Response.json(
