@@ -48,6 +48,10 @@ jobs:
     timeout-minutes: 90
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # A minimal D1-only API token can't enumerate GET /accounts to auto-discover
+      # the account, so wrangler needs the account ID handed to it explicitly.
+      # Account IDs are not secret (they ship in wrangler.toml / dashboard URLs).
+      CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
       DB_NAME: swim-report
       # Pin to the wrangler MAJOR line (matches package.json's `^4.112.0`), so the
       # unattended job gets 4.x fixes automatically but a future wrangler 5 can
