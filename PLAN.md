@@ -1709,18 +1709,53 @@ below).
       // 2^(retry-1), capped at maxMs, with +/-20% jitter. This is the sleep the
       // tile retry waits between attempts.
 
+    export function budgetExhausted(startMs, budgetMs, nowMs)
+      // Pure wall-clock predicate (shared with the classify loop): budgetMs <= 0
+      // disables it; otherwise true once (nowMs - startMs) >= budgetMs. The named
+      // + park loops reuse it with OVERPASS_DISCOVERY_BUDGET_MS as the backstop.
+
+    export function shouldFastDefer(okCount, failedCount, maxFailed)
+      // Pure early total-outage circuit breaker for the best-effort named loop:
+      // okCount === 0 && failedCount >= maxFailed. True only while ZERO tiles have
+      // succeeded and maxFailed (OVERPASS_DISCOVERY_MAX_FAILED_TILES = 3) have
+      // failed; any single success disarms it permanently.
+
 1. namedRows = the concatenation of await fetchBeaches(tile) over every tile (the flat
    tiled-REGIONS list). Each tile is fetched via fetchTileWithRetry(fetchFn, tile, label),
    which retries up to OVERPASS_TILE_ATTEMPTS = 3 times on null, sleeping
    backoffDelayMs(retry, ...) between attempts (exported sleep(ms) helper wrapping
-   setTimeout in a Promise); if a tile is STILL null after its last attempt, log and abort
-   the whole run (keep existing data — never let a missing tile read as "gone from OSM" and
-   mass-delete). The null contract is unchanged — an exhausted tile is still null.
-2. parkBeaches = the concatenation of await fetchParkBeaches(tile) over every tile; each
+   setTimeout in a Promise). UPSERTS ARE DECOUPLED FROM RECONCILIATION, and the named loop
+   is BEST-EFFORT: a tile still null after its last attempt does NOT abort the run — the
+   loop increments namedTilesFailed, logs the degrade, and CONTINUES to salvage every tile
+   that DID fetch (tracking namedTilesOk), regardless of WHICH tile failed. After the loop
+   namedComplete = (namedTilesOk === tiles.length): any failed, skipped, or budget-stopped
+   tile makes it false. The run emits UPSERTS for the fetched tiles (idempotent
+   INSERT ... ON CONFLICT — a beach in an un-fetched tile simply is not upserted and keeps
+   its row) while SKIPPING reconciliation (step 6 gate) whenever namedComplete is false.
+   Best-effort (rather than break-early) is deliberate: the motivating outage was "32 of 33
+   tiles succeeded" and the observed failure mode is contiguous multi-minute 504 bursts, so
+   a break-early prefix would lose every tile after the burst even once it clears. THREE
+   TOTAL-OUTAGE GUARDS keep a hopeless run cheap: (1) the pure exported predicate
+   shouldFastDefer(okCount, failedCount, maxFailed) => okCount === 0 && failedCount >=
+   maxFailed — an early circuit breaker throwing (no SQL) after
+   OVERPASS_DISCOVERY_MAX_FAILED_TILES = 3 failures while ZERO tiles have succeeded (~4-5
+   min; once any tile succeeds it disarms and the run commits to best-effort); (2) a
+   post-loop namedTilesOk === 0 defer (throws if the loop ended with nothing fetched, e.g.
+   the budget elapsed at zero); (3) OVERPASS_DISCOVERY_BUDGET_MS = 5400000 (90 min, under
+   discovery.yml's 120-min job timeout) — a wall-clock backstop reusing the pure
+   budgetExhausted(startMs, budgetMs, nowMs) helper that breaks the loop at the deadline,
+   leaving coverage incomplete (upserts-only). The null contract is unchanged — an exhausted
+   tile is still null. runDiscovery returns { namedRows, namedComplete, parkBeaches }.
+2. parkBeaches = the concatenation of await fetchParkBeaches(tile) over every tile — fetched
+   ONLY when the named pass completed (namedComplete), since reconciliation (the sole park
+   consumer) is already off under partial named coverage and probing park tiles during an
+   outage is wasted Overpass load; on partial named coverage parkBeaches stays null. Each
    tile is fetched through the same fetchTileWithRetry (up to OVERPASS_TILE_ATTEMPTS
-   attempts with backoffDelayMs). If any tile is still null after its last attempt, log and
-   DEGRADE: continue with named rows only and leave every existing park_name untouched (so
-   the delete path in step 6 never runs against a region whose park query partly failed).
+   attempts with backoffDelayMs), and the same OVERPASS_DISCOVERY_BUDGET_MS wall-clock
+   backstop (shared startMs) bounds this loop too. If any tile is still null after its last
+   attempt, or the budget elapses, log and DEGRADE: continue with named rows only and leave
+   every existing park_name untouched (so the delete path in step 6 never runs against a
+   region whose park query partly failed).
    Within a tile the two Overpass queries are strictly sequential — the
    fetchParkBeaches pass only begins after fetchBeaches has fully resolved — and tiles run
    one at a time with a polite inter-tile gap, since overpass-api.de allows only 2 slots
@@ -1750,12 +1785,22 @@ below).
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
      ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6;
    (nws_zone / nws_grid_url intentionally untouched on conflict.) When step 2
-   failed, use the legacy statement WITHOUT park_name so stale associations
-   survive an Overpass outage.
-5. Write sync_meta rows last_overpass_sync (nowIso) and last_overpass_count.
-6. Stale park-beach reconciliation (runs ONLY when BOTH Overpass queries succeeded —
-   parkBeaches !== null — AND this run produced >= 1 park-containment row, i.e. a row
-   with r.name === r.parkName). The upsert never deletes, so when OSM edits make a
+   failed OR was skipped (partial named coverage), use the legacy statement WITHOUT
+   park_name so stale associations survive an Overpass outage. Upserts emit for ANY
+   subset of tiles fetched — they are additive/idempotent and safe under partial
+   coverage (unlike the DELETEs in step 6).
+5. Write sync_meta rows last_overpass_sync (nowIso), last_overpass_count (this run's
+   produced-row count, which a partial run undercounts), and last_overpass_complete
+   ("true"/"false" = reconciliationAllowed(namedComplete, parkComplete)) so an operator
+   never reads a partial run's smaller count as a table shrink.
+6. Stale park-beach reconciliation — THE ONLY DELETE PATH — runs ONLY under
+   PROVABLY-COMPLETE coverage, enforced by the single pure gate
+   reconciliationAllowed(namedComplete, parkComplete) (both must be true: EVERY named tile
+   AND EVERY park tile fetched this run), AND a snapshot to diff against, AND this run
+   produced >= 1 park-containment row (a row with r.name === r.parkName). Partial named
+   coverage sets namedComplete=false (and skips park, so parkComplete=false) => the gate is
+   false => UPSERTS ONLY, no deletes. The predicate is exported + unit-tested so the
+   "incomplete coverage => no DELETE" invariant is asserted directly. The upsert never deletes, so when OSM edits make a
    DIFFERENT unnamed beach the largest in a park the previously-kept row lingers next
    to the new one. This pass (reconcileStaleRows in scripts/discovery-batch.js) SELECTs
    existing unnamed-origin park rows (park_name IS NOT NULL AND name = park_name) whose

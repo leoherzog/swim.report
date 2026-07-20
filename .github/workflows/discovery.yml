@@ -23,9 +23,16 @@ name: Beach discovery
 
 on:
   # Daily, offset from the old in-Worker discovery cron's 08:47 UTC slot. GitHub
-  # cron is UTC and best-effort (can lag several minutes under load). A run that
-  # fails through a sustained Overpass outage simply defers to the next day; the
-  # per-tile backoff retries (scripts/discovery-batch.js) ride out short bursts.
+  # cron is UTC and best-effort (can lag several minutes under load). Overpass
+  # outage behavior (scripts/discovery-batch.js): the per-tile backoff retries ride
+  # out short bursts; the named fetch is BEST-EFFORT — a tile still null after its
+  # retries no longer aborts the run, the loop CONTINUES past it to salvage every
+  # tile that DID fetch. A PARTIAL-but-productive run exits 0 and emits a delta of
+  # UPSERTS + flag_history retention + sync_meta with NO reconciliation DELETEs (the
+  # DELETE pass runs ONLY on provably-complete coverage; Apply applies the delta,
+  # idempotent). A HOPELESS run (0 successes + 3 failed tiles via the circuit
+  # breaker, OR 0 tiles fetched, OR the 90-min wall-clock budget stopping at zero)
+  # aborts with no SQL (exit 1) so Upload+Apply skip and it fast-defers to the next day.
   schedule:
     - cron: "47 8 * * *"
   # Manual runs: choose whether to apply to D1 or just produce the .sql artifact.
@@ -133,6 +140,18 @@ jobs:
           retention-days: 14
 
       - name: Apply SQL to production D1
+        # A PARTIAL run (best-effort named loop salvaged some tiles, others failed)
+        # exits 0 and its delta carries UPSERTS but NO reconciliation DELETEs —
+        # perfectly valid to apply (upserts are idempotent; a beach that sat in an
+        # un-fetched tile just keeps its existing row). A total-outage run never
+        # reaches here (the script exits 1 -> this step skips). The delta always has
+        # at least the flag_history-retention DELETE + sync_meta, so it is never
+        # empty; wrangler applies it as an idempotent no-op at worst.
+        # Discovery deliberately RETAINS the success()-gated Apply and does NOT copy
+        # classify.yml's always()/budget/truncate machinery: discovery writes its
+        # whole delta atomically at the end, so it has a clean binary — exit 0 with a
+        # complete file, or exit 1 with no file. There is no torn-tail / partial-flush
+        # window for the always()+truncate belt to protect against.
         if: ${{ env.APPLY == 'true' }}
         run: |
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file discovery-delta.sql; then

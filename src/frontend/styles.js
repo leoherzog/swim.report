@@ -18,10 +18,12 @@ const RULES = [
   // <wa-page>'s shadow :host rule sets background-color: var(--wa-color-surface-
   // default) — opaque, which would paint over the z-index:-1 wave layer. Making
   // the host transparent lets the body-level waves show through the (otherwise
-  // empty) main area. The .wa-theme-matter ancestor class lifts this author rule
-  // to specificity (0,1,1), just over the shadow :host at (0,1,0), so no
-  // !important is needed. Header/footer keep their own opaque surface fill.
-  ".wa-theme-matter wa-page {",
+  // empty) main area. :root (a pseudo-class, so (0,1,0)) + the wa-page type
+  // (0,0,1) lifts this author rule to (0,1,1), just over the shadow :host at
+  // (0,1,0), so no !important is needed — and it stays correct if the theme
+  // class on <html> ever changes (a bare `wa-page` at (0,0,1) would lose to
+  // :host). Header/footer keep their own opaque surface fill.
+  ":root wa-page {",
   "  background-color: transparent;",
   "}",
 

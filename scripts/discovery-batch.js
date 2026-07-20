@@ -84,6 +84,22 @@ const TILE_OVERLAP_DEG = 0.05;
 // Polite gap between successive tile queries (Overpass courtesy). The happy path
 // has no retry delay, so without this the tiles would burst back-to-back.
 const OVERPASS_TILE_GAP_MS = 1000;
+// Total-outage guards for the BEST-EFFORT named loop (see runDiscovery). The loop
+// no longer aborts on the first failed tile — it continues to salvage every tile
+// that DID fetch — so these two thresholds keep a HOPELESS run cheap:
+//   - OVERPASS_DISCOVERY_MAX_FAILED_TILES is the early circuit breaker: it fast-
+//     defers (throw, no SQL) ONLY while ZERO tiles have succeeded and this many
+//     have failed (~4-5 min, since each failed tile first exhausts OVERPASS_TILE_
+//     ATTEMPTS=3 backoff retries). Once ANY tile succeeds the breaker disarms and
+//     the run commits to best-effort ingestion of the good tiles.
+//   - OVERPASS_DISCOVERY_BUDGET_MS is the wall-clock backstop (90 min), reused via
+//     budgetExhausted: if the loop is still going at the deadline it breaks, leaving
+//     coverage incomplete (upserts-only). Deliberately UNDER discovery.yml's 120-min
+//     job timeout (verified timeout-minutes: 120), leaving ~30 min for the trailing
+//     park query + atomic write + Apply. COUPLING: if that workflow timeout is ever
+//     lowered, lower this too.
+const OVERPASS_DISCOVERY_MAX_FAILED_TILES = 3;
+const OVERPASS_DISCOVERY_BUDGET_MS = 5400000;
 const OVERPASS_RECONCILE_MAX_DELETES = 10;
 const OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25;
 const FLAG_HISTORY_RETENTION_DAYS = 90;
@@ -248,8 +264,8 @@ export function backoffDelayMs(retry, baseMs, maxMs, rand) {
 // OVERPASS_TILE_ATTEMPTS times (each call is itself a full 2-mirror failover in
 // the Overpass client); returns the rows on the first success, or null only after
 // every attempt fails. Sleeps backoffDelayMs between attempts. The null contract
-// is unchanged, so every caller's failure handling (the named all-or-nothing
-// abort, the park degrade) is preserved exactly.
+// is unchanged, so every caller's failure handling (the named best-effort
+// continue + coverage gate, the park degrade) is preserved exactly.
 async function fetchTileWithRetry(fetchFn, tile, label) {
   let rows = await fetchFn(tile);
   let attempt = 1;
@@ -267,19 +283,63 @@ async function fetchTileWithRetry(fetchFn, tile, label) {
   return rows;
 }
 
+// Pure gate for the stale-row reconciliation / DELETE pass. Reconciliation
+// (reconcileStaleRows -> deleteBeachSql) reads snapshot rows in-region NOT
+// produced this run as "gone from OSM" and DELETEs them, so it is SOUND ONLY when
+// coverage is PROVABLY COMPLETE: every named tile AND every park tile fetched
+// successfully. If even one tile (named or park) failed, a beach that merely sat
+// in an un-fetched tile would be wrongly read as gone and mass-deleted (possibly
+// destroying enriched rows). This predicate is the single choke point that
+// enforces the invariant; it is pure + exported so the guarantee is unit-tested
+// directly (incomplete coverage => reconciliation refused). parkComplete already
+// implies namedComplete under runDiscovery (park is fetched only when named
+// completed), but we AND both explicitly so the invariant survives any future
+// change that lets park run under partial named coverage.
+export function reconciliationAllowed(namedComplete, parkComplete) {
+  return namedComplete === true && parkComplete === true;
+}
+
+// Pure early total-outage circuit breaker for the best-effort named loop. True iff
+// ZERO tiles have succeeded yet AND at least maxFailed have failed — the signature
+// of mirrors that are down from the start, where continuing to grind every tile
+// would waste the whole job window and still ingest nothing. Once ANY tile succeeds
+// (okCount > 0) this can never fire again, so the run commits to best-effort
+// ingestion of the good tiles. Pure + exported so the decision is unit-tested
+// without touching the network-bound loop.
+export function shouldFastDefer(okCount, failedCount, maxFailed) {
+  return okCount === 0 && failedCount >= maxFailed;
+}
+
 // --- Discovery fetch (mirrors runOverpassSync's retry orchestration) --------
 // Every REGION bbox is tiled (see TILE_MAX_SPAN_DEG) and the tiles concatenated
 // into one flat list; each tile runs the two Overpass queries in turn — they
 // never overlap (overpass-api.de allows 2 slots/IP) — with bounded backing-off
 // retries apiece (fetchTileWithRetry) and a polite inter-tile gap.
-//   named beaches: all-or-nothing. Any tile still null after all retries aborts
-//     the whole run with no SQL — a partial named set would drive the reconciliation
-//     pass to read the missing tiles' beaches as "gone from OSM" and delete them.
-//   park beaches: any tile still null after all retries degrades the WHOLE run to
-//     named-only (parkBeaches = null: no park_name updates, no reconciliation),
-//     exactly like the single-box Worker path when its park query failed. This
-//     guarantees the delete path never runs against a region whose park query we
-//     could not fetch.
+//   named beaches: BEST-EFFORT, DECOUPLED upserts from reconciliation. A tile still
+//     null after all its retries no longer aborts the run — the loop CONTINUES past
+//     it (incrementing namedTilesFailed, logging the degrade) to salvage EVERY tile
+//     that DID fetch, regardless of WHICH tile failed (the motivating "32 of 33 tiles
+//     succeeded" case, where the failed tile may be anywhere and the observed 504
+//     bursts are contiguous multi-minute windows a break-early prefix would lose in
+//     full). namedComplete = (namedTilesOk === tiles.length): ANY failed, skipped, or
+//     budget-stopped tile makes it false. main() emits UPSERTS for the fetched tiles
+//     (idempotent INSERT ... ON CONFLICT — a beach absent from an un-fetched tile is
+//     simply not upserted and keeps its existing row) but SKIPS reconciliation whenever
+//     namedComplete is false (see reconciliationAllowed). THREE total-outage guards keep
+//     a hopeless run cheap: (1) shouldFastDefer — throws (no SQL) after
+//     OVERPASS_DISCOVERY_MAX_FAILED_TILES failures while ZERO tiles have succeeded
+//     (~4-5 min when mirrors fast-fail 504s from the start; a connection-hang storm
+//     is instead bounded by guard (3), the wall-clock budget); (2) the post-loop namedTilesOk===0 defer
+//     (throws if the loop ended with nothing fetched, e.g. budget exhausted at zero);
+//     (3) the OVERPASS_DISCOVERY_BUDGET_MS wall-clock backstop, which breaks the loop
+//     at the deadline leaving coverage incomplete (upserts-only). Once any tile
+//     succeeds the circuit breaker disarms and the run commits to best-effort.
+//   park beaches: fetched ONLY when named coverage is complete (reconciliation, the
+//     sole consumer that needs park data, is already off under partial named
+//     coverage, so probing park tiles during an outage is wasted Overpass load).
+//     Any park tile still null after all retries degrades to parkBeaches=null (no
+//     park_name updates, no reconciliation), exactly like the single-box Worker
+//     path when its park query failed; the same wall-clock backstop bounds it.
 async function runDiscovery() {
   let tiles = [];
   for (let i = 0; i < REGIONS.length; i = i + 1) {
@@ -288,43 +348,84 @@ async function runDiscovery() {
   log("discovery: " + String(REGIONS.length) + " region(s) tiled into " +
     String(tiles.length) + " sub-box(es) (<= " + String(TILE_MAX_SPAN_DEG) + " deg each)");
 
+  // Shared wall-clock origin for both loops' budget backstop (OVERPASS_DISCOVERY_BUDGET_MS).
+  const startMs = Date.now();
+
   const named = [];
+  let namedTilesOk = 0;
+  let namedTilesFailed = 0;
   for (let i = 0; i < tiles.length; i = i + 1) {
+    if (budgetExhausted(startMs, OVERPASS_DISCOVERY_BUDGET_MS, Date.now())) {
+      log("named fetch: wall-clock budget of " + String(OVERPASS_DISCOVERY_BUDGET_MS) +
+        "ms exhausted at tile " + String(i + 1) + "/" + String(tiles.length) +
+        " — stopping, coverage incomplete (upserts only, no reconciliation)");
+      break;
+    }
     if (i > 0) {
       await sleep(OVERPASS_TILE_GAP_MS);
     }
     const label = "fetchBeaches tile " + String(i + 1) + "/" + String(tiles.length);
     const rows = await fetchTileWithRetry(fetchBeaches, tiles[i], label);
     if (rows === null) {
-      throw new Error(label + " returned null after retry — aborting, no SQL emitted");
+      namedTilesFailed = namedTilesFailed + 1;
+      log(label + " returned null after retry — continuing best-effort to salvage remaining tiles" +
+        " (failed=" + String(namedTilesFailed) + " ok=" + String(namedTilesOk) + "); reconciliation will be skipped (incomplete coverage)");
+      if (shouldFastDefer(namedTilesOk, namedTilesFailed, OVERPASS_DISCOVERY_MAX_FAILED_TILES)) {
+        throw new Error("named fetch: " + String(namedTilesFailed) +
+          " tiles failed with 0 successes (total outage) — aborting, no SQL emitted; deferring to next run");
+      }
+      continue;
     }
+    namedTilesOk = namedTilesOk + 1;
     for (const row of rows) {
       named.push(row);
     }
   }
+  const namedComplete = namedTilesOk === tiles.length;
   const namedRows = dedupByOsm(named);
-  log("named beaches: " + String(namedRows.length) + " unique across " + String(tiles.length) + " tile(s)");
+  // Post-loop total-outage defer: if the loop ended with ZERO tiles fetched (e.g.
+  // the wall-clock budget elapsed before any tile succeeded), coverage is hopeless
+  // — abort with NO SQL so the run fast-defers to the next schedule (Upload+Apply
+  // skip on the non-zero exit). Complements shouldFastDefer (which fires mid-loop
+  // only while ok=0), covering the budget-stopped-at-zero case it cannot see.
+  if (namedTilesOk === 0) {
+    throw new Error("named fetch produced 0 tiles (total outage or budget exhaustion at zero) — aborting, no SQL emitted; deferring to next run");
+  }
+  log("named beaches: " + String(namedRows.length) + " unique; tiles ok=" + String(namedTilesOk) +
+    " failed=" + String(namedTilesFailed) + " of " + String(tiles.length) + "; complete=" + String(namedComplete));
 
-  const park = [];
-  let parkOk = true;
-  for (let i = 0; i < tiles.length; i = i + 1) {
-    await sleep(OVERPASS_TILE_GAP_MS);
-    const label = "fetchParkBeaches tile " + String(i + 1) + "/" + String(tiles.length);
-    const rows = await fetchTileWithRetry(fetchParkBeaches, tiles[i], label);
-    if (rows === null) {
-      log(label + " returned null after retry — degrading to named-only run (no park updates, no reconciliation)");
-      parkOk = false;
-      break;
+  let parkBeaches = null;
+  if (namedComplete) {
+    const park = [];
+    let parkOk = true;
+    for (let i = 0; i < tiles.length; i = i + 1) {
+      if (budgetExhausted(startMs, OVERPASS_DISCOVERY_BUDGET_MS, Date.now())) {
+        log("park fetch: wall-clock budget of " + String(OVERPASS_DISCOVERY_BUDGET_MS) +
+          "ms exhausted at tile " + String(i + 1) + "/" + String(tiles.length) +
+          " — degrading to named-only run (no park updates, no reconciliation)");
+        parkOk = false;
+        break;
+      }
+      await sleep(OVERPASS_TILE_GAP_MS);
+      const label = "fetchParkBeaches tile " + String(i + 1) + "/" + String(tiles.length);
+      const rows = await fetchTileWithRetry(fetchParkBeaches, tiles[i], label);
+      if (rows === null) {
+        log(label + " returned null after retry — degrading to named-only run (no park updates, no reconciliation)");
+        parkOk = false;
+        break;
+      }
+      for (const row of rows) {
+        park.push(row);
+      }
     }
-    for (const row of rows) {
-      park.push(row);
+    parkBeaches = parkOk ? dedupByOsm(park) : null;
+    if (parkOk) {
+      log("park beaches: " + String(parkBeaches.length) + " unique across " + String(tiles.length) + " tile(s)");
     }
+  } else {
+    log("skipping park fetch — named coverage incomplete, reconciliation is off regardless");
   }
-  const parkBeaches = parkOk ? dedupByOsm(park) : null;
-  if (parkOk) {
-    log("park beaches: " + String(parkBeaches.length) + " unique across " + String(tiles.length) + " tile(s)");
-  }
-  return { namedRows: namedRows, parkBeaches: parkBeaches };
+  return { namedRows: namedRows, namedComplete: namedComplete, parkBeaches: parkBeaches };
 }
 
 // --- SQL builders (mirror the exact statements in runOverpassSync) ----------
@@ -631,14 +732,18 @@ async function main() {
 
   if (args.discovery) {
     const discovery = await runDiscovery();
-    const hasPark = discovery.parkBeaches !== null;
+    const namedComplete = discovery.namedComplete;
+    const parkComplete = discovery.parkBeaches !== null;
+    const hasPark = parkComplete;
+    const coverageComplete = reconciliationAllowed(namedComplete, parkComplete);
     const merged = mergeBeachRows(
       discovery.namedRows,
       discovery.parkBeaches === null ? [] : discovery.parkBeaches
     );
     mergedRows = merged.rows;
     log("discovery merged rows=" + String(merged.rows.length) +
-      " skipped_unnamed=" + String(merged.skippedUnnamed) + " park_query=" + String(hasPark));
+      " skipped_unnamed=" + String(merged.skippedUnnamed) + " park_query=" + String(hasPark) +
+      " named_complete=" + String(namedComplete) + " coverage_complete=" + String(coverageComplete));
 
     const producedIds = new Set(merged.rows.map(function (r) { return r.id; }));
     const producedParkRowCount = merged.rows.filter(function (r) {
@@ -659,11 +764,17 @@ async function main() {
     }
     out.push("");
 
-    // 3. Stale park-beach reconciliation (only on a full park run + snapshot).
+    // 3. Stale park-beach reconciliation — THE ONLY DELETE PATH — gated on
+    //    PROVABLY-COMPLETE coverage (reconciliationAllowed: every named tile AND
+    //    every park tile fetched) plus a snapshot to diff against. The named loop is
+    //    best-effort (it salvages all fetched tiles); any failed, skipped, or
+    //    budget-stopped tile makes namedComplete false (and park is skipped, so
+    //    parkComplete is false too), so this branch never runs and the run emits
+    //    UPSERTS ONLY.
     //    deletedIds is derived from the SAME staleRows that produce the DELETEs, so
     //    the classify-universe exclusion set is exactly the set actually deleted
     //    (never a superset that could drop a still-present row from classification).
-    if (hasPark && args.snapshot) {
+    if (coverageComplete && args.snapshot) {
       const staleRows = reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount);
       if (staleRows.length > 0) {
         out.push("-- stale park-beach reconciliation (" + String(staleRows.length) + ")");
@@ -671,14 +782,20 @@ async function main() {
         out.push("");
       }
       deletedIds = new Set(staleRows.map(function (r) { return r.id; }));
-    } else if (hasPark && !args.snapshot) {
+    } else if (coverageComplete && !args.snapshot) {
       log("reconciliation skipped: no snapshot to compare against");
+    } else {
+      log("reconciliation SKIPPED: coverage incomplete (named_complete=" + String(namedComplete) +
+        " park_complete=" + String(parkComplete) + ") — emitting upserts only, no deletes");
     }
 
-    // 4. sync_meta bookkeeping.
+    // 4. sync_meta bookkeeping. last_overpass_count is this run's produced-row
+    //    count (a partial run undercounts, hence the companion completeness marker
+    //    so an operator never reads a small/zero count as "table shrank").
     out.push("-- sync_meta");
     out.push(syncMetaSql("last_overpass_sync", nowIso, nowIso));
     out.push(syncMetaSql("last_overpass_count", String(merged.rows.length), nowIso));
+    out.push(syncMetaSql("last_overpass_complete", coverageComplete ? "true" : "false", nowIso));
     out.push("");
   } else {
     log("discovery skipped (--no-discovery): classify-only run — no Overpass tiling, no upserts, no reconciliation, no deletes");

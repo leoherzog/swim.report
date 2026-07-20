@@ -16,6 +16,8 @@ import {
   syncMetaSql,
   reconciliationSql,
   reconcileStaleRows,
+  reconciliationAllowed,
+  shouldFastDefer,
   deleteBeachSql,
   classifyUpdateSql,
   bumpAttemptsSql,
@@ -243,6 +245,47 @@ describe("SQL literal delivery is statement-split safe", function () {
   });
   it("doubles a real apostrophe so it cannot terminate the literal early", function () {
     expect(sqlStr("O'Brien'; DROP")).toBe("'O''Brien''; DROP'");
+  });
+});
+
+describe("reconciliationAllowed gates DELETE on provably-complete coverage", function () {
+  // THE SAFETY INVARIANT: a DELETE may be emitted ONLY when EVERY named tile AND
+  // EVERY park tile fetched this run. Any incomplete coverage => reconciliation
+  // refused (upserts only). This predicate is the single choke point in main().
+  it("allows reconciliation ONLY when named AND park coverage are both complete", function () {
+    expect(reconciliationAllowed(true, true)).toBe(true);
+  });
+  it("refuses when named coverage is incomplete (partial named fetch)", function () {
+    expect(reconciliationAllowed(false, true)).toBe(false);
+    expect(reconciliationAllowed(false, false)).toBe(false);
+  });
+  it("refuses when park coverage is incomplete (park query degraded)", function () {
+    expect(reconciliationAllowed(true, false)).toBe(false);
+  });
+  it("is strict about the boolean true — any non-true (null/undefined) refuses", function () {
+    // runDiscovery signals incomplete park as parkBeaches === null; main derives
+    // parkComplete = (parkBeaches !== null). Guard against a truthy-but-not-true
+    // slipping a delete through.
+    expect(reconciliationAllowed(1, 1)).toBe(false);
+    expect(reconciliationAllowed(true, null)).toBe(false);
+    expect(reconciliationAllowed(undefined, true)).toBe(false);
+  });
+});
+
+describe("shouldFastDefer is the early total-outage circuit breaker", function () {
+  // Fires ONLY while ZERO tiles have succeeded AND at least maxFailed have failed —
+  // the mirrors-down-from-the-start signature where continuing the best-effort loop
+  // would grind every tile and still ingest nothing. Any single success disarms it.
+  it("fires once maxFailed tiles have failed with zero successes", function () {
+    expect(shouldFastDefer(0, 3, 3)).toBe(true);
+    expect(shouldFastDefer(0, 5, 3)).toBe(true);
+  });
+  it("does not fire before maxFailed failures", function () {
+    expect(shouldFastDefer(0, 2, 3)).toBe(false);
+    expect(shouldFastDefer(0, 0, 3)).toBe(false);
+  });
+  it("is disarmed permanently the moment any tile succeeds", function () {
+    expect(shouldFastDefer(1, 30, 3)).toBe(false);
   });
 });
 

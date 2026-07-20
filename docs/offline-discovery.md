@@ -161,13 +161,46 @@ The emitted SQL mirrors what the retired `runOverpassSync` cron did
   `OVERPASS_NAMED_TIMEOUT_MS = 150000` (must exceed the 90 s server budget plus
   queue/transfer slack; the park and water-class queries keep the 240000 default).
   Results are concatenated across all tiles of all regions and deduped by OSM
-  identity (`mergeBeachRows` also keys by id, so the merge is idempotent). The
-  all-or-nothing invariants are preserved per-pass: **any** named tile still null
-  after its retries aborts the whole run with no SQL; **any** park tile still null
-  degrades the whole run to named-only (no reconciliation), so the delete path
-  never runs against a region whose park query failed. This is also the North
-  America expansion rail — appending coastal boxes to `REGIONS` fans out into
-  per-tile queries that each stay under the timeout, with no other code change.
+  identity (`mergeBeachRows` also keys by id, so the merge is idempotent).
+  **Upserts are decoupled from reconciliation** (the safety invariant is that a
+  DELETE runs only under *provably-complete* coverage): the named loop is
+  **best-effort** — a tile still null after its retries no longer aborts the run, the
+  loop **continues past it** to salvage **every** tile that DID fetch, regardless of
+  *which* tile failed. It emits UPSERTS for those fetched tiles while **skipping
+  reconciliation entirely** whenever coverage is incomplete
+  (`namedComplete = (namedTilesOk === tiles.length)`, so any failed/skipped/budget-
+  stopped tile flips it `false`) — a beach that merely sat in an un-fetched tile is
+  never read as "gone from OSM", so it can't be wrongly deleted. Best-effort (rather
+  than break-early) is deliberate: the motivating outage was "32 of 33 tiles
+  succeeded", and the observed failure mode is *contiguous* multi-minute 504 bursts,
+  so a break-early prefix would lose **every** tile after the burst even once it
+  clears; continuing salvages them. Three **total-outage guards** keep a hopeless run
+  cheap so best-effort never regresses to a tens-of-minutes grind-that-ingests-nothing:
+  (1) `shouldFastDefer` — an early circuit breaker that aborts with no SQL after
+  `OVERPASS_DISCOVERY_MAX_FAILED_TILES` (3) failures **while zero tiles have
+  succeeded** (~4-5 min, mirrors down from the start; once any tile succeeds it
+  disarms and the run commits to best-effort); (2) a post-loop `namedTilesOk === 0`
+  defer (aborts if the loop ended having fetched nothing, e.g. the budget elapsed at
+  zero); (3) `OVERPASS_DISCOVERY_BUDGET_MS` (90 min, under the 120-min job timeout),
+  a wall-clock backstop reusing `budgetExhausted` that breaks the loop at the deadline
+  leaving coverage incomplete (upserts-only). A hopeless run exits 1 (Upload+Apply
+  skip, fast-defer); a partial-but-productive run exits 0 (so `Apply` applies its
+  upserts). Park beaches are fetched **only when the named pass completed** (the
+  delete pass, the sole consumer that needs park data, is already off under partial
+  named coverage, so probing park tiles during an outage is wasted Overpass load);
+  any park tile still null then degrades to named-only (`parkBeaches = null`, no
+  reconciliation), and the same wall-clock backstop bounds the park loop too. The gate
+  is a single pure predicate, `reconciliationAllowed(namedComplete, parkComplete)`
+  (both must be `true`), unit-tested in `test/discoveryBatch.test.js` alongside
+  `shouldFastDefer`. `sync_meta` records a `last_overpass_complete` marker
+  (`true`/`false`) alongside `last_overpass_count` so an operator never reads a
+  partial run's smaller count as a table shrink. Discovery deliberately does **not**
+  adopt classify's `always()` / incremental-flush / truncate machinery: it writes its
+  whole delta atomically at the end (a clean exit-0-with-complete-file /
+  exit-1-no-file binary, no torn-tail window), and its slow risk is the upstream
+  Overpass fetch — which the three guards bound — not a long local emit loop. This is
+  also the North America expansion rail — appending coastal boxes to `REGIONS` fans
+  out into per-tile queries that each stay under the timeout, with no other code change.
 - **Overpass burst resilience.** The public mirrors periodically return HTTP 504
   overload bursts on both hosts at once. Each per-tile fetch therefore makes
   `OVERPASS_TILE_ATTEMPTS = 3` bounded exponential-backoff-plus-jitter retries
