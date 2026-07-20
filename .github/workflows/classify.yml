@@ -34,6 +34,10 @@ on:
         description: "Max beaches to (re)classify this run (0 = all eligible)"
         type: string
         default: "150"
+      budget_min:
+        description: "Self-imposed wall-clock cap on the classify loop, minutes (< the 90-min job timeout)"
+        type: string
+        default: "60"
 
 concurrency:
   # The D1 write is not safely re-entrant — never let two classify runs overlap.
@@ -58,6 +62,16 @@ jobs:
       APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
       # Scheduled runs drain 150/run; manual runs can override (0 = all eligible).
       CLASSIFY_LIMIT: ${{ github.event_name == 'schedule' && '150' || inputs.classify_limit }}
+      # Self-imposed wall-clock budget (minutes) for the classify loop, well under
+      # timeout-minutes: 90. Under public-Overpass 504 storms 150 sequential probes
+      # overran 90 min and got CANCELLED — skipping Apply and persisting zero
+      # progress. The budget makes the run return exit 0 with margin so Apply runs
+      # normally (and classify SQL is now flushed incrementally as a SIGKILL net).
+      # 60 (not 70) leaves real headroom: the budget is only checked at the TOP of
+      # each loop iteration, so a probe already in flight can overhang by up to one
+      # full 2-mirror Overpass timeout (~8 min); 60 + ~4 min job setup + ~8 min
+      # overhang + ~2 min apply ≈ 74 min, ~16 min under the 90-min hard cap.
+      CLASSIFY_BUDGET_MIN: ${{ github.event_name == 'schedule' && '60' || inputs.budget_min }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -103,21 +117,44 @@ jobs:
             --snapshot snapshot.json \
             --out classify-delta.sql \
             --no-discovery \
-            --classify-limit "${CLASSIFY_LIMIT:-150}"
+            --classify-limit "${CLASSIFY_LIMIT:-150}" \
+            --classify-budget-ms $(( ${CLASSIFY_BUDGET_MIN:-70} * 60000 ))
           echo "---- delta summary ----"
           grep -c ';' classify-delta.sql | xargs echo "statements:"
           head -n 20 classify-delta.sql
 
+      # always() — NOT !cancelled() — because a timeout-minutes job cancel sets the
+      # cancelled() context true, so !cancelled() would SKIP these steps in exactly
+      # the hard-cancel case the incremental flush exists for (the original
+      # zero-progress bug). always() runs within the ~5-min cancellation grace
+      # window — enough for one wrangler apply. It is safe on a genuine unrelated
+      # failure (e.g. a bad CLOUDFLARE_API_TOKEN failing Snapshot leaves no delta
+      # file): if-no-files-found: ignore makes upload a no-op, and the Apply step's
+      # own empty/statement-less guard short-circuits before wrangler.
       - name: Upload SQL delta artifact
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: classify-delta-sql
           path: classify-delta.sql
+          if-no-files-found: ignore
           retention-days: 14
 
       - name: Apply SQL to production D1
-        if: ${{ env.APPLY == 'true' }}
+        if: ${{ always() && env.APPLY == 'true' }}
         run: |
+          # A SIGKILL landing mid-append can leave a torn trailing fragment with no
+          # closing ';'. wrangler d1 execute --file splits on ';' and would send that
+          # fragment as a statement, failing the WHOLE apply and losing every complete
+          # UPDATE before it. Truncate the delta to its last complete ';'-terminated
+          # statement so a torn tail can never reach wrangler.
+          node -e "const fs=require('fs');const p='classify-delta.sql';if(!fs.existsSync(p)){process.exit(0)}const s=fs.readFileSync(p,'utf8');const i=s.lastIndexOf(';');fs.writeFileSync(p,i>=0?s.slice(0,i+1)+'\n':'')"
+          # A missing/empty/statement-less delta applies as a harmless idempotent
+          # no-op (emitted UPDATEs set absolute values), so guard before wrangler.
+          if [ ! -s classify-delta.sql ] || ! grep -q ';' classify-delta.sql; then
+            echo "no water-class statements — empty/partial no-op, skipping apply"
+            exit 0
+          fi
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file classify-delta.sql; then
             echo "::error::wrangler apply failed (check CLOUDFLARE_API_TOKEN secret and delta SQL)"
             exit 1

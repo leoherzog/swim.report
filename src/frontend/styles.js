@@ -8,6 +8,91 @@ const RULES = [
   "  padding: 0;",
   "}",
 
+  // The page's opaque base color. <wa-page>'s host normally paints this itself,
+  // but we make the host transparent (below) so the fixed .wave-bg layer can sit
+  // behind it — so the surface color has to live on <body> now instead.
+  "body {",
+  "  background-color: var(--wa-color-surface-default);",
+  "}",
+
+  // <wa-page>'s shadow :host rule sets background-color: var(--wa-color-surface-
+  // default) — opaque, which would paint over the z-index:-1 wave layer. Making
+  // the host transparent lets the body-level waves show through the (otherwise
+  // empty) main area. The .wa-theme-matter ancestor class lifts this author rule
+  // to specificity (0,1,1), just over the shadow :host at (0,1,0), so no
+  // !important is needed. Header/footer keep their own opaque surface fill.
+  ".wa-theme-matter wa-page {",
+  "  background-color: transparent;",
+  "}",
+
+  // Firewatch-style ambient wave swells, fixed to the bottom of the viewport and
+  // rendered behind everything (z-index: -1, above only the body background).
+  // Decorative: aria-hidden in the markup, and pointer-events: none so it never
+  // eats clicks. Kept low and wide so it reads as a gentle water body, not a
+  // banner.
+  ".wave-bg {",
+  "  position: fixed;",
+  "  left: 0;",
+  "  right: 0;",
+  "  bottom: 0;",
+  "  z-index: -1;",
+  "  height: 18vh;",
+  "  min-height: 110px;",
+  "  max-height: 190px;",
+  "  pointer-events: none;",
+  "  overflow: hidden;",
+  "}",
+
+  ".wave-svg {",
+  "  display: block;",
+  "  width: 100%;",
+  "  height: 100%;",
+  "}",
+
+  // Parallax drift: each layer shares the horizontal translate keyframe but runs
+  // at a different (deliberately slow) duration, so the crests slide past each
+  // other for a gentle swell. Very long durations + tiny tints keep it subtle.
+  ".wave-layers > use {",
+  "  animation: wave-drift 26s cubic-bezier(0.55, 0.5, 0.45, 0.5) infinite;",
+  "}",
+
+  // Tint from the theme's own text token mixed into transparent: subtle
+  // dark-on-light in light mode, light-on-dark under .wa-dark — no hardcoded
+  // colors, so it always matches the current surface. Front layers a touch
+  // stronger for depth.
+  ".wave-layers > use:nth-child(1) {",
+  "  animation-delay: -2s;",
+  "  animation-duration: 24s;",
+  "  fill: color-mix(in oklab, var(--wa-color-text-normal) 3%, transparent);",
+  "}",
+  ".wave-layers > use:nth-child(2) {",
+  "  animation-delay: -3s;",
+  "  animation-duration: 33s;",
+  "  fill: color-mix(in oklab, var(--wa-color-text-normal) 4%, transparent);",
+  "}",
+  ".wave-layers > use:nth-child(3) {",
+  "  animation-delay: -4s;",
+  "  animation-duration: 42s;",
+  "  fill: color-mix(in oklab, var(--wa-color-text-normal) 5%, transparent);",
+  "}",
+  ".wave-layers > use:nth-child(4) {",
+  "  animation-delay: -5s;",
+  "  animation-duration: 54s;",
+  "  fill: color-mix(in oklab, var(--wa-color-text-normal) 7%, transparent);",
+  "}",
+
+  "@keyframes wave-drift {",
+  "  0% { transform: translate3d(-90px, 0, 0); }",
+  "  100% { transform: translate3d(85px, 0, 0); }",
+  "}",
+
+  // Honor a reduced-motion preference: keep the layered swells, drop the drift.
+  "@media (prefers-reduced-motion: reduce) {",
+  "  .wave-layers > use {",
+  "    animation: none;",
+  "  }",
+  "}",
+
   ".app-header {",
   "  padding-inline: var(--wa-space-xl);",
   "}",

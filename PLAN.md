@@ -1674,7 +1674,13 @@ daily discovery upserts:
   (the workflow passes 150). The delete-safety invariant is therefore PRESERVED
   by construction: classify-only mode produces zero deletes and zero upserts, and
   stale-row reconciliation (with its full park query + the proportional safety rail)
-  still runs ONLY in discovery mode.
+  still runs ONLY in discovery mode. classify.yml also passes
+  `--classify-budget-ms` (a 60-min wall-clock cap under the 90-min job timeout) and
+  flushes each water_class UPDATE to the delta file incrementally, so an Overpass-504
+  timeout-cancel still persists the beaches it finished (Upload+Apply are
+  `always()`-gated — a `timeout-minutes` cancel would SKIP `!cancelled()` steps —
+  and Apply truncates any torn tail; an empty/partial delta applies as an idempotent
+  no-op). The request path / rules / KV / D1 contract is unchanged.
 Passing both `--no-classify` and `--no-discovery` (nothing to do) is a guarded
 error. The mode split is purely operational: the D1 schema (section 2) and the KV
 shapes (sections 1, 3) are UNCHANGED, and the request path still reads only D1/KV.

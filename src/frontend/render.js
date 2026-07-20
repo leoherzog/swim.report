@@ -331,6 +331,31 @@ function renderFooter() {
     "official flag status. Always obey posted flags and lifeguards.</small>";
 }
 
+// Ambient, Firewatch-style layered wave swells pinned to the bottom of every
+// page (inspired by the "Pure CSS Waves" pen technique: one reusable path,
+// four <use> layers drifting at staggered speeds for parallax). Decorative
+// only — aria-hidden, pointer-events: none, and rendered behind all content
+// (see .wave-bg in styles.js). The layers carry no fill here: styles.js tints
+// them from the theme's own text token so they read as subtle dark-on-dark /
+// light-on-light tonal swells and flip automatically with the wa-dark class.
+function renderWaveBackground() {
+  return "<div class=\"wave-bg\" aria-hidden=\"true\">" +
+    "<svg class=\"wave-svg\" viewBox=\"0 24 150 28\" preserveAspectRatio=\"none\" " +
+    "shape-rendering=\"auto\" xmlns=\"http://www.w3.org/2000/svg\">" +
+    "<defs>" +
+    "<path id=\"gentle-wave\" d=\"M-160 44c30 0 58-18 88-18s58 18 88 18 58-18 88-18 " +
+    "58 18 88 18 v44h-352z\"></path>" +
+    "</defs>" +
+    "<g class=\"wave-layers\">" +
+    "<use href=\"#gentle-wave\" x=\"48\" y=\"0\"></use>" +
+    "<use href=\"#gentle-wave\" x=\"48\" y=\"3\"></use>" +
+    "<use href=\"#gentle-wave\" x=\"48\" y=\"5\"></use>" +
+    "<use href=\"#gentle-wave\" x=\"48\" y=\"7\"></use>" +
+    "</g>" +
+    "</svg>" +
+    "</div>";
+}
+
 function renderPageShell(headerHtml, mainHtml, footerHtml) {
   const lines = [];
   lines.push("<wa-page>");
@@ -360,6 +385,7 @@ function renderDocument(title, bodyHtml) {
   lines.push("<style>" + PAGE_STYLES + "</style>");
   lines.push("</head>");
   lines.push("<body>");
+  lines.push(renderWaveBackground());
   lines.push(bodyHtml);
   lines.push("</body>");
   lines.push("</html>");

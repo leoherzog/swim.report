@@ -103,6 +103,13 @@ function sleep(ms) {
   });
 }
 
+// Pure wall-clock budget predicate for the classify loop. budgetMs <= 0 disables
+// it (always false); otherwise true once (nowMs - startMs) has reached budgetMs.
+// Kept pure + three-arg (no injected clock) so it is trivially unit-testable.
+export function budgetExhausted(startMs, budgetMs, nowMs) {
+  return budgetMs > 0 && (nowMs - startMs) >= budgetMs;
+}
+
 // SQL string literal with single quotes doubled. Used for every text value in
 // the emitted .sql — the ONLY untrusted text is OSM-derived beach/park names.
 export function sqlStr(value) {
@@ -134,6 +141,7 @@ export function parseArgs(argv) {
     classify: true,
     classifyLimit: 0,       // 0 = classify the entire eligible queue
     classifyDelayMs: 300,   // polite gap between per-beach Overpass probes
+    classifyBudgetMs: 0,    // 0 = disabled; self-imposed wall-clock cap on the classify loop
     now: null
   };
   for (let i = 0; i < argv.length; i = i + 1) {
@@ -144,6 +152,7 @@ export function parseArgs(argv) {
     else if (a === "--no-classify") { args.classify = false; }
     else if (a === "--classify-limit") { args.classifyLimit = parseInt(argv[++i], 10) || 0; }
     else if (a === "--classify-delay-ms") { args.classifyDelayMs = parseInt(argv[++i], 10) || 0; }
+    else if (a === "--classify-budget-ms") { args.classifyBudgetMs = parseInt(argv[++i], 10) || 0; }
     else if (a === "--now") { args.now = argv[++i]; }
     else { throw new Error("unknown argument: " + a); }
   }
@@ -495,7 +504,18 @@ export function bumpAttemptsSql(id) {
     sqlStr(id) + ";";
 }
 
-async function classifyQueue(queue, limit, delayMs) {
+export async function classifyQueue(queue, options) {
+  // Options are read with backward-compatible defaults so main()'s production
+  // call behaves exactly as before, while tests inject fetch/classify/now/flush
+  // to drive the loop with zero network.
+  const opts = options || {};
+  const limit = opts.limit || 0;
+  const delayMs = opts.delayMs || 0;
+  const budgetMs = opts.budgetMs || 0;
+  const now = opts.now || Date.now;
+  const fetchSignals = opts.fetchSignals || fetchWaterClassSignals;
+  const classify = opts.classify || classifyWaterBody;
+  const flush = opts.flush || null;
   const statements = [];
   const counts = { attempted: 0, classified: 0, ocean: 0, great_lake: 0, inland: 0, bumped: 0, transient: 0 };
   const total = limit > 0 ? Math.min(limit, queue.length) : queue.length;
@@ -515,12 +535,29 @@ async function classifyQueue(queue, limit, delayMs) {
     // Stable sort (V8) => attempts ASC preserved, random order within a group.
     ordered.sort(function (a, b) { return a.water_class_attempts - b.water_class_attempts; });
   }
+  // Per-statement flush so a valid, statement-boundary-clean partial .sql always
+  // exists on disk even under a hard SIGKILL — each stmt is a complete UPDATE.
+  const emit = async function (stmt) {
+    statements.push(stmt);
+    if (flush) {
+      await flush(stmt);
+    }
+  };
+  const startMs = now();
+  let stopped = false;
+  let processed = 0;
   for (let i = 0; i < total; i = i + 1) {
+    if (budgetExhausted(startMs, budgetMs, now())) {
+      stopped = true;
+      log("classify budget reached after " + String(now() - startMs) + "ms — stopping at " +
+        String(i) + "/" + String(total) + "; " + String(total - i) + " remain queued for the next run");
+      break;
+    }
     const beach = ordered[i];
     counts.attempted = counts.attempted + 1;
     let signals = null;
     try {
-      signals = await fetchWaterClassSignals(beach);
+      signals = await fetchSignals(beach);
     } catch (err) {
       log("water class fetch threw for " + beach.id + ": " + err.message);
       signals = null;
@@ -528,13 +565,13 @@ async function classifyQueue(queue, limit, delayMs) {
     if (signals === null) {
       counts.transient = counts.transient + 1;
     } else {
-      const cls = classifyWaterBody(signals);
+      const cls = classify(signals);
       if (cls !== null) {
-        statements.push(classifyUpdateSql(beach.id, cls));
+        await emit(classifyUpdateSql(beach.id, cls));
         counts.classified = counts.classified + 1;
         counts[cls] = counts[cls] + 1;
       } else {
-        statements.push(bumpAttemptsSql(beach.id));
+        await emit(bumpAttemptsSql(beach.id));
         counts.bumped = counts.bumped + 1;
       }
     }
@@ -542,6 +579,7 @@ async function classifyQueue(queue, limit, delayMs) {
       log("classified " + String(counts.attempted) + "/" + String(total) + " (" +
         String(counts.classified) + " decided, " + String(counts.transient) + " transient)");
     }
+    processed = i + 1;
     if (i < total - 1) {
       await sleep(delayMs);
     }
@@ -550,7 +588,7 @@ async function classifyQueue(queue, limit, delayMs) {
     log("NOTE: --classify-limit capped this run at " + String(total) + " of " +
       String(queue.length) + " eligible beaches; re-run to drain the rest");
   }
-  return { statements: statements, counts: counts };
+  return { statements: statements, counts: counts, stopped: stopped, processed: processed };
 }
 
 // --- Main -------------------------------------------------------------------
@@ -647,26 +685,53 @@ async function main() {
   }
 
   // 5. Water-body classification (the pipeline's slow part; runs as its own job).
+  // Classify statements are flushed INCREMENTALLY (one complete UPDATE per append)
+  // so a run cancelled mid-queue by the job timeout still leaves a valid partial
+  // .sql on disk — the Upload+Apply steps are always()-gated (a timeout cancel
+  // would SKIP !cancelled() steps) to load it, truncating any torn tail first.
+  let flushed = false;
   if (args.classify) {
     const queue = buildClassifyQueue(snapshotRows, mergedRows, deletedIds);
     log("classification queue=" + String(queue.length) +
       (args.classifyLimit > 0 ? " (limit " + String(args.classifyLimit) + ")" : " (all)"));
-    const result = await classifyQueue(queue, args.classifyLimit, args.classifyDelayMs);
+    // Write the preamble once so the file exists from the first statement. In
+    // discovery+classify mode out[] already holds the completed discovery SQL
+    // (runDiscovery/reconcile finished synchronously above); in classify-only
+    // mode it holds just the header comment block.
+    await Deno.writeTextFile(args.out, out.join("\n") + "\n");
+    let headerWritten = false;
+    const flush = async function (stmt) {
+      let chunk = "";
+      if (!headerWritten) {
+        chunk = "-- water-class updates (incremental)\n";
+        headerWritten = true;
+      }
+      chunk = chunk + stmt + "\n";
+      await Deno.writeTextFile(args.out, chunk, { append: true });
+    };
+    const result = await classifyQueue(queue, {
+      limit: args.classifyLimit,
+      delayMs: args.classifyDelayMs,
+      budgetMs: args.classifyBudgetMs,
+      flush: flush
+    });
     const c = result.counts;
     log("classification done attempted=" + String(c.attempted) + " classified=" + String(c.classified) +
       " ocean=" + String(c.ocean) + " great_lake=" + String(c.great_lake) + " inland=" + String(c.inland) +
       " bumped=" + String(c.bumped) + " transient=" + String(c.transient));
-    if (result.statements.length > 0) {
-      out.push("-- water-class updates (" + String(result.statements.length) + ")");
-      for (const s of result.statements) { out.push(s); }
-      out.push("");
-    }
+    log("stopped_on_budget=" + String(result.stopped) + " processed=" + String(result.processed));
+    flushed = true;
   } else {
     log("classification skipped (--no-classify)");
   }
 
-  await Deno.writeTextFile(args.out, out.join("\n") + "\n");
-  log("wrote " + args.out);
+  // Discovery-only runs write the whole file atomically here, exactly as before.
+  // Classify runs already flushed incrementally, so do NOT re-write (that would
+  // clobber the appended water-class UPDATEs).
+  if (!flushed) {
+    await Deno.writeTextFile(args.out, out.join("\n") + "\n");
+    log("wrote " + args.out);
+  }
 }
 
 // Only run as an entrypoint (Deno). Importing this module (e.g. under vitest to

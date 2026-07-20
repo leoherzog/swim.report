@@ -64,6 +64,53 @@ the Worker.
   bundled into discovery it threatened the job's time budget and coupled its
   flakiness to discovery. A single per-beach probe failure is non-fatal (the row
   stays queued for the next run), so classify has no all-or-nothing abort.
+
+  **Wall-clock budget (60 min) vs job timeout (90 min).** Under public-Overpass
+  504 storms each per-beach probe is slow, so 150 sequential probes overran the
+  `timeout-minutes: 90` job cap and GitHub CANCELLED the run mid-queue. A cancelled
+  step's later steps SKIP under their default `if`, so the Upload+Apply steps never
+  ran — every scheduled run persisted ZERO `water_class` progress. The PRIMARY fix
+  is a self-imposed wall-clock budget: `classify.yml` passes
+  `--classify-budget-ms $((CLASSIFY_BUDGET_MIN * 60000))` (`CLASSIFY_BUDGET_MIN=60`),
+  so the classify loop returns, `main()` exits 0, the classify step SUCCEEDS, and
+  Upload+Apply run on their normal gate — loading the full flushed delta.
+  `timeout-minutes: 90` stays as a hard backstop. The 30-min gap between budget and
+  timeout is the budget-to-timeout margin, not the exact stop time: the budget is
+  checked only at the TOP of each loop iteration, so a probe already in flight can
+  push the actual process exit past the 60-min mark by up to one full 2-mirror
+  Overpass timeout (~8 min worst case with both mirrors dead-hanging). That leaves
+  ~22 min of real headroom below the 90-min cap — deliberately larger than any
+  single probe — plus ~4 min job setup and ~2 min apply still fit under 90.
+
+  The budget is the dependable mechanism, but it is backed by TWO belt-and-suspenders
+  layers so a hard timeout-cancel is never catastrophic: (1) the classify SQL is
+  flushed INCREMENTALLY (the preamble is written before the loop, then each complete,
+  newline-terminated `UPDATE …;` is appended the instant it is decided), so a valid
+  statement-boundary-clean partial `.sql` always survives even a hard kill; (2)
+  Upload+Apply are `always()`-gated — NOT `!cancelled()`, which a `timeout-minutes`
+  cancel would SKIP (that cancel sets the `cancelled()` context true, so the belt
+  path would be dead in exactly the case it exists for). `always()` runs inside the
+  ~5-min cancellation grace window, enough for one `wrangler d1 execute`. It is safe
+  on a genuine unrelated failure (a bad token failing Snapshot leaves no delta file):
+  `if-no-files-found: ignore` makes upload a no-op, and Apply first truncates the
+  delta to its last complete `;`-terminated statement (so a torn SIGKILL tail can
+  never reach wrangler and fail the whole apply) then short-circuits on a
+  `[ ! -s classify-delta.sql ] || ! grep -q ';'` guard — a missing/empty/statement-less
+  delta applies as a harmless idempotent no-op. No SIGTERM/SIGINT handler is added:
+  the step is a bash `run: |` block and GitHub signals bash, which does not reliably
+  forward signals to the child Deno process, so the graceful budget (exit 0) is the
+  dependable mechanism.
+
+  **Drain liveness under sustained outages.** A transient probe failure (null
+  Overpass signals) emits NO statement and does NOT bump `water_class_attempts`, so
+  a persistently-failing beach stays at the attempts-ASC queue head and is re-probed
+  first on every run. During a sustained 504/hang storm a budget-stopped run can burn
+  its whole budget on a few TCP-hanging heads, emit zero decisions, and never reach
+  `WATER_CLASS_MAX_ATTEMPTS` to retire them — decided/bumped beaches advance, but
+  fetch-failed beaches do not. This is pre-existing (the in-Worker `runWaterClassification`
+  behaved the same) and the budget is a strict improvement over the old
+  cancel-everything-persist-nothing behavior, but operators should know a stuck head
+  can stall drain until Overpass recovers.
 - **`src/discovery.js`** — the extracted pure merge logic, imported by BOTH the
   Worker (`src/index.js`, which re-exports `mergeBeachRows` for tests) and the
   batch script. Its only dependency is `src/geo.js`.
@@ -172,7 +219,8 @@ Locally (dry run — produce the SQL, don't apply; needs Deno + a snapshot):
 Flags: `--no-classify` (discovery only), `--no-discovery` (classify only; the two
 are mutually exclusive halves and passing both is a guarded error),
 `--classify-limit N` (cap per run; 0 = all), `--classify-delay-ms N`
-(default 300), `--now <iso>`.
+(default 300), `--classify-budget-ms N` (self-imposed wall-clock cap on the
+classify loop; 0 = disabled/full drain), `--now <iso>`.
 
 For **local dev**, `npm run seed` is now this same offline batch pointed at the
 local D1: it runs `scripts/discovery-batch.js --out ./.seed.sql --no-classify`

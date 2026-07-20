@@ -21,7 +21,9 @@ import {
   bumpAttemptsSql,
   buildClassifyQueue,
   tileBbox,
-  backoffDelayMs
+  backoffDelayMs,
+  budgetExhausted,
+  classifyQueue
 } from "../scripts/discovery-batch.js";
 import { WATER_CLASS_VERSION, WATER_CLASS_MAX_ATTEMPTS } from "../src/waterClass.js";
 
@@ -60,7 +62,12 @@ describe("parseArgs", function () {
     const a = parseArgs([]);
     expect(a.classify).toBe(true);
     expect(a.classifyLimit).toBe(0);
+    expect(a.classifyBudgetMs).toBe(0);
     expect(a.out).toBe("discovery-delta.sql");
+  });
+  it("parses --classify-budget-ms; a bad value falls back to 0 (disabled)", function () {
+    expect(parseArgs(["--classify-budget-ms", "4200000"]).classifyBudgetMs).toBe(4200000);
+    expect(parseArgs(["--classify-budget-ms", "x"]).classifyBudgetMs).toBe(0);
   });
   it("parses flags", function () {
     const a = parseArgs(["--snapshot", "s.json", "--out", "o.sql", "--no-classify", "--classify-limit", "50"]);
@@ -101,6 +108,77 @@ describe("backoffDelayMs", function () {
   });
   it("never returns negative", function () {
     expect(backoffDelayMs(1, 0, 0, function () { return 0; })).toBe(0);
+  });
+});
+
+describe("budgetExhausted", function () {
+  it("is disabled (always false) when budgetMs <= 0", function () {
+    expect(budgetExhausted(1000, 0, 9e15)).toBe(false);
+    expect(budgetExhausted(1000, -5, 9e15)).toBe(false);
+  });
+  it("is false while elapsed < budget", function () {
+    expect(budgetExhausted(1000, 5000, 3000)).toBe(false);   // elapsed 2000
+  });
+  it("is true once elapsed >= budget", function () {
+    expect(budgetExhausted(1000, 5000, 6000)).toBe(true);    // elapsed 5000
+    expect(budgetExhausted(1000, 5000, 8000)).toBe(true);    // elapsed 7000
+  });
+});
+
+describe("classifyQueue budget + incremental flush", function () {
+  const makeQueue = function () {
+    const q = [];
+    for (let n = 0; n < 5; n = n + 1) {
+      q.push({ id: "osm-node-" + String(n), water_class_attempts: 0 });
+    }
+    return q;
+  };
+  it("case A: stops cleanly when the wall-clock budget is exhausted", async function () {
+    const queue = makeQueue();
+    const collected = [];
+    // now() is checked at the TOP of each iteration before processing. Return
+    // start (0) for the first two checks, then a value past the deadline so the
+    // loop stops entering the 3rd iteration -> processed=2.
+    let calls = 0;
+    const clock = [0, 0, 0, 999999];
+    const fakeClock = function () {
+      const v = clock[Math.min(calls, clock.length - 1)];
+      calls = calls + 1;
+      return v;
+    };
+    const result = await classifyQueue(queue, {
+      limit: 0,
+      delayMs: 0,
+      budgetMs: 1,
+      now: fakeClock,
+      fetchSignals: async function () { return {}; },
+      classify: function () { return "great_lake"; },
+      flush: async function (s) { collected.push(s); }
+    });
+    expect(result.stopped).toBe(true);
+    expect(result.processed).toBe(2);
+    expect(collected.length).toBe(2);
+    expect(collected[0]).toBe(classifyUpdateSql(queue[0].id, "great_lake"));
+    expect(collected[1]).toBe(classifyUpdateSql(queue[1].id, "great_lake"));
+  });
+  it("case B: full drain flushes every statement incrementally", async function () {
+    const queue = makeQueue();
+    const collected2 = [];
+    const result = await classifyQueue(queue, {
+      limit: 0,
+      delayMs: 0,
+      budgetMs: 0,
+      now: function () { return 0; },
+      fetchSignals: async function () { return {}; },
+      classify: function () { return "great_lake"; },
+      flush: async function (s) { collected2.push(s); }
+    });
+    expect(result.stopped).toBe(false);
+    expect(result.processed).toBe(5);
+    expect(collected2.length).toBe(5);
+    for (let i = 0; i < 5; i = i + 1) {
+      expect(collected2[i]).toBe(classifyUpdateSql(queue[i].id, "great_lake"));
+    }
   });
 });
 
