@@ -453,9 +453,9 @@ Beach discovery and water-body classification run **outside** the Worker, in an
 offline GitHub Actions batch job (`scripts/discovery-batch.js`, run on Deno). They
 are split across **two independent workflows** so a slow or failing classification
 run never blocks discovery: `.github/workflows/discovery.yml` runs daily (beach
-discovery + stale-row reconciliation) and `.github/workflows/classify.yml` runs 4×
-daily (water-body classification only, up to 150 beaches/run, draining the
-unclassified queue). This keeps the two-path invariant — the batch writes D1
+discovery + stale-row reconciliation) and `.github/workflows/classify.yml` runs
+hourly (water-body classification only, up to 25 beaches/run — ~600/day in short
+Overpass bursts — draining the unclassified queue). This keeps the two-path invariant — the batch writes D1
 out-of-band and the request path still reads only D1/KV — while sidestepping the
 Worker's per-invocation subrequest caps. The batch reuses the discovery/classification
 code verbatim (`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`),

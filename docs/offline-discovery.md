@@ -54,10 +54,12 @@ the Worker.
   `.sql` as an artifact, and applies it with `wrangler d1 execute --remote
   --file`. `timeout-minutes: 120`.
 - **`.github/workflows/classify.yml`** — schedules the **water-classification**
-  half 4× daily (`23 2,8,14,20 * * *`, plus `workflow_dispatch`), running the
-  script with `--no-discovery --classify-limit 150` (classify-only: no tiling, no
+  half hourly (`23 * * * *`, plus `workflow_dispatch`), running the
+  script with `--no-discovery --classify-limit 25` (classify-only: no tiling, no
   upserts, no reconciliation, no deletes; emits **only** `water_class` UPDATEs,
-  150 per run, draining the NULL/stale queue over repeated runs). It lives in its
+  25 per run — short, polite Overpass bursts at ~600/day, the same throughput as
+  the old 4×-daily 150/run cadence; manual runs default to 150 for bulk drains —
+  draining the NULL/stale queue over repeated runs). It lives in its
   own workflow — and a distinct concurrency group (`classify`, disjoint from
   discovery's) so the two can run concurrently — because classification is
   hundreds of **sequential** per-beach Overpass probes, the pipeline's long pole:
@@ -258,10 +260,15 @@ classify loop; 0 = disabled/full drain), `--now <iso>`.
 For **local dev**, `npm run seed` is now this same offline batch pointed at the
 local D1: it runs `scripts/discovery-batch.js --out ./.seed.sql --no-classify`
 (discovery only, no snapshot) and applies the delta with
-`wrangler d1 execute swim-report --local --file ./.seed.sql`. `npm run
-seed:classify` runs it without `--no-classify` to also emit `water_class`
-updates. Both replace the old "trigger the discovery cron" seed path, which no
-longer exists in the Worker.
+`node scripts/apply-local-sql.js ./.seed.sql`, which splits it into <90 KB
+line-aligned chunks and runs one `wrangler d1 execute --local --file` per
+chunk. The chunking exists because wrangler's LOCAL apply hands the whole file
+to miniflare/workerd as a single SQL call, capped at 100,000 bytes
+(`SQLITE_TOOBIG`) — a full delta is ~700 KB. The REMOTE apply the workflows use
+is unaffected (it uploads through the D1 import API and ingests server-side).
+`npm run seed:classify` runs the batch without `--no-classify` to also emit
+`water_class` updates. Both replace the old "trigger the discovery cron" seed
+path, which no longer exists in the Worker.
 
 In CI: `discovery.yml` runs daily and `classify.yml` runs 4× daily (in their own
 concurrency groups, so they may overlap — they touch disjoint columns); each has a

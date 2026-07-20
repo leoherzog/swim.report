@@ -20,10 +20,17 @@ name: Water-body classification
 # likewise never runs `npm install` (npx --yes wrangler@<pin> only).
 
 on:
-  # 4x daily, offset from discovery.yml (47 8) and the Worker's own crons. Drains
-  # CLASSIFY_LIMIT beaches per run; repeat runs work through the backlog.
+  # Hourly, small chunks: 25 beaches/run (same ~600/day throughput as the old
+  # 4x-daily 150/run cadence) so each run is a short, polite Overpass burst that
+  # finishes in minutes — an Overpass 504 window is unlikely to span a whole run,
+  # and the budget/truncate machinery below becomes defense-in-depth instead of
+  # load-bearing. Minute 23 is offset from discovery.yml (47 8) and off the
+  # congested top-of-hour slot (GitHub cron is best-effort UTC: runs drift
+  # minutes and occasionally skip — harmless for a queue drain, the next run
+  # picks up). Once the backlog drains, most runs emit zero UPDATEs; the delta-
+  # summary step below tolerates that (grep -c guard) so a no-op run stays green.
   schedule:
-    - cron: "23 2,8,14,20 * * *"
+    - cron: "23 * * * *"
   workflow_dispatch:
     inputs:
       apply:
@@ -60,13 +67,17 @@ jobs:
       DB_NAME: swim-report
       WRANGLER_VERSION: "4"
       APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
-      # Scheduled runs drain 150/run; manual runs can override (0 = all eligible).
-      CLASSIFY_LIMIT: ${{ github.event_name == 'schedule' && '150' || inputs.classify_limit }}
+      # Scheduled runs drain 25/hour (~600/day); manual runs default to a 150
+      # bulk chunk and can override (0 = all eligible).
+      CLASSIFY_LIMIT: ${{ github.event_name == 'schedule' && '25' || inputs.classify_limit }}
       # Self-imposed wall-clock budget (minutes) for the classify loop, well under
-      # timeout-minutes: 90. Under public-Overpass 504 storms 150 sequential probes
-      # overran 90 min and got CANCELLED — skipping Apply and persisting zero
-      # progress. The budget makes the run return exit 0 with margin so Apply runs
-      # normally (and classify SQL is now flushed incrementally as a SIGKILL net).
+      # timeout-minutes: 90. A scheduled 25-probe run finishes in minutes and will
+      # never touch this; it protects MANUAL bulk runs (classify_limit 150 or
+      # 0 = full drain), where under public-Overpass 504 storms 150 sequential
+      # probes once overran 90 min and got CANCELLED — skipping Apply and
+      # persisting zero progress. The budget makes the run return exit 0 with
+      # margin so Apply runs normally (and classify SQL is flushed incrementally
+      # as a SIGKILL net).
       # 60 (not 70) leaves real headroom: the budget is only checked at the TOP of
       # each loop iteration, so a probe already in flight can overhang by up to one
       # full 2-mirror Overpass timeout (~8 min); 60 + ~4 min job setup + ~8 min
@@ -120,7 +131,13 @@ jobs:
             --classify-limit "${CLASSIFY_LIMIT:-150}" \
             --classify-budget-ms $(( ${CLASSIFY_BUDGET_MIN:-70} * 60000 ))
           echo "---- delta summary ----"
-          grep -c ';' classify-delta.sql | xargs echo "statements:"
+          # `grep -c` exits 1 on zero matches and this shell is `bash -eo
+          # pipefail`, so a fully-drained queue (header-only delta, zero
+          # UPDATEs — a SUCCESS) would fail the step without the `|| true`.
+          # (discovery.yml needs no such guard: its delta always carries the
+          # flag_history-retention DELETE + sync_meta statements.)
+          statements=$(grep -c ';' classify-delta.sql || true)
+          echo "statements: ${statements}"
           head -n 20 classify-delta.sql
 
       # always() — NOT !cancelled() — because a timeout-minutes job cancel sets the

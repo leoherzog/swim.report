@@ -1668,10 +1668,11 @@ daily discovery upserts:
   path below — tiling, upserts, stale-row reconciliation, `flag_history` retention prune, and
   the sync_meta stamps. Emits NO water_class UPDATEs.
 - CLASSIFY-ONLY (`--no-discovery --classify-limit N`, `.github/workflows/classify.yml`,
-  4x daily `23 2,8,14,20 * * *`, concurrency group `classify`): NO tiling, NO
+  hourly `23 * * * *`, concurrency group `classify`): NO tiling, NO
   upserts, NO reconciliation, NO deletes — it emits ONLY water_class UPDATEs for
   the snapshot rows still needing classification, up to `--classify-limit N`
-  (the workflow passes 150). The delete-safety invariant is therefore PRESERVED
+  (scheduled runs pass 25 — small hourly chunks, ~600/day; manual
+  `workflow_dispatch` runs default to 150 for bulk drains). The delete-safety invariant is therefore PRESERVED
   by construction: classify-only mode produces zero deletes and zero upserts, and
   stale-row reconciliation (with its full park query + the proportional safety rail)
   still runs ONLY in discovery mode. classify.yml also passes
@@ -1687,9 +1688,15 @@ shapes (sections 1, 3) are UNCHANGED, and the request path still reads only D1/K
 
 Locally, `npm run seed` runs the batch against local D1 in discovery-only mode
 (`deno run ... scripts/discovery-batch.js --out ./.seed.sql --no-classify` then
-`wrangler d1 execute swim-report --local --file ./.seed.sql`; `npm run
-seed:classify` runs the classify-only mode). The description below remains the
-authoritative contract for that batch.
+`node scripts/apply-local-sql.js ./.seed.sql`; `npm run seed:classify` runs the
+batch WITH classification). apply-local-sql.js splits the delta into <90 KB
+line-aligned chunks (one statement per line, so a split can never tear a
+statement) and applies each with its own `wrangler d1 execute --local --file`
+call, because wrangler's LOCAL apply passes the whole file to miniflare/workerd
+as one SQL call capped at 100,000 bytes (`SQLITE_TOOBIG`); the workflows'
+`--remote` apply (D1 import API, server-side ingestion) has no such cap and
+keeps its single-file apply. The description below remains the authoritative
+contract for that batch.
 
 Discovery region — the Great Lakes shoreline, defined as the curated coastal boxes in
 REGIONS (src/regions.js, section 5). The batch tiles every REGIONS bbox at
@@ -1894,16 +1901,17 @@ BROWSER on the detail page — never by the request path.
 ### Water classification (offline batch classify-only mode)
 
 Owned by the offline batch's CLASSIFY-ONLY mode — its own GitHub Actions workflow
-(`.github/workflows/classify.yml`, 4x daily "23 2,8,14,20 * * *", concurrency group
+(`.github/workflows/classify.yml`, hourly "23 * * * *", concurrency group
 `classify`, run with `--no-discovery --classify-limit N`) so per-beach Overpass probing
 never delays the daily discovery upserts. This mode does NO tiling, NO upserts, NO
 reconciliation, and NO deletes — it emits ONLY the water_class UPDATEs below. The
 classification decision + allowlist live in src/waterClass.js. Constants:
 WATER_CLASS_MAX_ATTEMPTS = 5 (from src/waterClass.js). The per-pass row count is set by
-`--classify-limit N` (the classify.yml workflow passes 150) — per-beach Overpass probing
-is rate-limited on the public endpoint, but the pass stays sequential and polite; the
-steady-state pass drains the trickle of newly-discovered rows plus any WATER_CLASS_VERSION
-re-drain.
+`--classify-limit N` (scheduled classify.yml runs pass 25 — short hourly bursts,
+~600/day; manual runs default to 150) — per-beach Overpass probing is rate-limited on
+the public endpoint, but the pass stays sequential and polite; the steady-state pass
+drains the trickle of newly-discovered rows plus any WATER_CLASS_VERSION re-drain (a
+drained-queue run emits zero UPDATEs and applies as a no-op).
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
@@ -1925,7 +1933,7 @@ classification (water_class has its own WATER_CLASS_VERSION).
 
 No in-line classification runs during discovery: the two modes are separate (see the
 offline-pipeline note above), so DISCOVERY-ONLY emits zero water_class UPDATEs and newly
-discovered rows are picked up by the next classify-only workflow run (4x daily). This keeps
+discovered rows are picked up by the next classify-only workflow run (hourly). This keeps
 discovery-only's SQL delta purely upserts + reconciliation + the flag_history prune +
 sync_meta, so the delete-safety invariant is confined to the one mode that can delete.
 
