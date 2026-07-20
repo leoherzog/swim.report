@@ -331,8 +331,9 @@ function renderFooter() {
     "official flag status. Always obey posted flags and lifeguards.</small>";
 }
 
-// Ambient, Firewatch-style layered wave swells pinned to the bottom of every
-// page (inspired by the "Pure CSS Waves" pen technique: one reusable path,
+// Ambient, Firewatch-style layered wave swells anchored to the bottom of the
+// document, behind the footer — they come into view as the visitor reaches the
+// end of the page (inspired by the "Pure CSS Waves" pen technique: one reusable path,
 // four <use> layers drifting at staggered speeds for parallax). Decorative
 // only — aria-hidden, pointer-events: none, and rendered behind all content
 // (see .wave-bg in styles.js). The layers carry no fill here: styles.js tints

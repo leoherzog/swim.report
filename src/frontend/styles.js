@@ -10,8 +10,13 @@ const RULES = [
 
   // The page's opaque base color. <wa-page>'s host normally paints this itself,
   // but we make the host transparent (below) so the fixed .wave-bg layer can sit
-  // behind it — so the surface color has to live on <body> now instead.
-  "body {",
+  // behind it. The surface color must live on <html> (the canvas background),
+  // NOT on <body>: WA's native.css already backgrounds <html>, which blocks
+  // body→canvas propagation, and a body-painted background renders ABOVE
+  // negative z-index positioned elements in the root stacking context — it
+  // would hide the waves. Restated here (unlayered, so it outranks the
+  // @layer wa-native copy) to make the dependency explicit.
+  "html {",
   "  background-color: var(--wa-color-surface-default);",
   "}",
 
@@ -27,13 +32,23 @@ const RULES = [
   "  background-color: transparent;",
   "}",
 
-  // Firewatch-style ambient wave swells, fixed to the bottom of the viewport and
-  // rendered behind everything (z-index: -1, above only the body background).
-  // Decorative: aria-hidden in the markup, and pointer-events: none so it never
-  // eats clicks. Kept low and wide so it reads as a gentle water body, not a
-  // banner.
+  // Anchors .wave-bg's absolute positioning to the full document height (body
+  // spans the whole page; html/body already have min-height: 100%). relative +
+  // z-index: auto does NOT create a stacking context, so the wave layer keeps
+  // participating in the root stacking context where negative z-index paints
+  // below all content.
+  "body {",
+  "  position: relative;",
+  "}",
+
+  // Firewatch-style ambient wave swells, anchored to the bottom of the document
+  // (not the viewport — they sit behind the footer and only appear as you reach
+  // the end of the page) and rendered behind everything (z-index: -1, above
+  // only the html canvas background). Decorative: aria-hidden in the markup,
+  // and pointer-events: none so it never eats clicks. Kept low and wide so it
+  // reads as a gentle water body, not a banner.
   ".wave-bg {",
-  "  position: fixed;",
+  "  position: absolute;",
   "  left: 0;",
   "  right: 0;",
   "  bottom: 0;",
@@ -111,9 +126,17 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
+  // wa-page's shadow sheet paints EVERY slotted section opaque via
+  // slot[name]::slotted(*) { background-color: var(--wa-color-surface-default) }
+  // — which would sit the footer on top of the document-bottom .wave-bg layer.
+  // Transparent here wins without !important: outer-document author rules beat
+  // shadow ::slotted() declarations regardless of specificity. The sticky
+  // header deliberately keeps its opaque ::slotted fill so content scrolling
+  // under it can't show through.
   ".app-footer {",
   "  padding-inline: var(--wa-space-xl);",
   "  color: var(--wa-color-text-quiet);",
+  "  background-color: transparent;",
   "}",
 
   "main.app-main {",
