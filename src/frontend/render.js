@@ -898,15 +898,17 @@ export function renderDetailPage(data) {
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
 
-  // Identity block wrapped in its own tight nested stack (wa-gap-2xs) so the
+  // Identity block wrapped in its own tight nested stack (wa-gap-xs) so the
   // back-link, title, subtitle, and coords group together; the outer app-main
   // stack's wa-gap-l then separates the whole header from the cards below.
   // (A stack zero-margins its children, so .beach-title/.beach-subtitle carry
-  // no margins of their own.)
-  const headerBlock = "<div class=\"beach-identity wa-stack wa-gap-2xs\">" +
+  // no margins of their own.) wa-flex-nowrap keeps the flag icon and beach
+  // name on one flex line at narrow widths — long names wrap inside their own
+  // span, beside the icon, instead of dropping below it.
+  const headerBlock = "<div class=\"beach-identity wa-stack wa-gap-xs\">" +
     "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
-    "<h1 class=\"beach-title wa-cluster wa-gap-s\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
+    "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
     "<p class=\"wa-caption-s\"><a class=\"coords-link\" href=\"" + escapeHtml(osmHref) +
     "\" rel=\"noopener noreferrer\">" +
