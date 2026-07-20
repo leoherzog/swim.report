@@ -245,10 +245,8 @@ migrations/0003_enrichment_attempts.sql:
 
   Per-row counter of failed fetchPointMetadata attempts (see runNwsEnrichment,
   section 7). Non-US points swept in by the discovery REGIONS (Ontario shoreline) 404 on
-  api.weather.gov and stay nws_zone IS NULL forever; without a cap they sort
-  first under ORDER BY id and permanently occupy the enrichment batch, starving
-  US beaches. The enrichment query skips rows at the cap
-  (enrichment_attempts >= 5).
+  api.weather.gov and stay nws_zone IS NULL forever; the enrichment query skips rows at
+  the cap (enrichment_attempts >= 5) so they never starve US beaches.
 
 migrations/0004_recompute_updated.sql:
 
@@ -481,10 +479,7 @@ Pure module. No fetch, no Date, no env. Exports:
       // ripCurrentRisk (section 1): structured echoes of the inputs, present on EVERY
       // branch, including alert-decided ones (waveHeightFt: the input when finite else
       // null; alertDetails: sanitized copy, [] default; ripCurrentRisk: known level
-      // else null). Adding waveColorForHeight and these echoes changed no color
-      // decision, threshold, precedence, or reason string for any input, so
-      // RULES_VERSION did NOT bump (flag_history calibration rows stay comparable
-      // across the change).
+      // else null).
 
 ### estimateFlag inputs shape (contract with the cron orchestrator)
 
@@ -644,8 +639,7 @@ and cron paths.
 
     export function distanceMi(lat1, lon1, lat2, lon2)
       // Pure. Great-circle distance in statute miles, derived from distanceKm
-      // (MI_PER_KM = 3958.8 / 6371). Numerically identical to the pre-consolidation
-      // per-module copies.
+      // (MI_PER_KM = 3958.8 / 6371).
 
     export function metersToFeet(m)
       // Pure. number -> number; m * 3.28084. Null-safe: null/undefined -> null
@@ -846,9 +840,7 @@ locally via pointInGeometry (src/geo.js).
       //   "&hourly=wave_height" +
       //   "&models=" + WAVE_MODEL_ORDER.join(",") +
       //   "&forecast_days=2&timezone=UTC"
-      //   Only wave_height is requested — wave_direction/wave_period were fetched but never
-      //   consumed (modelHoursSlice reads only wave_height_<model>) and tripled the request's
-      //   Open-Meteo weighted cost, pushing the batch burst over the API's rate limit.
+      //   Only wave_height is requested (wave_direction/wave_period are never consumed).
       // Response: array of location objects when multiple coords are sent (a single object
       //   when one coord — normalize to array). With multiple models the hourly variables
       //   are suffixed per model, e.g. hourly.wave_height_ecmwf_wam025. forecast_days=2
@@ -897,11 +889,9 @@ locally via pointInGeometry (src/geo.js).
 Great Lakes wave gap-filler: Open-Meteo's wave models frequently return masked/null
 cells on the Great Lakes, so beaches Open-Meteo leaves wave-null are filled from real
 buoy observations served by the GLOS Seagull REST API (unauthenticated JSON,
-10-minute cadence). NOTE: the true gridded source (NOAA GLCFS via the GLOS/Axiom
-ERDDAP at erddap.axiomdatascience.com) was hard-down (HTTP 502) when this was built,
-so this is NEAREST-BUOY point data, not grid interpolation — a beach only gets a
-reading when a wave-reporting buoy sits within MAX_PLATFORM_DISTANCE_KM (25); beyond
-that it stays null so a distant buoy is never presented as the beach's condition.
+10-minute cadence). This is NEAREST-BUOY point data, not grid interpolation — a beach
+only gets a reading when a wave-reporting buoy sits within MAX_PLATFORM_DISTANCE_KM (25);
+beyond that it stays null so a distant buoy is never presented as the beach's condition.
 Great Lakes buoys are seasonal (many pulled Nov-Apr): winter coverage collapsing to
 null is expected behavior, not an error.
 
@@ -1048,25 +1038,24 @@ entirely when it is unset.
       //   .b out tags bb;
       //   .parks out tags bb;
       //   .water out tags bb;
-      // All three park tag filters are REQUIRED (verified: Van Buren State Park MI
-      // is nature_reserve + protected_area, not leisure=park). Association happens
+      // All three park tag filters are REQUIRED (some state parks are mapped as
+      // nature_reserve + protected_area, not leisure=park). Association happens
       // locally, NOT via Overpass is_in (is_in only accepts nodes) and NEVER via
       // name-based area lookup (name collisions across states: Silver Lake State
       // Park exists in MI, NH, and VT).
       // POND FILTER: an UNNAMED beach is dropped before park association when
       // isPondBeach(beach, waters) — at least one water record overlaps its
       // bbox padded by 0.001 deg (~100 m) AND every overlapping one is
-      // smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈ 4.5 ha at MI latitudes;
-      // real case: Hawthorn Pond Natural Area's 32 m² beach on a ~2 ha pond
-      // became a full row). Beach size itself is NOT a usable signal — sub-100 m²
-      // unnamed slivers verified on Lake Erie / Torch Lake / Mullett Lake.
+      // smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈ 4.5 ha at MI latitudes).
+      // Beach size itself is NOT a usable signal (sub-100 m² unnamed slivers
+      // exist on real Great Lakes shore).
       // The water fetch is WAYS ONLY (+ natural=coastline ways as always-large
-      // shoreline evidence): around on water RELATIONS loads the Great Lakes
-      // multipolygons' full geometry and is pathological (verified 2026-07-17:
-      // >10 min server-side vs 72 s without — [timeout:180] would kill the
-      // query nightly). Ponds are essentially always closed ways, so way-water
-      // carries the whole pond signal; a beach on a relation-mapped lake sees
-      // either a coastline way (Great Lakes) or no nearby water (kept).
+      // shoreline evidence): `around` on water RELATIONS loads the Great Lakes
+      // multipolygons' full geometry and is pathological (server-side runs many
+      // minutes and [timeout:180] would kill the query nightly). Ponds are
+      // essentially always closed ways, so way-water carries the whole pond
+      // signal; a beach on a relation-mapped lake sees either a coastline way
+      // (Great Lakes) or no nearby water (kept).
       // Beaches with NO mapped water nearby are KEPT (missing data never drops);
       // NAMED beaches are never filtered (they also arrive via fetchBeaches).
       // Rows already in D1 for now-filtered beaches drain via the section-7
@@ -1327,13 +1316,12 @@ wrapper). No Date.now(), no ambient clock.
 
     // NOTE: the flag PAGE carries only a STATIC LEGEND (Green/Yellow/Red/Grey2.png
     // images explaining what the colors mean) — it must NEVER be parsed for a live
-    // color (doing so reported official green 24/7). The live feed is the published
-    // Google Sheet linked from the page as the "text version" (ADA alternative): a
-    // headerless CSV, one sentence per line, e.g. "Flag #6 North Beach is Green" /
-    // "North Pier is Open". Flags #6-#9 belong to North Beach, #10-#12 to South
-    // Beach (multiple poles per named beach); same-named flags roll up to the most
-    // severe color. Gray/Grey = unmonitored (9pm-9am local / Sept 15 - May 15
-    // off-season) and maps to NO DATA for that site, never a color.
+    // color. The live feed is the published Google Sheet linked from the page as the
+    // "text version" (ADA alternative): a headerless CSV, one sentence per line, e.g.
+    // "Flag #6 North Beach is Green" / "North Pier is Open". Flags #6-#9 belong to
+    // North Beach, #10-#12 to South Beach (multiple poles per named beach); same-named
+    // flags roll up to the most severe color. Gray/Grey = unmonitored (9pm-9am local /
+    // Sept 15 - May 15 off-season) and maps to NO DATA for that site, never a color.
 
     export function isSouthHavenMonitored(nowIso)
       // Pure, exported for tests. nowIso -> boolean. True when nowIso falls in the
@@ -1380,7 +1368,7 @@ wrapper). No Date.now(), no ambient clock.
       //   nowIso } or null when unparseable; sites is [] outside the monitored window
       //   or when every site is gray. Per-site reason:
       //   "Official flag reported by City of South Haven Beach Flag Program for <label>".
-      // South Haven now recognizes a double-red tier ("Double Red" line -> "double-red",
+      // South Haven recognizes a double-red tier ("Double Red" line -> "double-red",
       //   which outranks red in the same-site rollup, matching OFFICIAL_COLORS in
       //   officialSources/index.js); a plain red still means water closed.
 
@@ -1411,15 +1399,15 @@ guessed color). Full color semantics are in README.md's official-sources table.
   236-999 yellow, >=1000 red; reading date parsed from the page, >8 days stale
   -> null; updated = reading date (honest, may trip the UI stale warning).
 - src/officialSources/ohioBeachGuard.js (ohio-beachguard) — ODH BeachGuard
-  public API, 51 curated Lake Erie public-beach ids (OHIO_SITES; expanded from
-  the original 4 — the registry bulk endpoint returns null monitorings/advisories,
-  so each id still needs its own detail GET), one GET per id with per-id failure
-  isolation, issued in chunks of OHIO_FETCH_CHUNK_SIZE (exported const, 8) via
-  Promise.allSettled — same total subrequest count and result ordering as the old
-  serial loop, just bounded concurrency. matches() is HARD-GATED by OHIO_MATCH_BBOX (lat 41.2-42.1,
-  lon -83.6..-80.4) BEFORE any names[]/proximity check, so a same-named
-  Michigan/Ontario beach can never inherit an Ohio official flag; only distinctive,
-  low-collision names go in names[] (generic labels resolve by proximity only).
+  public API, 51 curated Lake Erie public-beach ids (OHIO_SITES — the registry
+  bulk endpoint returns null monitorings/advisories, so each id still needs its
+  own detail GET), one GET per id with per-id failure isolation, issued in chunks
+  of OHIO_FETCH_CHUNK_SIZE (exported const, 8) via Promise.allSettled (bounded
+  concurrency, same total subrequest count as a serial loop). matches() is
+  HARD-GATED by OHIO_MATCH_BBOX (lat 41.2-42.1, lon -83.6..-80.4) BEFORE any
+  names[]/proximity check, so a same-named Michigan/Ontario beach can never
+  inherit an Ohio official flag; only distinctive, low-collision names go in
+  names[] (generic labels resolve by proximity only).
   Out-of-season -> omitted; current advisory -> red for any HAB advisory
   (HAB_WARNING_ADV OR HAB_WATCH_ADV — both advise against water contact, watch
   collapsed UP to red per the never-a-false-green bias — or severity >= 4) else
@@ -1463,15 +1451,13 @@ guessed color). Full color semantics are in README.md's official-sources table.
 
 ## 7. Cron design (src/index.js)
 
-Beach discovery and water-body classification are NO LONGER in-Worker crons: the offline
-GitHub Actions batch (scripts/discovery-batch.js on Deno) is now the SOLE owner of both
-(cutover complete — the retired "47 8 * * *" runOverpassSync and "37 1,7,13,19 * * *"
-runWaterClassification crons are gone from wrangler.toml and CRON_JOBS; the discovery /
-classification logic they ran still lives in src/discovery.js, src/clients/overpass.js,
-and src/waterClass.js, imported verbatim by the batch — see the offline pipeline note
-under runOverpassSync below). The D1 schema (section 2) and the KV shapes (sections 1, 3)
-are UNCHANGED by the cutover: the offline batch writes the same D1 rows out-of-band and
-the request path still reads only D1/KV (the two-path rule holds).
+Beach discovery and water-body classification are NOT in-Worker crons: the offline
+GitHub Actions batch (scripts/discovery-batch.js on Deno) is the SOLE owner of both. The
+discovery/classification logic still lives in src/discovery.js, src/clients/overpass.js,
+and src/waterClass.js, imported verbatim by the batch (see the offline pipeline note under
+"Discovery pipeline" below). The D1 schema (section 2) and the KV shapes (sections 1, 3)
+are unaffected: the offline batch writes the same D1 rows out-of-band and the request path
+still reads only D1/KV (the two-path rule holds).
 
 wrangler.toml triggers:
 
@@ -1501,8 +1487,8 @@ failure counts).
 
 Constants: MAX_BEACHES_PER_RUN = 1000, KV_TTL_SECONDS = 7200. (The Open-Meteo batch/pacing
 constants — OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY, OPEN_METEO_BATCH_GAP_MS,
-OPEN_METEO_RETRY_MS, WAVE_DATA_TTL_SECONDS — belong to runWaveRefresh; the hourly cron no
-longer fetches Open-Meteo.)
+OPEN_METEO_RETRY_MS, WAVE_DATA_TTL_SECONDS — belong to runWaveRefresh; the hourly cron does
+not fetch Open-Meteo.)
 
 MAX_BEACHES_PER_RUN must cover the WHOLE beaches table in one run: the KV TTL is 2 h,
 so any beach not reached every other hourly run has its flag expire and shows "no data"
@@ -1537,7 +1523,7 @@ still needs real pagination (TODO.md).
    guarded so a failed get yields no input) into a Map. A missing key (the wave cron
    hasn't run yet, or its data aged past the 7 h TTL) simply yields no wave input — the
    estimate degrades to the wind fallback or "unknown", never a wrong flag.
-6. (Wind is no longer fetched here — the wind fallback the estimate uses is carried on the
+6. (Wind is not fetched here — the wind fallback the estimate uses is carried on the
    waveinput payload, recorded by runWaveRefresh only for beaches still wave-null there.)
 7. Per beach: assemble inputs (nulls for anything missing), including
    alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false (section 4 —
@@ -1603,16 +1589,15 @@ still needs real pagination (TODO.md).
 
 Subrequest budget (paid plan, 10,000/invocation): 1 NWS national alerts call (step 3) +
 1 ECCC national alerts call (step 3b) + ~2×15 SRF calls + ~13 waveinput KV gets batches
-(≤613 gets, step 5 — no upstream marine/GLOS/wind fetch anymore) + ~62 official-scraper
-fetches (one scrape() per matched scraper; South Haven uses 2 fetches, Ohio BeachGuard now
+(≤613 gets, step 5 — no upstream marine/GLOS/wind fetch) + ~62 official-scraper
+fetches (one scrape() per matched scraper; South Haven uses 2 fetches, Ohio BeachGuard
 issues ONE GET per OHIO_SITES entry = 51, the rest 1 each) + ~2 scraper-health KV ops per
 matched scraper + ≤1 flag_history D1 batch (step 9, only when >= 1 estimate/official pair
 exists) + ≤700 flag/official KV puts ≈ well under 10,000 at the full ~613-row pilot table.
-Both authorities' alerts are now ONE national fetch each — no longer a call per distinct
-zone — so alert cost stays flat as the table grows. Free plan
-(50 subrequests, 1000 KV writes/day) is NOT sufficient at this cadence — README must state
-the paid-plan assumption; alternatively cap MAX_BEACHES_PER_RUN low for a free-plan demo
-(TODO.md).
+Both authorities' alerts are ONE national fetch each — not a call per distinct zone — so
+alert cost stays flat as the table grows. Free plan (50 subrequests, 1000 KV writes/day) is
+NOT sufficient at this cadence — README states the paid-plan assumption; alternatively cap
+MAX_BEACHES_PER_RUN low for a free-plan demo (TODO.md).
 
 ### runWaveRefresh (6-hourly: "15 */6 * * *")
 
@@ -1622,15 +1607,12 @@ knobs are read via batchTiming(env) with numeric env overrides of the same names
 zero them to run instantly); MAX_BEACHES_PER_RUN = 1000 covers the whole table as the
 hourly cron does.
 
-Owns ALL upstream wave/wind fetching that used to live in the hourly recompute — the
-Open-Meteo marine wave batch, the GLOS Seagull buoy gap-fill, and the Open-Meteo wind
-fallback. It is a SEPARATE, less-frequent cron because Open-Meteo's marine models only
-publish every 6–12 h, so refetching hourly was 6–12× wasted quota; the 6-hourly cadence
-plus paced batching keeps the run under Open-Meteo's per-minute weighted rate limit (the
-old hourly Promise.allSettled fan-out burst past it, got the tail of the run HTTP 429'd,
-and blanked the detail-page strip). The 7 h TTL outlives the gap between runs (plus slack
-for one failed run), so a transient 429 leaves the strip showing slightly-older-but-still-
-model-current data instead of blanking it.
+Owns ALL upstream wave/wind fetching — the Open-Meteo marine wave batch, the GLOS Seagull
+buoy gap-fill, and the Open-Meteo wind fallback. It is a SEPARATE, less-frequent cron
+because Open-Meteo's marine models only publish every 6–12 h, so a 6-hourly cadence plus
+paced batching keeps the run under Open-Meteo's per-minute weighted rate limit. The 7 h TTL
+outlives the gap between runs (plus slack for one failed run), so a transient 429 leaves the
+strip showing slightly-older-but-still-model-current data instead of blanking it.
 
 1. const nowIso = new Date().toISOString(); wavesStartIso = nowIso truncated to the top of
    its UTC hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries.
@@ -1638,11 +1620,10 @@ model-current data instead of blanking it.
 2. Waves (marine), PACED: batchByBeach chunks the points (OPEN_METEO_BATCH = 100) and runs
    the chunks in concurrency-limited waves (OPEN_METEO_CONCURRENCY at a time) with a gap
    (OPEN_METEO_BATCH_GAP_MS) between waves and ONE backoff retry (OPEN_METEO_RETRY_MS) on a
-   throttled (null) batch — never the all-at-once fan-out that got 429'd. Each per-beach
-   entry carries the client's full shape { waveHeightFt, model, hoursFt, models, byModel }
-   (section 5). A still-failed batch stores the hoursFt: null batch-failure sentinel (NOT
-   an all-null array — distinguishes "fetch failed" from "fetched, all cells masked"),
-   models: [], byModel: {}.
+   throttled (null) batch. Each per-beach entry carries the client's full shape
+   { waveHeightFt, model, hoursFt, models, byModel } (section 5). A still-failed batch
+   stores the hoursFt: null batch-failure sentinel (NOT an all-null array — distinguishes
+   "fetch failed" from "fetched, all cells masked"), models: [], byModel: {}.
 3. Great Lakes buoy gap-fill: for beaches STILL wave-null, one fetchGlcfsWaveHeightsFt(
    points, nowIso) call (src/clients/glerl.js — dedups buoy fetches internally, <= 62
    subrequests). Non-null readings overwrite ONLY the entry's waveHeightFt and model
@@ -1668,18 +1649,14 @@ Subrequest budget: ~7 paced marine batches (100/batch over ~613 beaches) + ≤62
 puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the inter-wave sleeps
 burn no CPU so the paced run stays inside the scheduled invocation's time budget.
 
-### Discovery pipeline (offline batch — formerly runOverpassSync)
+### Discovery pipeline (offline batch — GitHub Actions, NOT an in-Worker cron)
 
-NOTE (offline pipeline): CUTOVER COMPLETE. Discovery + water classification now
-run ONLY in the offline GitHub Actions batch job that bulk-loads D1
-(`scripts/discovery-batch.js` on Deno, `docs/offline-discovery.md`) — the
-in-Worker `47 8 * * *` (runOverpassSync) and `37 1,7,13,19 * * *`
-(runWaterClassification) crons have been RETIRED from wrangler.toml and
-CRON_JOBS. The batch reuses this exact logic verbatim — the merge cluster lives
-in `src/discovery.js`, discovery/classification in `src/clients/overpass.js` +
-`src/waterClass.js`, the region rail in `src/regions.js` — and emits the
-identical upsert / reconciliation / `flag_history`-prune / classification SQL,
-bulk-loaded via `wrangler d1 execute --remote --file`. The two-path rule still
+Discovery + water classification run ONLY in the offline GitHub Actions batch job that
+bulk-loads D1 (`scripts/discovery-batch.js` on Deno, `docs/offline-discovery.md`). The
+batch reuses the Worker logic verbatim — the merge cluster lives in `src/discovery.js`,
+discovery/classification in `src/clients/overpass.js` + `src/waterClass.js`, the region rail
+in `src/regions.js` — and emits the upsert / reconciliation / `flag_history`-prune /
+classification SQL, bulk-loaded via `wrangler d1 execute --remote --file`. The two-path rule
 holds: the batch writes D1 out-of-band and the request path reads only D1/KV.
 
 The batch runs in one of TWO mutually-exclusive modes, selected by flags parsed
@@ -1687,17 +1664,17 @@ in parseArgs (whose `discovery` field defaults to true), split across TWO
 GitHub Actions workflows so a slow per-beach classify pass never delays the
 daily discovery upserts:
 - DISCOVERY-ONLY (`--no-classify`, `.github/workflows/discovery.yml`, daily
-  `47 8 * * *`, job timeout 120 min): the full runDiscovery() path below —
-  tiling, upserts, stale-row reconciliation, `flag_history` retention prune, and
+  `47 8 * * *`, concurrency group `discovery`, job timeout 120 min): the full runDiscovery()
+  path below — tiling, upserts, stale-row reconciliation, `flag_history` retention prune, and
   the sync_meta stamps. Emits NO water_class UPDATEs.
 - CLASSIFY-ONLY (`--no-discovery --classify-limit N`, `.github/workflows/classify.yml`,
   4x daily `23 2,8,14,20 * * *`, concurrency group `classify`): NO tiling, NO
   upserts, NO reconciliation, NO deletes — it emits ONLY water_class UPDATEs for
   the snapshot rows still needing classification, up to `--classify-limit N`
   (the workflow passes 150). The delete-safety invariant is therefore PRESERVED
-  by construction: classify-only mode produces zero deletes and zero upserts
-  (verified), and stale-row reconciliation (with its full park query + the
-  proportional safety rail) still runs ONLY in discovery mode.
+  by construction: classify-only mode produces zero deletes and zero upserts, and
+  stale-row reconciliation (with its full park query + the proportional safety rail)
+  still runs ONLY in discovery mode.
 Passing both `--no-classify` and `--no-discovery` (nothing to do) is a guarded
 error. The mode split is purely operational: the D1 schema (section 2) and the KV
 shapes (sections 1, 3) are UNCHANGED, and the request path still reads only D1/KV.
@@ -1709,16 +1686,16 @@ seed:classify` runs the classify-only mode). The description below remains the
 authoritative contract for that batch.
 
 Discovery region — the Great Lakes shoreline, defined as the curated coastal boxes in
-REGIONS (src/regions.js, section 5). The old single PILOT_BBOX constant is GONE; the batch
-tiles every REGIONS bbox at TILE_MAX_SPAN_DEG = 2.0 deg (tileBbox) and runs each tile as a
-separate Overpass query. Wherever a step below refers to "the region", read it as the union
-of the tiled REGIONS boxes rather than one rectangle.
+REGIONS (src/regions.js, section 5). The batch tiles every REGIONS bbox at
+TILE_MAX_SPAN_DEG = 2.0 deg (tileBbox) and runs each tile as a separate Overpass query.
+Wherever a step below refers to "the region", read it as the union of the tiled REGIONS
+boxes rather than one rectangle.
 
 Nationwide scale-out (adding Pacific / Gulf / Atlantic coasts) is purely ADDITIVE — append
 boxes to REGIONS (section 5) — and is explicitly a TODO.md item; do NOT attempt it now.
 
-runDiscovery() takes NO arguments (the old runDiscovery(retryMs) retry-delay
-parameter is gone — the delay is now computed per attempt, see below).
+runDiscovery() takes NO arguments (the per-attempt retry delay is computed per attempt, see
+below).
 
     export function backoffDelayMs(retry, baseMs, maxMs, rand)
       // Pure (rand injectable — defaults to Math.random — so tests are
@@ -1777,13 +1754,12 @@ parameter is gone — the delay is now computed per attempt, see below).
    to the new one. This pass (reconcileStaleRows in scripts/discovery-batch.js) SELECTs
    existing unnamed-origin park rows (park_name IS NOT NULL AND name = park_name) whose
    coordinates fall inside ANY REGION — pointInAnyRegion(lat, lon) (src/regions.js), the
-   union of the tiled boxes, replacing the old single PILOT_BBOX containment test — and
-   DELETEs any whose id was NOT produced this run. Named beaches (name != park_name) are
-   never candidates. Scoping by pointInAnyRegion fails SAFE: shrinking or removing a box
-   only REMOVES rows from the delete-candidate set (an out-of-region row is left alone,
-   never deleted), so an editing mistake under-deletes rather than mass-deleting enriched
-   rows. A proportional safety rail refuses the whole deletion when the stale set exceeds
-   max(OVERPASS_RECONCILE_MAX_DELETES = 10,
+   union of the tiled boxes — and DELETEs any whose id was NOT produced this run. Named
+   beaches (name != park_name) are never candidates. Scoping by pointInAnyRegion fails
+   SAFE: shrinking or removing a box only REMOVES rows from the delete-candidate set (an
+   out-of-region row is left alone, never deleted), so an editing mistake under-deletes
+   rather than mass-deleting enriched rows. A proportional safety rail refuses the whole
+   deletion when the stale set exceeds max(OVERPASS_RECONCILE_MAX_DELETES = 10,
    ceil(OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25 * candidates)) — a partial
    upstream response would otherwise mass-delete enriched rows (defense in depth
    behind runQuery's remark check, section 5). Each deletion is logged (id, name); the
@@ -1815,13 +1791,13 @@ ORDER BY enrichment_attempts ASC, RANDOM() LIMIT 75; for each, fetchPointMetadat
 sequentially; on success UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?;
 on failure (fetchPointMetadata returns null, or throws) UPDATE beaches SET
 enrichment_attempts = enrichment_attempts + 1 WHERE id = ?. Ordering: fewest failed
-attempts first (fresh rows before retries), then RANDOM() — the old ORDER BY id drained
-every osm-node-* row before any osm-way-* row, leaving way-based beaches (Holland State
-Park) alert-blind for weeks. The attempts cap stops permanent failures — non-US points
-swept in by the discovery REGIONS (Ontario shoreline) that api.weather.gov 404s forever —
-from occupying the batch and starving US beaches; after 5 attempts a row is permanently parked
-and no longer requeued. The per-run summary log reports attempted / enriched / failures /
-parked (rows with nws_zone IS NULL AND enrichment_attempts >= 5).
+attempts first (fresh rows before retries), then RANDOM() — so no id-prefix class of
+beaches (e.g. way-based state-park beaches) is ever drained after another. The attempts cap
+stops permanent failures — non-US points swept in by the discovery REGIONS (Ontario
+shoreline) that api.weather.gov 404s forever — from occupying the batch and starving US
+beaches; after 5 attempts a row is permanently parked and no longer requeued. The per-run
+summary log reports attempted / enriched / failures / parked (rows with nws_zone IS NULL
+AND enrichment_attempts >= 5).
 
 ### runEcccEnrichment (4x daily: "29 4,10,16,22 * * *")
 
@@ -1864,27 +1840,25 @@ Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤
 subrequests per run. The stored player URL is only ever dereferenced by the visitor's
 BROWSER on the detail page — never by the request path.
 
-### Water classification (offline batch classify-only mode — formerly runWaterClassification)
+### Water classification (offline batch classify-only mode)
 
-Owned by the offline batch's CLASSIFY-ONLY mode (retired as the in-Worker
-"37 1,7,13,19 * * *" cron), now its OWN GitHub Actions workflow
+Owned by the offline batch's CLASSIFY-ONLY mode — its own GitHub Actions workflow
 (`.github/workflows/classify.yml`, 4x daily "23 2,8,14,20 * * *", concurrency group
 `classify`, run with `--no-discovery --classify-limit N`) so per-beach Overpass probing
 never delays the daily discovery upserts. This mode does NO tiling, NO upserts, NO
 reconciliation, and NO deletes — it emits ONLY the water_class UPDATEs below. The
-classification decision + allowlist live in src/waterClass.js, unchanged. Constants:
+classification decision + allowlist live in src/waterClass.js. Constants:
 WATER_CLASS_MAX_ATTEMPTS = 5 (from src/waterClass.js). The per-pass row count is set by
 `--classify-limit N` (the classify.yml workflow passes 150) — per-beach Overpass probing
 is rate-limited on the public endpoint, but the pass stays sequential and polite; the
-one-time bulk backfill did the mass classification, the steady-state pass only drains the
-trickle of newly-discovered rows plus any WATER_CLASS_VERSION re-drain.
+steady-state pass drains the trickle of newly-discovered rows plus any WATER_CLASS_VERSION
+re-drain.
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
 water_class_attempts ASC, RANDOM() LIMIT <--classify-limit N> (fresh-first then random;
 re-drain on a version bump; skip parked). Per beach SEQUENTIALLY (never overlap Overpass
-calls —
-respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
+calls — respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
 - signals === null (TRANSIENT) → log, continue, NO bump (row stays queued);
 - cls = classifyWaterBody(signals); cls !== null → UPDATE beaches SET water_class = ?,
   water_class_version = ?, water_class_attempts = 0 WHERE id = ? (reset attempts on a
@@ -1928,6 +1902,10 @@ inland — a NULL-pending row still enriches, so classification never stacks in 
 NWS→park→ECCC pipeline.
 
 ## 8. HTTP surface (src/router.js, src/index.js)
+
+Conventions: the request path may do a throttled D1 WRITE (the last_viewed demand stamp
+below) but NEVER an upstream fetch — it reads only D1 and KV. Method GET only; anything
+else → 405.
 
 src/index.js:
 
@@ -2041,12 +2019,11 @@ Routing table (method GET only; anything else → 405):
     binding = "FLAGS"
     id = "d7814f3408de401e8fef467754c18381"
 
-First deployed 2026-07-13: the production Worker serves https://swim.report (custom
-domain route), with Workers Logs observability (full head sampling) and Smart
-Placement enabled. The D1 database and KV namespace IDs above are the real
-production resources; all migrations are applied remotely and the
-WINDY_WEBCAM_API_TOKEN secret is set on the Worker. Update compatibility_date
-periodically (it is pinned, not rolling).
+The production Worker serves https://swim.report (custom-domain route), with Workers Logs
+observability (full head sampling) and Smart Placement enabled. The D1 database and KV
+namespace IDs above are the real production resources; all migrations are applied remotely
+and the WINDY_WEBCAM_API_TOKEN secret is set on the Worker. compatibility_date is pinned
+(not rolling) — bump it occasionally.
 
 ## 9. Frontend contract (src/frontend/render.js)
 
@@ -2071,25 +2048,23 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                 input so proximity sorting survives a search submit) }
       // -> full HTML document string.
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite
-      // or null renders nothing. sortedByProximity is still accepted (the
-      // router passes it) but renders no visible note — the per-row distance
-      // labels carry the proximity signal on their own. The search box is a GET form
-      // (id="beach-search-form", action="/", input name="q") that submits
-      // server-side while the inline script keeps filtering rendered rows; a
-      // q-filtered page with zero rows shows "No beaches match your search."
-      // (not the empty-database copy).
-      // The page also embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a
-      // browser-side geolocation upgrade: on load, when the URL has no "near"
-      // param, it calls navigator.geolocation.getCurrentPosition and on success
-      // reloads via location.replace with "?near=lat,lon" (3-decimal rounding,
-      // ~110 m — matching the rough distance labels; other params like q are
-      // preserved), so the server-side proximity sort (section 8) upgrades from
-      // IP-derived request.cf coordinates to real browser location. No
-      // geolocation API, denied permission, or timeout silently keeps the
-      // IP-based ordering; an existing "near" param short-circuits the script,
-      // so the reload happens at most once and can never loop.
-      // Between the intro and the search form the page also embeds a home-page
-      // map: <section class="home-map-section"><div id="home-map"
+      // or null renders nothing. sortedByProximity is accepted (the router passes it)
+      // but renders no visible note — the per-row distance labels carry the proximity
+      // signal on their own. The search box is a GET form (id="beach-search-form",
+      // action="/", input name="q") that submits server-side while the inline script
+      // keeps filtering rendered rows; a q-filtered page with zero rows shows "No
+      // beaches match your search." (not the empty-database copy).
+      // The page embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a browser-side
+      // geolocation upgrade: on load, when the URL has no "near" param, it calls
+      // navigator.geolocation.getCurrentPosition and on success reloads via
+      // location.replace with "?near=lat,lon" (3-decimal rounding, ~110 m — matching
+      // the rough distance labels; other params like q are preserved), so the
+      // server-side proximity sort (section 8) upgrades from IP-derived request.cf
+      // coordinates to real browser location. No geolocation API, denied permission,
+      // or timeout silently keeps the IP-based ordering; an existing "near" param
+      // short-circuits the script, so the reload happens at most once and can never loop.
+      // Between the intro and the search form the page embeds a home-page map:
+      // <section class="home-map-section"><div id="home-map"
       // class="home-map framed-embed wa-border-radius-m"
       // data-center="lat,lon"? data-center-precise="1|0"?></div>
       // <script type="application/json"
@@ -2102,10 +2077,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // red class) and label is FLAG_ICON_LABELS[color], both computed server-
       // side so mapScript.js builds a <wa-icon name="flag"> marker (the same
       // icon component the UI uses) with no icon path or color logic of its own.
-      // data-center
-      // is the router's resolved location (data.location, the same {lat,lon} that
-      // sorts the list — browser "near" fix or Cloudflare IP estimate, 3 dp);
-      // data-center-precise is "1" for a browser fix, "0" for the IP estimate.
+      // data-center is the router's resolved location (data.location, the same
+      // {lat,lon} that sorts the list — browser "near" fix or Cloudflare IP estimate,
+      // 3 dp); data-center-precise is "1" for a browser fix, "0" for the IP estimate.
       // Home-page-only (never in renderDocument's shared head): MapLibre GL JS
       // 5.24.0 + its CSS (unpkg, pinned) plus the browser-side LIST_MAP_SCRIPT
       // (src/frontend/mapScript.js) render an OpenFreeMap positron map
@@ -2113,8 +2087,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // (zoom 10 when precise, else 9) else fitBounds over the markers else a
       // Great Lakes default ([-84, 44], zoom 5), with one clickable flag
       // <a href="/beach/<id>"> marker per beach. All browser-only — the Worker
-      // request path fetches
-      // nothing upstream (section "two-path rule").
+      // request path fetches nothing upstream (section "two-path rule").
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
@@ -2147,8 +2120,8 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Disclaimer in the footer of EVERY page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
   Rendered inside the shared footer <small> alongside the data attributions ("NOAA/NWS,
-  Environment and Climate Change Canada, and Open-Meteo"; it replaced the former
-  top-of-page wa-callout banner — the sentence itself is the invariant).
+  Environment and Climate Change Canada, and Open-Meteo"). The sentence itself is the
+  invariant.
 
 ### Flag rendering rules
 
@@ -2165,7 +2138,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   reason text, and an "Updated <wa-relative-time date=estimate.updated sync>" footer (the
   <wa-relative-time> element formats the ISO timestamp in the visitor's browser locale and
   keeps it live; the renderer stays pure, only interpolating the ISO into the date
-  attribute — it no longer emits a raw ISO string + " UTC").
+  attribute).
 - Estimate === null renders exactly like an unknown estimate with reason
   "No estimate available yet".
 - OFFICIAL flags (detail page, and a small badge on list rows when present) must be
@@ -2207,22 +2180,18 @@ exporting a CSS string); render.js is the sole module the router imports.
   estimate card → wave forecast section → wave map section → nearby-webcam section
   (if any); the lazy-loading map/webcam embeds follow the verdict and forecast as
   supporting exploration. The estimate card body shows the flag row (color name +
-  full reason) only — the former natural-language trigger line (TRIGGER_DESCRIPTIONS
-  and its "Rules version: " + rules_version fallback) was removed as redundant with
-  the reason. On the estimate card the sources
-  render as the pill badges described above in the
-  card header's top-right (slot="header-actions", ESTIMATE badge in slot="header"),
-  and the "Updated <wa-relative-time date=estimate.updated sync>" line renders in the
-  card footer (slot="footer"); both are omitted (with their with-* attributes) when there
-  is no estimate.
+  full reason) only. On the estimate card the sources render as the pill badges
+  described above in the card header's top-right (slot="header-actions", ESTIMATE badge
+  in slot="header"), and the "Updated <wa-relative-time date=estimate.updated sync>" line
+  renders in the card footer (slot="footer"); both are omitted (with their with-*
+  attributes) when there is no estimate.
 - Wave forecast section (detail page only, between the estimate card and the wave map
   section; helpers in src/frontend/waveStrip.js, pure, importing waveColorForHeight /
   alertColorForEvent / ripRiskColor from src/rules.js — the 2/4 ft thresholds and the
   alert/rip color mappings are never restated in the frontend):
-  - NO section heading (the former <h2>Wave forecast</h2> + badge row was removed).
-    The ESTIMATE badge rides the "now" stat line instead; when the stat is absent
-    (legacy payload without waveHeightFt) a badge-only wa-cluster row still renders so
-    the section always carries the estimated framing (product invariant).
+  - NO section heading. The ESTIMATE badge rides the "now" stat line instead; when the
+    stat is absent (legacy payload without waveHeightFt) a badge-only wa-cluster row
+    still renders so the section always carries the estimated framing (product invariant).
   - "Now" stat: estimate.waveHeightFt (section 1) rendered as toFixed(1) + " ft" with a
     quiet "waves now" caption label followed by the same ESTIMATE badge as the estimate
     card, all in one wa-cluster <p> (no "(estimated)" suffix); omitted entirely when
@@ -2257,21 +2226,17 @@ exporting a CSS string); render.js is the sole module the router imports.
     Legacy FlagEstimate payloads without the echo fields render no lane.
   - Strip: a plain flex row, Dark Sky style — <div class="wave-strip" role="list"
     aria-label="Wave height forecast for the next N hours"> of colored segment divs
-    (renderWaveStrip in render.js; the former <wa-bar-chart> element, its slotted
-    Chart.js JSON config, and the buildWaveChartConfig helper were removed — the
-    model-comparison line chart below is now the only chart on the page). One
-    segment per run from computeWaveRuns over waveColorForHeight (null hours are
-    their own "No data" runs so run lengths always sum to the trimmed hour count),
-    sized by flex-grow = run.hours (proportional — no percentage rounding drift) and
-    colored by the run's palette token via an inline style (width/color are genuinely
-    per-instance values, the sanctioned inline-style case): green
-    var(--wa-color-green-50), yellow var(--wa-color-yellow-70)
-    (tint 70 — see the palette note above), red var(--wa-color-red-50), no-data
-    var(--wa-color-gray-50) (the unknown-flag gray: honest absence, never green).
-  - Per-segment tooltips (these REPLACED the former closing caption): each segment is
-    focusable (role="listitem" tabindex="0") with a sibling <wa-tooltip
-    for=(segment id "wave-seg-" + index)> whose text — always identical to that
-    segment's aria-label — is the band label + hour range, e.g. "Under 2 ft waves
+    (renderWaveStrip in render.js). One segment per run from computeWaveRuns over
+    waveColorForHeight (null hours are their own "No data" runs so run lengths always
+    sum to the trimmed hour count), sized by flex-grow = run.hours (proportional — no
+    percentage rounding drift) and colored by the run's palette token via an inline style
+    (width/color are genuinely per-instance values, the sanctioned inline-style case):
+    green var(--wa-color-green-50), yellow var(--wa-color-yellow-70) (tint 70 — see the
+    palette note above), red var(--wa-color-red-50), no-data var(--wa-color-gray-50) (the
+    unknown-flag gray: honest absence, never green).
+  - Per-segment tooltips: each segment is focusable (role="listitem" tabindex="0") with a
+    sibling <wa-tooltip for=(segment id "wave-seg-" + index)> whose text — always identical
+    to that segment's aria-label — is the band label + hour range, e.g. "Under 2 ft waves
     (estimated) — now through +5 h", "2–4 ft waves (estimated) — +5 h to +8 h",
     "4 ft or more waves (estimated) — ...", and "No wave data — ..." (the no-data
     band drops the "(estimated)" suffix — absence is not an estimate). Band labels
@@ -2296,13 +2261,10 @@ exporting a CSS string); render.js is the sole module the router imports.
   - Model comparison chart (after the strip + ticks, before the stale warning): when the
     trimmed byModel has >= 2 models, a collapsed-by-default <wa-details
     summary="Compare wave models"> containing <wa-line-chart class="wave-model-chart"
-    without-animation label=... description=...> (the dedicated
-    <wa-line-chart> element replaced the old generic <wa-chart type="line">) configured
-    via a server-built Chart.js JSON config in a slotted
-    <script type="application/json"> (the component parses it; no inline JS; "<" in the
-    JSON is escaped to < so it can never close the script tag —
-    chartScriptAndFallback in render.js, whose sole remaining consumer is this chart
-    now that the band strip is a plain flex row). Datasets: one per model in display order,
+    without-animation label=... description=...> configured via a server-built Chart.js
+    JSON config in a slotted <script type="application/json"> (the component parses it; no
+    inline JS; "<" in the JSON is escaped to &lt; so it can never close the script tag —
+    chartScriptAndFallback in render.js). Datasets: one per model in display order,
     values rounded to 1 decimal in the CONFIG ONLY (storage stays raw; default tooltips
     display config values verbatim), nulls preserved with spanGaps false (honest line
     gaps), points hidden via the --point-radius: 0 CSS custom property on the
@@ -2314,16 +2276,15 @@ exporting a CSS string); render.js is the sole module the router imports.
     emits no scales block). Empirically verified against the pinned webawesome@3.10.0
     kit: wa-line-chart's yLabel attribute IS observed from parsed HTML and renders the
     axis title, but ONLY in its camelCase spelling yLabel="ft" (the HTML parser
-    lowercases it to ylabel, which the component observes). The kebab spelling
-    y-label="ft" is DEAD — it renders no axis title — so y-label markup must never be
-    emitted (a test asserts the html does not contain "y-label="). The slotted config
-    still sets plugins.title.display false so the element's label attribute
-    ("Wave height by forecast model", an accessibility label) does not leak as a
-    visible chart title above the plot. UNLIKE the band strip this chart keeps the
-    default legend and tooltips (comparison view).
-    label/description attributes + a visible fallback <p> carry waveModelSummary's
-    prose ("Wave height by model, next N hours — ECMWF now 2.6 ft, ...", with
-    "(no current reading)" for models null at hour 0). The flag and the band strip
+    lowercases it to ylabel, which the component observes); the kebab spelling
+    y-label="ft" renders no axis title and must never be emitted (a test asserts the
+    html does not contain "y-label="). The slotted config still sets
+    plugins.title.display false so the element's label attribute ("Wave height by
+    forecast model", an accessibility label) does not leak as a visible chart title above
+    the plot. UNLIKE the band strip this chart keeps the default legend and tooltips
+    (comparison view). label/description attributes + a visible fallback <p> carry
+    waveModelSummary's prose ("Wave height by model, next N hours — ECMWF now 2.6 ft, ...",
+    with "(no current reading)" for models null at hour 0). The flag and the band strip
     NEVER derive from byModel — composite hoursFt only.
   - Hour ticks: an aria-hidden HTML row below the strip — "Now" left, "+6 h"/"+12 h"/
     "+18 h" absolutely positioned at server-computed percentages (only when < total),
@@ -2338,17 +2299,13 @@ exporting a CSS string); render.js is the sole module the router imports.
   - Stale warning (WAVE_STALE_MS = 28800000 ms / 8 h, keyed on waves.updated) inside the
     section — a LONGER threshold than the flag cards' 2 h STALE_MS because the wave strip
     refreshes on the 6-hourly wave cron (its KV lives 7 h and the marine models publish
-    only every 6-12 h), so a few-hours-old strip is model-current, not stale.
-    The former closing caption ("Colored by estimated wave height only — green under
-    2 ft, yellow 2-4 ft, red 4 ft and up, gray no data. Not the official flag.") was
-    DELETED — its content now lives in the per-segment tooltips, and the ESTIMATE
+    only every 6-12 h), so a few-hours-old strip is model-current, not stale. The ESTIMATE
     badge plus footer disclaimer keep the not-official framing on the page.
   - The whole section is omitted when there is neither a finite now-height nor a
     renderable series (all-null wave beaches: null is normal, no empty-chart
     placeholder).
 - Wave map section: a plain <iframe class="wave-map-frame" loading="lazy" allowfullscreen>
-  (the former <wa-zoomable-frame> was replaced by a bare iframe — the Windy embed carries
-  its own zoom controls) wrapped in a
+  (the Windy embed carries its own zoom controls) wrapped in a
   <div class="wa-frame:landscape wa-border-radius-m framed-embed"> (the wa-frame:landscape +
   wa-border-radius-m utilities supply the 16:9 aspect-ratio, overflow clipping, and rounded
   corners; .framed-embed adds only the 1px surface border; the iframe keeps width/height:100%
@@ -2364,10 +2321,9 @@ exporting a CSS string); render.js is the sole module the router imports.
   pre-migration rows where the webcam fields are undefined). Embeds the Windy player
   URL in a plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> wrapped in the
   same <div class="wa-frame:landscape wa-border-radius-m framed-embed"> as the wave map
-  (replacing the former <wa-zoomable-frame>; its title
-  attribute is the webcam title, or "Nearby webcam" when untitled), 16:9
-  responsive, fetched by the BROWSER. Heading "Nearby webcam" — the caption must stay honest that the cam is
-  NEARBY, not necessarily the beach itself: it shows beach.webcam_title (when
+  (its title attribute is the webcam title, or "Nearby webcam" when untitled), 16:9
+  responsive, fetched by the BROWSER. Heading "Nearby webcam" — the caption must stay honest
+  that the cam is NEARBY, not necessarily the beach itself: it shows beach.webcam_title (when
   non-empty) plus an attribution link to https://www.windy.com/webcams naming
   Windy.com (free-tier attribution requirement). All dynamic values escape through
   escapeHtml, including attribute positions.
@@ -2434,125 +2390,62 @@ recognized NWS event wins over a recognized ECCC event (step 1 before 1b); an
 ECCC alert beats wave height; an ECCC-alert-decided color suppresses the
 alertsCheckable caveat; alertColorForEvent maps both namespaces (Title Case
 "Wind Warning" is NOT an ECCC match); alertAuthorityForEvent → "NWS" /
-"Environment Canada" / null.
+"Environment Canada" / null. rules.test.js also covers alertColorForEvent /
+ripRiskColor and the alertDetails / ripCurrentRisk output echoes (sanitization,
+legacy defaults).
 
-### test/eccc.test.js
+### Other test files (one-line inventory)
 
-- pointInGeometry (imported from ../src/geo.js): interior/exterior points,
-  hole exclusion, MultiPolygon membership, malformed/non-areal geometry → false.
-- fetchActiveEcccAlerts with stubbed fetch: keeps live alerts and maps
-  event/onset/ends/geometry (validity/event-end preferred, publication/
-  expiration fallbacks); drops status_en "ended" and expired features; skips
-  features without a usable name or geometry; the weather-alerts collection and
-  limit=2000 appear in the request URL and no bbox= does (national fetch);
-  sourceUrl echoes the request; null on HTTP failure and thrown fetch (never
-  throws).
-- ecccAlertsForPoint: containing polygons only, event dedupe, detail dedupe on
-  exact (event, onset, ends); no containing polygon → empty result; malformed
-  input degrades to empty.
-- fetchEcccZoneName: first region NAME returned (URL carries skipGeometry=true);
-  zero regions (US point) → null; HTTP failure → null.
-
-### test/ecccEnrichment.test.js
-
-runEcccEnrichment via runScheduledCron("29 4,10,16,22 * * *") with a recording
-DB stub: success stamps eccc_zone (no attempts bump); a null lookup (zero
-regions) bumps eccc_attempts; a thrown fetch bumps attempts for that beach only
-and the loop continues to enrich the next row (per-beach isolation).
-
-### test/srfParser.test.js
-
-Fixtures built with + and "\n" concatenation (NO backticks), realistic SRF product shape,
-e.g. a fixture containing lines like:
-"SRFGRR" ... "SURF ZONE FORECAST FOR SOUTHWEST MICHIGAN" ... "TODAY" ...
-"RIP CURRENT RISK...HIGH. DANGEROUS SWIMMING CONDITIONS." ... "WATER TEMPERATURE...68 DEGREES."
-
-1. "RIP CURRENT RISK...HIGH" → "HIGH".
-2. "RIP CURRENT RISK...MODERATE" → "MODERATE".
-3. "RIP CURRENT RISK...LOW" → "LOW".
-4. Lowercase prose "The risk of rip currents is moderate" style → "MODERATE" (regex 1 or 3).
-5. "There is a high risk of rip currents" → "HIGH" (regex 2).
-6. Multi-period product (TODAY...HIGH then TONIGHT...LOW) → first occurrence wins → "HIGH".
-7. "RIP CURRENT RISK...LOW TO MODERATE" → "LOW" (documented limitation).
-8. Product text with no rip mention → null.
-9. null input → null; "" → null.
-10. wfoFromGridUrl("https://api.weather.gov/gridpoints/GRR/33,33") → "GRR"; null / garbage → null.
-
-### test/parkContainment.test.js
-
-- parseParkBeachElements: beach/park split, bbox-center coords, node beaches,
-  skips (unnamed parks, coordinate-less elements), beach-and-park dual tagging
-  counts as beach only.
-- associateParkForBeach: smallest overlapping bbox wins; OVERLAP not center
-  containment (lakeward-bulging beach fixture); null when nothing overlaps.
-- mergeBeachRows: parkName attachment for named beaches, largest-unnamed-per-park
-  selection with name = park name, parkKey keeps same-named parks distinct,
-  unnamed-without-park skipped, id/osm_id derivation.
-- Rendering: park name as row title with beach-name subtitle, no subtitle when
-  names match or park_name is null, detail <title>/h1/subtitle, data-name carries
-  both names for search.
-
-### test/officialSources.test.js
-
-- parseSouthHavenCsv with inline CSV fixtures: green/yellow/red sites; Gray/Grey
-  (unmonitored) sites omitted, mixed gray+color sites omitted; same-named flags
-  roll up to most severe; pier lines ignored; unknown colors / unrecognized
-  lines / HTML-instead-of-CSV / empty → null; all-gray → [] (distinct from null).
-- extractSouthHavenCsvUrl: pubhtml/pub hrefs with &amp;-encoded queries →
-  canonical CSV export URL; missing gid → null.
-- southHaven.matches: name "South Haven South Beach" → true; lat/lon inside box with
-  unrelated name → true; Holland State Park coords → false.
-- findScraper returns southHaven for a matching BeachRow and null otherwise.
-- resolveSiteForBeach / scrapeOfficialFlagFromResult: name match beats proximity,
-  array-order first-match, radius default, invalid color → null, no site → null.
-
-Each additional registered scraper has its own test file
-(test/lenawee.test.js, test/metroparks.test.js, test/michiganCity.test.js,
-test/ohioBeachGuard.test.js, test/hdnwMichigan.test.js, test/bldhd.test.js,
-test/chicagoParkDistrict.test.js, test/wisconsinDnr.test.js) exercising its
-pure parse function(s) against inline fixtures — including
-ambiguous/unknown-status rows being OMITTED — plus matches() with matching and
-non-matching BeachRow fixtures. test/scraperHealth.test.js covers
-updateScraperHealth (increment/reset, 23-vs-24 boundary, exact alert strings,
-"never" fallback). test/glerl.test.js covers the GLOS buoy gap-fill client
-against a stubbed global fetch.
-
-test/openMeteo.test.js covers fetchWaveHeightsFt against a stubbed global fetch:
-forecast_days=2 in the request URL, the 24-entry hoursFt window starting at the UTC
-hour of nowIso, per-hour model fallback (and models[] contents/order), meters->feet,
-the hoursFt[0] === waveHeightFt invariant, all-null series, single-location
-normalization, and null on HTTP/network failure. test/waveStrip.test.js covers the
-pure strip helpers (trimWaveSeries defensive/trimming behavior — including byModel
-validation/trimming, computeWaveRuns run-length encoding with its sum invariant and
-exact band label / var() token strings, waveStripSummary exact strings, the model
-helpers, buildWaveModelChartConfig shape, and computeHazardBands —
-positioning/clamping/hour-snapping, missing onset/ends defaults, out-of-window and
-non-precedence drops, exact-repeat dedupe, the rip band, and malformed-input
-degradation to []). test/renderWaveForecast.test.js
-covers the rendered section via renderDetailPage: detail-stack order (estimate card
-→ forecast → wave map → webcam, anchored on rendered markers, not bare class names —
-those also ship in the embedded stylesheet), the flex-row strip's proportional
-flex-grow segments and exact per-segment wa-tooltip / matching aria-label texts, the
-visually-hidden prose summary, the per-model "now" caption and collapsed comparison
-disclosure, parsing the model chart's slotted JSON config back out and asserting
-datasets/labels/rounding end-to-end,
-the no-"</script" guard, fallback text === description, now-stat formatting (with
-the ESTIMATE badge on the stat line and no section heading), the hazard lane
-(positioned alert band + tooltip text, rip band, no lane for legacy estimates or
-without a series), the
-buoy case (stat without strip), legacy/absent payload omission, and the stale
-warning. test/flagRecompute.test.js additionally asserts the runWaveRefresh wave-cron
-writes — the "waveinput:" and "waves:" KV puts (24-entry hoursFt, top-of-hour startIso,
-TTL 25200) and their absence for all-null, masked, or failed wave fetches (last-good rides
-the TTL) — and that runFlagRecompute READS the "waveinput:" key for its wave height + wind
-fallback (degrading to unknown when the key is absent) rather than fetching, plus the
-alertDetails/ripCurrentRisk echoes landing in the
-"flag:" payload when the alerts fetch succeeds, and the Canadian path: an
-eccc_zone beach inside a stubbed GeoMet alert polygon gets the ECCC red with the
-"Environment Canada Alerts" source and no caveat, one outside every polygon gets
-a checked-but-clear estimate (still no caveat, source still named), and a failed
-ECCC fetch behaves like a transient NWS alerts failure (no caveat, no source);
-test/router.test.js asserts handleDetail reads the "waves:" key. test/rules.test.js also covers
-alertColorForEvent / ripRiskColor and the alertDetails / ripCurrentRisk output
-echoes (sanitization, legacy defaults).
-
+- test/eccc.test.js — pointInGeometry (interior/exterior/hole/MultiPolygon/malformed→false);
+  fetchActiveEcccAlerts with stubbed fetch (mapping, drops ended/expired, limit=2000, no
+  bbox, null on failure); ecccAlertsForPoint (containment, dedupe, malformed→empty);
+  fetchEcccZoneName (region NAME, skipGeometry, zero-region→null, HTTP fail→null).
+- test/ecccEnrichment.test.js — runEcccEnrichment via runScheduledCron with a recording DB
+  stub: success stamps eccc_zone (no bump); zero-region null bumps eccc_attempts; a thrown
+  fetch bumps only that beach and the loop continues (per-beach isolation).
+- test/srfParser.test.js — parseRipCurrentRisk cases 1-9 (HIGH/MODERATE/LOW, lowercase prose,
+  "high risk of rip currents", first-occurrence-wins, no-mention→null, "LOW TO MODERATE"→LOW,
+  null/""→null) and wfoFromGridUrl (case 10). Fixtures built with + and "\n" (no backticks).
+- test/parkContainment.test.js — parseParkBeachElements (beach/park split, coords, skips,
+  dual-tagging); associateParkForBeach (smallest overlapping bbox, overlap not containment,
+  null on none); mergeBeachRows (parkName attach, largest-unnamed-per-park, parkKey distinctness,
+  id/osm_id derivation); rendering (park-name-first title/subtitle, data-name search).
+- test/officialSources.test.js — parseSouthHavenCsv (green/yellow/red, gray omission,
+  most-severe rollup, piers ignored, unknown/HTML/empty→null, all-gray→[]); extractSouthHavenCsvUrl;
+  southHaven.matches; findScraper; resolveSiteForBeach / scrapeOfficialFlagFromResult
+  (name beats proximity, array-order, radius default, invalid color→null, no site→null).
+- test/lenawee.test.js, test/metroparks.test.js, test/michiganCity.test.js,
+  test/ohioBeachGuard.test.js, test/hdnwMichigan.test.js, test/bldhd.test.js,
+  test/chicagoParkDistrict.test.js, test/wisconsinDnr.test.js — each exercises its scraper's
+  pure parse function(s) against inline fixtures (incl. ambiguous/unknown-status rows OMITTED)
+  plus matches() with matching and non-matching BeachRow fixtures.
+- test/scraperHealth.test.js — updateScraperHealth (increment/reset, 23-vs-24 boundary,
+  exact alert strings, "never" fallback).
+- test/glerl.test.js — GLOS buoy gap-fill client against a stubbed global fetch.
+- test/openMeteo.test.js — fetchWaveHeightsFt against a stubbed fetch: forecast_days=2 in the
+  URL, 24-entry window at the UTC hour of nowIso, per-hour model fallback (+ models[] order),
+  meters→feet, hoursFt[0] === waveHeightFt, all-null series, single-location normalization,
+  null on HTTP/network failure.
+- test/waveStrip.test.js — pure strip helpers: trimWaveSeries (defensive/trimming incl. byModel
+  validation/trimming), computeWaveRuns (run-length + sum invariant + exact band label/var()
+  strings), waveStripSummary strings, model helpers, buildWaveModelChartConfig shape, and
+  computeHazardBands (positioning/clamping/hour-snapping, missing onset/ends defaults,
+  out-of-window/non-precedence drops, exact-repeat dedupe, rip band, malformed→[]).
+- test/renderWaveForecast.test.js — the rendered section via renderDetailPage: detail-stack
+  order, proportional flex-grow segments + exact per-segment tooltip/aria-label texts,
+  visually-hidden prose summary, per-model "now" caption + collapsed comparison disclosure,
+  parsing the model chart's slotted JSON config back out (datasets/labels/rounding), the
+  no-"</script" guard, fallback text === description, now-stat formatting (ESTIMATE badge on
+  the stat line, no section heading), the hazard lane (positioned band + tooltip, rip band,
+  no lane for legacy estimates or without a series), the buoy case (stat without strip),
+  legacy/absent payload omission, and the stale warning.
+- test/flagRecompute.test.js — asserts runWaveRefresh writes "waveinput:" and "waves:" KV
+  (24-entry hoursFt, top-of-hour startIso, TTL 25200) and their absence for all-null/masked/
+  failed fetches (last-good rides the TTL); runFlagRecompute READS "waveinput:" for wave
+  height + wind fallback (degrading to unknown when absent) rather than fetching; the
+  alertDetails/ripCurrentRisk echoes landing in "flag:"; and the Canadian path (eccc_zone
+  beach inside a stubbed GeoMet polygon → ECCC red + "Environment Canada Alerts" source, no
+  caveat; outside every polygon → checked-but-clear, no caveat; failed ECCC fetch behaves
+  like a transient NWS alerts failure).
+- test/router.test.js — asserts handleDetail reads the "waves:" key (plus routing/bbox/
+  cache-control behavior).

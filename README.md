@@ -18,10 +18,7 @@ Every color shown by Swim Report is either:
 - an **OFFICIAL** reading (`official: true`) — scraped directly from a municipality's
   or health department's own published status page/API, when Swim Report has a
   working scraper for that beach. Nine programs are supported today (see
-  "Official sources" below): South Haven MI, Lenawee County MI, Huron-Clinton
-  Metroparks MI, Michigan City IN, Ohio ODH BeachGuard, Health Dept of Northwest
-  Michigan, Benzie-Leelanau District Health Dept MI, Chicago Park District, and
-  Wisconsin DNR Beach Health.
+  [Official sources](#official-sources) below for the full table).
 
 Estimates and official readings are rendered in visually distinct UI elements
 everywhere they appear, and the API always keeps them in separate fields so a client
@@ -69,13 +66,13 @@ Example response:
           "nws_zone": "MIZ071",
           "osm_id": "node/123456"
         }
+      ]
+    }
 
 `park_name` is the containing park from OpenStreetMap (e.g. `"Holland State Park"`
 for the beach named `"Ottawa Beach"`), or `null` when the beach is not inside any
 named park. The UI titles such beaches by park name with the beach's own name as a
 subtitle.
-      ]
-    }
 
 Invalid or missing `bbox` returns `400`:
 
@@ -249,19 +246,17 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
   a bonus signal: a beach without a resolved `marine_zone` still flags on land alerts
   and waves. Canadian marine waters belong to ECCC, so marine enrichment is gated to
   US beaches (`nws_zone` set).
-- NWS yellow **watches and advisories** (Tornado / Severe Thunderstorm / High Wind
-  Watch; Wind / Lake Wind / Small Craft / Lakeshore Flood / Coastal Flood Advisory —
-  `NWS_FLOOR_PRECEDENCE`) map to yellow but are deliberately NOT part of the step-1
-  short-circuit. They are applied as a floor at step 6: they raise a green or unknown
-  estimate to yellow, but never downgrade a higher color a warning, rip risk, or
-  wave/wind already decided. This is the same masking concern that keeps ECCC watches
-  unmapped — resolved for NWS by flooring rather than exclusion, so a 4 ft-wave red is
-  never masked down to a watch/advisory yellow.
+- NWS yellow **watches and advisories** (`NWS_FLOOR_PRECEDENCE`) map to yellow but are
+  deliberately NOT part of the step-1 short-circuit. They are applied as a floor at
+  step 6: they raise a green or unknown estimate to yellow, but never downgrade a
+  higher color a warning, rip risk, or wave/wind already decided. This flooring is
+  what keeps a 4 ft-wave red from ever being masked down to a watch/advisory yellow —
+  the same masking concern that keeps ECCC watches unmapped, resolved for NWS by
+  flooring rather than exclusion.
 - Canadian beaches (the Great Lakes region set covers both the US and Canadian
-  shorelines) use
-  Environment and Climate Change Canada instead: ECCC issues **no** rip current,
-  high surf, or beach hazards product, so step 1b maps a curated set of severe
-  weather **warnings** for hazards dangerous to people in or on the water
+  shorelines) use Environment and Climate Change Canada instead: ECCC issues **no**
+  rip current, high surf, or beach hazards product, so step 1b maps a curated set of
+  severe weather **warnings** for hazards dangerous to people in or on the water
   (`ECCC_ALERT_PRECEDENCE`, checked in that order). Watches are deliberately
   unmapped — a watch-to-yellow rule would let it mask a wave-height red under the
   strict precedence. Event names are exact-match against the GeoMet API's
@@ -304,7 +299,8 @@ this as a natural-language explanation), `rules_version`, `official: false`, `so
 
 The production D1 database and KV namespace already exist and their IDs are
 committed in `wrangler.toml` — no resource creation is needed. `wrangler dev`
-runs everything against local simulated storage regardless of those IDs.
+runs everything against local simulated storage regardless of those IDs. The local
+database starts **empty** — populate it explicitly (see the seed steps below).
 
 Then visit `http://localhost:8787/health`, `http://localhost:8787/`, and
 `http://localhost:8787/api/beaches?bbox=-87.6,41.6,-82.3,46.6`.
@@ -324,42 +320,27 @@ automatically), and `CLOUDFLARE_TOKEN` is the account API token used to
 authenticate wrangler itself (export it as `CLOUDFLARE_API_TOKEN` before running
 wrangler commands — this machine has no `wrangler login` session).
 
-In production the webcam token is a Worker secret, set once (done 2026-07-13) with:
+In production the webcam token is a Worker secret, set once with
+`npx wrangler secret put WINDY_WEBCAM_API_TOKEN`. The webcam cron skips hydration
+(with a log line) when the token is unset; everything else — NWS, Open-Meteo, GLOS
+Seagull, and every official-source scraper — is unauthenticated.
 
-    npx wrangler secret put WINDY_WEBCAM_API_TOKEN
-
-The webcam cron skips hydration (with a log line) when the token is unset;
-everything else — NWS, Open-Meteo, GLOS Seagull, and every official-source
-scraper — is unauthenticated.
-
-**Web Awesome Pro CDN kit**: the frontend `<head>` loads Web Awesome Pro from the
-account's version-pinned CDN kit (`WA_KIT_BASE` in `src/frontend/render.js`): the
-matter theme, the mild color palette, native styles/reset, CSS utilities, and the
-`webawesome.loader.js` component autoloader, with matching
-`wa-theme-matter wa-palette-mild` classes on `<html>`. A `WA_THEME_OVERRIDES`
-style block carries the kit's token overrides but swaps its webfont downloads for
-system font stacks (no external font requests). Theme changes in the kit builder
-mean re-copying the snippet's theme/palette/overrides into `render.js` — the
-pinned CDN files themselves are immutable and long-cached. Font Awesome icons
-resolve through the kit code set via `data-fa-kit-code` on the `<html>` element.
-Light/dark mode follows the visitor's OS preference: a tiny blocking inline
-script in `<head>` (`src/frontend/colorSchemeScript.js`) toggles the `wa-dark`
-class on `<html>` from `prefers-color-scheme` before the theme stylesheets
-paint, and live OS switches apply without a reload.
+The frontend `<head>` loads Web Awesome Pro from the account's version-pinned CDN
+kit (`WA_KIT_BASE` in `src/frontend/render.js`) with matching
+`wa-theme-matter wa-palette-mild` classes on `<html>`; a `WA_THEME_OVERRIDES` style
+block swaps the kit's webfont downloads for system font stacks (no external font
+requests), and Font Awesome icons resolve via `data-fa-kit-code` on `<html>`. The
+pinned CDN files are immutable — theme edits in the kit builder must be re-copied
+into `render.js` by hand. Light/dark follows the visitor's OS preference via a
+blocking inline script (`src/frontend/colorSchemeScript.js`).
 
 ### Cron jobs
 
 Six scheduled triggers run in production (see `wrangler.toml`). They are separate
 crons on purpose: each upstream's rate-limit posture is independent, and a failure
-in one job never starves another.
-
-> **Discovery + classification are offline.** Beach discovery and water-body
-> classification no longer run in the Worker: the `47 8 * * *` (`runOverpassSync`)
-> and `37 1,7,13,19 * * *` (`runWaterClassification`) crons have been retired in
-> favor of the offline GitHub Actions batch (`scripts/discovery-batch.js`), which
-> bulk-loads D1 in a single run. See [Discovery and classification
-> (offline)](#discovery-and-classification-offline) below and
-> [`docs/offline-discovery.md`](docs/offline-discovery.md).
+in one job never starves another. Beach discovery and water-body classification are
+**not** in this list — they run offline (see [Discovery and classification
+(offline)](#discovery-and-classification-offline)).
 
 - `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
@@ -387,10 +368,9 @@ in one job never starves another.
   TTL: `waveinput:` + beachId (the wave height + wind fallback the hourly estimate
   reads) and `waves:` + beachId (the detail page's 24 h forecast strip, only when a
   real hourly series exists). It runs 6-hourly rather than hourly because Open-Meteo's
-  marine models only publish every 6–12 h, so hourly refetching was wasted quota; the
-  fetches are also paced (small concurrency window, a gap between batch waves, one
-  backoff retry on a throttled batch) to stay under Open-Meteo's per-minute weighted
-  rate limit instead of bursting and getting HTTP 429'd. The 7 h TTL outlives the gap
+  marine models only publish every 6–12 h; the fetches are paced (small concurrency
+  window, a gap between batch waves, one backoff retry on a throttled batch) to stay
+  under Open-Meteo's per-minute weighted rate limit. The 7 h TTL outlives the gap
   between runs, so a transient throttle leaves the strip showing slightly-older-but-
   still-model-current data rather than blanking it. A beach whose fetch merely failed
   is left untouched so its last-good KV survives.
@@ -400,8 +380,7 @@ in one job never starves another.
   rip-current rules in `runFlagRecompute`, so draining this queue fast is a safety
   property — api.weather.gov publishes no numeric rate limit and 75 sequential
   polite requests per run is well within reasonable use. Queue order is fewest
-  failed attempts first, then `RANDOM()` (the old `ORDER BY id` drained every
-  node-based beach before any way-based one). Failures bump a per-beach
+  failed attempts first, then `RANDOM()`. Failures bump a per-beach
   `enrichment_attempts` counter (migration 0003); after 5 failed attempts a row is
   parked and no longer requeued, so permanently-404ing non-US points (the Canadian
   shoreline covered by the Great Lakes region set) can't starve US beaches.
@@ -443,11 +422,6 @@ in one job never starves another.
   no-cam-within-radius answer clears the webcam columns and stamps the check
   time.
 
-Beach discovery and water-body classification are **not** in this list — they run
-offline (see [Discovery and classification (offline)](#discovery-and-classification-offline)).
-Only ocean / Great Lakes rows (plus still-unclassified rows during backfill) are
-shown anywhere; confirmed-inland rows are hidden, never deleted.
-
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
 developing via the scheduled-handler endpoint:
 
@@ -470,7 +444,8 @@ a couple of minutes), then `npm run seed:enrich` a few times to give beaches the
 zones (and `npm run seed:eccc` afterwards for the Canadian rows NWS parks — note the
 NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes before
 Canadian rows become ECCC candidates), and `npm run seed:classify` to classify their
-adjacent water bodies.
+adjacent water bodies. Run `seed:waves` before `seed:flags` so the recompute has wave
+inputs to read.
 
 ### Discovery and classification (offline)
 
@@ -482,10 +457,9 @@ discovery + stale-row reconciliation) and `.github/workflows/classify.yml` runs 
 daily (water-body classification only, up to 150 beaches/run, draining the
 unclassified queue). This keeps the two-path invariant — the batch writes D1
 out-of-band and the request path still reads only D1/KV — while sidestepping the
-Worker's per-invocation subrequest caps that once forced the "N-per-run / drip over
-days" backfill. The batch reuses the discovery/classification code verbatim
-(`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`), emits one
-idempotent `.sql` delta, and bulk-loads it into D1 with
+Worker's per-invocation subrequest caps. The batch reuses the discovery/classification
+code verbatim (`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`),
+emits one idempotent `.sql` delta, and bulk-loads it into D1 with
 `wrangler d1 execute --remote --file`.
 
 Overpass is fetched defensively: the named query carries a 90 s server-side timeout
@@ -497,33 +471,29 @@ kumi shares Private.coffee's backend.
 
 **Coverage.** Discovery is scoped to a curated set of coastal bounding boxes in
 `src/regions.js` (`REGIONS`) that trace the entire Great Lakes shoreline — both the
-US and the Canadian shores — rather than a single Michigan pilot box or one
-continental rectangle. Coastal boxes keep the discovery universe to actual shoreline:
-a continental rectangle would sweep in thousands of inland-lake "beach" elements that
-the classifier just drops, wasting Overpass query budget. Each region box is auto-tiled
-at `TILE_MAX_SPAN_DEG = 2.0` deg before any Overpass query runs, so box size is never
-the constraint — a large box simply becomes more tiles. The batch's stale-row
-reconciliation only treats a D1 row as a delete candidate if `pointInAnyRegion(lat, lon)`
-is true, and that check fails safe: shrinking or removing a box can only make the
-predicate false for more rows, which only *removes* delete candidates (an editing
-mistake under-deletes rather than over-deleting a real, enriched beach). **Expansion
-is additive**: bringing a new coast online (Pacific / Gulf / Atlantic) means appending
-boxes to `REGIONS` — discovery, tiling, and reconciliation all iterate the array and
-pick them up automatically (see the placeholder section at the bottom of
-`src/regions.js`).
+US and the Canadian shores. Coastal boxes keep the discovery universe to actual
+shoreline: a continental rectangle would sweep in thousands of inland-lake "beach"
+elements that the classifier just drops, wasting Overpass query budget. Each region
+box is auto-tiled at `TILE_MAX_SPAN_DEG = 2.0` deg before any Overpass query runs, so
+box size is never the constraint — a large box simply becomes more tiles. The batch's
+stale-row reconciliation only treats a D1 row as a delete candidate if
+`pointInAnyRegion(lat, lon)` is true — the **sole delete path** — and that check
+fails safe: shrinking or removing a box can only make the predicate false for more
+rows, which only *removes* delete candidates (an editing mistake under-deletes rather
+than over-deleting a real, enriched beach). **Expansion is additive**: bringing a new
+coast online (Pacific / Gulf / Atlantic) means appending boxes to `REGIONS` —
+discovery, tiling, and reconciliation all iterate the array and pick them up
+automatically (see the placeholder section at the bottom of `src/regions.js`).
 
 Classification matches each beach's adjacent water body to an allowlisted Great Lake
 by wikidata QID (never by name), so inland-lake rows can be hidden. Expected
 distribution across the Great Lakes region set is heavily `great_lake` / `inland` with
 0 `ocean` (no saltwater coast yet). See `docs/offline-discovery.md` for the full design.
 
-The `--test-scheduled` flag and `/__scheduled` path from older wrangler versions no
-longer exist in wrangler 4.
-
 **Paid-plan assumption**: the cron subrequest budgets exceed the free plan's
 50-subrequest ceiling (the paid plan allows 10,000 per invocation). The hourly
 `runFlagRecompute` runs alert + SRF + scraper fetches plus up to ~700 KV
-reads/writes (it no longer fetches waves — Ohio BeachGuard alone is 51 per-id GETs), and
+reads/writes (Ohio BeachGuard alone is 51 per-id GETs), and
 the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy gap-fill + wind
 fetches plus up to ~1200 `waveinput:`/`waves:` KV writes — each well under 10,000 but far
 past the free ceiling. Production deployment assumes the Workers Paid plan. See `TODO.md`
@@ -531,7 +501,7 @@ for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
 
 ## Deployment
 
-Production runs at **https://swim.report** (first deployed 2026-07-13) as a single
+Production runs at **https://swim.report** as a single
 Cloudflare Worker with a custom-domain route, Workers Logs observability
 (`head_sampling_rate = 1`), and Smart Placement — all configured in
 `wrangler.toml`, which carries the real production D1 database and KV namespace
@@ -554,11 +524,8 @@ starts writing flags. There is no remote equivalent of the enrichment/wave/flag
 `npm run seed:*` wrappers; either wait for the crons or run a local dev server with
 `remote = true` bindings and trigger the scheduled-handler endpoints manually.
 
-The discovery batch runs the same discovery/classification code outside the Worker's
-per-invocation caps, emits one idempotent `.sql` delta, and bulk-loads it with
-`wrangler d1 execute --remote --file` — turning the multi-day drip into a single run.
-Its prerequisites (repo secret `CLOUDFLARE_API_TOKEN`, migration 0009 applied
-remotely) and operational notes are in
+The discovery batch's prerequisites (repo secret `CLOUDFLARE_API_TOKEN`, migration
+0009 applied remotely) and operational notes are in
 [`docs/offline-discovery.md`](docs/offline-discovery.md).
 
 `compatibility_date` is pinned — bump it to the current date occasionally when

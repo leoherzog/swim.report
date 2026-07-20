@@ -79,7 +79,7 @@ function htmlResponse(html, status, cacheControl) {
 // when a visitor opens a beach's detail page or flag API. Fire-and-forget via
 // ctx.waitUntil so it can never delay or fail the render; throttled to once
 // per LAST_VIEWED_MIN_INTERVAL_MS per beach. This is the request path's only
-// D1 write (PLAN.md sections "Conventions" and 8) — still never an upstream
+// D1 write (PLAN.md sections 0 and 8) — still never an upstream
 // fetch. No-ops when ctx is absent (tests, non-Workers callers).
 function touchLastViewed(env, ctx, beach) {
   if (!ctx || typeof ctx.waitUntil !== "function") {
