@@ -2,11 +2,17 @@
 // Pure-parse tests for the Health Department of Northwest Michigan scraper.
 // No network: parseHdnwHtml is exercised against trimmed inline fixtures built
 // from the real page markup (strings joined with + and "\n", never backticks).
-import { describe, it, expect } from "vitest";
-import { parseHdnwHtml, hdnwMichigan } from "../src/officialSources/hdnwMichigan.js";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import {
+  parseHdnwHtml,
+  hdnwMichigan,
+  HDNW_URL,
+  HDNW_USER_AGENT
+} from "../src/officialSources/hdnwMichigan.js";
 import { resolveSiteForBeach } from "../src/officialSources/index.js";
 import { makeBeach } from "./helpers/beach.js";
 import { findSite } from "./helpers/sites.js";
+import { installFetch } from "./helpers/fetch.js";
 
 const NOW = "2026-07-05T12:00:00.000Z";
 
@@ -268,5 +274,73 @@ describe("hdnwMichigan.matches", function() {
   it("does not match a beach with non-numeric coordinates", function() {
     const beach = makeBeach({ name: "Broken", lat: null, lon: null });
     expect(hdnwMichigan.matches(beach)).toBe(false);
+  });
+});
+
+describe("hdnwMichigan.scrape empty-success vs failure", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // A fetch Response stand-in whose text() resolves to body.
+  function textResponse(body) {
+    return {
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    };
+  }
+
+  it("returns a HEALTHY perBeachResult with empty sites when every row is stale (seasonal steady state)", async function() {
+    // 06/20 -> 07/05 is 15 days: the table parses fine but nothing is current.
+    // scrape() must forward the empty-success as perBeachResult([], ...), NOT
+    // null — null would make the health tracker count a normal off-season
+    // scrape as a failure.
+    const html = tableHtml([
+      dataRow("06/20/26", "Charlevoix", "Thumb Lake Beach", "7.3", "1")
+    ]);
+    installFetch(function() {
+      return Promise.resolve(textResponse(html));
+    });
+    const result = await hdnwMichigan.scrape(NOW);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    expect(result.source).toBe(HDNW_URL);
+    expect(result.sources).toEqual([HDNW_URL]);
+    // Result-level fallback timestamp is the cron tick for this call.
+    expect(result.updated).toBe(NOW);
+  });
+
+  it("returns null (a parse FAILURE) when the fetched page has no <table>", async function() {
+    installFetch(function() {
+      return Promise.resolve(
+        textResponse("<html><body><p>maintenance page, no table</p></body></html>")
+      );
+    });
+    const result = await hdnwMichigan.scrape(NOW);
+    expect(result).toBe(null);
+  });
+
+  it("sends the polite identifying User-Agent on the single page fetch", async function() {
+    const html = tableHtml([
+      dataRow("07/01/26", "Emmet", "Zorn Park", "5.0", "1")
+    ]);
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(html));
+    });
+    await hdnwMichigan.scrape(NOW);
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe(HDNW_URL);
+    expect(calls[0].init.headers["User-Agent"]).toBe(HDNW_USER_AGENT);
+  });
+
+  it("returns null when the fetch itself fails (non-2xx), distinct from empty-success", async function() {
+    installFetch(function() {
+      return Promise.resolve({ ok: false, status: 403 });
+    });
+    const result = await hdnwMichigan.scrape(NOW);
+    expect(result).toBe(null);
   });
 });

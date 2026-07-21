@@ -16,7 +16,8 @@ import {
   parseBeachesListJson,
   isOhioSeasonPossible,
   ohioBeachGuard,
-  OHIO_SITES
+  OHIO_SITES,
+  OHIO_BEACHGUARD_API
 } from "../src/officialSources/ohioBeachGuard.js";
 import { makeBeach } from "./helpers/beach.js";
 import { installFetch } from "./helpers/fetch.js";
@@ -625,5 +626,105 @@ describe("ohioBeachGuard.scrape pre-fetch season guard", function() {
     const result = await ohioBeachGuard.scrape(NOW_OUT_OF_SEASON);
     expect(result).toBe(null);
     expect(calls.length).toBe(0);
+  });
+});
+
+describe("ohioBeachGuard.scrape per-id failure isolation", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // A fetch Response stand-in whose text() resolves to body.
+  function textResponse(body) {
+    return {
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    };
+  }
+
+  // A valid in-season, zero-current-advisory payload -> monitored-and-clear
+  // green for whichever curated site the id maps to.
+  function greenPayload() {
+    return JSON.stringify({
+      queryResults: [
+        {
+          beachName: "Some Ohio Lake Erie Beach",
+          monitorings: [
+            {
+              isCurrentYear: true,
+              planTypeText: "Bacteria",
+              swimSeasonStartDate: "2026-05-23T12:34:57.9370000-04:00",
+              swimSeasonEndDate: "2026-09-07T15:56:49.0830000-04:00"
+            }
+          ],
+          advisories: []
+        }
+      ]
+    });
+  }
+
+  // The empty-queryResults body ODH returns for an unknown id (HTTP 200).
+  const EMPTY_BODY = "{\"queryResults\":[]}";
+
+  // Routes the stubbed fetch by curated site id: perId maps id -> handler
+  // returning a promise; anything unrouted gets the empty-queryResults body.
+  function routeById(perId) {
+    return installFetch(function(url) {
+      for (const id in perId) {
+        if (url === OHIO_BEACHGUARD_API + id) {
+          return perId[id]();
+        }
+      }
+      return Promise.resolve(textResponse(EMPTY_BODY));
+    });
+  }
+
+  it("one id's fetch rejecting never poisons the batch — the good site still lands", async function() {
+    // OHIO_SITES[0] (id 162) hard-fails at the network layer; OHIO_SITES[1]
+    // (id 153, maumee-bay-erie) succeeds; every other id returns the valid
+    // empty-queryResults "not found" body.
+    const perId = {};
+    perId[OHIO_SITES[0].id] = function() {
+      return Promise.reject(new Error("connection reset"));
+    };
+    perId[OHIO_SITES[1].id] = function() {
+      return Promise.resolve(textResponse(greenPayload()));
+    };
+    const calls = routeById(perId);
+    const result = await ohioBeachGuard.scrape(NOW_IN_SEASON);
+    // Every id was still attempted (the failure did not short-circuit)...
+    expect(calls.length).toBe(OHIO_SITES.length);
+    // ...and exactly the one good site made it through.
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites.length).toBe(1);
+    expect(result.sites[0].siteId).toBe("maumee-bay-erie");
+    expect(result.sites[0].color).toBe("green");
+  });
+
+  it("resolves null (no result) when every id returns empty queryResults", async function() {
+    const calls = routeById({});
+    const result = await ohioBeachGuard.scrape(NOW_IN_SEASON);
+    // All the fetches happened, but zero sites parsed -> null, never an
+    // empty-sites result.
+    expect(calls.length).toBe(OHIO_SITES.length);
+    expect(result).toBe(null);
+  });
+
+  it("one id returning invalid JSON degrades to omission while another id still succeeds", async function() {
+    const perId = {};
+    perId[OHIO_SITES[0].id] = function() {
+      return Promise.resolve(textResponse("<html>not json</html>"));
+    };
+    perId[OHIO_SITES[1].id] = function() {
+      return Promise.resolve(textResponse(greenPayload()));
+    };
+    routeById(perId);
+    const result = await ohioBeachGuard.scrape(NOW_IN_SEASON);
+    expect(result).not.toBe(null);
+    expect(result.sites.length).toBe(1);
+    expect(result.sites[0].siteId).toBe("maumee-bay-erie");
   });
 });

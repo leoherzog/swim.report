@@ -514,3 +514,90 @@ describe("wave-forecast hazard lane", () => {
     expect(html).not.toContain("<div class=\"wave-alert-band\"");
   });
 });
+
+describe("wave-forecast hour ticks", () => {
+  // A fully non-null 24-hour series: the trimmed-window cases below slice off
+  // the leading hours, and the representativeHours fixture's all-null tail
+  // would make the whole series degrade to null after an 18 h trim.
+  function fullHours() {
+    const hours = [];
+    for (let i = 0; i < 24; i++) { hours.push(1.0); }
+    return hours;
+  }
+
+  // The ticks row markup only, sliced out of the page so absence assertions
+  // can't be satisfied (or spoiled) by inline styles elsewhere on the page.
+  function ticksRow(html) {
+    const open = "<div class=\"wave-chart-hours\" aria-hidden=\"true\">";
+    const start = html.indexOf(open);
+    expect(start).toBeGreaterThan(-1);
+    const end = html.indexOf("</div>", start);
+    expect(end).toBeGreaterThan(start);
+    return html.slice(start, end);
+  }
+
+  it("full 24 h window: Now pinned left, +6/+12/+18 h interior marks, +24 h pinned right", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({})
+    });
+    const row = ticksRow(html);
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-start\">Now</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 25%;\">+6 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 50%;\">+12 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 75%;\">+18 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\">+24 h</span>");
+  });
+
+  it("hidden from assistive tech and rendered directly after the strip", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({})
+    });
+    const stripIdx = html.indexOf("<div class=\"wave-strip\"");
+    const ticksIdx = html.indexOf("<div class=\"wave-chart-hours\" aria-hidden=\"true\">");
+    expect(stripIdx).toBeGreaterThan(-1);
+    expect(ticksIdx).toBeGreaterThan(stripIdx);
+  });
+
+  it("6 h remaining window: end label +6 h and no interior marks at all", () => {
+    // startIso 18 h before nowIso trims the series to 6 remaining hours; the
+    // interior gate is mark < totalHours, so 6 < 6 drops the +6 h mark and the
+    // end label takes it over.
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({
+        startIso: "2026-07-04T18:00:00.000Z", // NOW_ISO minus 18 h
+        hoursFt: fullHours()
+      })
+    });
+    const row = ticksRow(html);
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\">+6 h</span>");
+    expect(row).toContain("Now</span>");
+    // Interior marks are the only inline-styled spans in the row.
+    expect(row).not.toContain("style=");
+    // The strip's own label reflects the trimmed window too.
+    expect(html).toContain("aria-label=\"Wave height forecast for the next 6 hours\"");
+  });
+
+  it("12 h remaining window: only the +6 h interior mark, repositioned to 50%", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({
+        startIso: "2026-07-05T00:00:00.000Z", // NOW_ISO minus 12 h
+        hoursFt: fullHours()
+      })
+    });
+    const row = ticksRow(html);
+    // 6/12 -> 50%, not the full-window 25%.
+    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 50%;\">+6 h</span>");
+    // +12 h appears only as the pinned end label, never as an interior mark
+    // (12 < 12 is false), so the row carries exactly one inline-styled span.
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\">+12 h</span>");
+    expect(row.split("style=").length - 1).toBe(1);
+  });
+});

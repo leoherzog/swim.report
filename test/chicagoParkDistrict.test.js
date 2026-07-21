@@ -1,13 +1,16 @@
 // test/chicagoParkDistrict.test.js
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   parseChicagoFlags,
   beachNameKeys,
   cachebustFromNowIso,
-  chicagoParkDistrict
+  chicagoParkDistrict,
+  CHICAGO_FLAG_STATUS_URL,
+  CHICAGO_USER_AGENT
 } from "../src/officialSources/chicagoParkDistrict.js";
 import { makeBeach } from "./helpers/beach.js";
 import { findSite } from "./helpers/sites.js";
+import { installFetch } from "./helpers/fetch.js";
 
 // Reference "now" for the fixtures below. Epoch seconds = 1783289540.
 // The 36-hour staleness floor is therefore epoch 1783159940.
@@ -247,6 +250,99 @@ describe("cachebustFromNowIso", function() {
   it("falls back to 0 for empty input", function() {
     expect(cachebustFromNowIso("")).toBe("0");
     expect(cachebustFromNowIso(null)).toBe("0");
+  });
+});
+
+describe("chicagoParkDistrict.scrape", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // A fetch Response stand-in whose text() resolves to body (fetchText reads
+  // the body via response.text()).
+  function textResponse(body) {
+    return {
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    };
+  }
+
+  it("fetches the deterministic cachebust URL with the browser-like User-Agent", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(buildFixture()));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(calls.length).toBe(1);
+    // The ?q= cachebust is the digits of nowIso — deterministic, never the
+    // wall clock (the request URL must be reproducible from nowIso alone).
+    expect(calls[0].url).toBe(CHICAGO_FLAG_STATUS_URL + "?q=20260705221220000");
+    expect(calls[0].init.headers["User-Agent"]).toBe(CHICAGO_USER_AGENT);
+  });
+
+  it("resolves a perBeach result whose sites come from parseChicagoFlags", async function() {
+    installFetch(function() {
+      return Promise.resolve(textResponse(buildFixture()));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    // Same fixture as the parser tests: 3 fresh classifiable beaches survive.
+    expect(result.sites.length).toBe(3);
+    const twelfth = findSite(result.sites, "12th street beach");
+    expect(twelfth).not.toBe(null);
+    expect(twelfth.color).toBe("red");
+    expect(result.updated).toBe(NOW_ISO);
+  });
+
+  it("keeps the stored source link canonical (no ?q= cachebust)", async function() {
+    installFetch(function() {
+      return Promise.resolve(textResponse(buildFixture()));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    // The cachebust belongs only to the outbound request; the stored source
+    // users may click must stay the canonical flag-status URL.
+    expect(result.source).toBe(CHICAGO_FLAG_STATUS_URL);
+    expect(result.source.indexOf("?q=")).toBe(-1);
+    expect(result.sources).toEqual([CHICAGO_FLAG_STATUS_URL]);
+  });
+
+  it("returns null when every record parses out as stale (empty sites)", async function() {
+    const staleOnly = JSON.stringify([
+      { title: "Foster Beach - Surf Conditions", parent: "Foster Beach", date: "1756482510", flag: "Green" }
+    ]);
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(staleOnly));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    // parseChicagoFlags yields [] here; scrape must degrade that to null, not
+    // an empty perBeach result.
+    expect(calls.length).toBe(1);
+    expect(result).toBe(null);
+  });
+
+  it("returns null when the parser rejects the body outright (non-array JSON)", async function() {
+    installFetch(function() {
+      return Promise.resolve(textResponse("{\"parent\":\"x\"}"));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    expect(result).toBe(null);
+  });
+
+  it("returns null on an HTTP failure without throwing", async function() {
+    installFetch(function() {
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        text: function() {
+          return Promise.resolve("");
+        }
+      });
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    expect(result).toBe(null);
   });
 });
 

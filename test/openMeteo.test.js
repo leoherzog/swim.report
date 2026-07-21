@@ -3,7 +3,7 @@
 // access — the client runs against a stubbed globalThis.fetch. nowIso is fixed
 // so the hourly index (idx = UTC hour) is deterministic.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchWaveHeightsFt, WAVE_MODEL_ORDER } from "../src/clients/openMeteo.js";
+import { fetchWaveHeightsFt, fetchWinds, WAVE_MODEL_ORDER } from "../src/clients/openMeteo.js";
 import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 // idx = getUTCHours("...T15:20:00Z") = 15, so hoursFt[0] maps to series[15].
@@ -295,6 +295,105 @@ describe("fetchWaveHeightsFt", function() {
       return Promise.reject(new Error("network down"));
     });
     const out = await fetchWaveHeightsFt([{ beachId: "b1", lat: 42.4, lon: -86.29 }], NOW);
+    expect(out).toBe(null);
+  });
+});
+
+describe("fetchWinds", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  it("requests current wind speed + gusts in mph with joined lat/lon lists", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(jsonResponse([
+        { current: { wind_speed_10m: 1, wind_gusts_10m: 2 } },
+        { current: { wind_speed_10m: 3, wind_gusts_10m: 4 } }
+      ]));
+    });
+    const points = [
+      { beachId: "a", lat: 42.4, lon: -86.29 },
+      { beachId: "b", lat: 43.0, lon: -86.5 }
+    ];
+    const out = await fetchWinds(points);
+    const url = calls[0].url;
+    expect(url.indexOf("current=wind_speed_10m,wind_gusts_10m")).not.toBe(-1);
+    expect(url.indexOf("wind_speed_unit=mph")).not.toBe(-1);
+    expect(url.indexOf("latitude=42.4,43")).not.toBe(-1);
+    expect(url.indexOf("longitude=-86.29,-86.5")).not.toBe(-1);
+    expect(out.sourceUrl).toBe(url);
+  });
+
+  it("maps multiple points to their own results by beachId, nulling a missing gust", async function() {
+    installFetch(function() {
+      return Promise.resolve(jsonResponse([
+        { current: { wind_speed_10m: 12.3, wind_gusts_10m: 20.1 } },
+        { current: { wind_speed_10m: 5 } }
+      ]));
+    });
+    const points = [
+      { beachId: "a", lat: 42.4, lon: -86.29 },
+      { beachId: "b", lat: 43.0, lon: -86.5 }
+    ];
+    const out = await fetchWinds(points);
+    expect(out.results["a"]).toEqual({ windSpeedMph: 12.3, windGustMph: 20.1 });
+    expect(out.results["b"]).toEqual({ windSpeedMph: 5, windGustMph: null });
+  });
+
+  it("normalizes a single-location (non-array) response", async function() {
+    installFetch(function() {
+      return Promise.resolve(jsonResponse({ current: { wind_speed_10m: 8.5, wind_gusts_10m: 14 } }));
+    });
+    const out = await fetchWinds([{ beachId: "solo", lat: 42.4, lon: -86.29 }]);
+    expect(out.results["solo"]).toEqual({ windSpeedMph: 8.5, windGustMph: 14 });
+  });
+
+  it("nulls both fields when a location has no current object", async function() {
+    installFetch(function() {
+      return Promise.resolve(jsonResponse([{}]));
+    });
+    const out = await fetchWinds([{ beachId: "b1", lat: 42.4, lon: -86.29 }]);
+    expect(out.results["b1"]).toEqual({ windSpeedMph: null, windGustMph: null });
+  });
+
+  it("nulls both fields for a missing location (fewer locations than points)", async function() {
+    installFetch(function() {
+      return Promise.resolve(jsonResponse([
+        { current: { wind_speed_10m: 6, wind_gusts_10m: 9 } }
+      ]));
+    });
+    const points = [
+      { beachId: "present", lat: 42.4, lon: -86.29 },
+      { beachId: "missing", lat: 43.0, lon: -86.5 }
+    ];
+    const out = await fetchWinds(points);
+    expect(out.results["present"]).toEqual({ windSpeedMph: 6, windGustMph: 9 });
+    expect(out.results["missing"]).toEqual({ windSpeedMph: null, windGustMph: null });
+  });
+
+  it("treats non-number wind values as null (string \"12\" is not a reading)", async function() {
+    installFetch(function() {
+      return Promise.resolve(jsonResponse([
+        { current: { wind_speed_10m: "12", wind_gusts_10m: "20" } }
+      ]));
+    });
+    const out = await fetchWinds([{ beachId: "b1", lat: 42.4, lon: -86.29 }]);
+    expect(out.results["b1"]).toEqual({ windSpeedMph: null, windGustMph: null });
+  });
+
+  it("returns null on a non-ok HTTP response (never throws)", async function() {
+    installFetch(function() {
+      return Promise.resolve({ ok: false, status: 503, json: function() { return Promise.resolve(null); } });
+    });
+    const out = await fetchWinds([{ beachId: "b1", lat: 42.4, lon: -86.29 }]);
+    expect(out).toBe(null);
+  });
+
+  it("returns null when fetch rejects (never throws itself)", async function() {
+    installFetch(function() {
+      return Promise.reject(new Error("network down"));
+    });
+    const out = await fetchWinds([{ beachId: "b1", lat: 42.4, lon: -86.29 }]);
     expect(out).toBe(null);
   });
 });

@@ -17,6 +17,7 @@ import {
   distanceKm,
   GLCFS_WAVE_MODEL,
   MAX_PLATFORM_DISTANCE_KM,
+  MAX_PLATFORM_FETCHES,
   SEAGULL_PLATFORMS_URL,
   SEAGULL_PARAMETERS_URL
 } from "../src/clients/glerl.js";
@@ -460,6 +461,122 @@ describe("fetchWaveCatalogs", function () {
       return Promise.resolve({ ok: false, status: 502, json: function () { return Promise.resolve(null); } });
     });
     expect(await fetchWaveCatalogs()).toBe(null);
+  });
+});
+
+describe("fetchGlcfsWaveHeightsFt platform fetch cap", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // 61 platforms spaced 0.3 deg of latitude apart (~33 km, beyond the 25 km
+  // cap from any neighbor) with one beach sitting exactly on each platform,
+  // so every beach maps to its own unique platform.
+  function buildCapFixture() {
+    const platforms = [];
+    const points = [];
+    for (let i = 0; i <= MAX_PLATFORM_FETCHES; i = i + 1) {
+      platforms.push({ obsDatasetId: i, lat: 42 + i * 0.3, lon: -86 });
+      points.push({ beachId: "b" + String(i), lat: 42 + i * 0.3, lon: -86 });
+    }
+    return { platforms: platforms, points: points };
+  }
+
+  function obsBodyFor(obsDatasetId) {
+    return [
+      {
+        obs_dataset_id: obsDatasetId,
+        parameters: [
+          {
+            parameter_id: 195,
+            observations: [{ timestamp: "2026-07-06T02:20:00+00:00", value: 0.476 }]
+          }
+        ]
+      }
+    ];
+  }
+
+  it("caps obs fetches at MAX_PLATFORM_FETCHES and nulls the beaches beyond the cap", async function () {
+    const logSpy = vi.spyOn(console, "log");
+    const fixture = buildCapFixture();
+    const calls = installFetch(function (url) {
+      const marker = "obsDatasetId=";
+      const at = url.indexOf(marker);
+      if (url.indexOf("/obs?") !== -1 && at !== -1) {
+        const rest = url.slice(at + marker.length);
+        const amp = rest.indexOf("&");
+        const id = Number(amp === -1 ? rest : rest.slice(0, amp));
+        return Promise.resolve(jsonResponse(obsBodyFor(id)));
+      }
+      return Promise.resolve({ ok: false, status: 404, json: function () { return Promise.resolve(null); } });
+    });
+    const out = await fetchGlcfsWaveHeightsFt(fixture.points, NOW, {
+      platforms: fixture.platforms,
+      waveParameterIds: new Set([195])
+    });
+    expect(out).not.toBe(null);
+    // Exactly MAX_PLATFORM_FETCHES obs requests — the 61st platform is
+    // never fetched, defending the subrequest budget.
+    const obsUrls = calls.map(function (c) { return c.url; }).filter(function (u) { return u.indexOf("/obs?") !== -1; });
+    expect(obsUrls.length).toBe(MAX_PLATFORM_FETCHES);
+    // A capped-in beach gets a real reading; the beach mapped to the
+    // skipped platform degrades to null, never a borrowed number.
+    expect(out.results["b0"].waveHeightFt).toBeCloseTo(SOUTH_HAVEN_FT, 4);
+    expect(out.results["b0"].model).toBe(GLCFS_WAVE_MODEL);
+    expect(out.results["b" + String(MAX_PLATFORM_FETCHES)]).toEqual({ waveHeightFt: null, model: null });
+    // The skip is logged with the count of dropped platforms.
+    const logged = logSpy.mock.calls.some(function (args) {
+      return typeof args[0] === "string" && args[0].indexOf("platform fetch cap hit, skipping 1") !== -1;
+    });
+    expect(logged).toBe(true);
+  });
+});
+
+describe("fetchGlcfsWaveHeightsFt with structurally valid but EMPTY catalogs", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  function failingFetch() {
+    return installFetch(function () {
+      return Promise.resolve({ ok: false, status: 404, json: function () { return Promise.resolve(null); } });
+    });
+  }
+
+  it("returns all-null results (NOT null) when the platform list is empty", async function () {
+    // Winter condition: buoys pulled, catalog legitimately empty. The cron
+    // must see this as a successful run with no readings, distinct from a
+    // total catalog-fetch failure (which returns null).
+    const calls = failingFetch();
+    const out = await fetchGlcfsWaveHeightsFt(
+      [{ beachId: "b1", lat: 42.4, lon: -86.29 }],
+      NOW,
+      { platforms: [], waveParameterIds: new Set() }
+    );
+    expect(out).not.toBe(null);
+    expect(out.results["b1"]).toEqual({ waveHeightFt: null, model: null });
+    expect(out.sourceUrl).toBe(SEAGULL_PLATFORMS_URL);
+    // The empty cached catalogs are structurally usable, so nothing was
+    // fetched fresh — no catalog downloads and no obs requests.
+    expect(out.catalogsFetched).toBe(false);
+    expect(calls.length).toBe(0);
+  });
+
+  it("returns all-null results when platforms exist but no wave parameter ids do", async function () {
+    const calls = failingFetch();
+    const out = await fetchGlcfsWaveHeightsFt(
+      [{ beachId: "b1", lat: 42.4, lon: -86.29 }],
+      NOW,
+      {
+        platforms: [{ obsDatasetId: 37, lat: 42.397, lon: -86.331 }],
+        waveParameterIds: new Set()
+      }
+    );
+    expect(out).not.toBe(null);
+    expect(out.results["b1"]).toEqual({ waveHeightFt: null, model: null });
+    expect(out.catalogsFetched).toBe(false);
+    expect(calls.length).toBe(0);
   });
 });
 

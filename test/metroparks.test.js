@@ -1,6 +1,7 @@
 // test/metroparks.test.js
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { parseMetroparksHtml, metroparks, METROPARKS_URL } from "../src/officialSources/metroparks.js";
+import { installFetch } from "./helpers/fetch.js";
 import { resolveSiteForBeach, scrapeOfficialFlagFromResult } from "../src/officialSources/index.js";
 import { perBeachResult } from "../src/officialSources/util.js";
 import { makeBeach } from "./helpers/beach.js";
@@ -314,5 +315,111 @@ describe("metroparks.matches", function() {
       lat: 42.58, lon: -82.79
     });
     expect(metroparks.matches(beach)).toBe(false);
+  });
+});
+
+describe("metroparks.scrape", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  const NOW_ISO = "2026-07-17T00:00:00.000Z";
+
+  // A fetch Response stand-in whose text() resolves to body.
+  function textResponse(body) {
+    return {
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    };
+  }
+
+  // Both real panels present, every beach Open — the all-season-normal page.
+  const ALL_OPEN_FIXTURE =
+    "<div class=\"vc_tta-panel\" id=\"KensingtonMetropark\" data-vc-content=\".vc_tta-panel-body\">" +
+    "<div class=\"vc_tta-panel-body\">" +
+    "<p><strong>Martindale Beach:</strong> Open</p>" +
+    "<p><strong>Maple Beach:</strong> Open</p>" +
+    "</div></div>" +
+    "<div class=\"vc_tta-panel\" id=\"StonyCreekMetropark\" data-vc-content=\".vc_tta-panel-body\">" +
+    "<div class=\"vc_tta-panel-body\">" +
+    "<p><strong>Baypoint Beach:</strong> Open</p>" +
+    "<p><strong>Eastwood Beach:</strong> Open</p>" +
+    "</div></div>";
+
+  // Neither target panel id present (page redesign / renamed ids).
+  const RENAMED_PANEL_FIXTURE =
+    "<div class=\"vc_tta-panel\" id=\"KensingtonMetroparkRenamed\" data-vc-content=\".vc_tta-panel-body\">" +
+    "<div class=\"vc_tta-panel-body\">" +
+    "<p><strong>Martindale Beach:</strong> Closed</p>" +
+    "</div></div>";
+
+  it("returns an empty perBeachResult (NOT null) when every beach is Open", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(ALL_OPEN_FIXTURE));
+    });
+    const result = await metroparks.scrape(NOW_ISO);
+    // Empty-success semantics: a clean all-Open parse is a SUCCESSFUL scrape
+    // with nothing to report, never a null "failure".
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    expect(result.source).toBe(METROPARKS_URL);
+    expect(result.sources).toEqual([METROPARKS_URL]);
+    expect(result.updated).toBe(NOW_ISO);
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe(METROPARKS_URL);
+  });
+
+  it("returns closed-beach sites through the real scrape() path", async function() {
+    installFetch(function() {
+      return Promise.resolve(textResponse(FULL_FIXTURE));
+    });
+    const result = await metroparks.scrape(NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    const siteIds = result.sites.map(function(site) { return site.siteId; });
+    siteIds.sort();
+    expect(siteIds).toEqual(["baypoint-beach", "maple-beach"]);
+  });
+
+  it("returns null when neither target panel is found (real parse failure)", async function() {
+    installFetch(function() {
+      return Promise.resolve(textResponse(RENAMED_PANEL_FIXTURE));
+    });
+    const result = await metroparks.scrape(NOW_ISO);
+    expect(result).toBe(null);
+  });
+
+  it("returns null on a non-2xx response", async function() {
+    installFetch(function() {
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        text: function() {
+          return Promise.resolve("Service Unavailable");
+        }
+      });
+    });
+    expect(await metroparks.scrape(NOW_ISO)).toBe(null);
+  });
+
+  it("returns null on a network error", async function() {
+    installFetch(function() {
+      return Promise.reject(new Error("connect timeout"));
+    });
+    expect(await metroparks.scrape(NOW_ISO)).toBe(null);
+  });
+
+  it("sends NO headers (metroparks.com has only been probed without a User-Agent)", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(ALL_OPEN_FIXTURE));
+    });
+    await metroparks.scrape(NOW_ISO);
+    expect(calls.length).toBe(1);
+    // A regression that silently adds a User-Agent (or any header) to this
+    // un-probed source must fail here: the init has no headers key at all.
+    expect("headers" in calls[0].init).toBe(false);
   });
 });

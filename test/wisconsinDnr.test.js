@@ -320,3 +320,94 @@ describe("wisconsinDnr combined pre-fetch gate (F2)", function() {
     expect(shouldFetchWisconsinDnr("2026-01-15T06:00:00Z")).toBe(false);
   });
 });
+
+describe("wisconsinDnr.scrape pre-fetch gates and fetch wiring (F2)", function() {
+  // 12:00 CDT on 2026-07-09 — in season AND on a cadence hour, and only ~9.5
+  // days after the fixtures' SAMPLE_MS (2026-06-30), so default fixtures stay
+  // inside the 21-day freshness cutoff.
+  const NOW_CADENCE_HOUR = "2026-07-09T17:00:00.000Z";
+  // 13:00 CDT — in season but NOT one of the 0/6/12/18 local cadence hours.
+  const NOW_OFF_CADENCE = "2026-07-09T18:00:00.000Z";
+  // January in America/Chicago — clearly out of the May-October season.
+  const NOW_OFF_SEASON = "2026-01-15T18:00:00.000Z";
+
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // A fetch Response stand-in whose text() resolves to body (fetchText reads
+  // response.text(), not json()).
+  function textResponse(body) {
+    return {
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    };
+  }
+
+  it("returns null WITHOUT issuing any fetch during the off-season", async function() {
+    const calls = installFetch(function() {
+      // If the season gate ever let a fetch through this would still resolve,
+      // so the zero-call assertion below is the real check.
+      return Promise.resolve(textResponse(ALL_STATUSES));
+    });
+    const result = await wisconsinDnr.scrape(NOW_OFF_SEASON);
+    expect(result).toBe(null);
+    expect(calls.length).toBe(0);
+  });
+
+  it("returns null WITHOUT issuing any fetch on an in-season off-cadence hour", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(ALL_STATUSES));
+    });
+    const result = await wisconsinDnr.scrape(NOW_OFF_CADENCE);
+    expect(result).toBe(null);
+    expect(calls.length).toBe(0);
+  });
+
+  it("on a cadence hour fetches the layer URL with the self-identifying UA and a timeout signal", async function() {
+    const body = fixture([
+      feature(40, "Bradford Beach", "Open", -87.874, 43.058, true)
+    ]);
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(body));
+    });
+    const result = await wisconsinDnr.scrape(NOW_CADENCE_HOUR);
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe(WISCONSIN_DNR_URL);
+    expect(calls[0].init.headers["User-Agent"]).toBe(WISCONSIN_DNR_USER_AGENT);
+    // The timeoutMs: 60000 plumbing must reach fetch as an abort signal so a
+    // hung DNR upstream actually aborts instead of stalling the flag cron.
+    expect(calls[0].init.signal instanceof AbortSignal).toBe(true);
+    // And the fetched payload flows through the parser into a perBeach result.
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites.length).toBe(1);
+    expect(result.sites[0].siteId).toBe("wi-dnr-40");
+    expect(result.source).toBe(WISCONSIN_DNR_URL);
+    expect(result.sources).toEqual([WISCONSIN_DNR_URL]);
+    expect(result.updated).toBe(NOW_CADENCE_HOUR);
+  });
+
+  it("returns null when every fetched feature is stale (parse yields an empty list)", async function() {
+    // 40 days before now: past the 21-day cutoff, so the parser omits the
+    // site and scrape must degrade to null, never an empty perBeach result.
+    const staleMs = Date.parse(NOW_CADENCE_HOUR) - 40 * 24 * 60 * 60 * 1000;
+    const body = fixture([
+      feature(41, "Stale Open Beach", "Open", -87.9, 43.3, true, staleMs)
+    ]);
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(body));
+    });
+    const result = await wisconsinDnr.scrape(NOW_CADENCE_HOUR);
+    expect(calls.length).toBe(1);
+    expect(result).toBe(null);
+  });
+});
+
+// Imports for the scrape-wiring block above. ES module imports are hoisted,
+// so placing them beside the block that uses them keeps the pre-existing
+// lines of this file untouched.
+import { vi, afterEach } from "vitest";
+import { installFetch } from "./helpers/fetch.js";

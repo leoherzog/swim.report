@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import { parseParkBeachElements, associateParkForBeach, isPondBeach, WATER_MIN_AREA_DEG2 } from "../src/clients/overpass.js";
 import { mergeBeachRows } from "../src/index.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
+import { distanceKm } from "../src/geo.js";
 
 function bounds(minLat, minLon, maxLat, maxLon) {
   return { minlat: minLat, minlon: minLon, maxlat: maxLat, maxlon: maxLon };
@@ -370,5 +371,104 @@ describe("park-name-first rendering", () => {
     expect(html).toContain("<title>Holland State Park — Swim Report</title>");
     expect(html).toContain("<span>Holland State Park</span></h1>");
     expect(html).toContain("<p class=\"beach-subtitle\">Ottawa Beach</p>");
+  });
+});
+
+describe("mergeBeachRows: named park beach missed by the named pass", () => {
+  it("creates its own row carrying the park name when the id is not in namedRows", () => {
+    // The park containment query can return a NAMED beach the tiled named
+    // query never saw (e.g. a polygon straddling a tile edge). That beach must
+    // still become a full row — with its own name, not the park's — and carry
+    // parkName from the containment association.
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 77, name: "Hidden Cove Beach", lat: 43.1, lon: -86.3,
+        areaDeg2: 0.0001, parkName: "Some State Park", parkKey: "relation/5" }
+    ]);
+    expect(merged.rows.length).toBe(1);
+    expect(merged.skippedUnnamed).toBe(0);
+    const row = merged.rows[0];
+    expect(row.id).toBe("osm-way-77");
+    expect(row.name).toBe("Hidden Cove Beach");
+    expect(row.parkName).toBe("Some State Park");
+    expect(row.osmId).toBe("way/77");
+    expect(row.lat).toBe(43.1);
+    expect(row.lon).toBe(-86.3);
+    // Named-origin row: name !== parkName, so downstream unnamed-origin
+    // detection (name === park_name) must NOT fire for it.
+    expect(row.name).not.toBe(row.parkName);
+  });
+
+  it("prefers the named-pass row when the same id came through namedRows", () => {
+    // Same beach seen by BOTH passes: the named-pass row wins (only parkName
+    // is grafted on), so coordinates stay those of the named pass.
+    const merged = mergeBeachRows(
+      [{ osmType: "way", osmId: 77, name: "Hidden Cove Beach", lat: 43.1, lon: -86.3 }],
+      [{ osmType: "way", osmId: 77, name: "Hidden Cove Beach", lat: 43.100001, lon: -86.300001,
+        areaDeg2: 0.0001, parkName: "Some State Park", parkKey: "relation/5" }]
+    );
+    expect(merged.rows.length).toBe(1);
+    expect(merged.rows[0].lat).toBe(43.1);
+    expect(merged.rows[0].lon).toBe(-86.3);
+    expect(merged.rows[0].parkName).toBe("Some State Park");
+  });
+});
+
+describe("mergeBeachRows: compass-separation threshold boundary", () => {
+  // Latitude offsets derived from the SAME haversine the code uses
+  // (src/geo.js distanceKm), so these fixtures cannot drift from the math:
+  // due north on a sphere, km scale linearly with delta-lat.
+  const primaryLat = 43.96;
+  const primaryLon = -86.51;
+  const kmPerDegLat = distanceKm(primaryLat, primaryLon, primaryLat + 1, primaryLon);
+  const latAtKm = function (km) { return primaryLat + km / kmPerDegLat; };
+
+  it("keeps a secondary ~0.25 km due north with a North Beach suffix", () => {
+    const northLat = latAtKm(0.25);
+    // Sanity: this fixture really sits at/above the 0.2 km threshold.
+    expect(distanceKm(primaryLat, primaryLon, northLat, primaryLon)).toBeGreaterThanOrEqual(0.2);
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 20, name: null, lat: primaryLat, lon: primaryLon,
+        areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 21, name: null, lat: northLat, lon: primaryLon,
+        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123" }
+    ]);
+    expect(merged.rows.length).toBe(2);
+    expect(merged.skippedUnnamed).toBe(0);
+    const secondary = merged.rows.find(function (r) { return r.id === "osm-way-21"; });
+    expect(secondary.name).toBe("Ludington State Park — North Beach");
+    expect(secondary.parkName).toBe("Ludington State Park — North Beach");
+  });
+
+  it("skips a secondary only ~0.1 km away (sub-threshold separation is noise)", () => {
+    const nearLat = latAtKm(0.1);
+    // Sanity: this fixture really sits below the 0.2 km threshold.
+    expect(distanceKm(primaryLat, primaryLon, nearLat, primaryLon)).toBeLessThan(0.2);
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 20, name: null, lat: primaryLat, lon: primaryLon,
+        areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 22, name: null, lat: nearLat, lon: primaryLon,
+        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123" }
+    ]);
+    expect(merged.rows.length).toBe(1);
+    expect(merged.skippedUnnamed).toBe(1);
+    expect(merged.rows[0].id).toBe("osm-way-20");
+    expect(merged.rows.find(function (r) { return r.id === "osm-way-22"; })).toBe(undefined);
+  });
+
+  it("keeps a secondary at exactly the 0.2 km threshold (>= is inclusive)", () => {
+    // Nudge just past the boundary so float rounding in the reconstructed
+    // latitude cannot flip the >= comparison.
+    const boundaryLat = latAtKm(0.2000001);
+    expect(distanceKm(primaryLat, primaryLon, boundaryLat, primaryLon)).toBeGreaterThanOrEqual(0.2);
+    const merged = mergeBeachRows([], [
+      { osmType: "way", osmId: 20, name: null, lat: primaryLat, lon: primaryLon,
+        areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 23, name: null, lat: boundaryLat, lon: primaryLon,
+        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123" }
+    ]);
+    expect(merged.rows.length).toBe(2);
+    expect(merged.skippedUnnamed).toBe(0);
+    expect(merged.rows.find(function (r) { return r.id === "osm-way-23"; }).name)
+      .toBe("Ludington State Park — North Beach");
   });
 });

@@ -249,7 +249,7 @@ describe("classify UPDATE builders mirror classifyBeaches", function () {
 });
 
 describe("SQL literal delivery is statement-split safe", function () {
-  // The whole delta is shipped as one file to `wrangler d1 execute --file`, which
+  // The whole delta is shipped as one file to 'wrangler d1 execute --file', which
   // splits on statement boundaries. A single OSM name containing ; \n or -- must
   // NOT be able to break out of its quoted literal — only ' is special in SQLite
   // string literals, and sqlStr doubles it. Prove the dangerous chars stay inside
@@ -531,6 +531,108 @@ describe("marineZoneSql", function () {
     const second = marineZoneSql([after], new Set(), index);
     expect(second.updates).toBe(0);
     expect(second.statements).toEqual([]);
+  });
+});
+
+describe("classifyQueue per-beach error isolation", function () {
+  // The try/catch around fetchSignals is the batch's error-isolation contract:
+  // a throwing or null (transient) fetch must emit NO SQL for that beach and
+  // must NOT abort the loop — the row stays queued for the next run.
+  it("a thrown fetch and a null fetch emit no SQL and do not stop later beaches", async function () {
+    const queue = [
+      { id: "osm-node-throw", water_class_attempts: 0 },
+      { id: "osm-node-null", water_class_attempts: 0 },
+      { id: "osm-node-ok", water_class_attempts: 0 }
+    ];
+    const result = await classifyQueue(queue, {
+      limit: 0,
+      delayMs: 0,
+      budgetMs: 0,
+      now: function () { return 0; },
+      fetchSignals: async function (beach) {
+        if (beach.id === "osm-node-throw") { throw new Error("boom"); }
+        if (beach.id === "osm-node-null") { return null; }
+        return {};
+      },
+      classify: function () { return "inland"; }
+    });
+    expect(result.processed).toBe(3);
+    expect(result.counts.attempted).toBe(3);
+    expect(result.counts.transient).toBe(2);
+    expect(result.counts.classified).toBe(1);
+    expect(result.counts.inland).toBe(1);
+    expect(result.counts.bumped).toBe(0);
+    // ONLY the healthy beach gets a statement — no UPDATE of any kind for the
+    // thrown/null beaches (they stay queued, attempts untouched).
+    expect(result.statements).toEqual([classifyUpdateSql("osm-node-ok", "inland")]);
+  });
+});
+
+describe("classifyQueue bump path (clean fetch, empty classification)", function () {
+  it("a successful fetch with classify null bumps attempts and flushes each bump", async function () {
+    const queue = [
+      { id: "osm-node-b0", water_class_attempts: 0 },
+      { id: "osm-node-b1", water_class_attempts: 0 }
+    ];
+    const flushed = [];
+    const result = await classifyQueue(queue, {
+      limit: 0,
+      delayMs: 0,
+      budgetMs: 0,
+      now: function () { return 0; },
+      fetchSignals: async function () { return {}; },
+      classify: function () { return null; },
+      flush: async function (s) { flushed.push(s); }
+    });
+    expect(result.statements).toEqual([
+      bumpAttemptsSql("osm-node-b0"),
+      bumpAttemptsSql("osm-node-b1")
+    ]);
+    expect(result.counts.bumped).toBe(2);
+    expect(result.counts.classified).toBe(0);
+    expect(result.counts.transient).toBe(0);
+    // Each bump was also persisted incrementally through the injected flush.
+    expect(flushed).toEqual(result.statements);
+  });
+});
+
+describe("classifyQueue --classify-limit cap keeps attempts-ASC group ordering", function () {
+  // When limit caps a larger queue, the loop reshuffles within equal-attempts
+  // groups but MUST keep attempts ASC across groups: the attempts-2 group is
+  // never selected before the attempts-0 group is exhausted. The invariant is
+  // group membership, not order within the group, so run it a few times to be
+  // robust to the shuffle.
+  it("selects only the lowest-attempts group when limit equals its size", async function () {
+    for (let run = 0; run < 5; run = run + 1) {
+      const queue = [
+        { id: "osm-node-a0", water_class_attempts: 0 },
+        { id: "osm-node-a1", water_class_attempts: 0 },
+        { id: "osm-node-a2", water_class_attempts: 0 },
+        { id: "osm-node-b0", water_class_attempts: 2 },
+        { id: "osm-node-b1", water_class_attempts: 2 },
+        { id: "osm-node-b2", water_class_attempts: 2 }
+      ];
+      const result = await classifyQueue(queue, {
+        limit: 3,
+        delayMs: 0,
+        budgetMs: 0,
+        now: function () { return 0; },
+        fetchSignals: async function () { return {}; },
+        classify: function () { return "great_lake"; }
+      });
+      expect(result.processed).toBe(3);
+      expect(result.statements.length).toBe(3);
+      const allowed = new Set([
+        classifyUpdateSql("osm-node-a0", "great_lake"),
+        classifyUpdateSql("osm-node-a1", "great_lake"),
+        classifyUpdateSql("osm-node-a2", "great_lake")
+      ]);
+      for (const stmt of result.statements) {
+        expect(allowed.has(stmt)).toBe(true);
+      }
+      // All three attempts-0 beaches were hit exactly once (no duplicates).
+      expect(new Set(result.statements).size).toBe(3);
+    }
   });
 });
 

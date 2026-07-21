@@ -1050,3 +1050,499 @@ describe("scraper health season/cadence gate (healthMonitored)", function () {
     expect(health.lastSuccess).toBeNull();
   });
 });
+
+// The hourly recompute's wind-fallback wiring: windSpeedMph/windGustMph come
+// from the same "waveinput:" KV payload the wave cron wrote, and the
+// { label: "Wind Forecast" } source entry is pushed ONLY when the payload's
+// waveHeightFt is null (wind is a fallback, never a co-signal).
+describe("runFlagRecompute wind fallback from waveinput: KV", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("wave-null waveinput with 30 mph wind -> red via the wind trigger, Wind Forecast source", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(
+      [
+        makeBeachRow({
+          id: "osm-node-1",
+          // Enriched zone so the estimate carries no alerts-unavailable caveat
+          // (the stubbed alerts failure keeps alertsCheckable true).
+          nws_zone: "MIZ071"
+        })
+      ],
+      {
+        "waveinput:osm-node-1": {
+          beachId: "osm-node-1",
+          waveHeightFt: null,
+          model: null,
+          windSpeedMph: 30,
+          windGustMph: null,
+          updated: "2026-07-15T12:00:00.000Z"
+        }
+      }
+    );
+    await runHourlyCron(made.env);
+
+    const put = made.kvPuts.get("flag:osm-node-1");
+    expect(put).toBeDefined();
+    const estimate = JSON.parse(put.value);
+    expect(estimate.color).toBe("red");
+    expect(estimate.trigger).toBe("wind");
+    expect(estimate.reason).toBe(
+      "No wave data; wind 30 mph sustained, n/a mph gusts (at or above 25 mph sustained or 35 mph gust threshold)"
+    );
+    expect(estimate.sources).toContainEqual({
+      label: "Wind Forecast",
+      url: "https://open-meteo.com/en/docs"
+    });
+  });
+
+  it("waveinput carrying BOTH a wave height and wind: wave decides, Wind Forecast source is NOT pushed", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(
+      [makeBeachRow({ id: "osm-node-1", nws_zone: "MIZ071" })],
+      {
+        "waveinput:osm-node-1": {
+          beachId: "osm-node-1",
+          waveHeightFt: 1.0,
+          model: "ecmwf_wam025",
+          windSpeedMph: 30,
+          windGustMph: null,
+          updated: "2026-07-15T12:00:00.000Z"
+        }
+      }
+    );
+    await runHourlyCron(made.env);
+
+    const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-1").value);
+    // The 1.0 ft wave decides green; the 30 mph wind (red-worthy as a
+    // fallback) must not override or even appear as a source.
+    expect(estimate.color).toBe("green");
+    expect(estimate.trigger).toBe("wave-height");
+    const labels = estimate.sources.map(function (s) { return s.label; });
+    expect(labels).toContain("ECMWF Wave Forecast");
+    expect(labels).not.toContain("Wind Forecast");
+  });
+});
+
+// SRF (Surf Zone Forecast) wiring: step 4 fetches the latest SRF product text
+// once per distinct WFO (api.weather.gov /products/types/SRF/locations/<wfo>/
+// latest), parses the rip-current risk, and step 6 feeds it into the estimate
+// with an "NWS Surf Zone Forecast" source entry.
+const SRF_LATEST_URL = "https://api.weather.gov/products/types/SRF/locations/GRR/latest";
+
+describe("runFlagRecompute SRF rip-current wiring", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  function makeSrfFetchStub(urls) {
+    return function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      urls.push(target);
+      if (target.indexOf("/products/types/SRF/") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              productText: "SRFGRR\n\n.TODAY...\nRIP CURRENT RISK IS HIGH.\n"
+            });
+          }
+        });
+      }
+      // Alerts and everything else fail (alerts stay null, no caveat since the
+      // beach has an nws_zone).
+      return Promise.reject(new Error("network disabled in test"));
+    };
+  }
+
+  it("a successful SRF fetch parsing to HIGH -> red rip-current flag with the SRF source", async function () {
+    const urls = [];
+    vi.stubGlobal("fetch", makeSrfFetchStub(urls));
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-1",
+        nws_zone: "MIZ071",
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33"
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const put = made.kvPuts.get("flag:osm-node-1");
+    expect(put).toBeDefined();
+    const estimate = JSON.parse(put.value);
+    expect(estimate.color).toBe("red");
+    expect(estimate.trigger).toBe("rip-current");
+    expect(estimate.reason).toBe("NWS surf zone forecast rip current risk: HIGH");
+    expect(estimate.ripCurrentRisk).toBe("HIGH");
+    expect(estimate.sources).toContainEqual({
+      label: "NWS Surf Zone Forecast",
+      url: SRF_LATEST_URL
+    });
+  });
+
+  it("two beaches sharing a WFO cause exactly ONE SRF fetch (deduped via the wfos set)", async function () {
+    const urls = [];
+    vi.stubGlobal("fetch", makeSrfFetchStub(urls));
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-1",
+        nws_zone: "MIZ071",
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33"
+      }),
+      makeBeachRow({
+        id: "osm-node-2",
+        name: "Test Beach Beta",
+        lat: 44.81,
+        lon: -83.31,
+        nws_zone: "MIZ056",
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/40,50"
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const srfRequests = urls.filter(function (u) {
+      return u.indexOf(SRF_LATEST_URL) !== -1;
+    });
+    expect(srfRequests.length).toBe(1);
+
+    // Both beaches still received the shared WFO's risk.
+    const first = JSON.parse(made.kvPuts.get("flag:osm-node-1").value);
+    const second = JSON.parse(made.kvPuts.get("flag:osm-node-2").value);
+    expect(first.color).toBe("red");
+    expect(first.trigger).toBe("rip-current");
+    expect(second.color).toBe("red");
+    expect(second.trigger).toBe("rip-current");
+  });
+});
+
+// Step 8's official: KV TTL: default KV_TTL_SECONDS (7200) unless the scraper
+// declares a numeric officialTtlSeconds (wisconsin-dnr uses 28800 to bridge
+// its reduced ~6h fetch cadence).
+describe("runFlagRecompute official: KV TTL (default vs officialTtlSeconds)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("a scraper without officialTtlSeconds gets the default 7200 s TTL (south-haven)", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // Same stubbing as the flag_history test: the flag page 500s, the CSV
+    // export serves a red flag for North Beach.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("southhavenmi.gov") !== -1) {
+        return Promise.resolve({ ok: false, status: 500 });
+      }
+      if (target.indexOf("docs.google.com") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: function () { return Promise.resolve("Flag #6 North Beach is Red"); }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-sh",
+        name: "North Beach",
+        lat: 42.406,
+        lon: -86.28
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const official = made.kvPuts.get("official:osm-node-sh");
+    expect(official).toBeDefined();
+    expect(official.opts).toEqual({ expirationTtl: 7200 });
+    expect(JSON.parse(official.value).color).toBe("red");
+  });
+
+  it("wisconsin-dnr's officialTtlSeconds (28800) overrides the default on its official: put", async function () {
+    // 2026-07-15T17:00:00Z = 12:00 America/Chicago — in-season AND a
+    // FETCH_HOURS slot, so the DNR scraper actually fetches.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T17:00:00Z"));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("dnrmaps.wi.gov") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: function () {
+            return Promise.resolve(JSON.stringify({
+              features: [{
+                attributes: {
+                  OBJECTID: 12,
+                  OGW_BEACH_NAME_TEXT: "Bradford Beach",
+                  MAP_STATUS: "Open",
+                  // Sampled the day before the frozen run time — well inside
+                  // the 21-day staleness cutoff.
+                  SAMPLEDATE: Date.parse("2026-07-14T12:00:00Z")
+                },
+                geometry: { x: -87.9, y: 43.0 }
+              }]
+            }));
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    // Bradford Beach fixture — inside only the wisconsin-dnr matches() box,
+    // sitting exactly on the DNR site's geometry so proximity resolution binds.
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-mke", name: "Bradford Beach", lat: 43.0, lon: -87.9 })
+    ]);
+    await runHourlyCron(made.env);
+
+    const official = made.kvPuts.get("official:osm-node-mke");
+    expect(official).toBeDefined();
+    expect(official.opts).toEqual({ expirationTtl: 28800 });
+    const flag = JSON.parse(official.value);
+    expect(flag.color).toBe("green");
+    expect(flag.official).toBe(true);
+    expect(flag.scraperId).toBe("wisconsin-dnr");
+  });
+});
+
+// A corrupt "scraperhealth:" KV value must degrade to prev = null inside the
+// health step's own try/catch — restarting the streak — never poison the
+// scrape step or the per-beach flag writes.
+describe("runFlagRecompute corrupt scraperhealth: KV", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("unparseable health JSON restarts the streak at 1 and the run still completes", async function () {
+    // In-season FETCH_HOURS slot so wisconsin-dnr is health-monitored this run.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T17:00:00Z"));
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    // The health read uses env.FLAGS.get(key) WITHOUT { type: "json" }, so the
+    // stand-in hands back this raw corrupt string for JSON.parse to choke on.
+    const made = makeEnv(
+      [makeBeachRow({ id: "osm-node-mke", name: "Bradford Beach", lat: 43.0, lon: -87.9 })],
+      { "scraperhealth:wisconsin-dnr": "not-json{{" }
+    );
+    await runHourlyCron(made.env);
+
+    const put = made.kvPuts.get("scraperhealth:wisconsin-dnr");
+    expect(put).toBeDefined();
+    expect(JSON.parse(put.value)).toEqual({
+      consecutiveNulls: 1,
+      lastSuccess: null,
+      lastFailure: "2026-07-15T17:00:00.000Z"
+    });
+    // The corrupt health state never blocked the estimate writes.
+    expect(made.kvPuts.get("flag:osm-node-mke")).toBeDefined();
+  });
+});
+
+// runWaveRefresh wind-only route: a beach whose marine series fetched CLEANLY
+// but fully masked falls into the wind pass; a successful fetchWinds must
+// yield a waveinput with waveHeightFt null + the wind values (the only route
+// by which the estimate's wind fallback ever gets data) and NO waves: series.
+describe("runWaveRefresh wind-only waveinput (masked waves, successful wind fetch)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("writes a wind-only waveinput at the wave-data TTL and no waves: series", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        // Fetched cleanly, every model masked — the Great Lakes norm.
+        return marineOkResponse(marinePayload(1, { ecmwf_wam025: null }));
+      }
+      if (target.indexOf("api.open-meteo.com/v1/forecast") !== -1) {
+        // Single-point requests return a bare object, not an array.
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              current: { wind_speed_10m: 30, wind_gusts_10m: 45 }
+            });
+          }
+        });
+      }
+      // GLOS catalog/obs requests all fail -> no buoy gap-fill.
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runWaveCron(made.env);
+
+    const inputPut = made.kvPuts.get("waveinput:osm-node-1");
+    expect(inputPut).toBeDefined();
+    expect(inputPut.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
+    const input = JSON.parse(inputPut.value);
+    expect(input.beachId).toBe("osm-node-1");
+    expect(input.waveHeightFt).toBe(null);
+    expect(input.model).toBe(null);
+    expect(input.windSpeedMph).toBe(30);
+    expect(input.windGustMph).toBe(45);
+    expect(input.updated).toBe("2026-07-15T16:00:00.000Z");
+    // No hourly series with a finite cell -> no strip data.
+    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+  });
+});
+
+// fetchBatchWithRetry: a null first batch (the clients collapse a 429 to null)
+// is retried exactly once after retryMs; a second null gives up with no third
+// attempt.
+describe("runWaveRefresh batch one-retry backoff", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("recovers a 429'd marine batch on the single retry (exactly 2 requests)", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    let marineCalls = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        marineCalls = marineCalls + 1;
+        if (marineCalls === 1) {
+          // fetchJson collapses the non-ok status to null (the throttle case).
+          return Promise.resolve({ ok: false, status: 429 });
+        }
+        return marineOkResponse(marinePayload(1, { ecmwf_wam025: 0.5 }));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runWaveCron(made.env);
+
+    // The retry recovered the batch: 0.5 m -> ~1.6404 ft was written.
+    const inputPut = made.kvPuts.get("waveinput:osm-node-1");
+    expect(inputPut).toBeDefined();
+    const input = JSON.parse(inputPut.value);
+    expect(input.waveHeightFt).toBeCloseTo(1.64042, 4);
+    expect(input.model).toBe("ecmwf_wam025");
+    // Exactly first attempt + one retry, never a third.
+    expect(marineCalls).toBe(2);
+  });
+
+  it("gives up after a second null (exactly 2 requests, nothing written)", async function () {
+    let marineCalls = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        marineCalls = marineCalls + 1;
+        return Promise.resolve({ ok: false, status: 429 });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runWaveCron(made.env);
+
+    expect(marineCalls).toBe(2);
+    // Both throttled -> batch failure sentinel -> last-good KV left alone.
+    expect(made.kvPuts.get("waveinput:osm-node-1")).toBeUndefined();
+    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+  });
+});
+
+// After the per-beach loop, runFlagRecompute batches one
+// "UPDATE beaches SET recompute_updated = ?1 WHERE id = ?2" per processed
+// beach — the rotation that guarantees full-table coverage. A failed batch is
+// swallowed (the flag: puts must survive).
+describe("runFlagRecompute recompute_updated rotation stamping", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  function findRecomputeUpdates(batchCalls) {
+    const updates = [];
+    for (const statements of batchCalls) {
+      for (const statement of statements) {
+        if (statement.sql &&
+            statement.sql.indexOf("UPDATE beaches SET recompute_updated") === 0) {
+          updates.push(statement);
+        }
+      }
+    }
+    return updates;
+  }
+
+  it("stamps recompute_updated once per processed beach with [nowIso, beachId] args", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeBatchRecordingEnv([
+      makeBeachRow({ id: "osm-node-1" }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.81, lon: -83.31 })
+    ]);
+    await runHourlyCron(made.env);
+
+    const updates = findRecomputeUpdates(made.batchCalls);
+    expect(updates.length).toBe(2);
+    const stampedIds = updates.map(function (u) { return u.args[1]; }).sort();
+    expect(stampedIds).toEqual(["osm-node-1", "osm-node-2"]);
+    for (const update of updates) {
+      expect(update.args.length).toBe(2);
+      // nowIso-shaped first arg, identical across the run.
+      expect(update.args[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(update.args[0]).toBe(updates[0].args[0]);
+    }
+  });
+
+  it("a rejected UPDATE batch is swallowed — the run completes and flag: puts survive", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeBatchRecordingEnv([
+      makeBeachRow({ id: "osm-node-1" }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.81, lon: -83.31 })
+    ]);
+    made.env.DB.batch = function (statements) {
+      made.batchCalls.push(statements);
+      return Promise.reject(new Error("d1 batch down"));
+    };
+    await runHourlyCron(made.env);
+
+    // The batch WAS attempted...
+    expect(findRecomputeUpdates(made.batchCalls).length).toBe(2);
+    // ...and its failure never poisoned the estimates already written.
+    expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
+    expect(made.kvPuts.get("flag:osm-node-2")).toBeDefined();
+  });
+});

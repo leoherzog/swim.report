@@ -755,3 +755,481 @@ describe("last_viewed demand stamping", () => {
     expect(updateStatements(statements).length).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Appended coverage: worker entrypoint (error boundary + cron dispatch),
+// router guards (405, bbox validation, proximity ordering), and render.js
+// invariants (stale warnings, honest unknown, double-red, footer disclaimer,
+// source labels, escapeHtml, formatMiles, search-script id contract).
+// ---------------------------------------------------------------------------
+
+import { vi } from "vitest";
+import worker from "../src/index.js";
+import { escapeHtml } from "../src/frontend/render.js";
+import { LIST_SEARCH_SCRIPT } from "../src/frontend/searchScript.js";
+
+const NOW_ISO = "2026-07-05T12:00:00.000Z";
+const OVAL = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
+
+// Env whose D1 binding throws synchronously on prepare — the simplest way to
+// make any DB-touching route (or cron runner) fail.
+function throwingEnv() {
+  return {
+    DB: {
+      prepare: function () {
+        throw new Error("boom");
+      }
+    },
+    FLAGS: nullFlags()
+  };
+}
+
+// Slices the rendered document to one element's markup so assertions never
+// match the embedded stylesheet (which legitimately names every flag class).
+function sliceBetween(html, startMarker, endMarker) {
+  const start = html.indexOf(startMarker);
+  expect(start).toBeGreaterThan(-1);
+  const end = html.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  return html.slice(start, end + endMarker.length);
+}
+
+function estimateCardOf(html) {
+  return sliceBetween(html, "<wa-card class=\"estimate-card\"", "</wa-card>");
+}
+
+function officialCardOf(html) {
+  return sliceBetween(html, "<wa-card class=\"official-card\"", "</wa-card>");
+}
+
+function beachRowOf(html) {
+  return sliceBetween(html, "<li class=\"beach-row\"", "</li>");
+}
+
+function detailPage(estimate, official, waves) {
+  return renderDetailPage({
+    beach: OVAL,
+    estimate: estimate || null,
+    official: official || null,
+    waves: waves || null,
+    nowIso: NOW_ISO
+  });
+}
+
+describe("default fetch export: request-path error boundary", () => {
+  it("renders the project 500 page (not a bare throw) when a page route fails", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    try {
+      const res = await worker.fetch(homeRequest(""), throwingEnv(), makeCtx());
+      expect(res.status).toBe(500);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const html = await res.text();
+      expect(html).toContain("Something went wrong.");
+      const logged = logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n");
+      expect(logged).toContain("index: request handler threw: boom");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("returns 500 JSON {error: internal error} for a failing /api/ route", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    try {
+      const res = await worker.fetch(
+        getRequest("/api/beaches?bbox=-87,41,-82,47"), throwingEnv(), makeCtx()
+      );
+      expect(res.status).toBe(500);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const body = await res.json();
+      expect(body).toEqual({ error: "internal error" });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe("default scheduled export: cron dispatch", () => {
+  it("logs and never calls waitUntil for an unknown cron", () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    try {
+      const ctx = makeCtx();
+      worker.scheduled({ cron: "0 0 * * *" }, throwingEnv(), ctx);
+      expect(ctx.promises.length).toBe(0);
+      const logged = logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n");
+      expect(logged).toContain("index: scheduled invoked with unknown cron: 0 0 * * *");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("dispatches a known cron via waitUntil and its promise resolves even when D1 fails", async () => {
+    // runFlagRecompute catches its own failures (logging "flag recompute
+    // failed"), so a DB throw resolves the waitUntil promise rather than
+    // reaching the scheduled .catch — either layer keeps the cron from
+    // surfacing an unhandled rejection.
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    try {
+      const ctx = makeCtx();
+      worker.scheduled({ cron: "7 * * * *" }, throwingEnv(), ctx);
+      expect(ctx.promises.length).toBe(1);
+      await expect(Promise.all(ctx.promises)).resolves.toBeDefined();
+      const logged = logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n");
+      expect(logged).toContain("index: flag recompute failed: boom");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe("router guards: method and bbox validation", () => {
+  it("rejects non-GET requests with a 405 text/plain body", async () => {
+    const { env } = viewEnv(null);
+    const res = await handleRequest({ method: "POST", url: "https://swim.report/", cf: {} }, env);
+    expect(res.status).toBe(405);
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await res.text()).toBe("Method not allowed");
+  });
+
+  async function expectInvalidBbox(bbox) {
+    const { env, statements } = makeEnv([]);
+    const res = await handleRequest(getRequest("/api/beaches?bbox=" + bbox), env);
+    expect(res.status).toBe(400);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ error: "invalid bbox" });
+    // Rejected before any D1 query is built.
+    expect(statements.length).toBe(0);
+  }
+
+  it("400s a bbox with a non-finite part", async () => {
+    await expectInvalidBbox("-87,foo,-82,47");
+  });
+
+  it("400s an inverted-longitude bbox (minLon >= maxLon)", async () => {
+    await expectInvalidBbox("-82,41,-87,47");
+  });
+
+  it("400s inverted and degenerate latitude bboxes", async () => {
+    await expectInvalidBbox("-87,47,-82,41");
+    await expectInvalidBbox("-87,41,-82,41");
+  });
+
+  it("binds a valid bbox in (minLon, minLat, maxLon, maxLat) order", async () => {
+    const { env, statements } = makeEnv([]);
+    const res = await handleRequest(getRequest("/api/beaches?bbox=-87,41,-82,47"), env);
+    expect(res.status).toBe(200);
+    expect(statements[0].params).toEqual([-87, 41, -82, 47]);
+  });
+});
+
+describe("handleHome proximity branch: in-memory distance sort", () => {
+  function rowNamed(id, name, lat, lon) {
+    return { id: id, name: name, park_name: null, lat: lat, lon: lon };
+  }
+
+  it("fetches LIMIT 500 with no ORDER BY, then sorts rows by distance in JS", async () => {
+    // DB order is deliberately farthest-first: only the in-memory sort can put
+    // Near Beach ahead of Far Beach in the rendered page.
+    const rows = [
+      rowNamed("b-far", "Far Beach", 43.5, -86.28),
+      rowNamed("b-near", "Near Beach", 42.41, -86.28)
+    ];
+    const { env, statements } = makeEnv(rows);
+    const res = await handleRequest(homeRequest("?near=42.4,-86.28"), env);
+    expect(res.status).toBe(200);
+    expect(statements[0].sql).toContain("LIMIT 500");
+    expect(statements[0].sql).not.toContain("ORDER BY");
+    const html = await res.text();
+    const nearAt = html.indexOf("Near Beach");
+    const farAt = html.indexOf("Far Beach");
+    expect(nearAt).toBeGreaterThan(-1);
+    expect(farAt).toBeGreaterThan(-1);
+    expect(nearAt).toBeLessThan(farAt);
+  });
+
+  it("slices the sorted rows to 100 rendered beach rows", async () => {
+    const rows = [];
+    for (let i = 0; i < 101; i++) {
+      rows.push(rowNamed("b-" + String(i), "Beach " + String(i), 42.4 + i * 0.01, -86.28));
+    }
+    const { env } = makeEnv(rows);
+    const res = await handleRequest(homeRequest("?near=42.4,-86.28"), env);
+    const html = await res.text();
+    expect(html.split("<li class=\"beach-row\"").length - 1).toBe(100);
+  });
+});
+
+describe("2-hour stale-data warning on flag cards", () => {
+  const STALE_UPDATED = "2026-07-05T09:00:00.000Z"; // 3 h before NOW_ISO
+
+  function estimateUpdatedAt(iso) {
+    return { color: "green", reason: "calm", official: false, sources: [], updated: iso };
+  }
+
+  it("warns on an estimate card 3 h out of date", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt(STALE_UPDATED)));
+    expect(card).toContain(
+      "Stale data — last updated <wa-relative-time date=\"" + STALE_UPDATED +
+      "\" sync></wa-relative-time>"
+    );
+  });
+
+  it("stays quiet on a 1 h-old estimate", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt("2026-07-05T11:00:00.000Z")));
+    expect(card).not.toContain("Stale data");
+  });
+
+  it("treats exactly 2 h as fresh (strictly-greater-than threshold)", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt("2026-07-05T10:00:00.000Z")));
+    expect(card).not.toContain("Stale data");
+  });
+
+  it("warns on an official card 3 h out of date", () => {
+    const official = {
+      color: "green",
+      reason: "Official flag",
+      official: true,
+      source: "https://example.gov/flags",
+      updated: STALE_UPDATED
+    };
+    const card = officialCardOf(detailPage(null, official));
+    expect(card).toContain("Stale data — last updated");
+  });
+
+  it("skips the warning (without throwing) on an unparseable timestamp", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt("garbage")));
+    expect(card).not.toContain("Stale data");
+  });
+});
+
+describe("honest unknown: missing estimate never defaults green", () => {
+  it("renders a gray UNKNOWN estimate card when the estimate is null", () => {
+    const card = estimateCardOf(detailPage(null, null));
+    expect(card).toContain("<span class=\"wa-font-size-xl wa-font-weight-bold\">UNKNOWN</span>");
+    expect(card).toContain("No estimate available yet");
+    expect(card).toContain("flag-icon-unknown");
+    expect(card).toContain(">ESTIMATE</wa-badge>");
+    expect(card).not.toContain("GREEN");
+    expect(card).not.toContain("flag-icon-green");
+  });
+
+  it("falls back to 'No data available' for an estimate with a falsy reason", () => {
+    const card = estimateCardOf(detailPage({ color: "green", reason: "", sources: [], updated: null }));
+    expect(card).toContain("No data available");
+  });
+});
+
+describe("unrecognized flag colors normalize to unknown (corrupt-KV guard)", () => {
+  it("renders a garbage estimate color as UNKNOWN in the list row", () => {
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: { color: "purple" }, official: null, distanceMi: null }],
+      nowIso: NOW_ISO
+    });
+    const row = beachRowOf(html);
+    expect(row).toContain("flag-icon-unknown");
+    expect(row).toContain(">UNKNOWN</wa-badge>");
+    expect(row).not.toContain("flag-icon-purple");
+    expect(row).not.toContain("flag-icon-green");
+  });
+
+  it("treats a wrong-case color ('GREEN') as unknown on the detail card", () => {
+    const card = estimateCardOf(detailPage({ color: "GREEN", reason: "x", sources: [] }));
+    expect(card).toContain("flag-icon-unknown");
+    expect(card).toContain(">UNKNOWN</span>");
+    expect(card).not.toContain("flag-icon-green");
+  });
+
+  it("normalizes a garbage official color in the home-map marker JSON", () => {
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: null, official: { color: "magenta" }, distanceMi: null }],
+      nowIso: NOW_ISO
+    });
+    const markerJson = sliceBetween(html,
+      "<script type=\"application/json\" id=\"home-map-data\">", "</script>");
+    expect(markerJson).toContain("\"iconClass\":\"flag-icon-unknown\"");
+    expect(markerJson).toContain("\"label\":\"Flag status unknown\"");
+  });
+});
+
+describe("double-red presentation", () => {
+  const doubleRedOfficial = {
+    color: "double-red",
+    reason: "x",
+    official: true,
+    source: "https://ex.gov/f",
+    updated: NOW_ISO
+  };
+
+  it("shows the full label and TWO red-tinted flag icons on the official card", () => {
+    const card = officialCardOf(detailPage(null, doubleRedOfficial));
+    expect(card).toContain("DOUBLE RED — water closed");
+    const iconWrap = sliceBetween(card, "<span class=\"wa-cluster wa-gap-3xs\">", "</span>");
+    expect(iconWrap.split("<wa-icon name=\"flag\"").length - 1).toBe(2);
+    expect(iconWrap).toContain("flag-icon-red");
+  });
+
+  it("shows only the short DOUBLE RED chip label on a list row", () => {
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: { color: "double-red" }, official: null, distanceMi: null }],
+      nowIso: NOW_ISO
+    });
+    const row = beachRowOf(html);
+    expect(row).toContain(">DOUBLE RED</wa-badge>");
+    expect(row).not.toContain("water closed");
+  });
+
+  it("labels the standalone detail-title icon pair with role=img", () => {
+    const html = detailPage(null, doubleRedOfficial);
+    const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
+    expect(h1).toContain("role=\"img\" aria-label=\"Double red flags\"");
+    expect(h1).toContain("flag-icon-red");
+  });
+});
+
+describe("detail-page title flag precedence", () => {
+  function titleOf(html) {
+    return sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
+  }
+
+  it("prefers the official color over the estimate", () => {
+    const html = detailPage(
+      { color: "green", reason: "calm", sources: [] },
+      { color: "red", reason: "posted", official: true, source: "https://ex.gov/f", updated: NOW_ISO }
+    );
+    const h1 = titleOf(html);
+    expect(h1).toContain("flag-icon-red");
+    expect(h1).toContain("label=\"Red flag\"");
+    expect(h1).not.toContain("flag-icon-green");
+  });
+
+  it("uses the estimate color when no official flag exists", () => {
+    const h1 = titleOf(detailPage({ color: "yellow", reason: "waves", sources: [] }));
+    expect(h1).toContain("flag-icon-yellow");
+    expect(h1).toContain("label=\"Yellow flag\"");
+  });
+
+  it("renders gray unknown (never green) when both are null", () => {
+    const h1 = titleOf(detailPage(null, null));
+    expect(h1).toContain("flag-icon-unknown");
+    expect(h1).toContain("label=\"Flag status unknown\"");
+    expect(h1).not.toContain("flag-icon-green");
+  });
+});
+
+describe("footer disclaimer on the list page", () => {
+  const DISCLAIMER = "Estimated — not the official flag status. " +
+    "Always obey posted flags and lifeguards.";
+
+  it("appears on the empty list page with the attribution links", () => {
+    const html = renderListPage({ entries: [], nowIso: NOW_ISO });
+    expect(html).toContain(DISCLAIMER);
+    expect(html).toContain("<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a>");
+    expect(html).toContain("<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a>");
+    expect(html).toContain("<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a>");
+    expect(html).toContain("<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a>");
+    expect(html).toContain("<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a>");
+  });
+
+  it("appears on a populated list page too", () => {
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: null, official: null, distanceMi: null }],
+      nowIso: NOW_ISO
+    });
+    expect(html).toContain(DISCLAIMER);
+  });
+});
+
+describe("renderSourceLabels edge shapes", () => {
+  function cardWithSources(sources) {
+    return estimateCardOf(detailPage({ color: "green", reason: "calm", sources: sources, updated: null }));
+  }
+
+  it("renders an unlabeled non-URL source url as its raw string", () => {
+    const card = cardWithSources([{ url: "not-a-url" }]);
+    expect(card).toContain(">not-a-url</wa-badge>");
+  });
+
+  it("renders a legacy bare non-URL string source verbatim", () => {
+    const card = cardWithSources(["NWS Alerts"]);
+    expect(card).toContain(">NWS Alerts</wa-badge>");
+  });
+
+  it("omits badges and header-actions entirely for an empty sources array", () => {
+    const card = cardWithSources([]);
+    expect(card).not.toContain("source-badges");
+    expect(card).not.toContain("with-header-actions");
+  });
+
+  it("skips a source object with null label and url (no empty badge)", () => {
+    const card = cardWithSources([{ label: null, url: null }]);
+    expect(card).not.toContain("source-badges");
+    expect(card).not.toContain("with-header-actions");
+  });
+});
+
+describe("escapeHtml", () => {
+  it("returns empty string for null and undefined", () => {
+    expect(escapeHtml(null)).toBe("");
+    expect(escapeHtml(undefined)).toBe("");
+  });
+
+  it("escapes all five entities, ampersand first (no double-escaping)", () => {
+    expect(escapeHtml("&<>\"'")).toBe("&amp;&lt;&gt;&quot;&#39;");
+  });
+
+  it("coerces non-strings", () => {
+    expect(escapeHtml(42)).toBe("42");
+  });
+
+  it("re-escapes already-escaped input (never passes entities through)", () => {
+    expect(escapeHtml("a&amp;b")).toBe("a&amp;amp;b");
+  });
+});
+
+describe("formatMiles guard branches (via renderBeachRow)", () => {
+  function rowWithDistance(dist) {
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: null, official: null, distanceMi: dist }],
+      nowIso: NOW_ISO,
+      sortedByProximity: true
+    });
+    return beachRowOf(html);
+  }
+
+  it("renders no distance span for negative or NaN distances", () => {
+    expect(rowWithDistance(-3)).not.toContain("<span class=\"beach-row-distance");
+    expect(rowWithDistance(NaN)).not.toContain("<span class=\"beach-row-distance");
+  });
+
+  it("labels exactly 1 mile as ~1 mi (the <1 boundary is strict)", () => {
+    expect(rowWithDistance(1)).toContain("~1 mi");
+  });
+
+  it("labels 0.99 miles as the escaped &lt;1 mi", () => {
+    expect(rowWithDistance(0.99)).toContain("&lt;1 mi");
+  });
+
+  it("rounds 12.5 miles up to ~13 mi", () => {
+    expect(rowWithDistance(12.5)).toContain("~13 mi");
+  });
+});
+
+describe("search script <-> rendered markup id contract", () => {
+  it("pins the ids/attributes the client script queries to what renderListPage emits", () => {
+    expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-search')");
+    expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-list-empty')");
+    expect(LIST_SEARCH_SCRIPT).toContain("querySelectorAll('.beach-row')");
+    expect(LIST_SEARCH_SCRIPT).toContain("getAttribute('data-name')");
+    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('input', filterRows)");
+    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('wa-clear', filterRows)");
+
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: null, official: null, distanceMi: null }],
+      nowIso: NOW_ISO
+    });
+    expect(html).toContain("id=\"beach-search\"");
+    expect(html).toContain("id=\"beach-list-empty\"");
+    expect(html).toContain("class=\"beach-row\"");
+    expect(html).toContain("data-name=");
+  });
+});

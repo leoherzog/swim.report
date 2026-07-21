@@ -322,3 +322,87 @@ describe("ecccZoneNameForPoint", function () {
     expect(ecccZoneNameForPoint([{ name: "Bad", geometry: { type: "Polygon", coordinates: [[["x", 1]]] } }], 42, -82.9)).toBeNull();
   });
 });
+
+describe("truncation warning at the 2000-feature fetch limit", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function logCallsContaining(spy, needle) {
+    return spy.mock.calls.filter(function (args) {
+      return args.some(function (arg) {
+        return typeof arg === "string" && arg.indexOf(needle) !== -1;
+      });
+    });
+  }
+
+  it("fetchActiveEcccAlerts logs the truncation warning at exactly 2000 features but still returns them all", async function () {
+    const features = [];
+    for (let i = 0; i < 2000; i = i + 1) {
+      features.push(alertFeature({ alert_name_en: "wind warning " + String(i) }));
+    }
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: features });
+    });
+    const logSpy = vi.spyOn(console, "log");
+
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
+    expect(result).not.toBeNull();
+    // The full page is still parsed and returned — truncation is warned
+    // about, never treated as a failure.
+    expect(result.alerts.length).toBe(2000);
+    const warnings = logCallsContaining(logSpy, "at the 2000 limit");
+    expect(warnings.length).toBe(1);
+    expect(warnings[0][0]).toContain("eccc: alerts fetch returned 2000 features");
+  });
+
+  it("fetchActiveEcccAlerts does NOT warn below the limit", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: [alertFeature({})] });
+    });
+    const logSpy = vi.spyOn(console, "log");
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
+    expect(result.alerts.length).toBe(1);
+    expect(logCallsContaining(logSpy, "at the 2000 limit").length).toBe(0);
+  });
+
+  it("fetchEcccForecastZones logs the truncation warning at exactly 2000 features but still returns them all", async function () {
+    const features = [];
+    for (let i = 0; i < 2000; i = i + 1) {
+      features.push({
+        type: "Feature",
+        properties: { NAME: "Zone " + String(i), PROVINCE_C: "ON" },
+        geometry: squareAround(42.0, -82.9)
+      });
+    }
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: features });
+    });
+    const logSpy = vi.spyOn(console, "log");
+
+    const zones = await fetchEcccForecastZones();
+    expect(zones).not.toBeNull();
+    expect(zones.length).toBe(2000);
+    expect(zones[1999].name).toBe("Zone 1999");
+    const warnings = logCallsContaining(logSpy, "at the 2000 limit");
+    expect(warnings.length).toBe(1);
+    expect(warnings[0][0]).toContain("eccc: forecast-zones fetch returned 2000 features");
+  });
+
+  it("fetchEcccForecastZones does NOT warn below the limit", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [{
+          type: "Feature",
+          properties: { NAME: "Windsor - Essex - Chatham-Kent" },
+          geometry: squareAround(42.0, -82.9)
+        }]
+      });
+    });
+    const logSpy = vi.spyOn(console, "log");
+    const zones = await fetchEcccForecastZones();
+    expect(zones.length).toBe(1);
+    expect(logCallsContaining(logSpy, "at the 2000 limit").length).toBe(0);
+  });
+});

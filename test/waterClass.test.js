@@ -5,22 +5,28 @@
 // ocean > great_lake > inland; a clean-but-empty answer is null (bumps
 // attempts), a transient failure never reaches classifyWaterBody.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   classifyWaterBody,
   isGreatLakeQid,
+  isFlagWorthyWater,
   GREAT_LAKE_QIDS,
-  WATER_CLASS_VERSION
+  WATER_CLASS_VERSION,
+  WATER_CLASS_MAX_ATTEMPTS,
+  FLAG_WORTHY_WATER_SQL
 } from "../src/waterClass.js";
 import {
   parseWaterClassElements,
   buildWaterClassAnchor,
   buildWaterClassQuery,
+  fetchWaterClassSignals,
   WATER_MIN_AREA_DEG2,
   OCEAN_RADIUS_M,
   GREAT_LAKE_RADIUS_M,
-  INLAND_RADIUS_M
+  INLAND_RADIUS_M,
+  OVERPASS_MIRRORS
 } from "../src/clients/overpass.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 describe("classifyWaterBody", () => {
   it("Coney Island: a coastline signal classifies ocean", () => {
@@ -197,5 +203,141 @@ describe("buildWaterClassAnchor / buildWaterClassQuery", () => {
     expect(GREAT_LAKE_RADIUS_M).toBe(150);
     expect(INLAND_RADIUS_M).toBe(120);
     expect(WATER_CLASS_VERSION).toBe(1);
+  });
+});
+
+describe("fetchWaterClassSignals (transient null vs clean signals contract)", () => {
+  // null = TRANSIENT (caller must NOT bump water_class_attempts, row stays
+  // queued); a signals object = a CLEAN answer, the ONLY path that bumps
+  // attempts (via classifyWaterBody returning null on all-empty signals).
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const EMPTY_SIGNALS = {
+    coastlinePresent: false,
+    nearbyLakeQids: [],
+    nearbyWayWater: false
+  };
+
+  it("unparseable osm_id -> null with ZERO upstream fetches", async () => {
+    const calls = installFetch(() => {
+      return Promise.resolve(jsonResponse({ elements: [] }));
+    });
+    const result = await fetchWaterClassSignals({ id: 1, osm_id: "banana" });
+    expect(result).toBeNull();
+    expect(calls.length).toBe(0);
+  });
+
+  it("every mirror failing (HTTP 504) -> null after trying each mirror once", async () => {
+    const calls = installFetch(() => {
+      return Promise.resolve({
+        ok: false,
+        status: 504,
+        json: () => { return Promise.resolve({}); }
+      });
+    });
+    const result = await fetchWaterClassSignals({ id: 2, osm_id: "way/456" });
+    expect(result).toBeNull();
+    expect(calls.length).toBe(OVERPASS_MIRRORS.length);
+    expect(calls.map((c) => { return c.url; })).toEqual(OVERPASS_MIRRORS);
+  });
+
+  it("a clean HTTP-200 body with elements: [] -> the all-empty signals OBJECT, not null", async () => {
+    // The whole contract: clean-but-empty is a real answer (bumps attempts
+    // downstream), distinct from the transient-null no-bump path.
+    const calls = installFetch(() => {
+      return Promise.resolve(jsonResponse({ elements: [] }));
+    });
+    const result = await fetchWaterClassSignals({ id: 3, osm_id: "way/456" });
+    expect(result).toEqual(EMPTY_SIGNALS);
+    expect(result).not.toBeNull();
+    // First mirror answered cleanly, so no failover happened.
+    expect(calls.length).toBe(1);
+    // And the clean-but-empty answer is exactly what makes classifyWaterBody
+    // return null — the only attempts-bumping path.
+    expect(classifyWaterBody(result)).toBeNull();
+  });
+
+  it("a truncation remark on every mirror -> null (partial data reads as transient)", async () => {
+    const calls = installFetch(() => {
+      return Promise.resolve(jsonResponse({
+        remark: "runtime error: Query timed out",
+        elements: [{ type: "way", id: 9, tags: { natural: "coastline" } }]
+      }));
+    });
+    const result = await fetchWaterClassSignals({ id: 4, osm_id: "relation/2995932" });
+    expect(result).toBeNull();
+    // The remark made each mirror fall through in order before giving up.
+    expect(calls.map((c) => { return c.url; })).toEqual(OVERPASS_MIRRORS);
+  });
+
+  it("a remark on the primary but a clean fallback -> the fallback's signals win", async () => {
+    const calls = installFetch((url) => {
+      if (url === OVERPASS_MIRRORS[0]) {
+        return Promise.resolve(jsonResponse({ remark: "timed out", elements: [] }));
+      }
+      return Promise.resolve(jsonResponse({
+        elements: [
+          { type: "relation", id: 2, tags: { natural: "water", water: "lake", wikidata: "Q1169" } }
+        ]
+      }));
+    });
+    const result = await fetchWaterClassSignals({ id: 5, osm_id: "way/456" });
+    expect(result).toEqual({
+      coastlinePresent: false,
+      nearbyLakeQids: ["Q1169"],
+      nearbyWayWater: false
+    });
+    expect(calls.map((c) => { return c.url; })).toEqual(OVERPASS_MIRRORS);
+  });
+});
+
+describe("isFlagWorthyWater / FLAG_WORTHY_WATER_SQL (request-path 404 gate)", () => {
+  it("confirmed keepers are flag-worthy: ocean and great_lake", () => {
+    expect(isFlagWorthyWater({ water_class: "ocean" })).toBe(true);
+    expect(isFlagWorthyWater({ water_class: "great_lake" })).toBe(true);
+  });
+
+  it("confirmed inland is hidden", () => {
+    expect(isFlagWorthyWater({ water_class: "inland" })).toBe(false);
+  });
+
+  it("NULL under the attempts cap stays visible (pending); at the cap it parks hidden", () => {
+    expect(isFlagWorthyWater({ water_class: null, water_class_attempts: 0 })).toBe(true);
+    expect(isFlagWorthyWater({
+      water_class: null,
+      water_class_attempts: WATER_CLASS_MAX_ATTEMPTS - 1
+    })).toBe(true);
+    expect(isFlagWorthyWater({
+      water_class: null,
+      water_class_attempts: WATER_CLASS_MAX_ATTEMPTS
+    })).toBe(false);
+  });
+
+  it("a row missing the attempts column (or carrying a non-number) reads as 0 attempts -> visible", () => {
+    // Older stub rows / pre-migration reads: undefined attempts must be
+    // treated as NULL-pending, never as parked.
+    expect(isFlagWorthyWater({ water_class: null })).toBe(true);
+    expect(isFlagWorthyWater({ water_class: undefined })).toBe(true);
+    expect(isFlagWorthyWater({ water_class: null, water_class_attempts: "3" })).toBe(true);
+  });
+
+  it("no beach at all -> false, never throws", () => {
+    expect(isFlagWorthyWater(null)).toBe(false);
+    expect(isFlagWorthyWater(undefined)).toBe(false);
+    expect(isFlagWorthyWater(false)).toBe(false);
+  });
+
+  it("FLAG_WORTHY_WATER_SQL is the exact shared fragment, keeping the SQL and its JS mirror in lockstep", () => {
+    // A WATER_CLASS_MAX_ATTEMPTS bump must visibly change BOTH the SQL
+    // fragment and isFlagWorthyWater together — this pins the current pair.
+    expect(FLAG_WORTHY_WATER_SQL).toBe(
+      "(water_class IN ('ocean','great_lake') OR (water_class IS NULL AND water_class_attempts < 5))"
+    );
+    expect(FLAG_WORTHY_WATER_SQL).toContain(
+      "water_class_attempts < " + String(WATER_CLASS_MAX_ATTEMPTS)
+    );
   });
 });

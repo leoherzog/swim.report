@@ -1,11 +1,13 @@
 // test/officialSources.test.js
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   parseSouthHavenCsv,
   extractSouthHavenCsvUrl,
   isSouthHavenMonitored,
   southHaven,
-  SOUTH_HAVEN_CSV_URL
+  SOUTH_HAVEN_CSV_URL,
+  SOUTH_HAVEN_URL,
+  SOUTH_HAVEN_USER_AGENT
 } from "../src/officialSources/southHaven.js";
 import {
   scrapers,
@@ -16,6 +18,7 @@ import {
 } from "../src/officialSources/index.js";
 import { makeBeach } from "./helpers/beach.js";
 import { findSite } from "./helpers/sites.js";
+import { installFetch } from "./helpers/fetch.js";
 
 // Mirrors the live feed layout: CRLF line endings, no header row, flags
 // #6-#9 all named North Beach, #10-#12 all named South Beach, and two
@@ -681,5 +684,199 @@ describe("findScraper", function() {
   it("returns null for a non-matching BeachRow", function() {
     const beach = makeBeach({ name: "Holland State Park", lat: 42.7739, lon: -86.2109 });
     expect(findScraper(beach)).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Appended coverage: registry-wide scrape() failure contracts, southHaven
+// scrape() orchestration, resolveSiteForBeach names[] entry guard, and the
+// scrapeOfficialFlag unmatched-beach early return. All fetch stubbing goes
+// through installFetch (vi.stubGlobal); every block owns its own afterEach
+// cleanup per test/helpers/fetch.js.
+// ---------------------------------------------------------------------------
+
+// A timestamp at which EVERY scraper's pre-fetch gate passes, so scrape()
+// actually reaches its fetch path:
+//   - South Haven: 2026-07-09 13:00 America/Detroit (in season, 9am-9pm);
+//   - Wisconsin DNR: 2026-07-09 12:00 America/Chicago (July in season AND
+//     12 is a FETCH_HOURS cadence hour);
+//   - Ohio BeachGuard: July is inside the coarse May-Oct fetch window.
+const GATES_OPEN_ISO = "2026-07-09T17:00:00.000Z";
+
+describe("registry-wide scrape() fetch-failure contract", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  for (const scraper of scrapers) {
+    it(scraper.id + " resolves null when the upstream returns HTTP 503", async function() {
+      const calls = installFetch(function() {
+        return Promise.resolve({ ok: false, status: 503 });
+      });
+      const result = await scraper.scrape(GATES_OPEN_ISO);
+      expect(result).toBe(null);
+      // The pre-fetch gates must have passed — otherwise this test would be
+      // vacuous (a skipped fetch also returns null).
+      expect(calls.length).toBeGreaterThan(0);
+    });
+  }
+
+  for (const scraper of scrapers) {
+    it(scraper.id + " resolves null (never throws) when fetch itself throws", async function() {
+      const calls = installFetch(function() {
+        throw new Error("boom");
+      });
+      const result = await scraper.scrape(GATES_OPEN_ISO);
+      expect(result).toBe(null);
+      expect(calls.length).toBeGreaterThan(0);
+    });
+  }
+});
+
+describe("registry-wide scrape() null-on-markup-change contract", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // A 200 response whose body is a redesigned page: no recognizable table,
+  // panels, spreadsheet link, or JSON. Every scraper must degrade to null —
+  // a markup change may never surface a color object. metroparks and
+  // hdnwMichigan have empty-success ([]) semantics only for PARSEABLE pages;
+  // for this body their parsers find no panels / no table and return null,
+  // so scrape() is null for them too. For chicagoParkDistrict and
+  // wisconsinDnr this body is invalid JSON, exercising the JSON.parse
+  // failure path end-to-end.
+  const REDESIGNED_BODY = "<html><body>site redesigned</body></html>";
+
+  for (const scraper of scrapers) {
+    it(scraper.id + " resolves null for a 200 response with unrecognizable markup", async function() {
+      const calls = installFetch(function() {
+        return Promise.resolve({
+          ok: true,
+          text: function() {
+            return Promise.resolve(REDESIGNED_BODY);
+          }
+        });
+      });
+      const result = await scraper.scrape(GATES_OPEN_ISO);
+      expect(result).toBe(null);
+      expect(calls.length).toBeGreaterThan(0);
+    });
+  }
+});
+
+describe("southHaven.scrape orchestration", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // 2026-07-09 14:00 America/Detroit — in season, monitored hours.
+  const IN_WINDOW_ISO = "2026-07-09T18:00:00.000Z";
+  const LIVE_CSV = "Flag #6 North Beach is Green\r\nFlag #10 South Beach is Red";
+  const ALL_GRAY_CSV = "Flag #6 North Beach is Gray\r\nFlag #10 South Beach is Gray";
+
+  function csvResponse(body) {
+    return Promise.resolve({
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    });
+  }
+
+  it("skips the fetch entirely outside the monitored window", async function() {
+    const calls = installFetch(function() {
+      return csvResponse(LIVE_CSV);
+    });
+    // 2026-01-15 13:00 America/Detroit — deep off-season.
+    const result = await southHaven.scrape("2026-01-15T18:00:00.000Z");
+    expect(result).toBe(null);
+    expect(calls.length).toBe(0);
+  });
+
+  it("falls back to the known-good CSV URL when the page has no spreadsheet link", async function() {
+    const calls = installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse("<html><body>no links here</body></html>");
+      }
+      return csvResponse(LIVE_CSV);
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(result).not.toBe(null);
+    expect(calls.length).toBe(2);
+    expect(calls[0].url).toBe(SOUTH_HAVEN_URL);
+    expect(calls[0].init.headers["User-Agent"]).toBe(SOUTH_HAVEN_USER_AGENT);
+    expect(calls[1].url).toBe(SOUTH_HAVEN_CSV_URL);
+    expect(calls[1].init.redirect).toBe("follow");
+    expect(calls[1].init.headers["User-Agent"]).toBe(SOUTH_HAVEN_USER_AGENT);
+  });
+
+  it("uses the rebuilt CSV export URL from the page and reports both sources", async function() {
+    const rebuiltCsvUrl =
+      "https://docs.google.com/spreadsheets/d/e/2PACX-newid_123/pub?gid=42&single=true&output=csv";
+    const pageHtml = "<a href=\"https://docs.google.com/spreadsheets/d/e/" +
+      "2PACX-newid_123/pubhtml?gid=42&amp;single=true\">text version</a>";
+    const calls = installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse(pageHtml);
+      }
+      return csvResponse(LIVE_CSV);
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(result).not.toBe(null);
+    expect(calls.length).toBe(2);
+    expect(calls[1].url).toBe(rebuiltCsvUrl);
+    expect(result.source).toBe(SOUTH_HAVEN_URL);
+    expect(result.sources).toEqual([SOUTH_HAVEN_URL, rebuiltCsvUrl]);
+    expect(result.perBeach).toBe(true);
+    expect(result.updated).toBe(IN_WINDOW_ISO);
+  });
+
+  it("resolves null when every site in the CSV is gray (no data, not a color)", async function() {
+    const calls = installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse("<html><body>no links here</body></html>");
+      }
+      return csvResponse(ALL_GRAY_CSV);
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(result).toBe(null);
+    expect(calls.length).toBe(2);
+  });
+});
+
+describe("resolveSiteForBeach names[] entry guard", function() {
+  it("never lets an empty-string or non-string names[] entry match every beach", function() {
+    // ''.indexOf against any haystack is 0, so without the string-and-length
+    // guard a site with names: [''] would name-match EVERY beach and hand it
+    // that site's color. The site has no lat/lon, so proximity cannot rescue
+    // it either: the resolve must be null.
+    const sites = [
+      { siteId: "bad", color: "red", reason: "r", names: ["", null, 42] }
+    ];
+    expect(resolveSiteForBeach(V2_BEACH, sites)).toBe(null);
+  });
+
+  it("still resolves via a valid names[] entry alongside an empty one", function() {
+    const sites = [
+      { siteId: "ok", color: "green", reason: "r", names: ["", "oval beach"] }
+    ];
+    expect(resolveSiteForBeach(V2_BEACH, sites)).toBe(sites[0]);
+  });
+});
+
+describe("scrapeOfficialFlag unmatched-beach early return", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves null before any scrape or fetch when no scraper matches", async function() {
+    const calls = installFetch(function() {
+      throw new Error("must never be called");
+    });
+    const beach = makeBeach({ name: "Holland State Park", lat: 42.7739, lon: -86.2109 });
+    const result = await scrapeOfficialFlag(beach, "2026-07-05T12:00:00.000Z");
+    expect(result).toBe(null);
+    expect(calls.length).toBe(0);
   });
 });

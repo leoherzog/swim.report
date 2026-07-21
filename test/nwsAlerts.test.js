@@ -10,6 +10,7 @@ import {
   alertsUrlForZone,
   fetchAllActiveAlerts,
   fetchLatestSrfText,
+  fetchPointMetadata,
   nwsAlertsForZone
 } from "../src/clients/nws.js";
 
@@ -254,5 +255,117 @@ describe("alertsUrlForZone", function () {
   it("returns the zone-scoped active-alerts URL", function () {
     expect(alertsUrlForZone("MIZ071"))
       .toBe("https://api.weather.gov/alerts/active?zone=MIZ071");
+  });
+});
+
+describe("fetchAllActiveAlerts with missing or malformed features", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("treats a 200 body with no features key as an empty success, not a failure", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({});
+    });
+    // The hourly cron treats null as a fetch failure; an alert-free body must
+    // instead resolve to an empty alerts list with the source URL intact.
+    const result = await fetchAllActiveAlerts();
+    expect(result).toEqual({ alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL });
+  });
+
+  it("treats a non-array features value as an empty success, never throws", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: "nope" });
+    });
+    const result = await fetchAllActiveAlerts();
+    expect(result).toEqual({ alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL });
+  });
+});
+
+describe("fetchPointMetadata", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves zone id and grid URL from /points, with 4-decimal coords and the NWS User-Agent", async function () {
+    let requestedUrl = null;
+    let requestedInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
+      requestedUrl = url;
+      requestedInit = init;
+      return okJson({
+        properties: {
+          forecastZone: "https://api.weather.gov/zones/forecast/MIZ071",
+          forecastGridData: "https://api.weather.gov/gridpoints/GRR/33,33"
+        }
+      });
+    });
+
+    const result = await fetchPointMetadata(42.4001, -86.2758);
+    expect(requestedUrl).toBe("https://api.weather.gov/points/42.4001,-86.2758");
+    expect(requestedInit.headers["User-Agent"]).toBe(NWS_USER_AGENT);
+    // nwsZone is the last path segment of the forecastZone URL; nwsGridUrl is
+    // the forecastGridData URL verbatim (the enrichment cron stamps both).
+    expect(result).toEqual({
+      nwsZone: "MIZ071",
+      nwsGridUrl: "https://api.weather.gov/gridpoints/GRR/33,33"
+    });
+  });
+
+  it("pads short coordinates to exactly four decimal places", async function () {
+    let requestedUrl = null;
+    vi.stubGlobal("fetch", function (url) {
+      requestedUrl = url;
+      return okJson({
+        properties: {
+          forecastZone: "https://api.weather.gov/zones/forecast/MIZ049",
+          forecastGridData: "https://api.weather.gov/gridpoints/GRR/40,40"
+        }
+      });
+    });
+
+    await fetchPointMetadata(42.4, -86.25);
+    expect(requestedUrl).toBe("https://api.weather.gov/points/42.4000,-86.2500");
+  });
+
+  it("returns null when forecastZone or forecastGridData is missing (the parked-row path)", async function () {
+    // A beach whose /points response lacks either field must park as null —
+    // this is how Canadian rows that NWS will never cover stay un-enriched.
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        properties: {
+          forecastGridData: "https://api.weather.gov/gridpoints/GRR/33,33"
+        }
+      });
+    });
+    expect(await fetchPointMetadata(45.0, -82.0)).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        properties: {
+          forecastZone: "https://api.weather.gov/zones/forecast/MIZ071"
+        }
+      });
+    });
+    expect(await fetchPointMetadata(45.0, -82.0)).toBeNull();
+  });
+
+  it("returns null when properties is absent entirely", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ title: "Not the shape you wanted" });
+    });
+    expect(await fetchPointMetadata(45.0, -82.0)).toBeNull();
+  });
+
+  it("returns null on HTTP failure and on a rejected fetch, never throws", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 404 });
+    });
+    expect(await fetchPointMetadata(45.0, -82.0)).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network down"));
+    });
+    expect(await fetchPointMetadata(45.0, -82.0)).toBeNull();
   });
 });
