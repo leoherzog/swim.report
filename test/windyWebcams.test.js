@@ -7,6 +7,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseNearestActiveWebcam,
   fetchNearestWebcam,
+  fetchWebcamsInBbox,
   WINDY_WEBCAMS_API_URL,
   WEBCAM_RADIUS_KM,
   WEBCAM_FETCH_LIMIT
@@ -96,6 +97,28 @@ describe("parseNearestActiveWebcam", function () {
     expect(parseNearestActiveWebcam({ webcams: [nonFinite] }, LAT, LON)).toBe(null);
   });
 
+  it("excludes a cam beyond WEBCAM_RADIUS_KM (bbox-query safety)", function () {
+    // A bbox query can return cams nearer some OTHER beach in the bucket; the
+    // nearest one here sits ~14 km away (0.13 deg lat), outside the radius.
+    const out = parseNearestActiveWebcam(
+      { webcams: [dayCam(1234, "Too far", LAT + 0.13, LON)] },
+      LAT,
+      LON
+    );
+    expect(out).toBe(null);
+  });
+
+  it("picks the nearest cam WITHIN radius when a nearer one is out of range", function () {
+    const json = {
+      webcams: [
+        dayCam(111, "Out of range but closest-in-bbox... no", LAT + 0.2, LON),
+        dayCam(222, "In range", 42.397, -86.331)
+      ]
+    };
+    const out = parseNearestActiveWebcam(json, LAT, LON);
+    expect(out.webcamId).toBe("222");
+  });
+
   it("returns null for an empty webcams array", function () {
     expect(parseNearestActiveWebcam({ total: 0, webcams: [] }, LAT, LON)).toBe(null);
   });
@@ -117,6 +140,29 @@ describe("parseNearestActiveWebcam", function () {
     delete cam.title;
     const out = parseNearestActiveWebcam({ webcams: [cam] }, LAT, LON);
     expect(out.title).toBe("");
+  });
+
+  it("surfaces the cam's own detail-page URL from urls.detail (include=urls)", function () {
+    const cam = dayCam(1595253287, "Indian Grove: South Haven", 42.397, -86.331);
+    cam.urls = {
+      detail: "https://windy.com/webcams/1595253287",
+      edit: "https://windy.com/webcams/1595253287/edit"
+    };
+    const out = parseNearestActiveWebcam({ webcams: [cam] }, LAT, LON);
+    expect(out.detailUrl).toBe("https://windy.com/webcams/1595253287");
+  });
+
+  it("detailUrl degrades to null when urls is missing, malformed, or empty", function () {
+    const noUrls = parseNearestActiveWebcam({ webcams: [dayCam(1, "a", 42.397, -86.331)] }, LAT, LON);
+    expect(noUrls.detailUrl).toBeNull();
+
+    const empty = dayCam(2, "b", 42.397, -86.331);
+    empty.urls = { detail: "" };
+    expect(parseNearestActiveWebcam({ webcams: [empty] }, LAT, LON).detailUrl).toBeNull();
+
+    const malformed = dayCam(3, "c", 42.397, -86.331);
+    malformed.urls = "not-an-object";
+    expect(parseNearestActiveWebcam({ webcams: [malformed] }, LAT, LON).detailUrl).toBeNull();
   });
 });
 
@@ -141,7 +187,7 @@ describe("fetchNearestWebcam", function () {
     expect(calls[0].url).toBe(
       WINDY_WEBCAMS_API_URL +
       "?nearby=42.4,-86.3," + String(WEBCAM_RADIUS_KM) +
-      "&include=player,location&limit=" + String(WEBCAM_FETCH_LIMIT)
+      "&include=player,location,urls&limit=" + String(WEBCAM_FETCH_LIMIT)
     );
     expect(calls[0].init.headers["x-windy-api-key"]).toBe(API_KEY);
     expect(out).not.toBe(null);
@@ -188,6 +234,44 @@ describe("fetchNearestWebcam", function () {
     expect(await fetchNearestWebcam(LAT, LON, "")).toBe(null);
     expect(await fetchNearestWebcam(LAT, LON, null)).toBe(null);
     expect(await fetchNearestWebcam(LAT, LON, undefined)).toBe(null);
+    expect(calls.length).toBe(0);
+  });
+});
+
+describe("fetchWebcamsInBbox", function () {
+  const API_KEY = "test-api-key";
+
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("requests the bbox URL (north,east,south,west) with the api-key header and returns the raw body", async function () {
+    const body = { total: 1, webcams: [dayCam(1, "cam", 42.4, -86.3)] };
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse(body));
+    });
+    const out = await fetchWebcamsInBbox(43, -86, 42, -87, API_KEY);
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe(
+      WINDY_WEBCAMS_API_URL +
+      "?bbox=43,-86,42,-87" +
+      "&include=player,location,urls&limit=" + String(WEBCAM_FETCH_LIMIT)
+    );
+    expect(calls[0].init.headers["x-windy-api-key"]).toBe(API_KEY);
+    // Raw body passes through untouched for the caller to parse per beach.
+    expect(out).toEqual(body);
+  });
+
+  it("returns null on failure and makes no fetch when the api key is falsy", async function () {
+    installFetch(function () {
+      return Promise.resolve({ ok: false, status: 500, json: function () { return Promise.resolve(null); } });
+    });
+    expect(await fetchWebcamsInBbox(43, -86, 42, -87, API_KEY)).toBe(null);
+
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse({ webcams: [] }));
+    });
+    expect(await fetchWebcamsInBbox(43, -86, 42, -87, "")).toBe(null);
     expect(calls.length).toBe(0);
   });
 });

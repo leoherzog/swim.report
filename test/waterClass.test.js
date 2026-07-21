@@ -182,6 +182,12 @@ describe("buildWaterClassAnchor / buildWaterClassQuery", () => {
     expect(q).not.toContain("out geom");
   });
 
+  it("declares NO [maxsize] (inherits the 512 MiB default) — the lake-relation probe's execution memory must keep full headroom", () => {
+    const q = buildWaterClassQuery("way/456");
+    expect(q).toContain("[out:json][timeout:60];");
+    expect(q).not.toContain("maxsize");
+  });
+
   it("returns null when the id cannot be anchored", () => {
     expect(buildWaterClassQuery("nonsense")).toBeNull();
   });

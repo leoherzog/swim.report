@@ -50,15 +50,20 @@ cross-module interface.
                                      // Canadian: the hourly cron checks Environment
                                      // Canada alerts for it (section 7).
       marine_zone: "LMZ874",         // string or null: adjacent NWS MARINE forecast zone id
-                                     // (migration 0010) set by the marine enrichment cron
-                                     // for US beaches (nws_zone NOT NULL) via resolveMarineZone.
-                                     // Marine warnings (Gale/Storm/Special Marine) + Small
-                                     // Craft Advisory are zoned here, not to nws_zone; the
-                                     // hourly cron matches them from the SAME national
-                                     // /alerts/active fetch and merges into inputs.alerts.
-      marine_attempts: 0,            // number: failed/empty marine-zone probes (mirrors
-                                     // enrichment_attempts). Rows at MARINE_ENRICHMENT_MAX_ATTEMPTS
-                                     // park (inland points no marine zone is near).
+                                     // (migration 0010). DERIVED OFFLINE by the GitHub Actions
+                                     // discovery batch (--marine-zones): a nearest-marine-zone
+                                     // point-in-polygon + nearest-edge pass (≤15 km cap) over
+                                     // the NWS marine-zone shapefile geometry committed at
+                                     // data/marine-zones-greatlakes.json, only for US beaches
+                                     // (nws_zone NOT NULL). Change-only UPDATEs; NEVER NULLed
+                                     // once set. The retired in-Worker resolveMarineZone probe
+                                     // no longer writes it. Marine warnings (Gale/Storm/Special
+                                     // Marine) + Small Craft Advisory are zoned here, not to
+                                     // nws_zone; the hourly cron matches them from the SAME
+                                     // national /alerts/active fetch and merges into inputs.alerts.
+      marine_attempts: 0,            // number: VESTIGIAL — column retained, but nothing writes
+                                     // it since marine_zone moved to the offline pass. Was:
+                                     // failed/empty marine-zone probes of the old live cron.
       osm_id: "node/123456",         // string: osmType + "/" + osmNumericId
       webcam_id: "1595253287",       // string or null: Windy webcamId of the nearest active cam
       webcam_title: "Indian Grove: South Haven", // string or null (may be "")
@@ -355,7 +360,10 @@ Binding name: FLAGS (single namespace for both key families).
 - Key "flag:" + beachId  → JSON.stringify(FlagEstimate). Written by hourly cron with
   { expirationTtl: 7200 }.
 - Key "official:" + beachId → JSON.stringify(OfficialFlag). Written by hourly cron with
-  { expirationTtl: 7200 }.
+  { expirationTtl: 7200 } by default (KV_TTL_SECONDS), but the TTL is per-scraper
+  overridable: a scraper object may set an optional `officialTtlSeconds` field to extend it
+  when it fetches on a reduced cadence (wisconsin-dnr uses 28800 / 8 h so its ~6h-spaced
+  color persists in KV between fetches). See section 7 step 8.
 - Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the 6-hourly wave cron
   (runWaveRefresh) with { expirationTtl: 25200 }, and only when the series has >= 1 finite
   hour (section 1). Read ONLY by the detail route (the list page must not gain per-row
@@ -366,6 +374,13 @@ Binding name: FLAGS (single namespace for both key families).
   wave height or a wind fallback for the beach (section 1). Read by the hourly
   runFlagRecompute — the current wave height + wind fallback for the estimate come from
   here, NOT a live fetch. Absent key → the estimate has no wave input this run.
+- Key "glcfs:catalogs" → JSON.stringify({ platforms: [{ obsDatasetId, lat, lon }, ...],
+  waveParameterIds: number[] }) — the two SMALL derived structures parsed from the ~5.5 MB
+  semi-static GLOS Seagull catalogs (the wave-parameter-id Set serialized as an array).
+  Written AND read by the 6-hourly wave cron (runWaveRefresh) ONLY, with
+  { expirationTtl: 86400 } (~24 h), so the cron reuses them instead of re-downloading both
+  catalogs every run. Absent/corrupt → the wave cron fetches both catalogs fresh (never an
+  error). The request path never touches this key (two-path rule intact).
 - Key "scraperhealth:" + scraperId → JSON { consecutiveNulls, lastSuccess,
   lastFailure }. Written by the hourly cron with NO expirationTtl (the failure
   streak must survive across runs). See section 7 step 8.
@@ -745,13 +760,14 @@ bottom of the file, NOT in the live array) and everything downstream picks them 
       // Pure; regex /\/gridpoints\/([A-Z0-9]{3})\//; returns null on no match / null input.
 
     export async function fetchLatestSrfText(wfo)
-      // wfo: "GRR". Two-step:
-      //   1. GET "https://api.weather.gov/products/types/SRF/locations/" + wfo
-      //      -> json["@graph"], take element [0] (most recent), read its "id" field.
-      //   2. GET "https://api.weather.gov/products/" + id -> json.productText
+      // wfo: "GRR". SINGLE call (F4):
+      //   GET "https://api.weather.gov/products/types/SRF/locations/" + wfo + "/latest"
+      //   -> returns the newest matching product object with json.productText inline
+      //   (no separate list -> @graph[0].id -> /products/{id} second leg).
       // Success -> { text: productText, productId: "SRF " + wfo,
-      //              sourceUrl: "https://api.weather.gov/products/types/SRF/locations/" + wfo }
-      // Empty @graph or failure -> null
+      //              sourceUrl: "https://api.weather.gov/products/types/SRF/locations/" + wfo + "/latest" }
+      // Missing productText or failure -> null. Consumed shape unchanged
+      // (parseRipCurrentRisk reads only .text); sourceUrl is now the /latest URL.
 
     export async function fetchPointMetadata(lat, lon)
       // GET "https://api.weather.gov/points/" + lat.toFixed(4) + "," + lon.toFixed(4)
@@ -764,13 +780,17 @@ bottom of the file, NOT in the live array) and everything downstream picks them 
 
 Environment and Climate Change Canada via the MSC GeoMet OGC API
 (api.weather.gc.ca, pygeoapi) — the Canadian counterpart to nws.js for
-Ontario-shoreline beaches api.weather.gov 404s forever. Unlike
-api.weather.gov, GeoMet needs NO auth and NO User-Agent header. Alert
-features carry the REAL alert-region polygons, so there is no per-zone alerts
-endpoint to poll: the hourly cron makes ONE national fetch and matches beaches
-locally via pointInGeometry (src/geo.js).
+Ontario-shoreline beaches api.weather.gov 404s forever. GeoMet needs NO auth,
+but the MSC Open Data Service Usage Policy explicitly RECOMMENDS "a meaningful
+HTTP User-Agent header" (it is how ECCC reaches an app before rate-limiting it),
+so every GeoMet request (weather-alerts AND forecast-zones) now carries
+ECCC_USER_AGENT. Alert features carry the REAL alert-region polygons, so there
+is no per-zone alerts endpoint to poll: the hourly cron makes ONE national fetch
+and matches beaches locally via pointInGeometry (src/geo.js).
 
     export const ECCC_API_BASE = "https://api.weather.gc.ca";
+    export const ECCC_USER_AGENT = "swim.report (https://swim.report)";
+      // sent on EVERY GeoMet request (mirrors nws.js NWS_USER_AGENT).
     export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
       // human-readable alerts page for source { url } entries
 
@@ -779,6 +799,7 @@ locally via pointInGeometry (src/geo.js).
       // whole national active set is fetched once per run and matched to beaches
       // locally via ecccAlertsForPoint.
       // GET ECCC_API_BASE + "/collections/weather-alerts/items?f=json&limit=2000"
+      //   with header { "User-Agent": ECCC_USER_AGENT }.
       //   The national active set runs a few hundred in a busy period, so the
       //   2000 limit leaves ample headroom for one page to always suffice
       //   (pygeoapi CLAMPS an over-max limit rather than erroring); a page that
@@ -802,17 +823,29 @@ locally via pointInGeometry (src/geo.js).
       // ends }] } (details deduped on exact (event, onset, ends) repeats,
       // matching nwsAlertsForZone). Malformed input -> empty result.
 
-    export async function fetchEcccZoneName(lat, lon)
-      // Enrichment counterpart of nws.js fetchPointMetadata.
+    export async function fetchEcccForecastZones()
+      // The ENTIRE ECCC public forecast-region set in ONE fetch, WITH geometry
+      // (F12) — the enrichment counterpart of the alerts path's one-national-
+      // fetch shape, replacing the old per-beach fetchEcccZoneName lookups.
       // GET ECCC_API_BASE + "/collections/public-standard-forecast-zones/items
-      //   ?f=json&skipGeometry=true&limit=2&bbox=<point +/- 0.01 deg>"
-      // (the tiny bbox acts as a server-side containment test; skipGeometry
-      // keeps the response small — region polygons are large).
-      // Success with a region -> { zoneName: properties.NAME }, e.g.
-      // "Windsor - Essex - Chatham-Kent". A clean ZERO-region answer (a US
-      // point) -> null, deliberately indistinguishable from failure: both
-      // count an enrichment attempt and the cap parks the row either way.
-      // Failure -> null.
+      //   ?f=json&limit=2000" with header { "User-Agent": ECCC_USER_AGENT }.
+      //   The collection holds ~419 features nationwide, so 2000 leaves ample
+      //   headroom for one page (pygeoapi CLAMPS an over-max limit); an exactly-
+      //   full page logs a truncation warning.
+      // Success -> [{ name: properties.NAME, geometry }], e.g.
+      //   { name: "Windsor - Essex - Chatham-Kent", geometry }. Only features
+      //   with BOTH a non-empty NAME and an areal geometry are kept.
+      // Failure -> null (the caller parks the whole run, bumping no per-beach
+      //   attempt).
+
+    export function ecccZoneNameForPoint(zones, lat, lon)
+      // Pure, exported for tests. Resolves a beach point to its forecast-region
+      // NAME against a fetchEcccForecastZones result via exact point-in-polygon
+      // (pointInGeometry) — the first zone whose polygon contains the point,
+      // else null. Conservative by design: a point just OUTSIDE its region
+      // polygon (a shoreline centroid nudged offshore) resolves to null and the
+      // caller parks it, exactly as a US point (no containing Canadian region)
+      // does. Malformed input -> null.
 
 ### src/clients/srfParser.js (pure, no fetch)
 
@@ -906,23 +939,51 @@ null is expected behavior, not an error.
     export const MAX_OBS_AGE_MS = 7200000;      // matches the product-wide 2 h stale rule
     export const MAX_PLATFORM_FETCHES = 60;     // hard cap on per-run obs fetches
 
-    export async function fetchGlcfsWaveHeightsFt(points, nowIso)
+    export async function fetchGlcfsWaveHeightsFt(points, nowIso, cachedCatalogs)
       // points: [{ beachId, lat, lon }]; nowIso drives ALL freshness math (no Date.now()).
-      // EXACTLY openMeteo.fetchWaveHeightsFt's result shape:
+      // cachedCatalogs (optional): the derived { platforms, waveParameterIds } the cron
+      //   cached in KV (see "glcfs:catalogs", section 3). When USABLE, both large catalog
+      //   fetches are SKIPPED; when absent/garbage, they are fetched fresh.
+      // Result shape is a SUPERSET of openMeteo.fetchWaveHeightsFt's, plus catalog
+      // bookkeeping the cron uses to cache:
       //   { results: { beachId -> { waveHeightFt: number|null, model: GLCFS_WAVE_MODEL|null } },
-      //     sourceUrl }
+      //     sourceUrl,
+      //     catalogs: { platforms, waveParameterIds } | null,  // the structures used
+      //     catalogsFetched: boolean }                         // true iff fetched fresh
       //   Every input beachId MUST appear in results (nulls on miss).
-      // Flow: fetch the platform geojson + parameter catalog (2 subrequests), map each
+      // Flow: reuse cachedCatalogs when usable, else fetch + parse the platform geojson +
+      // parameter catalog (the 2 catalog subrequests, SKIPPED on a cache hit). Map each
       // beach to its nearest wave platform within 25 km, dedup platforms, then one
-      // /obs?obsDatasetId=N&startDate=<UTC date of nowIso - 2 h> fetch per UNIQUE
-      // platform (capped at MAX_PLATFORM_FETCHES, small concurrency batches). There is
-      // no working single-parameter filter upstream — fetch all params and select
-      // standard_name "sea_surface_wave_significant_height" client-side; freshest
-      // observation within the 2 h window wins; value is METERS -> * 3.28084 to feet.
+      // /obs?obsDatasetId=N&startDate=<UTC date of nowIso - 2 h>&parameterId=<comma-
+      // separated wave ids> fetch per UNIQUE platform (capped at MAX_PLATFORM_FETCHES,
+      // small concurrency batches). The obs request appends &parameterId=<wave ids> (F9):
+      // the server returns ONLY the requested parameters (~9x smaller payload; verified
+      // live), and parseObsWaveHeightFt still filters standard_name
+      // "sea_surface_wave_significant_height" client-side, so behavior is unchanged.
+      // Freshest observation within the 2 h window wins; value is METERS -> * 3.28084.
       // A failed platform fetch nulls only that platform's beaches. Total failure
-      // (either catalog fetch, unparseable nowIso) -> null.
-      // Subrequest cost: <= 2 + MAX_PLATFORM_FETCHES = 62 worst case (budget math in
-      // the module and section 7).
+      // (a catalog fetch on the fresh path, unparseable nowIso) -> null.
+      // Env-free: the module knows nothing about KV — the cron owns caching.
+      // Subrequest cost: <= 2 (catalogs, skipped on a cache hit) + MAX_PLATFORM_FETCHES =
+      // 62 worst case, typically <= 60 obs fetches on a hit (budget math in the module
+      // and section 7).
+
+    export async function fetchWaveCatalogs()
+      // Fetch + parse the two large semi-static Seagull catalogs (the ~3.4 MB
+      // /parameters and ~2.1 MB /obs-datasets.geojson) into the two SMALL derived
+      // structures the obs step needs: { platforms: [{ obsDatasetId, lat, lon }],
+      // waveParameterIds: Set }. Null when EITHER catalog fetch fails. Separable so the
+      // wave cron can cache the derived result in KV and hand it back to
+      // fetchGlcfsWaveHeightsFt. Env-free.
+
+    export function serializeWaveCatalogs(catalogs)
+      // Pure. Derived catalogs -> JSON-safe object for KV (the waveParameterIds Set is
+      // written as an array, since JSON cannot represent a Set).
+
+    export function deserializeWaveCatalogs(raw)
+      // Pure. Rehydrate a serializeWaveCatalogs KV payload back into the derived
+      // structures (array -> Set). Null on any missing/malformed field so a corrupt or
+      // stale-shaped cache degrades to a fresh fetch rather than throwing.
 
     Pure helpers, exported for tests: parseWaveParameterIds(paramsJson) -> Set of
     wave parameter_ids (per-platform ids; empty Set on malformed input);
@@ -954,12 +1015,15 @@ entirely when it is unset.
       // Pure, exported for tests. Parsed v3 /webcams body ->
       //   { webcamId: "1595253287" (String()-coerced), title: string ("" fallback),
       //     playerUrl: player.live when a non-empty string else player.day }
+      //   for the nearest usable active cam WITHIN WEBCAM_RADIUS_KM of (lat, lon),
       //   or null when no usable cam. Skips entries that are not objects, whose
       //   status !== "active" (inactive cams DO appear in nearby results), whose
       //   player object has neither a usable .live nor .day string, or whose
-      //   location.latitude/.longitude are not finite. Nearest by haversine
-      //   (distanceKm imported from ./glerl.js, which re-exports it from
-      //   ../geo.js). Malformed input -> null.
+      //   location.latitude/.longitude are not finite. The radius guard is now
+      //   enforced IN THE PARSER (not only by the nearby query param), so a shared
+      //   bbox result set (fetchWebcamsInBbox may return cams nearer some OTHER beach
+      //   in the bucket) stays correct. Nearest by haversine (distanceKm imported
+      //   from ./glerl.js, which re-exports it from ../geo.js). Malformed input -> null.
 
     export async function fetchNearestWebcam(lat, lon, apiKey)
       // GET WINDY_WEBCAMS_API_URL + "?nearby=" + lat + "," + lon + "," +
@@ -969,6 +1033,19 @@ entirely when it is unset.
       //   CONFIRMED "no cam within radius" (cron stamps webcam_checked and clears the
       //   webcam columns). Falsy apiKey or any transport/HTTP/parse failure -> null
       //   (unknown — cron leaves the row untouched for the next nightly run).
+
+    export async function fetchWebcamsInBbox(north, east, south, west, apiKey)
+      // One /webcams request bounded by a bbox rectangle so a bucket of nearby beaches
+      // (runWebcamSync clustering, F14) shares a single round trip instead of one
+      // nearby query each. GET WINDY_WEBCAMS_API_URL + "?bbox=<north,east,south,west>
+      //   &include=player,location&limit=" + WEBCAM_FETCH_LIMIT with header
+      //   { "x-windy-api-key": apiKey }. bbox order is Windy's documented
+      //   north,east,south,west.
+      // Returns the RAW parsed body ({ webcams: [...] }) for the caller to run
+      //   parseNearestActiveWebcam per beach against, or null on ANY failure (falsy
+      //   apiKey short-circuits to null before any fetch). The 50-cam cap
+      //   (WEBCAM_FETCH_LIMIT) means the caller must treat a full-length result as
+      //   possibly truncated and fall back to per-beach nearby queries.
 
 ### src/clients/overpass.js
 
@@ -1009,12 +1086,20 @@ entirely when it is unset.
       // bbox: { minLon, minLat, maxLon, maxLat } (numbers)
       // POST OVERPASS_URL, body "data=" + encodeURIComponent(query) where query is
       // (Overpass bbox order is south,west,north,east):
-      //   [out:json][timeout:90];
+      //   [out:json][timeout:90][maxsize:67108864];
       //   (
       //     nwr["natural"="beach"]["name"](minLat,minLon,maxLat,maxLon);
       //     nwr["leisure"="beach_resort"]["name"](minLat,minLon,maxLat,maxLon);
       //   );
       //   out center tags;
+      // The [maxsize:N] token (F10) declares a conservative EXECUTION-memory ceiling
+      // below Overpass's 512 MiB default, improving admission odds during a 504 overload
+      // storm on the shared public mirrors (the commons doc: the server "prioritizes
+      // small requests over large ones"). Per-builder values: buildQuery
+      // [maxsize:67108864] (64 MiB), buildParkBeachQuery [timeout:180][maxsize:134217728]
+      // (128 MiB), buildWaterClassQuery [timeout:60][maxsize:268435456] (256 MiB — the
+      // most generous, since its around-on-relations lake probe can pull a Great Lakes
+      // multipolygon's member geometry into execution memory). Tuned timeouts unchanged.
       // Only elements WITH a name tag are requested (data-quality choice; unnamed beaches
       // are out of scope for the pilot).
       // Per element: lat/lon from element.lat/element.lon (nodes) or element.center.lat/.lon
@@ -1408,6 +1493,11 @@ guessed color). Full color semantics are in README.md's official-sources table.
   names[]/proximity check, so a same-named Michigan/Ontario beach can never
   inherit an Ohio official flag; only distinctive, low-collision names go in
   names[] (generic labels resolve by proximity only).
+  scrape() has a coarse PRE-FETCH off-season gate (F1, isOhioSeasonPossible,
+  America/New_York): BeachGuard is a summer-only program, so for roughly Nov-Apr
+  the whole ~51-request detail fan-out is skipped entirely (returns null without
+  fetching), mirroring southHaven's pre-fetch skip; the authoritative per-plan
+  swim-season check in parseOhioBeach still gates the color inside the window.
   Out-of-season -> omitted; current advisory -> red for any HAB advisory
   (HAB_WARNING_ADV OR HAB_WATCH_ADV — both advise against water contact, watch
   collapsed UP to red per the never-a-false-green bias — or severity >= 4) else
@@ -1448,6 +1538,19 @@ guessed color). Full color semantics are in README.md's official-sources table.
   like "North Beach" would win over proximity and mis-bind); its broad bbox
   overlaps Michigan's western UP, which is safe because unresolved beaches just
   get no official flag.
+  Fetch-cadence gating (F2): scrape() has a PRE-FETCH gate that skips the slow
+  ~34 s statewide query entirely outside a deliberately WIDE May-October
+  (America/Chicago) monitoring season, and in-season fetches only on evenly-spread
+  local hours [0, 6, 12, 18] (4x/day) rather than hourly — the feed changes at most
+  ~daily (partner labs sample 1-5x/week, summer only). The last official color
+  persists in KV between fetches via the per-scraper official-KV TTL
+  (officialTtlSeconds = WISCONSIN_DNR_OFFICIAL_TTL_SECONDS = 28800 / 8 h; section 3,
+  section 7 step 8). Exported pure gate helpers: isWisconsinDnrInSeason(nowIso),
+  isWisconsinDnrFetchHour(nowIso), shouldFetchWisconsinDnr(nowIso). The User-Agent
+  is now SELF-IDENTIFYING ("Mozilla/5.0 (swim.report; +https://swim.report)",
+  re-probed 2026-07-20: the full statewide outFields=* query returns 200 with all
+  441 features under it) — no longer a spoofed desktop Chrome UA; the 60 s cron
+  timeout override is retained (the query is still slow).
 
 ## 7. Cron design (src/index.js)
 
@@ -1462,13 +1565,16 @@ still reads only D1/KV (the two-path rule holds).
 wrangler.toml triggers:
 
     [triggers]
-    crons = ["0 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+    crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
 matched job; an unrecognized cron is logged and ignored. The table:
-- "0 * * * *"          → runFlagRecompute(env)  (hourly; reads wave inputs from KV, does NOT
-                         fetch waves — see runWaveRefresh)
+- "7 * * * *"          → runFlagRecompute(env)  (hourly; reads wave inputs from KV, does NOT
+                         fetch waves — see runWaveRefresh. Offset off the congested :00
+                         top-of-hour slot the repo's own GH workflows avoid; any minute
+                         before :15 preserves the wave-cron ordering since it only READS
+                         the "waveinput:" KV)
 - "15 */6 * * *"       → runWaveRefresh(env)    (6-hourly; owns ALL Open-Meteo/GLOS wave &
                          wind fetching, writes the "waveinput:"/"waves:" KV the hourly cron reads)
 - "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; picks up rows the offline
@@ -1550,7 +1656,11 @@ still needs real pagination (TODO.md).
 8. Officials: group beaches by findScraper(beach) id; call each distinct scraper's
    scrape(nowIso) ONCE per run; for every matched beach resolve the shared result via
    scrapeOfficialFlagFromResult(beach, scraper, result) and write the returned
-   OfficialFlag to "official:" + beach.id ({ expirationTtl: 7200 }). Null scrape result,
+   OfficialFlag to "official:" + beach.id with
+   { expirationTtl: scraper.officialTtlSeconds ?? KV_TTL_SECONDS } — i.e. a scraper may
+   opt into a longer official-KV TTL (its optional officialTtlSeconds field) when it
+   fetches on a reduced cadence, so its last color persists between infrequent fetches;
+   default 7200 (section 3, and wisconsin-dnr's 28800 in section 6). Null scrape result,
    or a beach that resolves to no site (multi-site shape), → NO KV write for that beach
    (old key expires naturally).
    Scraper health monitoring (hourly path only): around each distinct MATCHED
@@ -1625,8 +1735,15 @@ strip showing slightly-older-but-still-model-current data instead of blanking it
    stores the hoursFt: null batch-failure sentinel (NOT an all-null array — distinguishes
    "fetch failed" from "fetched, all cells masked"), models: [], byModel: {}.
 3. Great Lakes buoy gap-fill: for beaches STILL wave-null, one fetchGlcfsWaveHeightsFt(
-   points, nowIso) call (src/clients/glerl.js — dedups buoy fetches internally, <= 62
-   subrequests). Non-null readings overwrite ONLY the entry's waveHeightFt and model
+   points, nowIso, cachedCatalogs) call (src/clients/glerl.js — dedups buoy fetches
+   internally, <= 62 subrequests). BEFORE the call, read the cron-cached derived catalogs
+   from the "glcfs:catalogs" KV (section 3) and deserializeWaveCatalogs (null on
+   miss/corrupt) → pass as cachedCatalogs so the client skips the two ~5.5 MB catalog
+   downloads on a hit. AFTER a fresh (non-cache) fetch of NON-EMPTY catalogs
+   (glcfsData.catalogsFetched && non-empty platforms/waveParameterIds), serialize and write
+   them back to "glcfs:catalogs" with { expirationTtl: 86400 } (~24 h); a cache HIT does
+   NOT rewrite (so the TTL genuinely expires and re-fetches), and empty catalogs are never
+   cached. Non-null readings overwrite ONLY the entry's waveHeightFt and model
    (model: GLCFS_WAVE_MODEL), PRESERVING hoursFt/models/byModel — buoys are nearest-point
    now-observations with no hourly series, and one is never synthesized.
 4. Wind: only for beaches whose waveHeightFt is still null (recomputed fresh — step 3 may
@@ -1645,9 +1762,19 @@ strip showing slightly-older-but-still-model-current data instead of blanking it
    inputs / series counts.
 
 Subrequest budget: ~7 paced marine batches (100/batch over ~613 beaches) + ≤62 GLCFS buoy
-(2 catalogs + ≤60 deduped platform fetches) + ≤7 paced wind batches + ≤613 waveinput KV
-puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the inter-wave sleeps
-burn no CPU so the paced run stays inside the scheduled invocation's time budget.
+(the 2 catalog fetches are AVOIDED on a "glcfs:catalogs" cache hit — most runs — so GLCFS
+cost is typically ≤60 deduped platform obs fetches) + ≤7 paced wind batches + ≤613
+waveinput KV puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the
+inter-wave sleeps burn no CPU so the paced run stays inside the scheduled invocation's
+time budget.
+
+Open-Meteo daily-budget accounting (U1): batchByBeach returns the run's weighted-call
+estimate (sum of batch.length over every attempt including the one backoff retry, since
+Open-Meteo weights a multi-location request by its location count), and runWaveRefresh logs
+wave + wind weighted calls against OPEN_METEO_DAILY_WEIGHTED_CEILING (10000/day free tier).
+Visibility only — no behavioral throttling on the DAILY budget yet (the existing pacing
+guards the per-MINUTE limit); the daily ceiling binds first once nationwide pagination
+removes the LIMIT 1000 cap (TODO.md).
 
 ### Discovery pipeline (offline batch — GitHub Actions, NOT an in-Worker cron)
 
@@ -1682,9 +1809,45 @@ daily discovery upserts:
   `always()`-gated — a `timeout-minutes` cancel would SKIP `!cancelled()` steps —
   and Apply truncates any torn tail; an empty/partial delta applies as an idempotent
   no-op). The request path / rules / KV / D1 contract is unchanged.
-Passing both `--no-classify` and `--no-discovery` (nothing to do) is a guarded
+Either mode may ALSO carry the offline marine_zone derivation (`--marine-zones <path>`,
+which discovery.yml passes; see "Offline marine_zone pass" below). The nothingToDo(args)
+guard errors only when discovery, classify, AND the marine pass are ALL off — passing
+`--no-classify --no-discovery` WITHOUT `--marine-zones` (nothing to do) is the guarded
 error. The mode split is purely operational: the D1 schema (section 2) and the KV
 shapes (sections 1, 3) are UNCHANGED, and the request path still reads only D1/KV.
+
+Offline marine_zone pass (`--marine-zones <path>`, discovery.yml) — replaces the retired
+in-Worker runMarineEnrichment cron (up to ~1,360 live api.weather.gov probes/day) with
+pure local math over repo-committed geometry, deriving beaches.marine_zone with ZERO
+upstream requests (F6). It runs against the `--snapshot` rows only (a beach discovered THIS
+run resolves on the NEXT daily run, once in-Worker NWS enrichment has stamped its
+nws_zone), skips rows in this run's reconciliation delete set, and NEVER affects
+reconciliationAllowed or the delete path — it only ever appends change-only UPDATEs.
+- Committed data: `data/marine-zones-greatlakes.json`, the Great Lakes NWS marine-zone
+  geometry generated by `scripts/build-marine-zones.js` from the NWS coastal marine-zone
+  shapefile (https://www.weather.gov/gis/MarineZones, refreshed ~biannually; see
+  docs/offline-discovery.md for the file format and refresh procedure).
+- `src/marineZones.js`:
+  - `buildMarineZoneIndex(zonesData)` — builds the spatial lookup index; THROWS on
+    malformed input (the batch surfaces a bad committed file rather than silently
+    deriving nothing).
+  - `nearestMarineZone(index, lat, lon)` -> zone id | null: point-in-polygon first, else
+    nearest polygon edge within `MARINE_ZONE_MAX_DISTANCE_KM = 15` (a strict superset of
+    the retired probe's ~13.6 km reach), else null. Deterministic tie-break: a <1e-9 km
+    tie resolves to the lexicographically smallest id, so a steady-state run emits zero
+    statements.
+  - `marineZoneSql(snapshotRows, deletedIds, index)` -> { statements, considered, updates }:
+    for each snapshot row with a non-empty nws_zone not in deletedIds, derive the zone and
+    emit an UPDATE only when the derived zone is non-null AND differs from the snapshot
+    value (derived-null NEVER NULLs an existing value — an old probe result beats nothing).
+    Exact SQL shape (SQL-side guards keep it idempotent under a stale snapshot):
+    `UPDATE beaches SET marine_zone = '<zone>' WHERE id = '<id>' AND nws_zone IS NOT NULL
+    AND (marine_zone IS NULL OR marine_zone <> '<zone>');`
+- sync_meta stamps: `last_marine_zone_pass` (nowIso) and `last_marine_zone_count`
+  (updates emitted this run).
+- discovery.yml snapshot columns now include `nws_zone` and `marine_zone` (full list:
+  id, osm_id, name, lat, lon, park_name, water_class, water_class_version,
+  water_class_attempts, nws_zone, marine_zone).
 
 Locally, `npm run seed` runs the batch against local D1 in discovery-only mode
 (`deno run ... scripts/discovery-batch.js --out ./.seed.sql --no-classify` then
@@ -1868,10 +2031,16 @@ rows NWS enrichment permanently parked:
 
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts >= 5
 AND eccc_zone IS NULL AND eccc_attempts < 5 ORDER BY eccc_attempts ASC, RANDOM()
-LIMIT 50; for each, fetchEcccZoneName(lat, lon) sequentially; on success UPDATE
-beaches SET eccc_zone = ? WHERE id = ?; on null/throw UPDATE beaches SET
-eccc_attempts = eccc_attempts + 1 WHERE id = ? (per-beach isolation via
-bumpEcccAttempts, mirroring the NWS side). A row with eccc_zone set is Canadian:
+LIMIT 50. ONE bulk fetchEcccForecastZones() per run fetches the whole forecast-region
+polygon set (F12), then each beach resolves LOCALLY via ecccZoneNameForPoint(zones, lat,
+lon) — the same one-national-fetch + local point-in-polygon shape as the alerts path,
+replacing up to 50 per-point GeoMet requests with a single one. A FAILED bulk fetch (null)
+PARKS the whole run: every beach skipped, NO attempt bumped, no throw, so a transient
+GeoMet outage never burns the attempts budget of resolvable rows. Per resolved beach:
+on success UPDATE beaches SET eccc_zone = ? WHERE id = ?; a beach no Canadian region
+contains (a US point, or a shoreline centroid nudged just offshore) bumps an attempt
+(UPDATE beaches SET eccc_attempts = eccc_attempts + 1 WHERE id = ?, per-beach isolation
+via bumpEcccAttempts, mirroring the NWS side). A row with eccc_zone set is Canadian:
 the hourly recompute checks Environment Canada alerts for it and it stops
 carrying the alerts-unavailable caveat. Rows no Canadian region matches (a US
 point that somehow exhausted NWS attempts, a mid-lake centroid) park at the cap
@@ -1889,14 +2058,24 @@ SELECT id, lat, lon FROM beaches WHERE webcam_checked IS NULL OR
 webcam_checked < (nowIso - 14 days) ORDER BY webcam_checked ASC, id ASC LIMIT 100
 (SQLite sorts NULLs first ASC, so never-checked rows drain before rechecks; 100/night
 fills the pilot in a few nights and the 14-day recheck cadence stays ahead of the
-beach count). For each row sequentially, fetchNearestWebcam(lat, lon, token):
-- null (API failure) → row untouched; it stays at the front of the queue.
+beach count). Due beaches are BUCKETED onto a coarse lat/lon grid (F14,
+WEBCAM_CLUSTER_SPAN_DEG = 0.2): a cell holding >1 beach shares ONE fetchWebcamsInBbox
+request (the cell's bounding box grown by WEBCAM_BBOX_MARGIN_DEG = 0.07 on every side so
+each beach's full WEBCAM_RADIUS_KM neighborhood sits inside it), then
+parseNearestActiveWebcam runs per beach against the shared result (the parser's radius
+guard keeps each beach's nearest correct even though the bbox is bucket-wide). A LONE cell,
+a FAILED bucket fetch, or a bucket whose result comes back cap-truncated (>= WEBCAM_FETCH_LIMIT
+= 50 cams, possibly incomplete) falls back to a per-beach fetchNearestWebcam nearby query.
+Clustering is best-effort: a beach may misbucket at a float cell boundary, which costs only
+the optimization (an extra request), never correctness. Each beach's persisted result
+(the shared { webcam } | null shape both paths produce):
+- null (API failure / failed bucket fetch) → row untouched; it stays at the front of the queue.
 - { webcam: null } (confirmed no cam) → clear webcam_id/webcam_title/
   webcam_player_url, set webcam_checked = nowIso.
 - { webcam } → write webcamId/title/playerUrl + webcam_checked = nowIso.
-Summary log reports due / webcams_checked / webcams_found / webcam_failures. ≤201
-subrequests per run. The stored player URL is only ever dereferenced by the visitor's
-BROWSER on the detail page — never by the request path.
+Summary log reports due / webcams_checked / webcams_found / webcam_failures. The stored
+player URL is only ever dereferenced by the visitor's BROWSER on the detail page — never
+by the request path.
 
 ### Water classification (offline batch classify-only mode)
 
@@ -2067,7 +2246,7 @@ Routing table (method GET only; anything else → 405):
     enabled = true
 
     [triggers]
-    crons = ["0 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+    crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
     [[d1_databases]]
     binding = "DB"
@@ -2180,7 +2359,13 @@ exporting a CSS string); render.js is the sole module the router imports.
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
   Rendered inside the shared footer <small> alongside the data attributions ("NOAA/NWS,
   Environment and Climate Change Canada, and Open-Meteo"). The sentence itself is the
-  invariant.
+  invariant. The footer ALSO carries the site-wide Windy webcam attribution the free
+  tier's Terms require (https://api.windy.com/webcams/terms), exact text "Webcams
+  provided by Windy.com — add a webcam." with "Windy.com" linking to
+  https://www.windy.com/webcams and "add a webcam" linking to
+  https://www.windy.com/webcams/add, positioned BETWEEN the data-attributions sentence
+  and the disclaimer sentence. This once-per-page footer credit satisfies Windy's Terms
+  credit obligation on every page.
 
 ### Flag rendering rules
 
@@ -2384,7 +2569,11 @@ exporting a CSS string); render.js is the sole module the router imports.
   responsive, fetched by the BROWSER. Heading "Nearby webcam" — the caption must stay honest
   that the cam is NEARBY, not necessarily the beach itself: it shows beach.webcam_title (when
   non-empty) plus an attribution link to https://www.windy.com/webcams naming
-  Windy.com (free-tier attribution requirement). All dynamic values escape through
+  Windy.com (free-tier attribution requirement). This per-webcam caption link is IN
+  ADDITION to (not a substitute for) the site-wide Windy Terms credit now carried in the
+  shared footer (section 9's page-skeleton bullet): the footer satisfies Windy's Terms
+  credit obligation on every page, and this caption remains a page-local supplementary
+  link (intentionally left unchanged by the footer fix). All dynamic values escape through
   escapeHtml, including attribute positions.
 
 ## 10. Test plan (Vitest, node environment — default; vitest.config.js only if needed)
@@ -2457,11 +2646,14 @@ legacy defaults).
 
 - test/eccc.test.js — pointInGeometry (interior/exterior/hole/MultiPolygon/malformed→false);
   fetchActiveEcccAlerts with stubbed fetch (mapping, drops ended/expired, limit=2000, no
-  bbox, null on failure); ecccAlertsForPoint (containment, dedupe, malformed→empty);
-  fetchEcccZoneName (region NAME, skipGeometry, zero-region→null, HTTP fail→null).
+  bbox, ECCC_USER_AGENT header, null on failure); ecccAlertsForPoint (containment, dedupe,
+  malformed→empty); fetchEcccForecastZones (one items request WITH geometry, limit=2000,
+  ECCC_USER_AGENT, keeps only NAME+geometry features, null on failure); ecccZoneNameForPoint
+  (point-in-polygon region NAME, outside-all→null, malformed→null).
 - test/ecccEnrichment.test.js — runEcccEnrichment via runScheduledCron with a recording DB
-  stub: success stamps eccc_zone (no bump); zero-region null bumps eccc_attempts; a thrown
-  fetch bumps only that beach and the loop continues (per-beach isolation).
+  stub: ONE bulk fetchEcccForecastZones then local resolution; success stamps eccc_zone (no
+  bump); an unresolved point bumps eccc_attempts; a failed bulk fetch parks the whole run
+  (no attempt bumped); per-beach isolation preserved.
 - test/srfParser.test.js — parseRipCurrentRisk cases 1-9 (HIGH/MODERATE/LOW, lowercase prose,
   "high risk of rip currents", first-occurrence-wins, no-mention→null, "LOW TO MODERATE"→LOW,
   null/""→null) and wfoFromGridUrl (case 10). Fixtures built with + and "\n" (no backticks).

@@ -9,8 +9,8 @@ import {
   NWS_USER_AGENT,
   alertsUrlForZone,
   fetchAllActiveAlerts,
-  nwsAlertsForZone,
-  resolveMarineZone
+  fetchLatestSrfText,
+  nwsAlertsForZone
 } from "../src/clients/nws.js";
 
 // A single alert feature. overrides.props merge into properties (so an
@@ -148,6 +148,61 @@ describe("fetchAllActiveAlerts", function () {
   });
 });
 
+describe("fetchLatestSrfText", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads productText from the single /latest call and reports the /latest URL", async function () {
+    const latestUrl = "https://api.weather.gov/products/types/SRF/locations/MFL/latest";
+    let requestedUrl = null;
+    let requestedInit = null;
+    let callCount = 0;
+    vi.stubGlobal("fetch", function (url, init) {
+      callCount++;
+      requestedUrl = url;
+      requestedInit = init;
+      return okJson({
+        id: "abc-123",
+        issuanceTime: "2026-07-20T12:00:00.000Z",
+        productText: "SURF ZONE FORECAST\nRIP CURRENT RISK...HIGH"
+      });
+    });
+
+    const result = await fetchLatestSrfText("MFL");
+    // A single request, to the /latest endpoint, with the NWS User-Agent.
+    expect(callCount).toBe(1);
+    expect(requestedUrl).toBe(latestUrl);
+    expect(requestedInit.headers["User-Agent"]).toBe(NWS_USER_AGENT);
+    // Shape consumed by parseRipCurrentRisk and the hourly cron is preserved,
+    // with sourceUrl now pointing at the /latest URL.
+    expect(result).toEqual({
+      text: "SURF ZONE FORECAST\nRIP CURRENT RISK...HIGH",
+      productId: "SRF MFL",
+      sourceUrl: latestUrl
+    });
+  });
+
+  it("returns null when productText is missing or malformed", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ id: "abc-123", issuanceTime: "2026-07-20T12:00:00.000Z" });
+    });
+    expect(await fetchLatestSrfText("MFL")).toBeNull();
+  });
+
+  it("returns null on HTTP failure and on a rejected fetch, never throws", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 500 });
+    });
+    expect(await fetchLatestSrfText("MFL")).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network down"));
+    });
+    expect(await fetchLatestSrfText("MFL")).toBeNull();
+  });
+});
+
 describe("nwsAlertsForZone", function () {
   it("filters by zone membership", function () {
     const alerts = [
@@ -199,67 +254,5 @@ describe("alertsUrlForZone", function () {
   it("returns the zone-scoped active-alerts URL", function () {
     expect(alertsUrlForZone("MIZ071"))
       .toBe("https://api.weather.gov/alerts/active?zone=MIZ071");
-  });
-});
-
-describe("resolveMarineZone", function () {
-  afterEach(function () {
-    vi.unstubAllGlobals();
-  });
-
-  // Build a marine /zones FeatureCollection with the given zone ids.
-  function marineZones(ids) {
-    return okJson({
-      features: ids.map(function (id) {
-        return { properties: { id: id, name: id + " name" } };
-      })
-    });
-  }
-
-  // Stub fetch so only points matching one of matchPrefixes (a substring of the
-  // "point=lat,lon" query) return a zone; everything else returns empty. Also
-  // records every requested point= value for probe-count assertions.
-  function stubMarine(matchSubstr, zoneId, requested) {
-    vi.stubGlobal("fetch", function (url) {
-      if (requested) {
-        requested.push(url);
-      }
-      if (matchSubstr !== null && url.indexOf(matchSubstr) !== -1) {
-        return marineZones([zoneId]);
-      }
-      return marineZones([]);
-    });
-  }
-
-  it("returns the zone at the exact point without probing when present", async function () {
-    const requested = [];
-    // The un-nudged point is lat.toFixed(4),lon.toFixed(4) = 42.7750,-86.2110.
-    stubMarine("point=42.7750,-86.2110", "LMZ844", requested);
-    const result = await resolveMarineZone(42.775, -86.211);
-    expect(result).toEqual({ marineZone: "LMZ844" });
-    expect(requested.length).toBe(1); // no offshore probe needed
-  });
-
-  it("finds the zone via an offshore probe when the shore point is empty", async function () {
-    const requested = [];
-    // Only the first ring, west direction (lon - 0.10 -> -86.3110) has a zone.
-    stubMarine("point=42.7750,-86.3110", "LMZ874", requested);
-    const result = await resolveMarineZone(42.775, -86.211);
-    expect(result).toEqual({ marineZone: "LMZ874" });
-    expect(requested.length).toBeGreaterThan(1); // probed offshore
-  });
-
-  it("returns { marineZone: null } when no probe finds a marine zone", async function () {
-    stubMarine(null, null, null); // every point returns empty
-    const result = await resolveMarineZone(45.0, -84.0);
-    expect(result).toEqual({ marineZone: null });
-  });
-
-  it("returns null when the first lookup fails to fetch (transient)", async function () {
-    vi.stubGlobal("fetch", function () {
-      return Promise.resolve({ ok: false, status: 500, json: function () { return Promise.resolve({}); } });
-    });
-    const result = await resolveMarineZone(42.775, -86.211);
-    expect(result).toBeNull();
   });
 });

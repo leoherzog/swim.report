@@ -126,6 +126,49 @@ export const OHIO_SITES = [
 // matches() and resolution both treat a site as covering ~2 mi of shoreline.
 export const OHIO_SITE_RADIUS_MI = 2;
 
+// Coarse pre-fetch off-season window, in America/New_York local time. ODH
+// BeachGuard is a summer-only program — samples are collected Memorial Day to
+// Labor Day — so for roughly Nov-Apr every one of scrape()'s ~51 per-id
+// subrequests returns a payload parseOhioBeach discards (the fine-grained
+// per-plan swim-season gate at parseOhioBeach rejects it). isOhioSeasonPossible
+// lets scrape() skip that whole fan-out during the off-season, mirroring
+// southHaven's pre-fetch gate. The window is deliberately COARSE and wide (the
+// fetch window is May 1 - Oct 31 inclusive, months 5..10) so it can never
+// suppress in-season data — the real season sits well inside it, and the
+// authoritative Memorial-Day-to-Labor-Day check in parseOhioBeach still gates
+// the actual color inside the window. Ohio's Lake Erie shore is Eastern time.
+const OHIO_FETCH_MONTH_START = 5;  // May
+const OHIO_FETCH_MONTH_END = 10;   // October (inclusive)
+
+// Pure. Given the cron's passed-in ISO timestamp, is the current date inside
+// the coarse BeachGuard fetch window (May-Oct, America/New_York local)? Parses
+// the passed-in string only (no Date.now()); uses Intl for the DST-correct
+// local month. A missing/unparseable timestamp is treated as in-season (do not
+// gate on a clock we do not have; scrape always supplies one).
+export function isOhioSeasonPossible(nowIso) {
+  if (typeof nowIso !== "string" || nowIso.length === 0) {
+    return true;
+  }
+  const date = new Date(nowIso);
+  if (isNaN(date.getTime())) {
+    return true;
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "numeric"
+  }).formatToParts(date);
+  let month = null;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].type === "month") {
+      month = parseInt(parts[i].value, 10);
+    }
+  }
+  if (month === null || isNaN(month)) {
+    return true;
+  }
+  return month >= OHIO_FETCH_MONTH_START && month <= OHIO_FETCH_MONTH_END;
+}
+
 // scrape() issues one detail subrequest per OHIO_SITES entry (~53). Run them in
 // small concurrent chunks — bounded so we stay polite to the ODH host and
 // within the subrequest/connection budget — instead of strictly serially.
@@ -477,6 +520,13 @@ export const ohioBeachGuard = {
   id: "ohio-beachguard",
   label: "Ohio Department of Health BeachGuard",
   url: OHIO_BEACHGUARD_PAGE,
+  // Health-monitor gate (see the scraper-health step in src/index.js): the
+  // off-season pre-fetch skip in scrape() is a DELIBERATE null, not a
+  // failure — outside the coarse season window this scraper's nulls must not
+  // count toward the consecutive-null alert streak.
+  healthMonitored: function(nowIso) {
+    return isOhioSeasonPossible(nowIso);
+  },
   matches: function(beach) {
     if (!beach) {
       return false;
@@ -505,6 +555,15 @@ export const ohioBeachGuard = {
     return false;
   },
   scrape: async function(nowIso) {
+    // Coarse off-season pre-fetch guard: BeachGuard is summer-only, so for
+    // roughly Nov-Apr the whole ~51-request fan-out returns payloads
+    // parseOhioBeach discards. Skip every fetch and report no data, mirroring
+    // southHaven's pre-fetch gate. The authoritative per-plan swim-season check
+    // in parseOhioBeach still applies inside the window.
+    if (!isOhioSeasonPossible(nowIso)) {
+      console.log("ohioBeachGuard: outside coarse swim season, skipping fetch");
+      return null;
+    }
     // Fetch each beach detail once (one subrequest per OHIO_SITES entry — the
     // bulk listing endpoint omits monitorings/advisories, so per-id detail is
     // required; see PLAN.md section 7 for the budget). Resolve one site to its

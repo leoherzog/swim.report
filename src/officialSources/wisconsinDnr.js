@@ -17,12 +17,17 @@ export const WISCONSIN_DNR_URL =
 
 import { fetchText, perBeachResult, ageDays } from "./util.js";
 
-// dnrmaps.wi.gov throttles/blocks requests without a desktop-browser
-// User-Agent (a bare request timed out at 30s in probing); the service is also
-// slow (~30s even when it succeeds), so the cron client should allow 45s+.
+// dnrmaps.wi.gov previously appeared to require a desktop-browser User-Agent (a
+// BARE request — no UA at all — timed out at 30s in early probing), so this used
+// to send a fully-spoofed Chrome UA. Re-probed 2026-07-20 with a self-
+// identifying UA (mirrors chicagoParkDistrict.js): both the trimmed and the FULL
+// statewide outFields=* query returned HTTP 200 with all 441 features, so the
+// earlier timeout was caused by sending NO UA, not by failing a browser check.
+// We now self-identify (gives DNR ops a contact channel; scraping-etiquette
+// norm). The service is still slow (~34s TTFB on the full query), so the cron
+// client keeps its 60s timeout below.
 export const WISCONSIN_DNR_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (swim.report; +https://swim.report)";
 
 // MAP_STATUS is the small closed enum that drives the public map's pin colors
 // (Open / Advisory / Closed / Closed For Season / No Data Available /
@@ -51,6 +56,111 @@ const SILENT_OMIT_STATUS = {
 // In-season samples observed in live data topped out around 13 days old, so
 // 21 days omits nothing current while reliably dropping off-season staleness.
 const MAX_SAMPLE_AGE_DAYS = 21;
+
+// ---------------------------------------------------------------------------
+// Fetch-cadence gating (F2). The statewide ArcGIS query is slow (~34s TTFB) and
+// the data behind it is a PERIODIC bacteria-sampling feed that changes at most
+// ~daily (partner labs sample beaches 1-5x/week, summer only:
+// https://dnr.wisconsin.gov/topic/Beaches/FAQ.html). Polling it on every hourly
+// cron tick is 24-120x the update rate, and off-season it is pure waste (every
+// sample is stale, so parseWisconsinDnrJson omits every site anyway). We gate
+// the fetch on two pure, DST-correct (America/Chicago) checks below, modeled on
+// southHaven's isSouthHavenMonitored season skip.
+
+// Monitoring season, as inclusive America/Chicago local MONTHS. The actual
+// program runs roughly late May through early September, but a sample stays
+// usable for MAX_SAMPLE_AGE_DAYS (21) after collection, so valid colored data
+// can linger a few weeks past the last sampling date. We therefore use a
+// deliberately WIDE, conservative window — May through October — and skip the
+// fetch only in the clearly-dead Nov-Apr months, where every sample is
+// guaranteed stale. Erring wide means we never skip a fetch that could still
+// return current data; the Nov-Apr skip removes ~7 months of wasted slow
+// queries with zero risk to product data.
+const SEASON_START_MONTH = 5;  // May
+const SEASON_END_MONTH = 10;   // October (inclusive)
+
+// In-season, fetch only on these America/Chicago local hours — a few evenly-
+// spread fetches per day (every 6h) instead of 24. Between fetches the last
+// official color persists in KV via WISCONSIN_DNR_OFFICIAL_TTL_SECONDS (the
+// official-scrape step honors it per-scraper), so off-cadence hours can safely
+// return null without the flag vanishing. 6h max staleness is negligible for a
+// source that changes at most ~daily.
+const FETCH_HOURS = [0, 6, 12, 18];
+
+// Longer official-KV TTL for this source, read by the official-scrape step in
+// src/index.js. The default 2h KV TTL would let the official flag disappear for
+// hours between the ~6h-spaced fetches; 8h keeps the last color alive across
+// the gap (with margin for a single missed fetch). SAFE here — unlike a
+// continuously-updated source — because samples change at most ~daily AND every
+// emitted site's `updated` carries its own SAMPLEDATE, so the frontend's
+// stale-data warning stays accurate regardless of how long KV holds the value.
+export const WISCONSIN_DNR_OFFICIAL_TTL_SECONDS = 28800; // 8 hours
+
+// Pure. Extract America/Chicago (Wisconsin) local month + hour from the cron's
+// passed-in ISO timestamp, using Intl for the DST-correct local wall-clock
+// (same approach as southHaven). Returns null when nowIso is missing or
+// unparseable so callers can pick a safe default rather than gate on a clock we
+// do not have.
+function wisconsinLocalParts(nowIso) {
+  if (typeof nowIso !== "string" || nowIso.length === 0) {
+    return null;
+  }
+  const date = new Date(nowIso);
+  if (isNaN(date.getTime())) {
+    return null;
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "numeric",
+    hour: "numeric",
+    hour12: false
+  }).formatToParts(date);
+  let month = null;
+  let hour = null;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].type === "month") {
+      month = parseInt(parts[i].value, 10);
+    } else if (parts[i].type === "hour") {
+      hour = parseInt(parts[i].value, 10);
+    }
+  }
+  if (month === null || hour === null || isNaN(month) || isNaN(hour)) {
+    return null;
+  }
+  // hour12:false renders midnight as 24 in some ICU builds; normalize to 0.
+  if (hour === 24) {
+    hour = 0;
+  }
+  return { month: month, hour: hour };
+}
+
+// Pure, exported for tests. Is the passed-in time within the (deliberately wide)
+// monitoring season? A missing/unparseable timestamp returns true (do not gate
+// on a clock we lack; parseWisconsinDnrJson already rejects a bad clock).
+export function isWisconsinDnrInSeason(nowIso) {
+  const parts = wisconsinLocalParts(nowIso);
+  if (parts === null) {
+    return true;
+  }
+  return parts.month >= SEASON_START_MONTH && parts.month <= SEASON_END_MONTH;
+}
+
+// Pure, exported for tests. Should the slow statewide query run at this local
+// hour? True only on FETCH_HOURS. A missing/unparseable timestamp returns true
+// (safe default: fetch rather than silently stop fetching).
+export function isWisconsinDnrFetchHour(nowIso) {
+  const parts = wisconsinLocalParts(nowIso);
+  if (parts === null) {
+    return true;
+  }
+  return FETCH_HOURS.indexOf(parts.hour) !== -1;
+}
+
+// Pure, exported for tests. Combined pre-fetch gate: fetch only when both
+// in-season AND on a cadence hour.
+export function shouldFetchWisconsinDnr(nowIso) {
+  return isWisconsinDnrInSeason(nowIso) && isWisconsinDnrFetchHour(nowIso);
+}
 
 // Pure, exported for tests. (string|null, nowIso) -> sites[] | null.
 // nowIso is the cron's current-time argument, used ONLY to judge sample
@@ -195,6 +305,16 @@ export const wisconsinDnr = {
   id: "wisconsin-dnr",
   label: "Wisconsin DNR Beach Health Program",
   url: WISCONSIN_DNR_URL,
+  // Longer official-KV TTL, honored per-scraper by the official-scrape step so
+  // the last color persists across the ~6h-spaced fetch cadence below.
+  officialTtlSeconds: WISCONSIN_DNR_OFFICIAL_TTL_SECONDS,
+  // Health-monitor gate (see the scraper-health step in src/index.js): the
+  // season/cadence pre-fetch skips in scrape() are DELIBERATE nulls, not
+  // failures — off-season months and off-cadence hours must not count toward
+  // (or reset) the consecutive-null alert streak.
+  healthMonitored: function(nowIso) {
+    return shouldFetchWisconsinDnr(nowIso);
+  },
   matches: function(beach) {
     // Wisconsin Great Lakes (Lake Michigan + Lake Superior) shoreline box.
     // This box overlaps Michigan's western Upper Peninsula. That is
@@ -205,6 +325,21 @@ export const wisconsinDnr = {
       beach.lat >= 42.45 && beach.lat <= 47.15;
   },
   scrape: async function(nowIso) {
+    // Pre-fetch gates (F2). Off-season, every sample is stale and the parser
+    // would omit every site, so the slow statewide query is pure waste — skip
+    // it entirely (mirrors southHaven). In-season, fetch only on the spread
+    // FETCH_HOURS; on off-cadence hours return null and let the last official
+    // color persist in KV (WISCONSIN_DNR_OFFICIAL_TTL_SECONDS bridges the gap).
+    if (!isWisconsinDnrInSeason(nowIso)) {
+      console.log("wisconsinDnr: out of monitoring season, skipping fetch");
+      return null;
+    }
+    if (!isWisconsinDnrFetchHour(nowIso)) {
+      console.log(
+        "wisconsinDnr: off-cadence hour, skipping fetch (last color persists in KV)"
+      );
+      return null;
+    }
     const text = await fetchText(WISCONSIN_DNR_URL, {
       headers: { "User-Agent": WISCONSIN_DNR_USER_AGENT },
       logPrefix: "wisconsinDnr: fetch failed",

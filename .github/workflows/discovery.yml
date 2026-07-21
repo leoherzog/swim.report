@@ -12,6 +12,14 @@ name: Beach discovery
 # water_class UPDATEs — so a slow classify pass can never starve or blow the
 # time budget of this fast, delete-bearing discovery pass. See docs/offline-discovery.md.
 #
+# This run ALSO derives beaches.marine_zone offline (--marine-zones), replacing
+# the retired in-Worker marine enrichment cron: a pure local nearest-marine-zone
+# pass (point-in-polygon + nearest-edge, 15 km cap) over the snapshot against
+# the repo-committed data/marine-zones-greatlakes.json, refreshed manually via
+# scripts/build-marine-zones.js when NWS publishes new coastal marine zone
+# shapefiles (https://www.weather.gov/gis/MarineZones, ~biannually). Change-only
+# idempotent UPDATEs; zero upstream requests; never touches the delete path.
+#
 # Requires one repository secret:
 #   CLOUDFLARE_API_TOKEN  — value = the CLOUDFLARE_TOKEN in .dev.vars (a token
 #                           with D1 edit scope on the swim-report database).
@@ -104,7 +112,7 @@ jobs:
           # naive `> snapshot.json` swallows them and the step fails with a blank
           # log. Capture the exit code and surface the file on failure.
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
+            --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts, nws_zone, marine_zone FROM beaches" \
             > snapshot.json; then
             echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
             cat snapshot.json
@@ -127,7 +135,8 @@ jobs:
             scripts/discovery-batch.js \
             --snapshot snapshot.json \
             --out discovery-delta.sql \
-            --no-classify
+            --no-classify \
+            --marine-zones data/marine-zones-greatlakes.json
           echo "---- delta summary ----"
           grep -c ';' discovery-delta.sql | xargs echo "statements:"
           head -n 20 discovery-delta.sql

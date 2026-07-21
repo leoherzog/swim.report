@@ -25,9 +25,12 @@ import {
   tileBbox,
   backoffDelayMs,
   budgetExhausted,
-  classifyQueue
+  classifyQueue,
+  marineZoneSql,
+  nothingToDo
 } from "../scripts/discovery-batch.js";
 import { WATER_CLASS_VERSION, WATER_CLASS_MAX_ATTEMPTS } from "../src/waterClass.js";
+import { buildMarineZoneIndex, nearestMarineZone } from "../src/marineZones.js";
 
 describe("sqlStr / sqlNum literal escaping", function () {
   it("doubles single quotes and NULLs empty values", function () {
@@ -87,6 +90,25 @@ describe("parseArgs", function () {
   });
   it("throws on unknown argument", function () {
     expect(function () { return parseArgs(["--nope"]); }).toThrow();
+  });
+  it("defaults marineZones to null; --marine-zones takes a path", function () {
+    expect(parseArgs([]).marineZones).toBe(null);
+    const a = parseArgs(["--marine-zones", "data/marine-zones-greatlakes.json"]);
+    expect(a.marineZones).toBe("data/marine-zones-greatlakes.json");
+  });
+});
+
+describe("nothingToDo guard", function () {
+  it("errors only when discovery, classify, AND the marine pass are all off", function () {
+    expect(nothingToDo(parseArgs(["--no-discovery", "--no-classify"]))).toBe(true);
+  });
+  it("marine-only is a valid mode", function () {
+    const a = parseArgs(["--no-discovery", "--no-classify", "--marine-zones", "data/marine-zones-greatlakes.json"]);
+    expect(nothingToDo(a)).toBe(false);
+  });
+  it("any single mode is valid", function () {
+    expect(nothingToDo(parseArgs(["--no-classify"]))).toBe(false);
+    expect(nothingToDo(parseArgs(["--no-discovery"]))).toBe(false);
   });
 });
 
@@ -440,6 +462,75 @@ describe("tileBbox", function () {
       expect(t.minLon).toBeGreaterThanOrEqual(lakeMichigan.minLon);
       expect(t.maxLon).toBeLessThanOrEqual(lakeMichigan.maxLon);
     }
+  });
+});
+
+describe("marineZoneSql", function () {
+  // One synthetic zone: a water rectangle east of lon -85.90 at lat 43.0..43.1.
+  // A beach just WEST of it (on land) derives "LMZ777" via nearest-edge.
+  function closedRect(minLon, minLat, maxLon, maxLat) {
+    return [
+      [minLon, minLat], [maxLon, minLat], [maxLon, maxLat], [minLon, maxLat], [minLon, minLat]
+    ];
+  }
+  const index = buildMarineZoneIndex({
+    zones: [{ id: "LMZ777", polygons: [[closedRect(-85.90, 43.0, -85.78, 43.1)]] }]
+  });
+  const nearBeach = { id: "osm-node-1", lat: 43.05, lon: -85.93, nws_zone: "MIZ071", marine_zone: null };
+
+  it("emits the exact change-only UPDATE with idempotency guards", function () {
+    const r = marineZoneSql([nearBeach], new Set(), index);
+    expect(r.considered).toBe(1);
+    expect(r.updates).toBe(1);
+    expect(r.statements).toEqual([
+      "UPDATE beaches SET marine_zone = 'LMZ777' WHERE id = 'osm-node-1'" +
+      " AND nws_zone IS NOT NULL AND (marine_zone IS NULL OR marine_zone <> 'LMZ777');"
+    ]);
+  });
+  it("emits nothing when the derived zone equals the snapshot value", function () {
+    const same = Object.assign({}, nearBeach, { marine_zone: "LMZ777" });
+    const r = marineZoneSql([same], new Set(), index);
+    expect(r.considered).toBe(1);
+    expect(r.updates).toBe(0);
+    expect(r.statements).toEqual([]);
+  });
+  it("corrects a historic probe artifact (existing value differs from derived)", function () {
+    const stale = Object.assign({}, nearBeach, { marine_zone: "LMZ874" });
+    const r = marineZoneSql([stale], new Set(), index);
+    expect(r.statements.length).toBe(1);
+    expect(r.statements[0]).toContain("SET marine_zone = 'LMZ777'");
+  });
+  it("skips rows without a non-empty nws_zone string", function () {
+    const noZone = Object.assign({}, nearBeach, { nws_zone: null });
+    const emptyZone = Object.assign({}, nearBeach, { nws_zone: "" });
+    const missing = { id: "osm-node-2", lat: 43.05, lon: -85.93 };
+    const r = marineZoneSql([noZone, emptyZone, missing], new Set(), index);
+    expect(r.considered).toBe(0);
+    expect(r.statements).toEqual([]);
+  });
+  it("skips rows deleted by this run's reconciliation", function () {
+    const r = marineZoneSql([nearBeach], new Set(["osm-node-1"]), index);
+    expect(r.considered).toBe(0);
+    expect(r.statements).toEqual([]);
+  });
+  it("NEVER NULLs out an existing value when derivation misses (derived null)", function () {
+    // A far-inland row keeps its old probe result: no statement at all.
+    const inland = { id: "osm-node-3", lat: 42.0, lon: -84.0, nws_zone: "MIZ099", marine_zone: "LMZ874" };
+    const r = marineZoneSql([inland], new Set(), index);
+    expect(r.considered).toBe(1);
+    expect(r.updates).toBe(0);
+    expect(r.statements).toEqual([]);
+  });
+  it("is idempotent: a second run over the post-update state emits zero statements", function () {
+    const first = marineZoneSql([nearBeach], new Set(), index);
+    expect(first.updates).toBe(1);
+    // Apply the derived value to the snapshot (what D1 holds after the UPDATE)…
+    const derived = nearestMarineZone(index, nearBeach.lat, nearBeach.lon);
+    const after = Object.assign({}, nearBeach, { marine_zone: derived });
+    // …and the steady-state run emits nothing.
+    const second = marineZoneSql([after], new Set(), index);
+    expect(second.updates).toBe(0);
+    expect(second.statements).toEqual([]);
   });
 });
 

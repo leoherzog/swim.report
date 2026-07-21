@@ -11,24 +11,31 @@ import {
   alertsUrlForZone,
   wfoFromGridUrl,
   fetchLatestSrfText,
-  fetchPointMetadata,
-  resolveMarineZone
+  fetchPointMetadata
 } from "./clients/nws.js";
 import {
   fetchActiveEcccAlerts,
   ecccAlertsForPoint,
-  fetchEcccZoneName,
+  fetchEcccForecastZones,
+  ecccZoneNameForPoint,
   ECCC_ALERTS_INFO_URL
 } from "./clients/eccc.js";
 import { parseRipCurrentRisk } from "./clients/srfParser.js";
 import { fetchWaveHeightsFt, fetchWinds } from "./clients/openMeteo.js";
 import {
   fetchGlcfsWaveHeightsFt,
+  serializeWaveCatalogs,
+  deserializeWaveCatalogs,
   GLCFS_WAVE_MODEL,
   SEAGULL_INFO_URL
 } from "./clients/glerl.js";
 import { FLAG_WORTHY_WATER_SQL } from "./waterClass.js";
-import { fetchNearestWebcam } from "./clients/windyWebcams.js";
+import {
+  fetchNearestWebcam,
+  fetchWebcamsInBbox,
+  parseNearestActiveWebcam,
+  WEBCAM_FETCH_LIMIT
+} from "./clients/windyWebcams.js";
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
 import { updateScraperHealth } from "./scraperHealth.js";
 
@@ -57,6 +64,20 @@ const MAX_BEACHES_PER_RUN = 1000;
 // waves, one backoff retry on a throttled batch) to stay under the per-minute
 // limit. Sleeps burn no CPU, so the paced run stays well inside the scheduled
 // invocation's time budget.
+//
+// The per-minute limit is NOT the binding constraint at scale — the free tier's
+// per-DAY ceiling is. Open-Meteo weights a multi-location request by the number
+// of locations (a 100-coordinate batch costs ~100 weighted calls, per the
+// maintainer), so HTTP-level batching saves connections but NOT daily quota:
+// the ceiling is 10,000 weighted calls/day. Today a full run stays well under it
+// (each location's marine request is 1 variable over 2 days -> fractional
+// per-location weight, and the wind fallback only fires for wave-null beaches),
+// but once nationwide pagination lands (removing the LIMIT 1000 cap) the daily
+// ceiling binds first — well before the Workers subrequest limit. runWaveRefresh
+// logs a per-run weighted-call estimate (locations + retries) against that
+// 10,000/day ceiling so the constraint is visible before pagination ships; no
+// behavioral throttling on the daily budget yet (TODO.md).
+const OPEN_METEO_DAILY_WEIGHTED_CEILING = 10000;
 const OPEN_METEO_BATCH = 100;
 const OPEN_METEO_CONCURRENCY = 2;
 const OPEN_METEO_BATCH_GAP_MS = 12000;
@@ -68,6 +89,16 @@ const KV_TTL_SECONDS = 7200;
 // the next refresh, so a transient upstream 429 leaves the strip showing
 // slightly older — but still model-current — data instead of blanking it.
 const WAVE_DATA_TTL_SECONDS = 25200;
+// The two GLOS Seagull catalogs (~5.5 MB combined) are semi-static reference
+// data (buoy deployments change on week-plus timescales), so the wave cron
+// caches the two SMALL derived structures parsed from them — the wave
+// parameter-id Set and the wave-platform coordinate list — in KV for ~24 h
+// instead of re-downloading both catalogs every 6-hourly run. Written and read
+// by the wave cron ONLY (the request path never touches this key), so the
+// two-path rule is untouched. A cache miss/corrupt/stale value degrades to a
+// fresh fetch, never an error.
+const GLCFS_CATALOG_KV_KEY = "glcfs:catalogs";
+const GLCFS_CATALOG_TTL_SECONDS = 86400;
 // Per RUN of the dedicated enrichment cron (4x daily = up to 300 points/day).
 // api.weather.gov publishes no numeric rate limit (it 429s with Retry-After
 // when unhappy); 75 sequential polite requests per run is well within
@@ -86,16 +117,22 @@ const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // way the NWS cap parks non-US points.
 const ECCC_ENRICHMENT_LIMIT = 50;
 const ECCC_ENRICHMENT_MAX_ATTEMPTS = 5;
-// Marine zone enrichment (own cron, 4x daily): US beaches (nws_zone set) get the
-// adjacent marine forecast zone id via an offshore probe of api.weather.gov.
-// Each beach costs up to 1 + 2*8 = 17 sequential subrequests (point + two 8-way
-// rings, first hit wins — most resolve in far fewer), so the per-run limit is
-// kept low to stay well under the Workers subrequest cap; the queue drains once
-// and marine alerts are a BONUS signal (land alerts + waves still flag without
-// it), so a slow drain and a low attempts cap that parks probe-less inland
-// points are both fine.
-const MARINE_ENRICHMENT_LIMIT = 20;
-const MARINE_ENRICHMENT_MAX_ATTEMPTS = 5;
+// Sanity floor for the bulk forecast-zones fetch: the collection holds ~419
+// features nationwide, so a 200 that parses to far fewer (a degraded/partial
+// GeoMet response, or a schema change stripping every feature in the client's
+// NAME+geometry filter) is treated exactly like a fetch failure — the run is
+// PARKED with no attempt bumps. Without this, one under-delivered response
+// would bump up to ECCC_ENRICHMENT_LIMIT beaches at once toward the permanent
+// attempts cap (an amplification the old per-point lookup never had).
+const ECCC_ZONES_SANITY_MIN = 100;
+// Fixed pause BETWEEN the sequential api.weather.gov / GeoMet requests the
+// enrichment loops make (F5). The Worker egresses from a shared IP pool, which
+// api.weather.gov treats like a proxy ("Proxies are more likely to reach the
+// limit"), so firing up to 75 back-to-back /points requests risks a 429 the
+// whole run inherits. A short sleep between requests burns no CPU and adds no
+// subrequests; it only spaces the burst out. Applied between iterations only
+// (never before the first request or after the last).
+const ENRICHMENT_REQUEST_SPACING_MS = 300;
 // Webcam hydration (daily webcam cron): nearest Windy webcam player per
 // beach. Webcams appear and disappear slowly, so rows are rechecked on a
 // 14-day cadence; 100 lookups per night drains the pilot backlog in a few
@@ -104,6 +141,17 @@ const MARINE_ENRICHMENT_MAX_ATTEMPTS = 5;
 // publishes no quota and 100/night is polite guesswork (TODO.md).
 const WEBCAM_ENRICHMENT_LIMIT = 100;
 const WEBCAM_RECHECK_MS = 14 * 86400000;
+// Webcam clustering (F14): due beaches are bucketed onto a coarse lat/lon grid
+// so a cell holding more than one beach shares a SINGLE bbox /webcams request
+// instead of one nearby query each; a lone beach in a cell keeps the cheaper
+// nearby query. The grid span is far under Windy's zoom-tiered bbox size cap
+// (22.5 deg lat / 45 deg lon at the tightest zoom), so span is never the
+// binding limit — the 50-cam-per-call cap is, which the caller guards by
+// falling back to per-beach nearby queries when a bucket's result comes back
+// full (possibly truncated). The bbox is grown by WEBCAM_BBOX_MARGIN_DEG on
+// every side so each beach's full WEBCAM_RADIUS_KM neighborhood sits inside it.
+const WEBCAM_CLUSTER_SPAN_DEG = 0.2;
+const WEBCAM_BBOX_MARGIN_DEG = 0.07;
 
 // Human-readable labels for estimate sources ({ label, url } entries — see
 // PLAN.md section 1). Wave labels name the model that actually supplied the
@@ -161,12 +209,24 @@ function batchTiming(env) {
 // null. The clients collapse a 429 / 5xx / network error to null (their
 // data-or-null contract), so a null here is exactly the transient-throttle case
 // the backoff is meant to ride out. A second null gives up (onBatchFail).
-async function fetchBatchWithRetry(batch, fetchFn, retryMs) {
+// onAttempt(batch.length) fires once per actual upstream fetch (the first try and
+// the retry, if one happens) so the caller can tally Open-Meteo's weighted,
+// location-multiplied call cost against the free-tier daily ceiling (U1). A
+// 100-coordinate batch costs ~100 weighted calls, and the one backoff retry
+// doubles that batch's cost, so counting per-attempt batch.length is the exact
+// weighted estimate.
+async function fetchBatchWithRetry(batch, fetchFn, retryMs, onAttempt) {
+  if (onAttempt) {
+    onAttempt(batch.length);
+  }
   const first = await fetchFn(batch);
   if (first !== null) {
     return first;
   }
   await sleep(retryMs);
+  if (onAttempt) {
+    onAttempt(batch.length);
+  }
   return fetchFn(batch);
 }
 
@@ -178,17 +238,21 @@ async function fetchBatchWithRetry(batch, fetchFn, retryMs) {
 // onEntry(point, entry) fires for each point with a result row; a still-null or
 // rejected batch fires onBatchFail(batch) once. The wave-null sentinel handling
 // and failure logging live in the callbacks, so this helper carries no
-// upstream-specific behavior.
+// upstream-specific behavior. Returns the run's Open-Meteo weighted-call
+// estimate (sum of batch.length over every attempt including retries) so the
+// wave cron can log it against the free-tier daily ceiling (U1).
 async function batchByBeach(points, fetchFn, onEntry, onBatchFail, timing) {
   const t = timing || { gapMs: OPEN_METEO_BATCH_GAP_MS, retryMs: OPEN_METEO_RETRY_MS, concurrency: OPEN_METEO_CONCURRENCY };
   const batches = chunk(points, OPEN_METEO_BATCH);
+  let weightedCalls = 0;
+  const onAttempt = function (n) { weightedCalls = weightedCalls + n; };
   for (let start = 0; start < batches.length; start = start + t.concurrency) {
     if (start > 0) {
       await sleep(t.gapMs);
     }
     const wave = batches.slice(start, start + t.concurrency);
     const settled = await Promise.allSettled(
-      wave.map(function (batch) { return fetchBatchWithRetry(batch, fetchFn, t.retryMs); })
+      wave.map(function (batch) { return fetchBatchWithRetry(batch, fetchFn, t.retryMs, onAttempt); })
     );
     for (let k = 0; k < settled.length; k = k + 1) {
       const s = settled[k];
@@ -206,6 +270,7 @@ async function batchByBeach(points, fetchFn, onEntry, onBatchFail, timing) {
       }
     }
   }
+  return weightedCalls;
 }
 
 // Beaches whose current wave height is still null (either no wave entry at all
@@ -505,31 +570,42 @@ async function runFlagRecompute(env) {
 
         // Scraper health monitoring (hourly path only). Only scrapers that
         // actually had matched beaches this run reach here, so a scraper that
-        // was never invoked is never counted as failing. Costs one KV get +
-        // one KV put per MATCHED scraper per run — at most a handful of extra
-        // subrequests against the per-invocation budget (PLAN.md section 7).
-        // The "scraperhealth:" key is written WITHOUT expirationTtl so the
-        // consecutive-null streak persists across runs.
-        try {
-          const healthKey = "scraperhealth:" + group.scraper.id;
-          const prevRaw = await env.FLAGS.get(healthKey);
-          let prev = null;
-          if (prevRaw) {
-            try {
-              prev = JSON.parse(prevRaw);
-            } catch (parseErr) {
-              prev = null;
+        // was never invoked is never counted as failing. The same intent
+        // extends to DELIBERATE season/cadence pre-fetch skips: a scraper may
+        // declare healthMonitored(nowIso), and when it returns false this
+        // run's null is NOT counted (no streak bump, no reset) — otherwise an
+        // off-season scraper would cross the alert threshold in a day, flood
+        // an ALERT log every hour for months, and blind the monitor to real
+        // in-season breakage. Costs one KV get + one KV put per MATCHED
+        // scraper per run — at most a handful of extra subrequests against
+        // the per-invocation budget (PLAN.md section 7). The "scraperhealth:"
+        // key is written WITHOUT expirationTtl so the consecutive-null streak
+        // persists across runs.
+        const healthMonitored = typeof group.scraper.healthMonitored === "function"
+          ? group.scraper.healthMonitored(nowIso) === true
+          : true;
+        if (healthMonitored) {
+          try {
+            const healthKey = "scraperhealth:" + group.scraper.id;
+            const prevRaw = await env.FLAGS.get(healthKey);
+            let prev = null;
+            if (prevRaw) {
+              try {
+                prev = JSON.parse(prevRaw);
+              } catch (parseErr) {
+                prev = null;
+              }
             }
+            const health = updateScraperHealth(
+              group.scraper.id, prev, result !== null, nowIso
+            );
+            await env.FLAGS.put(healthKey, JSON.stringify(health.next));
+            if (health.alert) {
+              console.log(health.alert);
+            }
+          } catch (err) {
+            console.log("index: scraper health update failed for " + group.scraper.id + ": " + err.message);
           }
-          const health = updateScraperHealth(
-            group.scraper.id, prev, result !== null, nowIso
-          );
-          await env.FLAGS.put(healthKey, JSON.stringify(health.next));
-          if (health.alert) {
-            console.log(health.alert);
-          }
-        } catch (err) {
-          console.log("index: scraper health update failed for " + group.scraper.id + ": " + err.message);
         }
 
         if (result === null) {
@@ -538,10 +614,17 @@ async function runFlagRecompute(env) {
         for (const beach of group.beaches) {
           const flag = scrapeOfficialFlagFromResult(beach, group.scraper, result);
           if (flag !== null) {
+            // A scraper may opt into a longer official-KV TTL (scraper.
+            // officialTtlSeconds) when it fetches on a reduced cadence, so the
+            // last color persists between its infrequent fetches; default 2h.
+            const officialTtl =
+              typeof group.scraper.officialTtlSeconds === "number"
+                ? group.scraper.officialTtlSeconds
+                : KV_TTL_SECONDS;
             await env.FLAGS.put(
               "official:" + beach.id,
               JSON.stringify(flag),
-              { expirationTtl: KV_TTL_SECONDS }
+              { expirationTtl: officialTtl }
             );
             officialsByBeach.set(beach.id, {
               color: flag.color,
@@ -650,7 +733,7 @@ async function runWaveRefresh(env) {
     const wavePoints = beaches.map(function (b) {
       return { beachId: b.id, lat: b.lat, lon: b.lon };
     });
-    await batchByBeach(
+    const waveWeightedCalls = await batchByBeach(
       wavePoints,
       function (batch) { return fetchWaveHeightsFt(batch, nowIso); },
       function (point, entry) {
@@ -682,8 +765,36 @@ async function runWaveRefresh(env) {
     const glcfsPoints = waveNullPoints(beaches, waveResults);
     if (glcfsPoints.length > 0) {
       try {
-        const glcfsData = await fetchGlcfsWaveHeightsFt(glcfsPoints, nowIso);
+        // Read the cron-cached derived catalogs (Set rehydrated from its array
+        // form). A miss or corrupt payload deserializes to null, and the client
+        // then fetches both catalogs fresh — never an error.
+        let cachedCatalogs = null;
+        try {
+          const rawCatalogs = await env.FLAGS.get(GLCFS_CATALOG_KV_KEY, { type: "json" });
+          cachedCatalogs = deserializeWaveCatalogs(rawCatalogs);
+        } catch (cacheErr) {
+          console.log("index: glcfs catalog cache read failed: " + cacheErr.message);
+        }
+
+        const glcfsData = await fetchGlcfsWaveHeightsFt(glcfsPoints, nowIso, cachedCatalogs);
         if (glcfsData !== null) {
+          // Persist freshly fetched catalogs so the next ~24 h of runs reuse
+          // them (skip when the client used the cache, so the TTL genuinely
+          // expires and re-fetches). Empty catalogs are never cached — that
+          // would suppress the gap-fill for a full day.
+          if (glcfsData.catalogsFetched && glcfsData.catalogs &&
+              glcfsData.catalogs.platforms.length > 0 &&
+              glcfsData.catalogs.waveParameterIds.size > 0) {
+            try {
+              await env.FLAGS.put(
+                GLCFS_CATALOG_KV_KEY,
+                JSON.stringify(serializeWaveCatalogs(glcfsData.catalogs)),
+                { expirationTtl: GLCFS_CATALOG_TTL_SECONDS }
+              );
+            } catch (writeErr) {
+              console.log("index: glcfs catalog cache write failed: " + writeErr.message);
+            }
+          }
           for (const point of glcfsPoints) {
             const entry = glcfsData.results[point.beachId];
             if (entry && entry.waveHeightFt !== null) {
@@ -713,7 +824,7 @@ async function runWaveRefresh(env) {
     // fresh — step 2 may have gap-filled some beaches out of the wave-null set.
     const windResults = new Map();
     const windPoints = waveNullPoints(beaches, waveResults);
-    await batchByBeach(
+    const windWeightedCalls = await batchByBeach(
       windPoints,
       function (batch) { return fetchWinds(batch); },
       function (point, entry) {
@@ -800,6 +911,20 @@ async function runWaveRefresh(env) {
       }
     }
 
+    // Open-Meteo weighted-call accounting (U1): each location in a batch costs
+    // ~1 weighted call and the one backoff retry doubles a throttled batch, so
+    // this is the run's contribution to the free-tier daily ceiling. Logged for
+    // visibility only — no behavioral throttling on the daily budget yet. Once
+    // nationwide pagination removes the LIMIT 1000 cap, this ceiling binds
+    // before the Workers subrequest limit does (TODO.md).
+    const openMeteoWeightedCalls = waveWeightedCalls + windWeightedCalls;
+    console.log(
+      "index: open-meteo weighted calls this run=" + String(openMeteoWeightedCalls) +
+      " (wave=" + String(waveWeightedCalls) +
+      " wind=" + String(windWeightedCalls) +
+      ") of " + String(OPEN_METEO_DAILY_WEIGHTED_CEILING) + "/day free-tier ceiling"
+    );
+
     console.log(
       "index: wave refresh complete, beaches=" + String(beaches.length) +
       " inputs=" + String(inputCount) +
@@ -857,7 +982,12 @@ async function runNwsEnrichment(env) {
       String(NWS_ENRICHMENT_LIMIT)
     ).all();
     const toEnrich = needsEnrichment.results || [];
+    let firstRequest = true;
     for (const beach of toEnrich) {
+      if (!firstRequest) {
+        await sleep(ENRICHMENT_REQUEST_SPACING_MS);
+      }
+      firstRequest = false;
       try {
         const meta = await fetchPointMetadata(beach.lat, beach.lon);
         if (meta !== null) {
@@ -930,25 +1060,57 @@ async function runEcccEnrichment(env) {
       String(ECCC_ENRICHMENT_LIMIT)
     ).all();
     const toEnrich = needsEnrichment.results || [];
-    for (const beach of toEnrich) {
-      try {
-        const zone = await fetchEcccZoneName(beach.lat, beach.lon);
-        if (zone !== null) {
-          await env.DB.prepare(
-            "UPDATE beaches SET eccc_zone = ?1 WHERE id = ?2"
-          ).bind(zone.zoneName, beach.id).run();
-          enriched = enriched + 1;
-        } else {
-          // fetchEcccZoneName returns null on any failure AND on a clean
-          // zero-region answer (a US point) — both count an attempt so
-          // unresolvable rows eventually park.
+    // ONE bulk fetch of the whole forecast-region polygon set per run (F12),
+    // then resolve every pending beach locally via point-in-polygon — the same
+    // one-fetch shape as the alerts path, replacing up to 50 per-point GeoMet
+    // requests with a single one. A failed OR under-delivered bulk fetch
+    // (below ECCC_ZONES_SANITY_MIN parsed zones) PARKS the run (every beach
+    // skipped, no attempt bumped, no throw) so a transient GeoMet outage or a
+    // degraded partial response never burns the attempts budget of
+    // resolvable rows.
+    // Env-tunable floor (tests use a tiny fixture zone set), defaulting to
+    // the production sanity constant.
+    const zonesSanityMin = typeof env.ECCC_ZONES_SANITY_MIN === "number"
+      ? env.ECCC_ZONES_SANITY_MIN
+      : ECCC_ZONES_SANITY_MIN;
+    let zones = null;
+    if (toEnrich.length > 0) {
+      const fetched = await fetchEcccForecastZones();
+      if (fetched === null) {
+        console.log("index: eccc enrichment parked run — forecast-zones fetch failed");
+      } else if (fetched.length < zonesSanityMin) {
+        console.log(
+          "index: eccc enrichment parked run — forecast-zones fetch under-delivered (" +
+          String(fetched.length) + " zones, expected ~419)"
+        );
+      } else {
+        zones = fetched;
+      }
+    }
+    if (zones === null) {
+      // Nothing to enrich, or the run is parked (logged above).
+    } else {
+      for (const beach of toEnrich) {
+        try {
+          const zoneName = ecccZoneNameForPoint(zones, beach.lat, beach.lon);
+          if (zoneName !== null) {
+            await env.DB.prepare(
+              "UPDATE beaches SET eccc_zone = ?1 WHERE id = ?2"
+            ).bind(zoneName, beach.id).run();
+            enriched = enriched + 1;
+          } else {
+            // No Canadian region contains the point OR sits within the
+            // nearest-edge leniency cap (ECCC_ZONE_MAX_EDGE_KM) — a US point.
+            // Count an attempt so unresolvable rows eventually park, exactly
+            // like the old per-point null.
+            enrichmentFailures = enrichmentFailures + 1;
+            await bumpEcccAttempts(env, beach.id);
+          }
+        } catch (err) {
           enrichmentFailures = enrichmentFailures + 1;
+          console.log("index: eccc enrichment failed for " + beach.id + ": " + err.message);
           await bumpEcccAttempts(env, beach.id);
         }
-      } catch (err) {
-        enrichmentFailures = enrichmentFailures + 1;
-        console.log("index: eccc enrichment failed for " + beach.id + ": " + err.message);
-        await bumpEcccAttempts(env, beach.id);
       }
     }
 
@@ -967,76 +1129,6 @@ async function runEcccEnrichment(env) {
     );
   } catch (err) {
     console.log("index: eccc enrichment failed: " + err.message);
-  }
-}
-
-// Marine zone enrichment (own cron, 4x daily, offset from the other enrichment
-// triggers): US beaches (nws_zone set) get their adjacent marine forecast zone
-// id (e.g. "LMZ874") via resolveMarineZone's offshore probe, so the hourly
-// recompute can match NWS marine warnings (Gale/Storm/Special Marine) and Small
-// Craft Advisory for them from the national /alerts/active fetch it already
-// makes. Gated to nws_zone NOT NULL: Canadian marine waters belong to ECCC, not
-// NWS. A definitive "no marine zone nearby" ({ marineZone: null }) AND a
-// transient fetch failure (null) both count an attempt so an inland or
-// probe-resistant point parks at the cap instead of re-probing forever.
-async function bumpMarineAttempts(env, beachId) {
-  try {
-    await env.DB.prepare(
-      "UPDATE beaches SET marine_attempts = marine_attempts + 1 WHERE id = ?1"
-    ).bind(beachId).run();
-  } catch (updateErr) {
-    console.log("index: marine enrichment attempt bump failed for " + beachId + ": " + updateErr.message);
-  }
-}
-
-async function runMarineEnrichment(env) {
-  let enriched = 0;
-  let enrichmentFailures = 0;
-
-  try {
-    const needsEnrichment = await env.DB.prepare(
-      "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NOT NULL AND marine_zone IS NULL " +
-      "AND marine_attempts < " + String(MARINE_ENRICHMENT_MAX_ATTEMPTS) + " AND " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY marine_attempts ASC, RANDOM() LIMIT " +
-      String(MARINE_ENRICHMENT_LIMIT)
-    ).all();
-    const toEnrich = needsEnrichment.results || [];
-    for (const beach of toEnrich) {
-      try {
-        const resolved = await resolveMarineZone(beach.lat, beach.lon);
-        if (resolved !== null && resolved.marineZone !== null) {
-          await env.DB.prepare(
-            "UPDATE beaches SET marine_zone = ?1 WHERE id = ?2"
-          ).bind(resolved.marineZone, beach.id).run();
-          enriched = enriched + 1;
-        } else {
-          // null = the first probe failed to fetch (transient); { marineZone:
-          // null } = probes succeeded but no marine zone is nearby. Both count
-          // an attempt so unresolvable rows eventually park.
-          enrichmentFailures = enrichmentFailures + 1;
-          await bumpMarineAttempts(env, beach.id);
-        }
-      } catch (err) {
-        enrichmentFailures = enrichmentFailures + 1;
-        console.log("index: marine enrichment failed for " + beach.id + ": " + err.message);
-        await bumpMarineAttempts(env, beach.id);
-      }
-    }
-
-    const parkedResult = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM beaches WHERE nws_zone IS NOT NULL AND marine_zone IS NULL " +
-      "AND marine_attempts >= " + String(MARINE_ENRICHMENT_MAX_ATTEMPTS)
-    ).first();
-    const parkedCount = parkedResult ? parkedResult.n : 0;
-
-    console.log(
-      "index: marine enrichment complete, attempted=" + String(toEnrich.length) +
-      " enriched=" + String(enriched) +
-      " failures=" + String(enrichmentFailures) +
-      " parked=" + String(parkedCount)
-    );
-  } catch (err) {
-    console.log("index: marine enrichment failed: " + err.message);
   }
 }
 
@@ -1066,35 +1158,121 @@ async function runWebcamSync(env) {
       " ORDER BY webcam_checked ASC, id ASC LIMIT " + String(WEBCAM_ENRICHMENT_LIMIT)
     ).bind(webcamCutoffIso).all();
     const webcamDue = webcamDueResult.results || [];
-    for (const beach of webcamDue) {
+
+    // Persist ONE beach's fetch result (the { webcam } | null shape both the
+    // nearby and bbox paths produce): null = transport/API failure, leave the
+    // row untouched so it stays at the front of the queue; { webcam: null } =
+    // confirmed no cam here, clear + stamp; { webcam } = store the player.
+    async function persistWebcamResult(beach, result) {
+      if (result === null) {
+        webcamFailures = webcamFailures + 1;
+        return;
+      }
+      webcamsChecked = webcamsChecked + 1;
+      if (result.webcam !== null) {
+        webcamsFound = webcamsFound + 1;
+        await env.DB.prepare(
+          "UPDATE beaches SET webcam_id = ?1, webcam_title = ?2, webcam_player_url = ?3, " +
+          "webcam_detail_url = ?4, webcam_checked = ?5 WHERE id = ?6"
+        ).bind(
+          result.webcam.webcamId,
+          result.webcam.title,
+          result.webcam.playerUrl,
+          result.webcam.detailUrl === undefined ? null : result.webcam.detailUrl,
+          nowIso,
+          beach.id
+        ).run();
+      } else {
+        await env.DB.prepare(
+          "UPDATE beaches SET webcam_id = NULL, webcam_title = NULL, " +
+          "webcam_player_url = NULL, webcam_detail_url = NULL, webcam_checked = ?1 WHERE id = ?2"
+        ).bind(nowIso, beach.id).run();
+      }
+    }
+
+    // One beach via the nearby query (lone-cell path and truncation fallback).
+    async function syncBeachNearby(beach) {
       try {
         const result = await fetchNearestWebcam(beach.lat, beach.lon, env.WINDY_WEBCAM_API_TOKEN);
-        if (result === null) {
-          webcamFailures = webcamFailures + 1;
-          continue;
-        }
-        webcamsChecked = webcamsChecked + 1;
-        if (result.webcam !== null) {
-          webcamsFound = webcamsFound + 1;
-          await env.DB.prepare(
-            "UPDATE beaches SET webcam_id = ?1, webcam_title = ?2, webcam_player_url = ?3, " +
-            "webcam_checked = ?4 WHERE id = ?5"
-          ).bind(
-            result.webcam.webcamId,
-            result.webcam.title,
-            result.webcam.playerUrl,
-            nowIso,
-            beach.id
-          ).run();
-        } else {
-          await env.DB.prepare(
-            "UPDATE beaches SET webcam_id = NULL, webcam_title = NULL, " +
-            "webcam_player_url = NULL, webcam_checked = ?1 WHERE id = ?2"
-          ).bind(nowIso, beach.id).run();
-        }
+        await persistWebcamResult(beach, result);
       } catch (err) {
         webcamFailures = webcamFailures + 1;
         console.log("index: webcam hydration failed for " + beach.id + ": " + err.message);
+      }
+    }
+
+    // Bucket due beaches onto a coarse grid; cells with >1 beach share a bbox.
+    const buckets = {};
+    for (const beach of webcamDue) {
+      const key = String(Math.floor(beach.lat / WEBCAM_CLUSTER_SPAN_DEG)) + ":" +
+        String(Math.floor(beach.lon / WEBCAM_CLUSTER_SPAN_DEG));
+      if (!buckets[key]) {
+        buckets[key] = [];
+      }
+      buckets[key].push(beach);
+    }
+
+    for (const key in buckets) {
+      if (!Object.prototype.hasOwnProperty.call(buckets, key)) {
+        continue;
+      }
+      const bucket = buckets[key];
+      if (bucket.length === 1) {
+        await syncBeachNearby(bucket[0]);
+        continue;
+      }
+      // Shared bbox for the cell, grown so every beach's radius sits inside.
+      let north = -Infinity;
+      let south = Infinity;
+      let east = -Infinity;
+      let west = Infinity;
+      for (const beach of bucket) {
+        if (beach.lat > north) { north = beach.lat; }
+        if (beach.lat < south) { south = beach.lat; }
+        if (beach.lon > east) { east = beach.lon; }
+        if (beach.lon < west) { west = beach.lon; }
+      }
+      let bboxJson = null;
+      try {
+        bboxJson = await fetchWebcamsInBbox(
+          north + WEBCAM_BBOX_MARGIN_DEG,
+          east + WEBCAM_BBOX_MARGIN_DEG,
+          south - WEBCAM_BBOX_MARGIN_DEG,
+          west - WEBCAM_BBOX_MARGIN_DEG,
+          env.WINDY_WEBCAM_API_TOKEN
+        );
+      } catch (err) {
+        bboxJson = null;
+        console.log("index: webcam bbox fetch threw for bucket " + key + ": " + err.message);
+      }
+      const truncated = bboxJson !== null && Array.isArray(bboxJson.webcams) &&
+        bboxJson.webcams.length >= WEBCAM_FETCH_LIMIT;
+      if (bboxJson === null) {
+        // Bbox fetch failed: every beach in the bucket is a failure, left
+        // untouched to retry next run (no request amplification).
+        for (const beach of bucket) {
+          webcamFailures = webcamFailures + 1;
+        }
+        continue;
+      }
+      if (truncated) {
+        // The result hit the 50-cam cap and may be incomplete, so a bbox-wide
+        // "nearest" could be wrong — fall back to a per-beach nearby query,
+        // which the API bounds to the radius server-side.
+        console.log("index: webcam bbox bucket " + key + " hit the cam cap, using nearby per beach");
+        for (const beach of bucket) {
+          await syncBeachNearby(beach);
+        }
+        continue;
+      }
+      for (const beach of bucket) {
+        try {
+          const webcam = parseNearestActiveWebcam(bboxJson, beach.lat, beach.lon);
+          await persistWebcamResult(beach, { webcam: webcam });
+        } catch (err) {
+          webcamFailures = webcamFailures + 1;
+          console.log("index: webcam hydration failed for " + beach.id + ": " + err.message);
+        }
       }
     }
     console.log(
@@ -1114,11 +1292,10 @@ async function runWebcamSync(env) {
 // row, and the unknown-cron fallback below stays the single place that logs
 // an unrecognized trigger.
 const CRON_JOBS = {
-  "0 * * * *": { run: runFlagRecompute, label: "flag recompute" },
+  "7 * * * *": { run: runFlagRecompute, label: "flag recompute" },
   "15 */6 * * *": { run: runWaveRefresh, label: "wave refresh" },
   "17 3,9,15,21 * * *": { run: runNwsEnrichment, label: "nws enrichment" },
   "29 4,10,16,22 * * *": { run: runEcccEnrichment, label: "eccc enrichment" },
-  "23 1,7,13,19 * * *": { run: runMarineEnrichment, label: "marine enrichment" },
   "31 9 * * *": { run: runWebcamSync, label: "webcam sync" }
 };
 

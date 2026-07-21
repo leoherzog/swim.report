@@ -194,36 +194,16 @@ function fetchJson(url, label) {
   return httpFetchJson(url, { label: "glerl: " + label });
 }
 
-// Same result shape as openMeteo.fetchWaveHeightsFt:
-//   { results: { beachId -> { waveHeightFt: number|null, model: string|null } },
-//     sourceUrl }
-// Every input beachId appears in results (nulls on miss); null only on total
-// failure (either catalog fetch failing). Successful readings carry
-// model: GLCFS_WAVE_MODEL.
-//
-// Subrequest budget math (paid plan, 1000/invocation; the hourly cron
-// currently uses ~360 — PLAN.md section 7): this function costs at most
-// 2 catalog fetches (platform geojson + parameter catalog) plus one obs
-// fetch per UNIQUE nearby platform, hard-capped at MAX_PLATFORM_FETCHES =
-// 60, so <= 62 subrequests worst case (realistically a few dozen platforms
-// cover the Michigan pilot beaches). ~360 + 62 = ~422, comfortably under
-// 1000. It is called only for beaches Open-Meteo left wave-null, and skips
-// all fetching when given no points.
-export async function fetchGlcfsWaveHeightsFt(points, nowIso) {
-  const results = {};
-  for (const point of points) {
-    results[point.beachId] = { waveHeightFt: null, model: null };
-  }
-  if (points.length === 0) {
-    return { results: results, sourceUrl: SEAGULL_PLATFORMS_URL };
-  }
-
-  const startDate = obsStartDateUtc(nowIso);
-  if (startDate === null) {
-    console.log("glerl: invalid nowIso: " + String(nowIso));
-    return null;
-  }
-
+// Fetch + parse the two large semi-static Seagull catalogs (the ~3.4 MB
+// /api/v1/parameters and ~2.1 MB /api/v1/obs-datasets.geojson) into the two
+// SMALL derived structures the obs step actually needs:
+//   { platforms: [{ obsDatasetId, lat, lon }, ...], waveParameterIds: Set }
+// Returns null when EITHER catalog fetch fails (the caller then leaves its
+// beaches wave-null). This is a separable step so the 6-hourly wave cron can
+// cache the (tiny) derived result in KV and hand it back to
+// fetchGlcfsWaveHeightsFt, avoiding the ~5.5 MB re-download on a normal run.
+// Env-free: knows nothing about KV — the cron owns caching.
+export async function fetchWaveCatalogs() {
   const geojson = await fetchJson(SEAGULL_PLATFORMS_URL, "platform catalog");
   if (geojson === null) {
     return null;
@@ -235,10 +215,104 @@ export async function fetchGlcfsWaveHeightsFt(points, nowIso) {
     return null;
   }
   const waveParameterIds = parseWaveParameterIds(paramsJson);
+  return { platforms: platforms, waveParameterIds: waveParameterIds };
+}
+
+// Pure. True when c is a usable derived-catalog structure (a platforms array
+// plus a waveParameterIds Set). Guards the cached-catalog fast path so a
+// missing/garbage value degrades to a fresh fetch instead of throwing.
+function isUsableCatalogs(c) {
+  return !!c && Array.isArray(c.platforms) && c.waveParameterIds instanceof Set;
+}
+
+// Pure. Derived catalogs -> a JSON-safe object for KV. JSON cannot represent a
+// Set, so waveParameterIds is written as an array.
+export function serializeWaveCatalogs(catalogs) {
+  return {
+    platforms: catalogs.platforms,
+    waveParameterIds: Array.from(catalogs.waveParameterIds)
+  };
+}
+
+// Pure. Rehydrate a KV payload written by serializeWaveCatalogs back into the
+// derived structures (array -> Set). Returns null on any missing/malformed
+// field so a corrupt or stale-shaped cache degrades to a fresh fetch rather
+// than throwing — the caller passes the null straight into
+// fetchGlcfsWaveHeightsFt, which then fetches fresh.
+export function deserializeWaveCatalogs(raw) {
+  if (!raw || !Array.isArray(raw.platforms) || !Array.isArray(raw.waveParameterIds)) {
+    return null;
+  }
+  return {
+    platforms: raw.platforms,
+    waveParameterIds: new Set(raw.waveParameterIds)
+  };
+}
+
+// Result shape (a superset of openMeteo.fetchWaveHeightsFt's, plus catalog
+// bookkeeping the cron uses to cache):
+//   { results: { beachId -> { waveHeightFt: number|null, model: string|null } },
+//     sourceUrl,
+//     catalogs: { platforms, waveParameterIds } | null,  // structures used
+//     catalogsFetched: boolean }                         // true iff fetched fresh
+// Every input beachId appears in results (nulls on miss); null only on total
+// failure (invalid nowIso, or a catalog fetch failing on the fresh path).
+// Successful readings carry model: GLCFS_WAVE_MODEL.
+//
+// cachedCatalogs (optional): the derived { platforms, waveParameterIds } the
+// cron cached in KV. When usable, both large catalogs are skipped entirely;
+// when absent/garbage, they are fetched fresh (fetchWaveCatalogs) and returned
+// via catalogs/catalogsFetched so the cron can persist them.
+//
+// Subrequest budget math (paid plan, 1000/invocation; the hourly cron
+// currently uses ~360 — PLAN.md section 7): this function costs AT MOST
+// 2 catalog fetches (skipped on a cache hit) plus one obs fetch per UNIQUE
+// nearby platform, hard-capped at MAX_PLATFORM_FETCHES = 60, so <= 62
+// subrequests worst case (realistically a few dozen platforms cover the
+// Michigan pilot beaches). ~360 + 62 = ~422, comfortably under 1000. It is
+// called only for beaches Open-Meteo left wave-null, and skips all fetching
+// when given no points.
+export async function fetchGlcfsWaveHeightsFt(points, nowIso, cachedCatalogs) {
+  const results = {};
+  for (const point of points) {
+    results[point.beachId] = { waveHeightFt: null, model: null };
+  }
+  if (points.length === 0) {
+    return { results: results, sourceUrl: SEAGULL_PLATFORMS_URL, catalogs: null, catalogsFetched: false };
+  }
+
+  const startDate = obsStartDateUtc(nowIso);
+  if (startDate === null) {
+    console.log("glerl: invalid nowIso: " + String(nowIso));
+    return null;
+  }
+
+  // Catalog step: reuse the cron-cached derived structures when usable,
+  // otherwise fetch + parse both catalogs fresh. A missing/garbage cache
+  // degrades to a fresh fetch (isUsableCatalogs), never a throw.
+  let catalogs = cachedCatalogs;
+  let catalogsFetched = false;
+  if (!isUsableCatalogs(catalogs)) {
+    catalogs = await fetchWaveCatalogs();
+    if (catalogs === null) {
+      return null;
+    }
+    catalogsFetched = true;
+  }
+  const platforms = catalogs.platforms;
+  const waveParameterIds = catalogs.waveParameterIds;
   if (platforms.length === 0 || waveParameterIds.size === 0) {
     console.log("glerl: no wave platforms or wave parameters in Seagull catalogs");
-    return { results: results, sourceUrl: SEAGULL_PLATFORMS_URL };
+    return { results: results, sourceUrl: SEAGULL_PLATFORMS_URL, catalogs: catalogs, catalogsFetched: catalogsFetched };
   }
+
+  // F9: restrict each obs request to the wave parameter ids (comma-separated).
+  // Verified live: the server returns only the requested parameters (~9x
+  // smaller payload) and parseObsWaveHeightFt already filters to these same
+  // ids, so behavior is unchanged. Sorted for a deterministic URL.
+  const parameterIdQuery = Array.from(waveParameterIds)
+    .sort(function (a, b) { return a - b; })
+    .join(",");
 
   // Beach -> nearest platform, then dedup so each platform is fetched once
   // no matter how many beaches share it.
@@ -269,7 +343,7 @@ export async function fetchGlcfsWaveHeightsFt(points, nowIso) {
     const batch = toFetch.slice(i, i + OBS_FETCH_CONCURRENCY);
     const settled = await Promise.allSettled(batch.map(function (obsDatasetId) {
       const url = SEAGULL_API_BASE + "/obs?obsDatasetId=" + String(obsDatasetId) +
-        "&startDate=" + startDate;
+        "&startDate=" + startDate + "&parameterId=" + parameterIdQuery;
       return fetchJson(url, "obs for platform " + String(obsDatasetId));
     }));
     for (let j = 0; j < batch.length; j = j + 1) {
@@ -295,5 +369,5 @@ export async function fetchGlcfsWaveHeightsFt(points, nowIso) {
       results[point.beachId] = { waveHeightFt: waveHeightFt, model: GLCFS_WAVE_MODEL };
     }
   }
-  return { results: results, sourceUrl: SEAGULL_PLATFORMS_URL };
+  return { results: results, sourceUrl: SEAGULL_PLATFORMS_URL, catalogs: catalogs, catalogsFetched: catalogsFetched };
 }

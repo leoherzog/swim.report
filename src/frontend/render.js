@@ -325,10 +325,20 @@ function renderBrandHeader() {
 
 // The disclaimer sentence below is a product invariant (PLAN.md section 9):
 // estimates must never read as official flag status, on any page.
+// The Windy credit sentence is the site-wide attribution the free webcam tier's
+// Terms require (https://api.windy.com/webcams/terms: credit "Webcams provided
+// by Windy.com — add a webcam", with Windy.com linking to the webcams hub and
+// "add a webcam" linking to the submission page) — carried here, once, on every
+// page, rather than duplicated per-webcam; the per-webcam caption's own
+// "Webcam via Windy.com" link (renderWebcam) satisfies the SEPARATE
+// link-every-image obligation by targeting that cam's own detail page, and is
+// unaffected by this footer line.
 function renderFooter() {
   return "<small>Beach locations via OpenStreetMap contributors. Marine and weather data via " +
-    "NOAA/NWS, Environment and Climate Change Canada, and Open-Meteo. Estimated — not the " +
-    "official flag status. Always obey posted flags and lifeguards.</small>";
+    "NOAA/NWS, Environment and Climate Change Canada, and Open-Meteo. Webcams provided by " +
+    "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> — " +
+    "<a href=\"https://www.windy.com/webcams/add\" rel=\"noopener noreferrer\">add a webcam</a>. " +
+    "Estimated — not the official flag status. Always obey posted flags and lifeguards.</small>";
 }
 
 // Ambient, Firewatch-style layered wave swells anchored to the bottom of the
@@ -633,7 +643,12 @@ function renderWaveMap(beach) {
 // Rendered only when webcam_player_url is a non-empty string; the columns are
 // null (no nearby cam) or undefined (pre-migration rows), so both are skipped.
 // The heading and caption stay honest that this is a NEARBY cam, and the free
-// tier requires the Windy.com attribution link-back.
+// tier requires the Windy.com attribution link-back. Windy's Terms further
+// require every image be linked to that cam's OWN webcam page (or timelapse
+// player) — the caption link targets webcam_detail_url (the cam's Windy
+// detail page, stored by the webcam cron from include=urls) and only falls
+// back to the generic webcams hub for pre-refresh rows that predate the
+// column.
 function renderWebcam(beach) {
   const playerUrl = beach.webcam_player_url;
   if (typeof playerUrl !== "string" || playerUrl.length === 0) {
@@ -641,11 +656,15 @@ function renderWebcam(beach) {
   }
   const title = (typeof beach.webcam_title === "string") ? beach.webcam_title : "";
   const frameTitle = title ? title : "Nearby webcam";
+  const detailUrl =
+    (typeof beach.webcam_detail_url === "string" && beach.webcam_detail_url.length > 0)
+      ? beach.webcam_detail_url
+      : "https://www.windy.com/webcams";
   const captionParts = [];
   if (title) {
     captionParts.push("<span class=\"webcam-title\">" + escapeHtml(title) + "</span>");
   }
-  captionParts.push("Webcam via <a href=\"https://www.windy.com/webcams\" " +
+  captionParts.push("Webcam via <a href=\"" + escapeHtml(detailUrl) + "\" " +
     "rel=\"noopener noreferrer\">Windy.com</a>");
   const lines = [];
   lines.push("<section class=\"webcam-section wa-stack wa-gap-s\">");

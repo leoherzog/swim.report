@@ -6,6 +6,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   fetchGlcfsWaveHeightsFt,
+  fetchWaveCatalogs,
+  serializeWaveCatalogs,
+  deserializeWaveCatalogs,
   parseWaveParameterIds,
   parseWavePlatforms,
   nearestWavePlatform,
@@ -311,6 +314,9 @@ describe("fetchGlcfsWaveHeightsFt", function () {
     expect(obsUrls.length).toBe(1);
     expect(obsUrls[0].indexOf("obsDatasetId=37")).not.toBe(-1);
     expect(obsUrls[0].indexOf("startDate=2026-07-06")).not.toBe(-1);
+    // F9: obs is filtered to the wave parameter ids (sorted, comma-separated),
+    // shrinking the payload ~9x. Parser already filters to the same ids.
+    expect(obsUrls[0].indexOf("parameterId=195,610")).not.toBe(-1);
   });
 
   it("makes no fetches and returns empty results for empty points", async function () {
@@ -365,5 +371,117 @@ describe("fetchGlcfsWaveHeightsFt", function () {
     expect(out).not.toBe(null);
     expect(out.results["beach-near"].waveHeightFt).toBeCloseTo(SOUTH_HAVEN_FT, 4);
     expect(out.results["beach-ludington"]).toEqual({ waveHeightFt: null, model: null });
+  });
+
+  it("returns the derived catalogs it fetched so the cron can cache them", async function () {
+    installFetch(defaultHandler);
+    const out = await fetchGlcfsWaveHeightsFt(
+      [{ beachId: "beach-near", lat: 42.4, lon: -86.29 }],
+      NOW
+    );
+    expect(out.catalogsFetched).toBe(true);
+    expect(out.catalogs.waveParameterIds instanceof Set).toBe(true);
+    expect(Array.from(out.catalogs.waveParameterIds).sort()).toEqual([195, 610]);
+    expect(out.catalogs.platforms).toEqual([
+      { obsDatasetId: 37, lat: 42.397, lon: -86.331 },
+      { obsDatasetId: 62, lat: 43.98, lon: -86.56 }
+    ]);
+  });
+
+  it("reuses passed-in cached catalogs and fetches NEITHER large catalog", async function () {
+    const calls = installFetch(defaultHandler);
+    const cached = {
+      platforms: [{ obsDatasetId: 37, lat: 42.397, lon: -86.331 }],
+      waveParameterIds: new Set([195, 610])
+    };
+    const out = await fetchGlcfsWaveHeightsFt(
+      [{ beachId: "beach-near", lat: 42.4, lon: -86.29 }],
+      NOW,
+      cached
+    );
+    expect(out.catalogsFetched).toBe(false);
+    expect(out.results["beach-near"].waveHeightFt).toBeCloseTo(SOUTH_HAVEN_FT, 4);
+    const urls = calls.map(function (c) { return c.url; });
+    // Neither semi-static catalog is re-downloaded on a cache hit.
+    expect(urls.indexOf(SEAGULL_PLATFORMS_URL)).toBe(-1);
+    expect(urls.indexOf(SEAGULL_PARAMETERS_URL)).toBe(-1);
+    // The obs request still fires, still parameter-filtered.
+    const obsUrls = urls.filter(function (u) { return u.indexOf("/obs?") !== -1; });
+    expect(obsUrls.length).toBe(1);
+    expect(obsUrls[0].indexOf("parameterId=195,610")).not.toBe(-1);
+  });
+
+  it("degrades to a fresh fetch when the cached catalogs are unusable", async function () {
+    const calls = installFetch(defaultHandler);
+    // Garbage shape (waveParameterIds is not a Set) must not throw — the client
+    // ignores it and fetches both catalogs fresh.
+    const out = await fetchGlcfsWaveHeightsFt(
+      [{ beachId: "beach-near", lat: 42.4, lon: -86.29 }],
+      NOW,
+      { platforms: "nope", waveParameterIds: [195] }
+    );
+    expect(out.catalogsFetched).toBe(true);
+    expect(out.results["beach-near"].waveHeightFt).toBeCloseTo(SOUTH_HAVEN_FT, 4);
+    const urls = calls.map(function (c) { return c.url; });
+    expect(urls.indexOf(SEAGULL_PLATFORMS_URL)).not.toBe(-1);
+    expect(urls.indexOf(SEAGULL_PARAMETERS_URL)).not.toBe(-1);
+  });
+});
+
+describe("fetchWaveCatalogs", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches both catalogs and returns the derived structures", async function () {
+    installFetch(function (url) {
+      if (url === SEAGULL_PLATFORMS_URL) {
+        return Promise.resolve(jsonResponse(PLATFORMS_FIXTURE));
+      }
+      if (url === SEAGULL_PARAMETERS_URL) {
+        return Promise.resolve(jsonResponse(PARAMS_FIXTURE));
+      }
+      return Promise.resolve({ ok: false, status: 404, json: function () { return Promise.resolve(null); } });
+    });
+    const catalogs = await fetchWaveCatalogs();
+    expect(catalogs.waveParameterIds instanceof Set).toBe(true);
+    expect(Array.from(catalogs.waveParameterIds).sort()).toEqual([195, 610]);
+    expect(catalogs.platforms).toEqual([
+      { obsDatasetId: 37, lat: 42.397, lon: -86.331 },
+      { obsDatasetId: 62, lat: 43.98, lon: -86.56 }
+    ]);
+  });
+
+  it("returns null when a catalog fetch fails", async function () {
+    installFetch(function (url) {
+      if (url === SEAGULL_PLATFORMS_URL) {
+        return Promise.resolve(jsonResponse(PLATFORMS_FIXTURE));
+      }
+      return Promise.resolve({ ok: false, status: 502, json: function () { return Promise.resolve(null); } });
+    });
+    expect(await fetchWaveCatalogs()).toBe(null);
+  });
+});
+
+describe("serializeWaveCatalogs / deserializeWaveCatalogs", function () {
+  it("round-trips the derived structures through a JSON-safe form (Set <-> array)", function () {
+    const catalogs = {
+      platforms: [{ obsDatasetId: 37, lat: 42.397, lon: -86.331 }],
+      waveParameterIds: new Set([195, 610])
+    };
+    const serialized = serializeWaveCatalogs(catalogs);
+    // JSON cannot hold a Set — it must be an array on the wire.
+    expect(Array.isArray(serialized.waveParameterIds)).toBe(true);
+    const round = deserializeWaveCatalogs(JSON.parse(JSON.stringify(serialized)));
+    expect(round.waveParameterIds instanceof Set).toBe(true);
+    expect(Array.from(round.waveParameterIds).sort()).toEqual([195, 610]);
+    expect(round.platforms).toEqual(catalogs.platforms);
+  });
+
+  it("deserializes a missing/corrupt payload to null (so the caller fetches fresh)", function () {
+    expect(deserializeWaveCatalogs(null)).toBe(null);
+    expect(deserializeWaveCatalogs({})).toBe(null);
+    expect(deserializeWaveCatalogs({ platforms: [], waveParameterIds: "nope" })).toBe(null);
+    expect(deserializeWaveCatalogs({ waveParameterIds: [195] })).toBe(null);
   });
 });

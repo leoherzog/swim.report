@@ -47,14 +47,23 @@ function bboxLine(bbox) {
   return "(" + bbox.minLat + "," + bbox.minLon + "," + bbox.maxLat + "," + bbox.maxLon + ")";
 }
 
-function buildQuery(bbox) {
+// Server-side [maxsize] governs EXECUTION memory admission, not response size
+// (see the "pathological" comment near buildWaterClassQuery below) — without
+// it every query inherits the 512 MiB default, and the commons doc says the
+// server "prioritizes small requests over large ones," admitting a request
+// only when it fits within half the remaining available resources. Declaring
+// a conservative ceiling below the default improves admission odds during a
+// 504 overload storm on the shared public mirrors. Each builder's value is
+// sized to its own output: the named query returns tiny "out center tags"
+// records for a 2° tile, so 64 MiB is generous headroom.
+export function buildQuery(bbox) {
   const bb = bboxLine(bbox);
   // [timeout:90], not 60: on a loaded public mirror even a small 2° tile runs
   // right at a 60 s execution budget and gets truncated (observed "timed out
   // after 62 seconds" on the western-Lake-Superior tile in CI). 90 s gives the
   // valid-but-slow tile room to finish; the remark guard in runQuery still
   // rejects anything that breaches 90 s, so no partial set can ever leak.
-  return "[out:json][timeout:90];\n" +
+  return "[out:json][timeout:90][maxsize:67108864];\n" +
     "(\n" +
     "  nwr[\"natural\"=\"beach\"][\"name\"]" + bb + ";\n" +
     "  nwr[\"leisure\"=\"beach_resort\"][\"name\"]" + bb + ";\n" +
@@ -159,9 +168,14 @@ export async function fetchBeaches(bbox) {
 // outside the park bbox. Smallest overlapping park bbox wins so a nested
 // specific park beats a containing forest or protected area.
 
+// Declares a conservative [maxsize] below the 512 MiB default, improving
+// admission odds during a 504 overload storm (see buildQuery's comment for
+// the commons-doc rationale). 128 MiB accounts for the park query's larger
+// output ("out tags bb" on beaches, parks, AND nearby water ways) plus the
+// area-membership computation the ->.pa map_to_area step performs.
 function buildParkBeachQuery(bbox) {
   const bb = bboxLine(bbox);
-  return "[out:json][timeout:180];\n" +
+  return "[out:json][timeout:180][maxsize:134217728];\n" +
     "(\n" +
     "  way[\"leisure\"=\"park\"][\"name\"]" + bb + ";\n" +
     "  relation[\"leisure\"=\"park\"][\"name\"]" + bb + ";\n" +
@@ -425,6 +439,18 @@ export function buildWaterClassAnchor(osmId) {
 // anchor, `out ids tags bb` — NEVER `out geom` (Lake Superior's multipolygon
 // geometry is tens of MB). Returns the query string, or null when the beach's
 // osm_id cannot be anchored.
+// Deliberately declares NO [maxsize], inheriting the server's 512 MiB
+// default — the ONE builder of the three that keeps full headroom. [maxsize]
+// governs EXECUTION memory, not response size: the relation["natural"="water"]
+// (around.a:150) lake-relation probe can pull a Great Lakes multipolygon's
+// full member geometry into memory while evaluating the `around` filter even
+// though the eventual "out ids tags bb" output is tiny (see the "pathological"
+// around-on-relations comment above, near WATER_MIN_AREA_DEG2). A declared
+// cap below the actual execution need would make Overpass KILL the query
+// mid-run for the largest lake relations (Superior/Michigan/Huron), leaving
+// those shoreline beaches perpetually unclassified — a correctness risk that
+// outweighs the admission-odds benefit, which the named/park caps above
+// (output-bound, safely sizeable) already deliver.
 export function buildWaterClassQuery(osmId) {
   const anchor = buildWaterClassAnchor(osmId);
   if (anchor === null) {

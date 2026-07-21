@@ -45,6 +45,7 @@ import {
   WATER_CLASS_MAX_ATTEMPTS
 } from "../src/waterClass.js";
 import { REGIONS, pointInAnyRegion } from "../src/regions.js";
+import { buildMarineZoneIndex, nearestMarineZone } from "../src/marineZones.js";
 
 // --- Constants --------------------------------------------------------------
 // The discovery regions and the point-in-region predicate come from the
@@ -158,6 +159,7 @@ export function parseArgs(argv) {
     classifyLimit: 0,       // 0 = classify the entire eligible queue
     classifyDelayMs: 300,   // polite gap between per-beach Overpass probes
     classifyBudgetMs: 0,    // 0 = disabled; self-imposed wall-clock cap on the classify loop
+    marineZones: null,      // path to data/marine-zones-greatlakes.json => run the offline marine_zone pass
     now: null
   };
   for (let i = 0; i < argv.length; i = i + 1) {
@@ -169,6 +171,7 @@ export function parseArgs(argv) {
     else if (a === "--classify-limit") { args.classifyLimit = parseInt(argv[++i], 10) || 0; }
     else if (a === "--classify-delay-ms") { args.classifyDelayMs = parseInt(argv[++i], 10) || 0; }
     else if (a === "--classify-budget-ms") { args.classifyBudgetMs = parseInt(argv[++i], 10) || 0; }
+    else if (a === "--marine-zones") { args.marineZones = argv[++i]; }
     else if (a === "--now") { args.now = argv[++i]; }
     else { throw new Error("unknown argument: " + a); }
   }
@@ -516,6 +519,53 @@ export function reconciliationSql(snapshotRows, producedIds, producedParkRowCoun
     .map(function (r) { return deleteBeachSql(r.id); });
 }
 
+// --- Offline marine_zone derivation ------------------------------------------
+// Replaces the retired in-Worker runMarineEnrichment cron (up to 17 live NWS
+// probes per beach, 4x daily) with pure local math against the repo-committed
+// data/marine-zones-greatlakes.json (see src/marineZones.js and
+// scripts/build-marine-zones.js). Pure builder, mirrors reconciliationSql:
+//   - operates ONLY on snapshot rows (a beach discovered THIS run resolves on
+//     the next daily run, after the in-Worker NWS enrichment stamps nws_zone);
+//   - skips rows in this run's reconciliation delete set;
+//   - re-derives for EVERY row with nws_zone set (not just marine_zone-NULL
+//     rows) so historic probe artifacts self-correct once — the old probe took
+//     the FIRST ring hit, not the true nearest zone;
+//   - emits an UPDATE only when the derived zone is non-null AND differs from
+//     the snapshot value; derived-null NEVER NULLs out an existing value
+//     (marine alerts are a bonus signal — an old probe result beats nothing).
+// Derivation is deterministic (see nearestMarineZone's tie-break), so a
+// steady-state run emits zero statements. The SQL-side guards keep each
+// statement idempotent and safe under a stale snapshot. beaches.marine_attempts
+// is vestigial: the column stays but nothing writes it anymore.
+export function marineZoneSql(snapshotRows, deletedIds, index) {
+  const statements = [];
+  let considered = 0;
+  let updates = 0;
+  for (const row of snapshotRows) {
+    if (deletedIds.has(row.id)) {
+      continue;
+    }
+    if (typeof row.nws_zone !== "string" || row.nws_zone === "") {
+      continue;
+    }
+    considered = considered + 1;
+    const derived = nearestMarineZone(index, row.lat, row.lon);
+    if (derived === null) {
+      continue;
+    }
+    const existing = row.marine_zone === undefined ? null : row.marine_zone;
+    if (derived === existing) {
+      continue;
+    }
+    statements.push(
+      "UPDATE beaches SET marine_zone = " + sqlStr(derived) + " WHERE id = " + sqlStr(row.id) +
+      " AND nws_zone IS NOT NULL AND (marine_zone IS NULL OR marine_zone <> " + sqlStr(derived) + ");"
+    );
+    updates = updates + 1;
+  }
+  return { statements: statements, considered: considered, updates: updates };
+}
+
 // --- Classification queue ---------------------------------------------------
 // Build the post-upsert view of every beach (snapshot ∪ newly discovered, minus
 // reconcile-deletes), then queue the ones that still need classifying. This
@@ -694,6 +744,12 @@ export async function classifyQueue(queue, options) {
 
 // --- Main -------------------------------------------------------------------
 
+// Pure guard, exported for tests: a run with discovery, classify, AND the
+// marine pass all switched off does nothing and is a caller error.
+export function nothingToDo(args) {
+  return !args.discovery && !args.classify && !args.marineZones;
+}
+
 async function main() {
   const args = parseArgs(Deno.args);
   // The batch runs in one of two modes, split across two GitHub Actions jobs so a
@@ -704,12 +760,15 @@ async function main() {
   //   CLASSIFY-ONLY (classify.yml --no-discovery --classify-limit N): NO Overpass
   //     tiling, NO upserts, NO reconciliation, NO deletes — emits ONLY water-class
   //     UPDATEs for snapshot rows still needing classification, N per run.
-  if (!args.discovery && !args.classify) {
-    throw new Error("--no-discovery with --no-classify does nothing — pick at least one mode");
+  //   Either mode may ALSO carry the offline marine_zone pass (--marine-zones,
+  //   discovery.yml): pure local derivation over the snapshot, no network.
+  if (nothingToDo(args)) {
+    throw new Error("nothing to do — pick at least one of discovery, classify, --marine-zones");
   }
   const nowIso = args.now || new Date().toISOString();
   log("start now=" + nowIso + " out=" + args.out +
-    " discovery=" + String(args.discovery) + " classify=" + String(args.classify));
+    " discovery=" + String(args.discovery) + " classify=" + String(args.classify) +
+    " marineZones=" + String(args.marineZones));
 
   let snapshotRows = [];
   if (args.snapshot) {
@@ -799,6 +858,49 @@ async function main() {
     out.push("");
   } else {
     log("discovery skipped (--no-discovery): classify-only run — no Overpass tiling, no upserts, no reconciliation, no deletes");
+  }
+
+  // 4b. Offline marine_zone derivation (see marineZoneSql). Runs BEFORE the
+  // classify flush/atomic-write logic so both discovery-mode and marine-only
+  // runs emit through the existing write paths unchanged. Pure local math over
+  // the committed geometry — no network, and NO effect on reconciliationAllowed
+  // or the delete path (it only ever appends change-only UPDATEs).
+  //
+  // ISOLATED from the delete-bearing discovery output: everything that can
+  // throw (a missing/malformed data/marine-zones-greatlakes.json fails
+  // Deno.readTextFile / JSON.parse, and buildMarineZoneIndex throws by design
+  // on malformed geometry) is computed into a LOCAL buffer inside try/catch,
+  // and only appended to out[] once the whole pass succeeded. A broken marine
+  // data file therefore degrades to a loudly-logged "no marine changes" —
+  // the discovery delta (upserts + reconciliation DELETEs + retention +
+  // sync_meta) still writes and Apply still runs. A bonus signal must never
+  // abort the project's ONLY delete path.
+  if (args.marineZones) {
+    if (!args.snapshot) {
+      log("marine zone pass skipped: marine pass needs --snapshot");
+    } else {
+      try {
+        const zonesData = JSON.parse(await Deno.readTextFile(args.marineZones));
+        const index = buildMarineZoneIndex(zonesData);
+        const marine = marineZoneSql(snapshotRows, deletedIds, index);
+        const marineOut = [];
+        marineOut.push("-- marine zone derivation (" + String(marine.updates) + ")");
+        for (const stmt of marine.statements) {
+          marineOut.push(stmt);
+        }
+        marineOut.push(syncMetaSql("last_marine_zone_pass", nowIso, nowIso));
+        marineOut.push(syncMetaSql("last_marine_zone_count", String(marine.updates), nowIso));
+        marineOut.push("");
+        for (const line of marineOut) {
+          out.push(line);
+        }
+        log("marine zones: considered=" + String(marine.considered) + " updates=" + String(marine.updates));
+      } catch (err) {
+        log("marine zone pass FAILED (skipped, no marine UPDATEs emitted; " +
+          "discovery/classify output unaffected): " +
+          (err && err.message ? err.message : String(err)));
+      }
+    }
   }
 
   // 5. Water-body classification (the pipeline's slow part; runs as its own job).

@@ -70,7 +70,12 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   "Nearby webcam" honestly, but a curated per-beach override column is the
   eventual fix if bad matches show up. (4) Cams flip between active/inactive; a
   beach keeps a stored player URL up to 14 days after its cam dies (the player
-  page itself degrades gracefully).
+  page itself degrades gracefully). (5) The site-wide footer now carries Windy's
+  required Terms credit and same-grid-cell due beaches share one bbox `/webcams`
+  request (F14 clustering landed). Still open (F13 secondary, deliberately not done —
+  scoped to the maintainer's `render.js`-only pass): request `include=...,urls` and
+  deep-link each per-webcam caption to that cam's own detail page (`webcam.urls`)
+  rather than the generic Windy webcams hub.
 - **Threshold calibration against real flag history.** The `flag_history` table
   (migration 0006, PLAN.md sections 2 and 7) accumulates estimated-vs-official
   pairs for beaches with a scraped official flag (South Haven and Chicago
@@ -131,6 +136,13 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   API strings are inferred from ECCC's product list but not yet observed live in
   `alert_name_en` (none observed live yet) — verify the exact strings when one
   fires; a mismatch fails safe (event ignored).
+- **ECCC zone enrichment: consider a conservative shoreline-nearest fallback.**
+  `runEcccEnrichment` now does one bulk `fetchEcccForecastZones()` polygon fetch per run +
+  local exact point-in-polygon (`ecccZoneNameForPoint`). A beach centroid that sits just
+  OFFSHORE of its forecast-region polygon (a shoreline point nudged into the lake) resolves
+  to null and parks, exactly like a US point. A conservative nearest-region-within-a-small-
+  distance fallback could rescue those centroids — deliberately NOT implemented now to avoid
+  a wrong region assignment; revisit if parked-Canadian counts climb.
 - **SwimSmart / Michigan DNR partnership outreach.** Michigan's SwimSmart
   program and DNR-managed state park beaches are the ONLY path to Michigan's
   statewide official data: every EGLE BeachGuard/MiEnviro access route is a
@@ -169,6 +181,28 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   if Canadian beaches are included), regardless of zone count. A separate
   queue-based stale-refresh (request path enqueues, consumer fetches) only if
   flagless gaps show up in practice.
+- **Open-Meteo daily weighted-call budget (accounting landed, throttle deferred).**
+  Open-Meteo's free tier caps at **10,000 weighted calls/day**, and a batched
+  multi-location request is weighted by its location count (a 100-coordinate batch ≈ 100
+  weighted calls), so HTTP-level batching saves connections but NOT daily quota.
+  `runWaveRefresh` now LOGS a per-run weighted-call estimate (via `batchByBeach`'s return
+  value, counting each attempt including the one backoff retry) against
+  `OPEN_METEO_DAILY_WEIGHTED_CEILING = 10000` — visibility only, no behavioral throttling
+  on the DAILY budget yet (existing pacing guards only the per-MINUTE limit). Today a full
+  run stays well under the ceiling, but it **binds first** — before the Workers subrequest
+  limit — once nationwide pagination removes the `MAX_BEACHES_PER_RUN = 1000` cap (the
+  pagination item above). Add a real per-day cap/throttle (or cap the wind-fallback
+  location set per day, or reduce from 4 runs/day given the 6–12 h marine model cadence)
+  BEFORE pagination ships.
+- **NWS marine-zone shapefile refresh (~biannual chore).** `beaches.marine_zone` is derived
+  offline from `data/marine-zones-greatlakes.json`, generated from the NWS coastal
+  marine-zone shapefile. NWS republishes it ~1–2×/year on a schedule announced on
+  https://www.weather.gov/gis/MarineZones (current release `mz16ap26.zip`, effective
+  2026-04-16). When a new release lands, follow the refresh procedure in
+  `docs/offline-discovery.md` (update `DEFAULT_ZIP_URL` + `RELEASE_VALID_DATE` in
+  `scripts/build-marine-zones.js`, regenerate, diff per-prefix counts, `npm test`, commit).
+  Also grow `GREAT_LAKES_ZONE_PREFIXES` in that script whenever `src/regions.js` `REGIONS`
+  gains coasts beyond the Great Lakes system.
 - **North America coastal expansion — add Pacific / Gulf / Atlantic boxes to
   `src/regions.js`.** Discovery tiles the `REGIONS` array in the offline batch
   (`TILE_MAX_SPAN_DEG = 2.0`), so scale-out is purely additive: append coastal
@@ -229,12 +263,18 @@ multi-site, one test file each). Caveats worth remembering per scraper:
   rows. Open/Advisory/Closed → green/yellow/red; Closed For Season / No Data /
   Other Status omitted; 21-day sample staleness gate. Proximity-only resolution
   (no names[] — generic statewide names like "North Beach" would mis-bind);
-  mostly pays off when the bbox expands past the pilot.
+  mostly pays off when the bbox expands past the pilot. The slow ~34 s statewide
+  query is now PRE-FETCH gated (F2): skipped entirely outside a wide May–October
+  season and, in-season, run only at local hours [0, 6, 12, 18] (America/Chicago)
+  rather than hourly — the color persists between fetches via `officialTtlSeconds`
+  = 8 h. Its User-Agent is now self-identifying (no longer a spoofed Chrome UA).
 - **Ohio ODH BeachGuard API** (`ohio-beachguard`) — 51 curated Lake Erie
   public-beach ids (one GET per id per scrape; the registry bulk endpoint omits
   monitorings/advisories, so per-id detail is required). In-season + zero current
   advisories → affirmative green (BeachGuard is Ohio's system of record);
-  out-of-season → no data; `OHIO_MATCH_BBOX` hard-gates `matches()` so a
+  out-of-season → no data (a coarse Nov–Apr pre-fetch guard, `isOhioSeasonPossible`,
+  now skips the whole ~51-request fan-out off-season, mirroring southHaven);
+  `OHIO_MATCH_BBOX` hard-gates `matches()` so a
   same-named Michigan/Ontario beach can never inherit an Ohio flag. A few real
   public beaches carry 64-bit ids (Conneaut Sandbar, the Bay Point beaches, Yacht
   Port, Zeller's, Castaway) and are intentionally not yet covered (under-claim);

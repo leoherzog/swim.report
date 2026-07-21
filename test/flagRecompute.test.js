@@ -84,7 +84,7 @@ function makeEnv(beachRows, kvSeed) {
 }
 
 function runHourlyCron(env) {
-  return runScheduledCron(env, "0 * * * *");
+  return runScheduledCron(env, "7 * * * *");
 }
 
 function runWaveCron(env) {
@@ -783,6 +783,168 @@ describe("runWaveRefresh wave inputs + series (waveinput:/waves: KV)", function 
   });
 });
 
+// The GLOS Seagull buoy gap-fill relies on two large semi-static catalogs
+// (~5.5 MB) that the wave cron caches in KV so they are NOT re-downloaded every
+// 6-hourly run (F8). GLCFS_CATALOG_KV_KEY holds the tiny derived structures
+// (platform coords + wave parameter_id list, the Set written as an array);
+// GLCFS_CATALOG_TTL is the ~24 h refresh window. The cache is read AND written
+// by the wave cron only — the request path never touches it.
+const GLCFS_CATALOG_KV_KEY = "glcfs:catalogs";
+const GLCFS_CATALOG_TTL = 86400;
+
+// Builds a fetch stub that records every requested URL (into urls) and serves
+// the marine-masked payload (forcing the beach wave-null so GLOS runs), the two
+// Seagull catalogs, and one buoy /obs reading. platformLat/platformLon place the
+// catalog platform on the beach so nearestWavePlatform resolves it.
+function makeBuoyGapFillFetch(urls) {
+  return function (url) {
+    const target = typeof url === "string" ? url : (url && url.url) || "";
+    urls.push(target);
+    if (target.indexOf(MARINE_HOST) !== -1) {
+      return marineOkResponse(marinePayload(1, { ecmwf_wam025: null }));
+    }
+    if (target.indexOf("obs-datasets.geojson") !== -1) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: function () {
+          return Promise.resolve({
+            features: [{
+              properties: {
+                obs_dataset_id: 100,
+                parameters: [{ standard_name: "sea_surface_wave_significant_height" }]
+              },
+              geometry: { coordinates: [-83.3, 44.8] }
+            }]
+          });
+        }
+      });
+    }
+    if (target.indexOf("/parameters") !== -1) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: function () {
+          return Promise.resolve([
+            { parameter_id: 5, standard_name: "sea_surface_wave_significant_height" }
+          ]);
+        }
+      });
+    }
+    if (target.indexOf("/obs?") !== -1) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: function () {
+          return Promise.resolve([{
+            obs_dataset_id: 100,
+            parameters: [{
+              parameter_id: 5,
+              observations: [{ timestamp: "2026-07-15T15:55:00Z", value: 1.0 }]
+            }]
+          }]);
+        }
+      });
+    }
+    return Promise.reject(new Error("network disabled in test"));
+  };
+}
+
+describe("runWaveRefresh GLOS catalog KV cache (F8)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("cache MISS: fetches both catalogs and writes the derived structures to KV (Set as array, 24h TTL)", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    const urls = [];
+    vi.stubGlobal("fetch", makeBuoyGapFillFetch(urls));
+
+    // No seeded catalog cache -> deserialize null -> client fetches fresh.
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runWaveCron(made.env);
+
+    // Both large catalogs were fetched this run...
+    expect(urls.some(function (u) { return u.indexOf("obs-datasets.geojson") !== -1; })).toBe(true);
+    expect(urls.some(function (u) { return u.indexOf("/parameters") !== -1; })).toBe(true);
+
+    // ...and the derived structures were persisted for the next ~24 h of runs.
+    const catalogPut = made.kvPuts.get(GLCFS_CATALOG_KV_KEY);
+    expect(catalogPut).toBeDefined();
+    expect(catalogPut.opts).toEqual({ expirationTtl: GLCFS_CATALOG_TTL });
+    const cached = JSON.parse(catalogPut.value);
+    // JSON cannot hold a Set: waveParameterIds is serialized as an array.
+    expect(Array.isArray(cached.waveParameterIds)).toBe(true);
+    expect(cached.waveParameterIds).toEqual([5]);
+    expect(cached.platforms).toEqual([{ obsDatasetId: 100, lat: 44.8, lon: -83.3 }]);
+
+    // The buoy reading still reached the estimate input.
+    const input = JSON.parse(made.kvPuts.get("waveinput:osm-node-1").value);
+    expect(input.waveHeightFt).toBeCloseTo(3.28084, 4);
+  });
+
+  it("cache HIT: reuses seeded catalogs, fetches NEITHER large catalog, and does not rewrite the cache", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    const urls = [];
+    vi.stubGlobal("fetch", makeBuoyGapFillFetch(urls));
+
+    // Seed the derived structures in the serialized (array) form the cron writes.
+    const made = makeEnv(
+      [makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })],
+      {
+        "glcfs:catalogs": {
+          platforms: [{ obsDatasetId: 100, lat: 44.8, lon: -83.3 }],
+          waveParameterIds: [5]
+        }
+      }
+    );
+    await runWaveCron(made.env);
+
+    // Neither semi-static catalog was re-downloaded...
+    expect(urls.some(function (u) { return u.indexOf("obs-datasets.geojson") !== -1; })).toBe(false);
+    expect(urls.some(function (u) { return u.indexOf("/parameters") !== -1; })).toBe(false);
+    // ...but the buoy /obs (with the cached parameterId filter) still ran.
+    expect(urls.some(function (u) { return u.indexOf("/obs?") !== -1 && u.indexOf("parameterId=5") !== -1; })).toBe(true);
+
+    // A cache hit must NOT rewrite the cache (so the TTL genuinely expires).
+    expect(made.kvPuts.get(GLCFS_CATALOG_KV_KEY)).toBeUndefined();
+
+    // The gap-fill still produced the reading from the cached platform.
+    const input = JSON.parse(made.kvPuts.get("waveinput:osm-node-1").value);
+    expect(input.waveHeightFt).toBeCloseTo(3.28084, 4);
+  });
+
+  it("cache CORRUPT: degrades to a fresh fetch and rewrites the cache (never throws)", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    const urls = [];
+    vi.stubGlobal("fetch", makeBuoyGapFillFetch(urls));
+
+    // A stale-shaped payload deserializes to null -> fresh fetch, not a throw.
+    const made = makeEnv(
+      [makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })],
+      { "glcfs:catalogs": { platforms: [], waveParameterIds: "nope" } }
+    );
+    await runWaveCron(made.env);
+
+    // Fell through to fetching both catalogs fresh.
+    expect(urls.some(function (u) { return u.indexOf("obs-datasets.geojson") !== -1; })).toBe(true);
+    expect(urls.some(function (u) { return u.indexOf("/parameters") !== -1; })).toBe(true);
+    // And repaired the cache with the freshly derived structures.
+    const catalogPut = made.kvPuts.get(GLCFS_CATALOG_KV_KEY);
+    expect(catalogPut).toBeDefined();
+    expect(JSON.parse(catalogPut.value).waveParameterIds).toEqual([5]);
+  });
+});
+
 // The hourly estimate no longer fetches Open-Meteo — it READS the wave cron's
 // "waveinput:" + id KV. A seeded wave height must flow through to the flag
 // color; a missing key must degrade honestly (no wave input, no crash).
@@ -837,5 +999,54 @@ describe("runFlagRecompute reads waveinput: KV", function () {
     const flagPut = made.kvPuts.get("flag:osm-node-1");
     expect(flagPut).toBeDefined();
     expect(JSON.parse(flagPut.value).color).toBe("unknown");
+  });
+});
+
+describe("scraper health season/cadence gate (healthMonitored)", function () {
+  // A deliberate season/cadence pre-fetch skip must be invisible to the
+  // health monitor: no streak bump (no months-long false ALERT flood) and no
+  // reset. Only genuine in-window nulls count. Date alone is faked so the
+  // cron's new Date() lands where each case needs it; timers stay real (the
+  // wave-path sleeps are zeroed by the env).
+  afterEach(function () {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function milwaukeeBeach() {
+    // Inside ONLY the wisconsin-dnr matches() box.
+    return makeBeachRow({ id: "osm-node-mke", name: "Bradford Beach", lat: 43.0, lon: -87.9 });
+  }
+
+  function runAt(isoTime, beachRows) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(isoTime));
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const made = makeEnv(beachRows);
+    return runHourlyCron(made.env).then(function () { return made; });
+  }
+
+  it("off-season (January): the deliberate skip writes NO scraperhealth: key", async function () {
+    const made = await runAt("2026-01-15T18:00:00Z", [milwaukeeBeach()]);
+    expect(made.kvPuts.get("scraperhealth:wisconsin-dnr")).toBeUndefined();
+  });
+
+  it("in-season off-cadence hour: still not counted (no scraperhealth: write)", async function () {
+    // 2026-07-15T19:00:00Z = 14:00 America/Chicago — not a FETCH_HOURS slot.
+    const made = await runAt("2026-07-15T19:00:00Z", [milwaukeeBeach()]);
+    expect(made.kvPuts.get("scraperhealth:wisconsin-dnr")).toBeUndefined();
+  });
+
+  it("in-season ON-cadence hour with a real fetch failure: the null IS counted", async function () {
+    // 2026-07-15T17:00:00Z = 12:00 America/Chicago — a FETCH_HOURS slot; the
+    // stubbed network failure is a genuine scrape null.
+    const made = await runAt("2026-07-15T17:00:00Z", [milwaukeeBeach()]);
+    const put = made.kvPuts.get("scraperhealth:wisconsin-dnr");
+    expect(put).toBeDefined();
+    const health = JSON.parse(put.value);
+    expect(health.consecutiveNulls).toBe(1);
+    expect(health.lastSuccess).toBeNull();
   });
 });

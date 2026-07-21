@@ -4,7 +4,7 @@
 // backticks). Fixtures mirror the real /beacheslist/{id} payload shape, trimmed
 // to the fields the parser reads (the heavy "metadata" siblings are omitted —
 // the parser ignores them anyway).
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   parseIsoToEpoch,
   parseAdvisoryDate,
@@ -14,10 +14,12 @@ import {
   advisoryColor,
   parseOhioBeach,
   parseBeachesListJson,
+  isOhioSeasonPossible,
   ohioBeachGuard,
   OHIO_SITES
 } from "../src/officialSources/ohioBeachGuard.js";
 import { makeBeach } from "./helpers/beach.js";
+import { installFetch } from "./helpers/fetch.js";
 
 // nowIso used across in-season tests (season runs ~05-23 .. 09-07).
 const NOW_IN_SEASON = "2026-07-05T12:00:00.000Z";
@@ -542,5 +544,86 @@ describe("ohioBeachGuard.matches", function() {
       lon: -86.2109
     });
     expect(ohioBeachGuard.matches(beach)).toBe(false);
+  });
+});
+
+describe("isOhioSeasonPossible", function() {
+  it("is true inside the coarse May-Oct fetch window", function() {
+    // Boundary months and a mid-summer month all fetch.
+    expect(isOhioSeasonPossible("2026-05-01T12:00:00.000Z")).toBe(true);
+    expect(isOhioSeasonPossible(NOW_IN_SEASON)).toBe(true);
+    expect(isOhioSeasonPossible("2026-10-31T12:00:00.000Z")).toBe(true);
+  });
+
+  it("is false for the Nov-Apr off-season", function() {
+    expect(isOhioSeasonPossible("2026-11-15T12:00:00.000Z")).toBe(false);
+    expect(isOhioSeasonPossible(NOW_OUT_OF_SEASON)).toBe(false);
+    expect(isOhioSeasonPossible("2026-01-15T12:00:00.000Z")).toBe(false);
+    expect(isOhioSeasonPossible("2026-04-30T12:00:00.000Z")).toBe(false);
+  });
+
+  it("treats a missing/unparseable timestamp as in-season (never gate on a clock we lack)", function() {
+    expect(isOhioSeasonPossible("")).toBe(true);
+    expect(isOhioSeasonPossible(null)).toBe(true);
+    expect(isOhioSeasonPossible("not-a-timestamp")).toBe(true);
+  });
+});
+
+describe("ohioBeachGuard.scrape pre-fetch season guard", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  // A fetch Response stand-in whose text() resolves to body.
+  function textResponse(body) {
+    return {
+      ok: true,
+      text: function() {
+        return Promise.resolve(body);
+      }
+    };
+  }
+
+  // A valid in-season, no-current-advisory payload -> monitored-and-clear green.
+  function greenPayload() {
+    return JSON.stringify({
+      queryResults: [
+        {
+          beachName: "Some Ohio Lake Erie Beach",
+          monitorings: [
+            {
+              isCurrentYear: true,
+              planTypeText: "Bacteria",
+              swimSeasonStartDate: "2026-05-23T12:34:57.9370000-04:00",
+              swimSeasonEndDate: "2026-09-07T15:56:49.0830000-04:00"
+            }
+          ],
+          advisories: []
+        }
+      ]
+    });
+  }
+
+  it("fetches one detail request per site in-season and returns a result", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(textResponse(greenPayload()));
+    });
+    const result = await ohioBeachGuard.scrape(NOW_IN_SEASON);
+    // One subrequest per curated site, and a usable multi-site result.
+    expect(calls.length).toBe(OHIO_SITES.length);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites.length).toBe(OHIO_SITES.length);
+  });
+
+  it("returns null WITHOUT issuing any fetch during the off-season", async function() {
+    const calls = installFetch(function() {
+      // If the guard ever lets a fetch through off-season this would still
+      // resolve, so the zero-call assertion below is the real check.
+      return Promise.resolve(textResponse(greenPayload()));
+    });
+    const result = await ohioBeachGuard.scrape(NOW_OUT_OF_SEASON);
+    expect(result).toBe(null);
+    expect(calls.length).toBe(0);
   });
 });

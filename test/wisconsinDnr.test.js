@@ -6,7 +6,12 @@ import { describe, it, expect } from "vitest";
 import {
   parseWisconsinDnrJson,
   wisconsinDnr,
-  WISCONSIN_DNR_URL
+  WISCONSIN_DNR_URL,
+  WISCONSIN_DNR_USER_AGENT,
+  WISCONSIN_DNR_OFFICIAL_TTL_SECONDS,
+  isWisconsinDnrInSeason,
+  isWisconsinDnrFetchHour,
+  shouldFetchWisconsinDnr
 } from "../src/officialSources/wisconsinDnr.js";
 import { makeBeach } from "./helpers/beach.js";
 
@@ -232,5 +237,86 @@ describe("wisconsinDnr registry entry", function() {
     expect(wisconsinDnr.url).toBe(WISCONSIN_DNR_URL);
     expect(WISCONSIN_DNR_URL.indexOf("where=1%3D1")).not.toBe(-1);
     expect(WISCONSIN_DNR_URL.indexOf("outSR=4326")).not.toBe(-1);
+  });
+
+  it("exposes a longer per-scraper official-KV TTL that outlasts the fetch gap", function() {
+    // F2: fetches are ~6h apart (FETCH_HOURS every 6h); the official flag must
+    // survive that gap, so the TTL must exceed 6h. 8h gives a one-missed-fetch
+    // margin. The official-scrape step reads scraper.officialTtlSeconds.
+    expect(wisconsinDnr.officialTtlSeconds).toBe(WISCONSIN_DNR_OFFICIAL_TTL_SECONDS);
+    expect(WISCONSIN_DNR_OFFICIAL_TTL_SECONDS).toBe(28800);
+    expect(WISCONSIN_DNR_OFFICIAL_TTL_SECONDS).toBeGreaterThan(6 * 3600);
+  });
+});
+
+describe("wisconsinDnr User-Agent (F3)", function() {
+  it("self-identifies rather than spoofing a browser", function() {
+    // Re-probed 2026-07-20: the self-identifying UA returns HTTP 200 on the full
+    // statewide query, so the earlier timeout was from sending NO UA, not from
+    // failing a browser check. Must name swim.report and carry a contact link.
+    expect(WISCONSIN_DNR_USER_AGENT).toBe("Mozilla/5.0 (swim.report; +https://swim.report)");
+    expect(WISCONSIN_DNR_USER_AGENT.indexOf("swim.report")).not.toBe(-1);
+    expect(WISCONSIN_DNR_USER_AGENT.indexOf("Chrome")).toBe(-1);
+  });
+});
+
+describe("wisconsinDnr season guard (F2)", function() {
+  // America/Chicago local months; season is the wide May-October window.
+  it("is in season for May through October", function() {
+    expect(isWisconsinDnrInSeason("2026-05-15T12:00:00Z")).toBe(true);
+    expect(isWisconsinDnrInSeason("2026-07-05T12:00:00Z")).toBe(true);
+    expect(isWisconsinDnrInSeason("2026-10-15T12:00:00Z")).toBe(true);
+  });
+
+  it("is out of season November through April", function() {
+    expect(isWisconsinDnrInSeason("2026-01-15T12:00:00Z")).toBe(false);
+    expect(isWisconsinDnrInSeason("2026-04-15T12:00:00Z")).toBe(false);
+    expect(isWisconsinDnrInSeason("2026-11-15T12:00:00Z")).toBe(false);
+    expect(isWisconsinDnrInSeason("2026-12-15T12:00:00Z")).toBe(false);
+  });
+
+  it("uses local-time month at the boundaries", function() {
+    // 2026-05-01T02:00Z is still Apr 30 21:00 in Chicago (CDT, UTC-5) -> out.
+    expect(isWisconsinDnrInSeason("2026-05-01T02:00:00Z")).toBe(false);
+    // 2026-05-01T06:00Z is May 1 01:00 local -> in.
+    expect(isWisconsinDnrInSeason("2026-05-01T06:00:00Z")).toBe(true);
+  });
+
+  it("treats a missing/unparseable timestamp as in season (safe default)", function() {
+    expect(isWisconsinDnrInSeason(undefined)).toBe(true);
+    expect(isWisconsinDnrInSeason("")).toBe(true);
+    expect(isWisconsinDnrInSeason("not-a-date")).toBe(true);
+  });
+});
+
+describe("wisconsinDnr fetch-cadence gate (F2)", function() {
+  // July -> Chicago is CDT (UTC-5), so local hour = UTC hour - 5.
+  it("fetches only on the evenly-spread cadence hours (0/6/12/18 local)", function() {
+    expect(isWisconsinDnrFetchHour("2026-07-15T05:00:00Z")).toBe(true);  // 00 local
+    expect(isWisconsinDnrFetchHour("2026-07-15T11:00:00Z")).toBe(true);  // 06 local
+    expect(isWisconsinDnrFetchHour("2026-07-15T17:00:00Z")).toBe(true);  // 12 local
+    expect(isWisconsinDnrFetchHour("2026-07-15T23:00:00Z")).toBe(true);  // 18 local
+  });
+
+  it("skips off-cadence hours so the query runs a few times/day, not hourly", function() {
+    expect(isWisconsinDnrFetchHour("2026-07-15T12:00:00Z")).toBe(false); // 07 local
+    expect(isWisconsinDnrFetchHour("2026-07-15T08:00:00Z")).toBe(false); // 03 local
+    expect(isWisconsinDnrFetchHour("2026-07-15T18:00:00Z")).toBe(false); // 13 local
+  });
+
+  it("treats a missing/unparseable timestamp as a fetch hour (safe default)", function() {
+    expect(isWisconsinDnrFetchHour(undefined)).toBe(true);
+    expect(isWisconsinDnrFetchHour("not-a-date")).toBe(true);
+  });
+});
+
+describe("wisconsinDnr combined pre-fetch gate (F2)", function() {
+  it("fetches only when in season AND on a cadence hour", function() {
+    // In season + cadence hour -> fetch.
+    expect(shouldFetchWisconsinDnr("2026-07-15T17:00:00Z")).toBe(true);
+    // In season, off-cadence hour -> skip.
+    expect(shouldFetchWisconsinDnr("2026-07-15T12:00:00Z")).toBe(false);
+    // Off season, cadence hour -> skip.
+    expect(shouldFetchWisconsinDnr("2026-01-15T06:00:00Z")).toBe(false);
   });
 });

@@ -27,12 +27,20 @@ export const WEBCAM_RADIUS_KM = 5;
 export const WEBCAM_FETCH_LIMIT = 50;
 
 // Pure. Windy v3 /webcams response body (already-parsed object) ->
-//   { webcamId, title, playerUrl } for the nearest usable active cam, or null.
-// A candidate is usable only when it is an object, status === "active", it has
-// a player object exposing a non-empty-string .live or .day, and its
-// location.latitude / location.longitude are finite numbers. playerUrl prefers
-// player.live (a live stream) over player.day (a timelapse). Malformed input
-// (null, missing/non-array webcams, etc.) -> null, never a throw.
+//   { webcamId, title, playerUrl, detailUrl } for the nearest usable active
+// cam WITHIN WEBCAM_RADIUS_KM of (lat, lon), or null. A candidate is usable
+// only when it is an object, status === "active", it has a player object
+// exposing a non-empty-string .live or .day, and its location.latitude /
+// location.longitude are finite numbers. playerUrl prefers player.live (a
+// live stream) over player.day (a timelapse). detailUrl is the cam's OWN
+// Windy detail page (urls.detail from include=urls) or null when absent —
+// the Terms' "link every image with our webcam page" target; renderWebcam
+// falls back to the generic hub when it is null (pre-refresh rows). The
+// radius guard makes this safe
+// against a bbox query's wider result set (a shared bbox may return cams
+// nearer some OTHER beach in the bucket) — for a nearby query nothing changes,
+// since the API already constrained the response to WEBCAM_RADIUS_KM. Malformed
+// input (null, missing/non-array webcams, etc.) -> null, never a throw.
 export function parseNearestActiveWebcam(json, lat, lon) {
   if (!json || !Array.isArray(json.webcams)) {
     return null;
@@ -64,12 +72,21 @@ export function parseNearestActiveWebcam(json, lat, lon) {
       continue;
     }
     const d = distanceKm(lat, lon, camLat, camLon);
+    if (d > WEBCAM_RADIUS_KM) {
+      continue;
+    }
+    const urls = cam.urls;
+    const detailUrl = urls && typeof urls === "object" &&
+      typeof urls.detail === "string" && urls.detail.length > 0
+      ? urls.detail
+      : null;
     if (bestDistance === null || d < bestDistance) {
       bestDistance = d;
       best = {
         webcamId: String(cam.webcamId),
         title: cam.title === undefined || cam.title === null ? "" : String(cam.title),
-        playerUrl: playerUrl
+        playerUrl: playerUrl,
+        detailUrl: detailUrl
       };
     }
   }
@@ -87,7 +104,7 @@ export async function fetchNearestWebcam(lat, lon, apiKey) {
   }
   const url = WINDY_WEBCAMS_API_URL +
     "?nearby=" + String(lat) + "," + String(lon) + "," + String(WEBCAM_RADIUS_KM) +
-    "&include=player,location&limit=" + String(WEBCAM_FETCH_LIMIT);
+    "&include=player,location,urls&limit=" + String(WEBCAM_FETCH_LIMIT);
   const json = await fetchJson(url, {
     headers: { "x-windy-api-key": apiKey },
     label: "windyWebcams:"
@@ -96,4 +113,26 @@ export async function fetchNearestWebcam(lat, lon, apiKey) {
     return null;
   }
   return { webcam: parseNearestActiveWebcam(json, lat, lon) };
+}
+
+// One /webcams request bounded by a bbox rectangle so a bucket of nearby
+// beaches (runWebcamSync clustering) shares a single round trip instead of one
+// nearby query each. Returns the RAW parsed body ({ webcams: [...] }) for the
+// caller to run parseNearestActiveWebcam per beach against, or null on ANY
+// failure. Never throws. A falsy apiKey short-circuits to null before any
+// fetch. bbox order is Windy's documented north,east,south,west; the 50-cam
+// cap (WEBCAM_FETCH_LIMIT) means the caller must treat a full-length result as
+// possibly truncated and fall back to per-beach nearby queries.
+export async function fetchWebcamsInBbox(north, east, south, west, apiKey) {
+  if (!apiKey) {
+    console.log("windyWebcams: missing api key, skipping bbox fetch");
+    return null;
+  }
+  const url = WINDY_WEBCAMS_API_URL +
+    "?bbox=" + String(north) + "," + String(east) + "," + String(south) + "," + String(west) +
+    "&include=player,location,urls&limit=" + String(WEBCAM_FETCH_LIMIT);
+  return await fetchJson(url, {
+    headers: { "x-windy-api-key": apiKey },
+    label: "windyWebcams: bbox"
+  });
 }

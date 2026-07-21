@@ -7,7 +7,9 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   fetchActiveEcccAlerts,
   ecccAlertsForPoint,
-  fetchEcccZoneName
+  fetchEcccForecastZones,
+  ecccZoneNameForPoint,
+  ECCC_USER_AGENT
 } from "../src/clients/eccc.js";
 import { pointInGeometry } from "../src/geo.js";
 
@@ -108,8 +110,10 @@ describe("fetchActiveEcccAlerts", function () {
 
   it("keeps live alerts, drops ended and expired ones, and maps the fields", async function () {
     let requestedUrl = null;
-    vi.stubGlobal("fetch", function (url) {
+    let requestedInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
       requestedUrl = url;
+      requestedInit = init;
       return okJson({
         features: [
           alertFeature({}),
@@ -124,6 +128,8 @@ describe("fetchActiveEcccAlerts", function () {
 
     const result = await fetchActiveEcccAlerts(NOW_ISO);
     expect(result).not.toBeNull();
+    // MSC usage policy asks for a self-identifying User-Agent (F11).
+    expect(requestedInit.headers["User-Agent"]).toBe(ECCC_USER_AGENT);
     expect(result.alerts.length).toBe(1);
     expect(result.alerts[0].event).toBe("severe thunderstorm warning");
     // onset = validity_datetime, ends = event_end_datetime (preferred over
@@ -208,37 +214,111 @@ describe("ecccAlertsForPoint", function () {
   });
 });
 
-describe("fetchEcccZoneName", function () {
+describe("fetchEcccForecastZones", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
   });
 
-  it("returns the first region NAME for a Canadian point", async function () {
+  function zoneFeature(name, lat, lon) {
+    return {
+      type: "Feature",
+      properties: { NAME: name, PROVINCE_C: "ON" },
+      geometry: squareAround(lat, lon)
+    };
+  }
+
+  it("fetches the whole set once WITH geometry and a self-identifying UA", async function () {
     let requestedUrl = null;
-    vi.stubGlobal("fetch", function (url) {
+    let requestedInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
       requestedUrl = url;
+      requestedInit = init;
       return okJson({
-        features: [{
-          type: "Feature",
-          properties: { NAME: "Windsor - Essex - Chatham-Kent", PROVINCE_C: "ON" }
-        }]
+        features: [
+          zoneFeature("Windsor - Essex - Chatham-Kent", 42.0, -82.9),
+          zoneFeature("Blind River - Thessalon", 46.26, -83.28)
+        ]
       });
     });
-    const result = await fetchEcccZoneName(41.9836774, -82.9343626);
-    expect(result).toEqual({ zoneName: "Windsor - Essex - Chatham-Kent" });
+    const zones = await fetchEcccForecastZones();
+    expect(zones.length).toBe(2);
+    expect(zones[0]).toEqual({
+      name: "Windsor - Essex - Chatham-Kent",
+      geometry: squareAround(42.0, -82.9)
+    });
     expect(requestedUrl).toContain("collections/public-standard-forecast-zones/items");
-    expect(requestedUrl).toContain("skipGeometry=true");
+    expect(requestedUrl.indexOf("skipGeometry")).toBe(-1);
+    expect(requestedUrl).toContain("limit=2000");
+    expect(requestedInit.headers["User-Agent"]).toBe(ECCC_USER_AGENT);
   });
 
-  it("returns null for a US point (zero regions) and on failure", async function () {
+  it("skips features missing a NAME or an areal geometry", async function () {
     vi.stubGlobal("fetch", function () {
-      return okJson({ features: [] });
+      const noGeom = zoneFeature("No geometry", 45.0, -80.0);
+      noGeom.geometry = null;
+      return okJson({
+        features: [
+          { type: "Feature", properties: null, geometry: squareAround(42, -82.9) },
+          { type: "Feature", properties: { NAME: "" }, geometry: squareAround(42, -82.9) },
+          noGeom,
+          zoneFeature("Keeper", 42.0, -82.9)
+        ]
+      });
     });
-    expect(await fetchEcccZoneName(42.401, -86.288)).toBeNull();
+    const zones = await fetchEcccForecastZones();
+    expect(zones.map(function (z) { return z.name; })).toEqual(["Keeper"]);
+  });
 
+  it("returns null on HTTP failure and on a thrown fetch, never throws", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.resolve({ ok: false, status: 503 });
     });
-    expect(await fetchEcccZoneName(41.98, -82.93)).toBeNull();
+    expect(await fetchEcccForecastZones()).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network down"));
+    });
+    expect(await fetchEcccForecastZones()).toBeNull();
+  });
+});
+
+describe("ecccZoneNameForPoint", function () {
+  const zones = [
+    { name: "Windsor - Essex - Chatham-Kent", geometry: squareAround(42.0, -82.9) },
+    { name: "Blind River - Thessalon", geometry: squareAround(46.26, -83.28) }
+  ];
+
+  it("returns the NAME of the containing region", function () {
+    expect(ecccZoneNameForPoint(zones, 42.0, -82.9)).toBe("Windsor - Essex - Chatham-Kent");
+    expect(ecccZoneNameForPoint(zones, 46.26, -83.28)).toBe("Blind River - Thessalon");
+  });
+
+  it("returns null for a point no region contains (a US point far from every zone)", function () {
+    expect(ecccZoneNameForPoint(zones, 42.401, -86.288)).toBeNull();
+  });
+
+  it("nearest-edge fallback: a shoreline centroid just OUTSIDE the polygon (within 2 km) still resolves", function () {
+    // Zone edge at lat 42.2 (squareAround top edge = 42.0 + 0.2); a centroid
+    // nudged ~1.1 km north of it (0.01 deg) is outside the polygon but well
+    // inside ECCC_ZONE_MAX_EDGE_KM.
+    expect(pointInGeometry(zones[0].geometry, 42.21, -82.9)).toBe(false);
+    expect(ecccZoneNameForPoint(zones, 42.21, -82.9)).toBe("Windsor - Essex - Chatham-Kent");
+  });
+
+  it("nearest-edge fallback picks the CLOSEST zone, not the first listed", function () {
+    // Just north of the Blind River square's top edge (46.26 + 0.2 = 46.46).
+    expect(ecccZoneNameForPoint(zones, 46.47, -83.28)).toBe("Blind River - Thessalon");
+  });
+
+  it("a point beyond the 2 km cap from every edge resolves to null", function () {
+    // ~3.3 km north of the top edge (0.03 deg of latitude).
+    expect(ecccZoneNameForPoint(zones, 42.23, -82.9)).toBeNull();
+  });
+
+  it("malformed input degrades to null, never throws", function () {
+    expect(ecccZoneNameForPoint(null, 42, -82.9)).toBeNull();
+    expect(ecccZoneNameForPoint([null, {}, { name: 5 }], 42, -82.9)).toBeNull();
+    expect(ecccZoneNameForPoint(zones, NaN, -82.9)).toBeNull();
+    expect(ecccZoneNameForPoint([{ name: "Bad", geometry: { type: "Polygon", coordinates: [[["x", 1]]] } }], 42, -82.9)).toBeNull();
   });
 });

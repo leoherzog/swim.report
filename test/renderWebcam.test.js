@@ -71,7 +71,12 @@ describe("nearby-webcam section", () => {
     });
     expect(html).not.toContain("Nearby webcam");
     expect(html).not.toContain("class=\"webcam-frame\"");
-    expect(html).not.toContain("windy.com/webcams");
+    // the per-webcam caption ("Webcam via Windy.com") must not leak, but the
+    // page's footer always carries a site-wide Windy credit link regardless
+    // of whether this beach has a cam, so assert on the caption specifically
+    // rather than on the shared windy.com/webcams URL string
+    expect(html).not.toContain("class=\"webcam-caption");
+    expect(html).not.toContain("Webcam via");
   });
 
   it("renders nothing and does not throw for a pre-migration row (fields undefined)", () => {
@@ -79,7 +84,8 @@ describe("nearby-webcam section", () => {
     expect(function () { html = renderWith({}); }).not.toThrow();
     expect(html).not.toContain("Nearby webcam");
     expect(html).not.toContain("class=\"webcam-frame\"");
-    expect(html).not.toContain("windy.com/webcams");
+    expect(html).not.toContain("class=\"webcam-caption");
+    expect(html).not.toContain("Webcam via");
   });
 
   it("renders nothing when webcam_player_url is an empty string", () => {
@@ -102,6 +108,43 @@ describe("nearby-webcam section", () => {
       "<span class=\"webcam-title\">Beach &lt;Cam&gt; &amp; &quot;Pier&quot;</span>");
     // the raw, unescaped title must never appear
     expect(html).not.toContain("Beach <Cam> & \"Pier\"");
+  });
+
+  it("links the caption to the cam's OWN detail page when webcam_detail_url is stored (Windy Terms)", () => {
+    const html = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "South Pier Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: "https://windy.com/webcams/1595253287"
+    });
+    expect(html).toContain(
+      "Webcam via <a href=\"https://windy.com/webcams/1595253287\" rel=\"noopener noreferrer\">Windy.com</a>");
+    // the caption must not fall back to the generic hub when a per-cam page exists
+    expect(html).not.toContain(
+      "Webcam via <a href=\"https://www.windy.com/webcams\"");
+  });
+
+  it("falls back to the generic hub link for a pre-refresh row (webcam_detail_url null/undefined)", () => {
+    const html = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "South Pier Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: null
+    });
+    expect(html).toContain(
+      "Webcam via <a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a>");
+  });
+
+  it("escapes a quote in the detail URL so it cannot break out of the href attribute", () => {
+    const html = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: "https://windy.com/webcams/\"><script>alert(1)</script>"
+    });
+    expect(html).toContain(
+      "href=\"https://windy.com/webcams/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\"");
+    expect(html).not.toContain("<script>alert(1)</script>");
   });
 
   it("escapes a quote in the player URL so it cannot break out of the src attribute", () => {

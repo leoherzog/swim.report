@@ -276,6 +276,20 @@ describe("wave-forecast section", () => {
     expect(html).toContain(
       "Estimated — not the official flag status. Always obey posted flags and lifeguards.");
   });
+
+  it("carries the Windy webcam credit required by Windy's Terms in the footer", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({})
+    });
+    // exact wording required by https://api.windy.com/webcams/terms, split
+    // across the two required links
+    expect(html).toContain(
+      "Webcams provided by <a href=\"https://www.windy.com/webcams\" " +
+      "rel=\"noopener noreferrer\">Windy.com</a> — <a href=\"https://www.windy.com/webcams/add\" " +
+      "rel=\"noopener noreferrer\">add a webcam</a>.");
+  });
 });
 
 describe("wave-forecast model comparison", () => {

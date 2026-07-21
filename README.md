@@ -240,11 +240,12 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
   otherwise a red could shadow a co-active double-red (e.g. Storm Warning).
 - **Marine** alerts (Storm/Gale/Special Marine Warning, Small Craft Advisory) are
   issued for a beach's adjacent *marine* zone (e.g. `LMZ874`), not its land
-  `nws_zone`. A US beach's `marine_zone` is resolved once by the marine-enrichment
-  cron (an offshore probe of `api.weather.gov/zones?type=marine`) and matched from the
-  **same** national `/alerts/active` fetch — no extra upstream call. Marine alerts are
+  `nws_zone`. A US beach's `marine_zone` is derived once **offline** by the discovery
+  batch (a nearest-marine-zone point-in-polygon pass over a committed NWS marine-zone
+  shapefile — see the cron section) and matched from the **same** national
+  `/alerts/active` fetch — no extra upstream call. Marine alerts are
   a bonus signal: a beach without a resolved `marine_zone` still flags on land alerts
-  and waves. Canadian marine waters belong to ECCC, so marine enrichment is gated to
+  and waves. Canadian marine waters belong to ECCC, so the derivation is gated to
   US beaches (`nws_zone` set).
 - NWS yellow **watches and advisories** (`NWS_FLOOR_PRECEDENCE`) map to yellow but are
   deliberately NOT part of the step-1 short-circuit. They are applied as a floor at
@@ -342,7 +343,7 @@ in one job never starves another. Beach discovery and water-body classification 
 **not** in this list — they run offline (see [Discovery and classification
 (offline)](#discovery-and-classification-offline)).
 
-- `0 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
+- `7 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
   the whole beach directory every run, so no flag ever outlives its 2 h KV TTL waiting
   for a rotation turn), fetches the fast-changing safety signals (alerts and SRF
@@ -357,7 +358,11 @@ in one job never starves another. Beach discovery and water-body classification 
   them through `estimateFlag`, runs the official-source scrapers (once per distinct
   matched scraper, resolved per beach, with KV-backed health monitoring), and
   writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
-  TTL. A missing `waveinput:` key (wave cron hasn't run, or its data aged out) just
+  TTL (a scraper may set an optional `officialTtlSeconds` to extend its own
+  official-KV TTL when it fetches on a reduced cadence — wisconsin-dnr uses 8 h). The
+  `7` minute offset keeps this hourly burst off the congested top-of-hour `:00` slot;
+  it only **reads** the `waveinput:` KV the `:15` wave cron wrote, so the ordering is
+  unchanged. A missing `waveinput:` key (wave cron hasn't run, or its data aged out) just
   means no wave input that run — the estimate falls back to wind or `unknown`, never
   a wrong flag.
 - `15 */6 * * *` (6-hourly) — `runWaveRefresh`: owns **all** upstream wave and wind
@@ -388,24 +393,28 @@ in one job never starves another. Beach discovery and water-body classification 
   `runEcccEnrichment`: the Canadian counterpart. Beaches NWS enrichment
   permanently parked (`nws_zone` NULL at the attempts cap) get their ECCC public
   forecast region name (e.g. "Windsor - Essex - Chatham-Kent") from the GeoMet
-  `public-standard-forecast-zones` collection (`src/clients/eccc.js`, no auth or
-  User-Agent required), up to 50 per run — one run covers the current ~50-row
-  Ontario backlog. A row with `eccc_zone` set joins the hourly Environment
+  `public-standard-forecast-zones` collection (`src/clients/eccc.js`), up to 50 per
+  run — one run covers the current ~50-row Ontario backlog. One **bulk** polygon
+  fetch of the whole forecast-region set per run + a local point-in-polygon per beach
+  (not a per-beach GeoMet lookup); every GeoMet request now sends a meaningful
+  `User-Agent` (MSC usage policy). A failed bulk fetch parks the whole run (no attempt
+  bumped). A row with `eccc_zone` set joins the hourly Environment
   Canada alerts check and stops carrying the alerts-unavailable caveat; rows no
   Canadian region matches park at their own 5-attempt cap (`eccc_attempts`,
   migration 0008).
-- `23 1,7,13,19 * * *` (4x daily, offset from the other enrichment triggers) —
-  `runMarineEnrichment`: US beaches (`nws_zone` set) get their adjacent NWS **marine
-  forecast zone** id (e.g. `LMZ874`, `marine_zone`, migration 0010) via
-  `resolveMarineZone` — an offshore probe of `api.weather.gov/zones?type=marine`
-  (the beach point sits on land outside every marine polygon, so it samples the
-  point then two 8-way rings ~5.5/11 km out, nearest hit wins). Up to 20 beaches/run
-  (each costs up to ~17 sequential probe subrequests, kept well under the Workers
-  cap). Once set, the hourly recompute matches **marine warnings** (Storm/Gale/
-  Special Marine) and **Small Craft Advisory** from the same national `/alerts/active`
-  fetch. A point no marine zone is near (inland) parks at a 5-attempt cap
-  (`marine_attempts`); marine alerts are a bonus, so a parked beach still flags on
-  land alerts and waves. Gated to US beaches — Canadian marine waters are ECCC's.
+- **`marine_zone` is no longer an in-Worker cron.** US beaches (`nws_zone` set) get
+  their adjacent NWS **marine forecast zone** id (e.g. `LMZ874`, `marine_zone`,
+  migration 0010) derived **offline** by the daily discovery batch: a nearest-marine-
+  zone point-in-polygon + nearest-edge pass (15 km cap) over a repo-committed NWS
+  marine-zone shapefile (`data/marine-zones-greatlakes.json`, `src/marineZones.js`),
+  emitting change-only UPDATEs with zero upstream requests and never NULLing an
+  existing value. Once set, the hourly recompute matches **marine warnings**
+  (Storm/Gale/Special Marine) and **Small Craft Advisory** from the same national
+  `/alerts/active` fetch. Gated to US beaches (`nws_zone` NOT NULL) — Canadian marine
+  waters are ECCC's — and marine alerts are a bonus, so a beach with no resolved
+  `marine_zone` still flags on land alerts and waves. This retired the old up-to-1,360
+  live probe requests/day; the shapefile is refreshed ~biannually with
+  `scripts/build-marine-zones.js` (see the offline section).
 - `31 9 * * *` (daily) — `runWebcamSync`: hydrates each beach's nearest **Windy
   webcam** (`src/clients/windyWebcams.js`, Webcams API v3 free tier): up to 100
   beaches/night — never-checked rows first, then rows last checked more than
@@ -417,7 +426,12 @@ in one job never starves another. Beach discovery and water-body classification 
   the read-only request path, while the player embeds durably. The detail page
   renders it in a plain `<iframe>` embed (the same framed treatment as the
   wave map, with an accessible `title`) labeled as a *nearby* webcam
-  with a Windy.com attribution link (free-tier requirement). An API failure
+  with a Windy.com attribution link (free-tier requirement). The site-wide
+  footer also carries the Windy webcam credit its Terms require ("Webcams provided
+  by Windy.com — add a webcam."), which satisfies the credit obligation on every
+  page independently of this per-webcam caption link. Same-grid-cell due beaches
+  share one bbox `/webcams` request (lone/truncated/failed buckets fall back to
+  per-beach nearby queries). An API failure
   leaves the row untouched (retried next night); a confirmed
   no-cam-within-radius answer clears the webcam columns and stamps the check
   time.
@@ -427,15 +441,18 @@ developing via the scheduled-handler endpoint:
 
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"   # NWS point enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*"  # ECCC zone enrichment
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=23+1,7,13,19+*+*+*"   # NWS marine zone enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly wave refresh
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+*"            # hourly flag recompute
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=7+*+*+*+*"            # hourly flag recompute
+    # (marine_zone is derived offline by the discovery batch — not a cron; see npm run seed:marine)
 
-`npm run seed:enrich` / `npm run seed:eccc` / `npm run seed:marine` /
+`npm run seed:enrich` / `npm run seed:eccc` /
 `npm run seed:webcams` / `npm run seed:waves` / `npm run seed:flags` wrap these
-enrichment/wave/flag crons,
-while `npm run seed` and `npm run seed:classify` run the offline discovery batch
+enrichment/wave/flag crons. `npm run seed:marine` is NOT a cron wrapper — it runs the
+offline `marine_zone` derivation against local D1 (snapshot `SELECT` →
+`discovery-batch.js --marine-zones` → `apply-local-sql.js`), so run it after
+`seed:enrich` has stamped `nws_zone`.
+While `npm run seed` and `npm run seed:classify` run the offline discovery batch
 against the local D1 (see [Discovery and classification
 (offline)](#discovery-and-classification-offline)). The local database
 starts empty — run
@@ -490,13 +507,28 @@ by wikidata QID (never by name), so inland-lake rows can be hidden. Expected
 distribution across the Great Lakes region set is heavily `great_lake` / `inland` with
 0 `ocean` (no saltwater coast yet). See `docs/offline-discovery.md` for the full design.
 
+**Marine-zone derivation.** The daily discovery run also derives `beaches.marine_zone`
+offline (`--marine-zones data/marine-zones-greatlakes.json`), replacing what used to be a
+live in-Worker probe cron. It is a pure nearest-marine-zone pass (point-in-polygon +
+nearest-edge, 15 km cap; `src/marineZones.js`) over the snapshot rows that already have
+`nws_zone` set, emitting change-only idempotent UPDATEs (never NULLing an existing value)
+and never touching the delete path. The committed geometry file is regenerated
+~biannually — when NWS publishes a new coastal marine-zone shapefile
+(https://www.weather.gov/gis/MarineZones) — by running `scripts/build-marine-zones.js`
+(see `docs/offline-discovery.md` for the file format and refresh procedure).
+
 **Paid-plan assumption**: the cron subrequest budgets exceed the free plan's
 50-subrequest ceiling (the paid plan allows 10,000 per invocation). The hourly
 `runFlagRecompute` runs alert + SRF + scraper fetches plus up to ~700 KV
 reads/writes (Ohio BeachGuard alone is 51 per-id GETs), and
 the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy gap-fill + wind
 fetches plus up to ~1200 `waveinput:`/`waves:` KV writes — each well under 10,000 but far
-past the free ceiling. Production deployment assumes the Workers Paid plan. See `TODO.md`
+past the free ceiling. Production deployment assumes the Workers Paid plan. `runWaveRefresh`
+also logs a per-run **Open-Meteo weighted-call** estimate (each batched location counts as
+~1 weighted call, and one backoff retry doubles a throttled batch) against Open-Meteo's
+free-tier **10,000 weighted calls/day** ceiling — a separate limit from the Workers
+subrequest budget that binds first once nationwide pagination removes the
+`MAX_BEACHES_PER_RUN = 1000` cap (accounting only for now; see `TODO.md`). See `TODO.md`
 for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
 
 ## Deployment

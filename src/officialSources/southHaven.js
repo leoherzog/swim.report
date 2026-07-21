@@ -336,6 +336,13 @@ export const southHaven = {
   id: "south-haven-mi",
   label: "City of South Haven Beach Flag Program",
   url: SOUTH_HAVEN_URL,
+  // Health-monitor gate (see the scraper-health step in src/index.js): the
+  // season/hours pre-fetch skip in scrape() is a DELIBERATE null, not a
+  // failure — unmonitored hours must not count toward the consecutive-null
+  // alert streak.
+  healthMonitored: function(nowIso) {
+    return isSouthHavenMonitored(nowIso);
+  },
   matches: function(beach) {
     if (/south haven/i.test(beach.name)) {
       return true;
