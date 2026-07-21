@@ -162,17 +162,30 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   mitigation, not a cure. The real fix for chronic public-Overpass 504 flakiness
   is a **self-hosted Overpass instance** (or a paid/reliable endpoint) so
   discovery no longer rides shared public infrastructure.
-- **Flip the recompute rotation to demand-priority once the table outgrows one
-  run.** The request path stamps `beaches.last_viewed` (migration 0007; detail
-  page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`) but nothing
-  reads it yet — at pilot scale `MAX_BEACHES_PER_RUN = 1000` covers the whole
-  table hourly, so prioritization would change nothing. When beach count
-  approaches that limit, reorder the hourly SELECT to recompute recently-viewed
-  beaches every run and rotate never/rarely-viewed rows on a slower cadence (with
-  a matching longer KV TTL for the slow tier). Caveat: Workers Cache means cache
-  HITs don't run the Worker, so `last_viewed` undercounts popular beaches
-  slightly (stamps land on misses/revalidations only) — fine for a coarse
-  priority signal.
+- **Demand-priority recompute rotation — mechanism landed, cold-tier tuning
+  deferred.** The request path stamps `beaches.last_viewed` (migration 0007;
+  detail page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`), and
+  it now has real consumers: `runFlagRecompute`/`runWaveRefresh` split their
+  rotation into a hot tier (`last_viewed` within `HOT_VIEW_WINDOW_MS`, 7 days —
+  always fully covered every run) and a cold tier that rotates through the
+  remaining `MAX_BEACHES_PER_RUN` budget on the existing
+  `recompute_updated`-oldest-first order; `runNwsEnrichment`/
+  `runEcccEnrichment`/`runWebcamSync` add `last_viewed DESC NULLS LAST` as a
+  tiebreak in their candidate queues so a viewed beach's enrichment/recheck gap
+  fills before an equally-eligible never-viewed one's. At pilot scale both tiers
+  still fit inside one run, so the split is a no-op in practice today; it only
+  starts mattering once beach count approaches `MAX_BEACHES_PER_RUN`. Deferred
+  residue: (1) a longer KV TTL for the cold tier specifically, so a cold beach's
+  flag doesn't expire to "no data" every time it misses a rotation turn once hot
+  and cold no longer both fit in one run; (2) stamping `last_viewed` from the
+  home list view too (currently only the two single-beach routes stamp it, so a
+  beach that's only ever seen on the list page never reads as hot); (3) a real
+  split-query implementation (today's is a single ORDER BY guard, not two
+  separate queries) plus the migration 0012-class indexes real pagination will
+  need at nationwide scale; (4) real pagination itself. Caveat unchanged:
+  Workers Cache means cache HITs don't run the Worker, so `last_viewed`
+  undercounts popular beaches slightly (stamps land on misses/revalidations
+  only) — fine for a coarse priority signal.
 - **Alerts-only fast cron (not yet built).** A `*/10`-ish alerts-only cron — NWS
   alerts are the one event-driven input; a High Surf Warning issued at :05
   currently waits up to 55 min for the hourly recompute. Since alerts are a

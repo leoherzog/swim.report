@@ -10,10 +10,12 @@ import { WEBCAM_FETCH_LIMIT } from "../src/clients/windyWebcams.js";
 // COUNT, and every bind().run() is recorded with its SQL + args.
 function makeWebcamEnv(dueRows) {
   const runCalls = [];
+  const preparedSql = [];
   const env = {
     WINDY_WEBCAM_API_TOKEN: "test-token",
     DB: {
       prepare: function (sql) {
+        preparedSql.push(sql);
         return {
           all: function () { return Promise.resolve({ results: dueRows }); },
           first: function () { return Promise.resolve({ n: 0 }); },
@@ -31,7 +33,7 @@ function makeWebcamEnv(dueRows) {
       }
     }
   };
-  return { env: env, runCalls: runCalls };
+  return { env: env, runCalls: runCalls, preparedSql: preparedSql };
 }
 
 function runWebcamCron(env) {
@@ -70,6 +72,27 @@ function webcamUpdates(runCalls) {
 describe("runWebcamSync clustering", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
+  });
+
+  it("selects due candidates never-checked-first, then hot last_viewed, then oldest-checked/id", async function () {
+    const made = makeWebcamEnv([]);
+    await runWebcamCron(made.env);
+
+    const selects = made.preparedSql.filter(function (sql) {
+      return sql.indexOf("SELECT id, lat, lon FROM beaches WHERE (webcam_checked IS NULL OR webcam_checked < ?1)") !== -1;
+    });
+    expect(selects.length).toBe(1);
+    expect(selects[0]).toContain(
+      "ORDER BY (webcam_checked IS NULL) DESC, last_viewed DESC NULLS LAST, webcam_checked ASC, id ASC"
+    );
+    // Never-checked-before-rechecks stays the leading key; last_viewed is a
+    // demand-aware tiebreak; the original oldest-checked/id ordering is last.
+    const neverCheckedIdx = selects[0].indexOf("(webcam_checked IS NULL) DESC");
+    const lastViewedIdx = selects[0].indexOf("last_viewed DESC NULLS LAST");
+    const checkedIdIdx = selects[0].indexOf("webcam_checked ASC, id ASC");
+    expect(neverCheckedIdx).toBeGreaterThan(-1);
+    expect(lastViewedIdx).toBeGreaterThan(neverCheckedIdx);
+    expect(checkedIdIdx).toBeGreaterThan(lastViewedIdx);
   });
 
   it("shares one bbox request across a cluster and a nearby request for a lone beach", async function () {

@@ -9,12 +9,14 @@ import { runScheduledCron } from "./helpers/cron.js";
 // the parked COUNT, and every .bind().run() is recorded with its SQL + args.
 function makeEnrichmentEnv(candidateRows) {
   const runCalls = [];
+  const preparedSql = [];
   const env = {
     // Production parks the run when the bulk zones fetch under-delivers
     // (~419 expected); these tests use 1-2 fixture zones, so lower the floor.
     ECCC_ZONES_SANITY_MIN: 1,
     DB: {
       prepare: function (sql) {
+        preparedSql.push(sql);
         return {
           all: function () {
             return Promise.resolve({ results: candidateRows });
@@ -44,7 +46,7 @@ function makeEnrichmentEnv(candidateRows) {
       put: function () { return Promise.resolve(); }
     }
   };
-  return { env: env, runCalls: runCalls };
+  return { env: env, runCalls: runCalls, preparedSql: preparedSql };
 }
 
 function runEcccCron(env) {
@@ -204,6 +206,26 @@ describe("runEcccEnrichment", function () {
     expect(made.runCalls.some(function (c) {
       return c.sql.indexOf("eccc_attempts + 1") !== -1;
     })).toBe(false);
+  });
+
+  it("selects candidates eccc_attempts-first, hot last_viewed tiebreak, RANDOM() last", async function () {
+    stubZonesFetch([]);
+    const made = makeEnrichmentEnv([]);
+    await runEcccCron(made.env);
+
+    const selects = made.preparedSql.filter(function (sql) {
+      return sql.indexOf("SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL") !== -1;
+    });
+    expect(selects.length).toBe(1);
+    expect(selects[0]).toContain("ORDER BY eccc_attempts ASC, last_viewed DESC NULLS LAST, RANDOM()");
+    // eccc_attempts MUST stay the leading key (the parking guarantee);
+    // last_viewed is only a demand-aware tiebreak, RANDOM() stays last.
+    const attemptsIdx = selects[0].indexOf("eccc_attempts ASC");
+    const lastViewedIdx = selects[0].indexOf("last_viewed DESC NULLS LAST");
+    const randomIdx = selects[0].indexOf("RANDOM()");
+    expect(attemptsIdx).toBeGreaterThan(-1);
+    expect(lastViewedIdx).toBeGreaterThan(attemptsIdx);
+    expect(randomIdx).toBeGreaterThan(lastViewedIdx);
   });
 
   it("parks the run under the DEFAULT sanity floor when a 200 under-delivers (2 of ~419 zones)", async function () {

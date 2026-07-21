@@ -344,9 +344,16 @@ in one job never starves another. Beach discovery and water-body classification 
 (offline)](#discovery-and-classification-offline)).
 
 - `7 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
-  `MAX_BEACHES_PER_RUN = 1000`, oldest `recompute_updated` first — enough to cover
-  the whole beach directory every run, so no flag ever outlives its 2 h KV TTL waiting
-  for a rotation turn), fetches the fast-changing safety signals (alerts and SRF
+  `MAX_BEACHES_PER_RUN = 1000`), ordered hot-first then oldest-`recompute_updated`-first:
+  a beach viewed within the last `HOT_VIEW_WINDOW_MS` (7 days, tracked via the
+  `last_viewed` demand stamp) is always covered every run, so its 2 h flag KV TTL never
+  lapses while it's in demand; cold (never/rarely-viewed) rows rotate through the
+  remaining budget on the original oldest-`recompute_updated`-first order and can lapse
+  to honest "no data" between turns once the table outgrows one run. At pilot scale both
+  tiers still fit inside `MAX_BEACHES_PER_RUN`, so the whole directory is covered every
+  run regardless — the split only starts mattering at nationwide scale. The per-run log
+  line reports a `hot=` count alongside the usual totals. It fetches the fast-changing
+  safety signals (alerts and SRF
   rip-current risk) and reads each beach's stored wave inputs from KV (the
   `waveinput:` key the wave cron below writes) for the current wave height and the
   wind fallback — it performs **no** Open-Meteo or GLOS fetch itself. Both
@@ -378,14 +385,18 @@ in one job never starves another. Beach discovery and water-body classification 
   under Open-Meteo's per-minute weighted rate limit. The 7 h TTL outlives the gap
   between runs, so a transient throttle leaves the strip showing slightly-older-but-
   still-model-current data rather than blanking it. A beach whose fetch merely failed
-  is left untouched so its last-good KV survives.
+  is left untouched so its last-good KV survives. Reads beaches with the same hot-first
+  ordering as `runFlagRecompute` (`last_viewed` within `HOT_VIEW_WINDOW_MS`, then oldest
+  `recompute_updated` first), sharing that column as a read-only rotation cursor — only
+  `runFlagRecompute` ever writes `recompute_updated`.
 - `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
   `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
   api.weather.gov/points. A beach without `nws_zone` silently skips the alert and
   rip-current rules in `runFlagRecompute`, so draining this queue fast is a safety
   property — api.weather.gov publishes no numeric rate limit and 75 sequential
   polite requests per run is well within reasonable use. Queue order is fewest
-  failed attempts first, then `RANDOM()`. Failures bump a per-beach
+  failed attempts first, then `last_viewed DESC` (recently-viewed beaches drain their
+  zone gap ahead of never-viewed ones), then `RANDOM()`. Failures bump a per-beach
   `enrichment_attempts` counter (migration 0003); after 5 failed attempts a row is
   parked and no longer requeued, so permanently-404ing non-US points (the Canadian
   shoreline covered by the Great Lakes region set) can't starve US beaches.
@@ -394,7 +405,9 @@ in one job never starves another. Beach discovery and water-body classification 
   permanently parked (`nws_zone` NULL at the attempts cap) get their ECCC public
   forecast region name (e.g. "Windsor - Essex - Chatham-Kent") from the GeoMet
   `public-standard-forecast-zones` collection (`src/clients/eccc.js`), up to 50 per
-  run — one run covers the current ~50-row Ontario backlog. One **bulk** polygon
+  run (queue order: fewest failed attempts first, then `last_viewed DESC`, then
+  `RANDOM()` — the same demand-tiebreak shape as `runNwsEnrichment`) — one run covers
+  the current ~50-row Ontario backlog. One **bulk** polygon
   fetch of the whole forecast-region set per run + a local point-in-polygon per beach
   (not a per-beach GeoMet lookup); every GeoMet request now sends a meaningful
   `User-Agent` (MSC usage policy). A failed bulk fetch parks the whole run (no attempt
@@ -417,8 +430,11 @@ in one job never starves another. Beach discovery and water-body classification 
   `scripts/build-marine-zones.js` (see the offline section).
 - `31 9 * * *` (daily) — `runWebcamSync`: hydrates each beach's nearest **Windy
   webcam** (`src/clients/windyWebcams.js`, Webcams API v3 free tier): up to 100
-  beaches/night — never-checked rows first, then rows last checked more than
-  14 days ago — get one `nearby` lookup (5 km radius) and store the nearest
+  beaches/night — never-checked rows strictly first, then within each of
+  never-checked/due-for-recheck (last checked more than 14 days ago) a
+  `last_viewed DESC` demand tiebreak so a recently-viewed beach's lookup or recheck
+  runs ahead of a never-viewed one's, then oldest-checked first — get one `nearby`
+  lookup (5 km radius) and store the nearest
   *active* cam's id, title, and embed **player** URL in D1 (migration 0005).
   The 100/night cap is deliberately unchanged: Windy publishes no free-tier
   quota, so it stays at polite guesswork. Only the player URL is kept:

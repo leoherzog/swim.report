@@ -155,7 +155,7 @@ describe("runNwsEnrichment", function () {
     expect(bumps.map(function (c) { return c.args[0]; })).toEqual(["osm-node-1"]);
   });
 
-  it("selects candidates under the attempts cap, freshest-first with RANDOM(), capped at 75", async function () {
+  it("selects candidates attempts-first, hot last_viewed tiebreak, RANDOM() last, capped at 75", async function () {
     stubPointsFetch({});
     const made = makeEnrichmentEnv([]);
     await runNwsCron(made.env);
@@ -165,8 +165,17 @@ describe("runNwsEnrichment", function () {
     });
     expect(selects.length).toBe(1);
     expect(selects[0]).toContain("enrichment_attempts < 5");
-    expect(selects[0]).toContain("ORDER BY enrichment_attempts ASC, RANDOM()");
+    expect(selects[0]).toContain("ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM()");
     expect(selects[0]).toContain("LIMIT 75");
+    // The attempts key MUST stay first (it is the parking guarantee);
+    // last_viewed is only a demand-aware tiebreak, and RANDOM() stays last so
+    // ties among equally-cold rows still shuffle.
+    const attemptsIdx = selects[0].indexOf("enrichment_attempts ASC");
+    const lastViewedIdx = selects[0].indexOf("last_viewed DESC NULLS LAST");
+    const randomIdx = selects[0].indexOf("RANDOM()");
+    expect(attemptsIdx).toBeGreaterThan(-1);
+    expect(lastViewedIdx).toBeGreaterThan(attemptsIdx);
+    expect(randomIdx).toBeGreaterThan(lastViewedIdx);
   });
 
   it("still enriches row 2 when row 1's fetch throws (network error swallowed to a bump)", async function () {

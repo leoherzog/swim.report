@@ -50,6 +50,10 @@ export { mergeBeachRows };
 // subrequests worst case, well under the paid plan's 10,000/invocation).
 // Real pagination is still required for nationwide scale-out (TODO.md).
 const MAX_BEACHES_PER_RUN = 1000;
+// 7-day hot/cold demand window; >> the 2h flag KV TTL so hotness never flaps
+// with the flag lifecycle; spans weekly visit periodicity. Consumed by
+// runFlagRecompute/runWaveRefresh.
+export const HOT_VIEW_WINDOW_MS = 7 * 86400000;
 // Open-Meteo's keyless API applies a per-minute WEIGHTED rate limit (cost scales
 // with locations x variables x models x days) plus per-hour/day caps, and it
 // throttles per source IP — which for a Cloudflare Worker is a shared egress
@@ -308,11 +312,13 @@ async function runFlagRecompute(env) {
   const estimatesByBeach = new Map();
   const officialsByBeach = new Map();
 
+  const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString();
+
   try {
     const beachesResult = await env.DB.prepare(
       "SELECT * FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
-    ).all();
+      " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+    ).bind(hotCutoffIso).all();
     const beaches = beachesResult.results || [];
 
     // Step 3: alerts — ONE national fetch, matched to the run's distinct zone
@@ -687,12 +693,16 @@ async function runFlagRecompute(env) {
       }
     }
 
+    const hotCount = beaches.filter(function (b) {
+      return b.last_viewed && b.last_viewed >= hotCutoffIso;
+    }).length;
     console.log(
       "index: flag recompute complete, beaches=" + String(beaches.length) +
       " estimates=" + String(estimateCount) +
       " officials=" + String(officialCount) +
       " history=" + String(historyCount) +
-      " failures=" + String(failureCount)
+      " failures=" + String(failureCount) +
+      " hot=" + String(hotCount)
     );
   } catch (err) {
     console.log("index: flag recompute failed: " + err.message);
@@ -721,11 +731,13 @@ async function runWaveRefresh(env) {
   let inputCount = 0;
   let seriesCount = 0;
 
+  const hotCutoffIso = new Date(Date.parse(nowIso) - HOT_VIEW_WINDOW_MS).toISOString();
+
   try {
     const beachesResult = await env.DB.prepare(
-      "SELECT id, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
-    ).all();
+      "SELECT id, lat, lon, last_viewed FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+      " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+    ).bind(hotCutoffIso).all();
     const beaches = beachesResult.results || [];
 
     // Step 1: waves (marine), paced.
@@ -978,7 +990,7 @@ async function runNwsEnrichment(env) {
     const needsEnrichment = await env.DB.prepare(
       "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < " +
       String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " AND " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY enrichment_attempts ASC, RANDOM() LIMIT " +
+      " ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT " +
       String(NWS_ENRICHMENT_LIMIT)
     ).all();
     const toEnrich = needsEnrichment.results || [];
@@ -1056,7 +1068,7 @@ async function runEcccEnrichment(env) {
       "SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts >= " +
       String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " AND eccc_zone IS NULL AND eccc_attempts < " +
       String(ECCC_ENRICHMENT_MAX_ATTEMPTS) + " AND " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY eccc_attempts ASC, RANDOM() LIMIT " +
+      " ORDER BY eccc_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT " +
       String(ECCC_ENRICHMENT_LIMIT)
     ).all();
     const toEnrich = needsEnrichment.results || [];
@@ -1155,7 +1167,7 @@ async function runWebcamSync(env) {
     const webcamDueResult = await env.DB.prepare(
       "SELECT id, lat, lon FROM beaches WHERE (webcam_checked IS NULL OR webcam_checked < ?1) " +
       "AND " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY webcam_checked ASC, id ASC LIMIT " + String(WEBCAM_ENRICHMENT_LIMIT)
+      " ORDER BY (webcam_checked IS NULL) DESC, last_viewed DESC NULLS LAST, webcam_checked ASC, id ASC LIMIT " + String(WEBCAM_ENRICHMENT_LIMIT)
     ).bind(webcamCutoffIso).all();
     const webcamDue = webcamDueResult.results || [];
 

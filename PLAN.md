@@ -304,10 +304,17 @@ migrations/0007_last_viewed.sql:
   Demand signal: ISO timestamp of the last visitor view of this beach (detail page
   or /api/flag/:beachId), stamped from the REQUEST path via ctx.waitUntil
   (touchLastViewed in src/router.js — section 8), throttled to once per beach per
-  hour (LAST_VIEWED_MIN_INTERVAL_MS). NULL = never viewed. Consumed by nothing yet:
-  the hourly recompute still covers the whole table at pilot scale; nationwide
-  scale-out will prioritize recently viewed rows in the recompute rotation
-  (TODO.md "Scale-out").
+  hour (LAST_VIEWED_MIN_INTERVAL_MS). NULL = never viewed. Consumed by:
+  runFlagRecompute and runWaveRefresh (section 7), which both split their
+  recompute rotation into a hot tier — beaches viewed within HOT_VIEW_WINDOW_MS
+  (7 days), always covered every run via an ORDER BY guard bound as ?1 — and a
+  cold tier that rotates through the remaining MAX_BEACHES_PER_RUN budget on the
+  existing recompute_updated-oldest-first order; and runNwsEnrichment /
+  runEcccEnrichment / runWebcamSync (section 7), which each add last_viewed DESC
+  (NULLS LAST) as a tiebreak in their candidate ORDER BY so a recently-viewed
+  beach drains its enrichment/recheck queue ahead of an equally-eligible but
+  never-viewed one. Nationwide scale-out still needs a longer cold-tier KV TTL,
+  list-view stamping, and real pagination (TODO.md "Scale-out").
 
 migrations/0008_eccc.sql:
 
@@ -1591,21 +1598,32 @@ failure counts).
 
 ### runFlagRecompute (hourly)
 
-Constants: MAX_BEACHES_PER_RUN = 1000, KV_TTL_SECONDS = 7200. (The Open-Meteo batch/pacing
-constants — OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY, OPEN_METEO_BATCH_GAP_MS,
-OPEN_METEO_RETRY_MS, WAVE_DATA_TTL_SECONDS — belong to runWaveRefresh; the hourly cron does
-not fetch Open-Meteo.)
+Constants: MAX_BEACHES_PER_RUN = 1000, KV_TTL_SECONDS = 7200, HOT_VIEW_WINDOW_MS =
+604800000 (7 days — exported from src/index.js for tests; shared with runWaveRefresh).
+(The Open-Meteo batch/pacing constants — OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY,
+OPEN_METEO_BATCH_GAP_MS, OPEN_METEO_RETRY_MS, WAVE_DATA_TTL_SECONDS — belong to
+runWaveRefresh; the hourly cron does not fetch Open-Meteo.)
 
-MAX_BEACHES_PER_RUN must cover the WHOLE beaches table in one run: the KV TTL is 2 h,
-so any beach not reached every other hourly run has its flag expire and shows "no data"
-until its next rotation turn. 1000 covers the pilot with headroom; nationwide scale-out
-still needs real pagination (TODO.md).
+MAX_BEACHES_PER_RUN must cover all HOT beaches every run: cold rows rotate through the
+remaining budget and lapse to honest no-data between turns. A beach is HOT when its
+last_viewed falls within HOT_VIEW_WINDOW_MS of the run; the hot/cold split guarantees a
+recently-viewed beach's 2 h KV TTL never lapses while it is still in demand, at the cost
+of letting a never/rarely-viewed row's flag go stale for longer once the table exceeds
+MAX_BEACHES_PER_RUN. 1000 covers the pilot with headroom (hot and cold both fit in one
+run today, so the split is a no-op in practice at pilot scale); nationwide scale-out
+still needs a longer cold-tier KV TTL and real pagination (TODO.md).
 
-1. const nowIso = new Date().toISOString(); (single timestamp for the whole run).
-2. SELECT * FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT 1000
-   (recompute_updated is migration 0004; NULLs sort first, so never-recomputed rows and
-   the longest-waiting rows always go first — a fair rotation if the table ever exceeds
-   the limit).
+1. const nowIso = new Date().toISOString(); (single timestamp for the whole run);
+   const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
+2. SELECT * FROM beaches ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
+   recompute_updated ASC, id ASC LIMIT 1000, bound with hotCutoffIso as ?1
+   (recompute_updated is migration 0004; NULLs sort first within each tier, so
+   never-recomputed rows and the longest-waiting rows always go first inside the hot
+   tier and again inside the cold tier — a fair rotation within each tier if the table
+   ever exceeds the limit). The leading guard evaluates to 0 for NULL/older last_viewed,
+   so never-viewed and stale-viewed rows sort into the cold tier after every hot row.
+   The per-run summary log adds a hot=<count> field: the count of selected rows whose
+   last_viewed falls within the hot window.
 3. Alerts: build the set of distinct non-null nws_zone values; when non-empty, ONE
    fetchAllActiveAlerts() call for the whole run, then each zone's Map entry =
    nwsAlertsForZone(nationalAlerts.alerts, zone) as { events, details, sourceUrl:
@@ -1725,8 +1743,16 @@ outlives the gap between runs (plus slack for one failed run), so a transient 42
 strip showing slightly-older-but-still-model-current data instead of blanking it.
 
 1. const nowIso = new Date().toISOString(); wavesStartIso = nowIso truncated to the top of
-   its UTC hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries.
-   SELECT id, lat, lon FROM beaches ORDER BY recompute_updated ASC, id ASC LIMIT 1000.
+   its UTC hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries;
+   const hotCutoffIso = new Date(Date.parse(nowIso) - HOT_VIEW_WINDOW_MS).toISOString()
+   (the same 7-day hot/cold split runFlagRecompute uses, computed from this run's own
+   nowIso). SELECT id, lat, lon, last_viewed FROM beaches ORDER BY (last_viewed IS NOT
+   NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT 1000, bound with
+   hotCutoffIso as ?1. This shares the flag cron's recompute_updated cursor (both crons
+   read and advance the same column) WITHOUT stamping it itself — recompute_updated is
+   written only by runFlagRecompute's own step 9; runWaveRefresh reads the column purely
+   to order its rotation, so the two crons' rotations stay coupled without either owning
+   the other's write.
 2. Waves (marine), PACED: batchByBeach chunks the points (OPEN_METEO_BATCH = 100) and runs
    the chunks in concurrency-limited waves (OPEN_METEO_CONCURRENCY at a time) with a gap
    (OPEN_METEO_BATCH_GAP_MS) between waves and ONE backoff retry (OPEN_METEO_RETRY_MS) on a
@@ -2008,12 +2034,16 @@ Retry-After when unhappy); 75 sequential polite requests per run, four times a d
 is well within reasonable use.
 
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < 5
-ORDER BY enrichment_attempts ASC, RANDOM() LIMIT 75; for each, fetchPointMetadata(lat, lon)
-sequentially; on success UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?;
-on failure (fetchPointMetadata returns null, or throws) UPDATE beaches SET
-enrichment_attempts = enrichment_attempts + 1 WHERE id = ?. Ordering: fewest failed
-attempts first (fresh rows before retries), then RANDOM() — so no id-prefix class of
-beaches (e.g. way-based state-park beaches) is ever drained after another. The attempts cap
+ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 75; for each,
+fetchPointMetadata(lat, lon) sequentially; on success UPDATE beaches SET nws_zone = ?,
+nws_grid_url = ? WHERE id = ?; on failure (fetchPointMetadata returns null, or throws)
+UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?. Ordering:
+fewest failed attempts first (fresh rows before retries, attempts key stays first so the
+parking behavior below is unchanged), then last_viewed DESC NULLS LAST as a demand
+tiebreak (a beach visitors are actively hitting drains its NWS-zone gap before an
+equally-fresh but never-viewed one), then RANDOM() last — so within a tied
+attempts/last_viewed bucket no id-prefix class of beaches (e.g. way-based state-park
+beaches) is ever drained after another. The attempts cap
 stops permanent failures — non-US points swept in by the discovery REGIONS (Ontario
 shoreline) that api.weather.gov 404s forever — from occupying the batch and starving US
 beaches; after 5 attempts a row is permanently parked and no longer requeued. The per-run
@@ -2030,8 +2060,11 @@ the two enrichment upstreams never share a failure window. Candidates are ONLY
 rows NWS enrichment permanently parked:
 
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts >= 5
-AND eccc_zone IS NULL AND eccc_attempts < 5 ORDER BY eccc_attempts ASC, RANDOM()
-LIMIT 50. ONE bulk fetchEcccForecastZones() per run fetches the whole forecast-region
+AND eccc_zone IS NULL AND eccc_attempts < 5 ORDER BY eccc_attempts ASC,
+last_viewed DESC NULLS LAST, RANDOM() LIMIT 50 — the same demand-tiebreak shape as
+runNwsEnrichment: attempts key first (so parking is unaffected), last_viewed DESC NULLS
+LAST next (a viewed beach's Ontario-shoreline zone gap fills before a never-viewed one's),
+RANDOM() last. ONE bulk fetchEcccForecastZones() per run fetches the whole forecast-region
 polygon set (F12), then each beach resolves LOCALLY via ecccZoneNameForPoint(zones, lat,
 lon) — the same one-national-fetch + local point-in-polygon shape as the alerts path,
 replacing up to 50 per-point GeoMet requests with a single one. A FAILED bulk fetch (null)
@@ -2055,10 +2088,15 @@ the logs for 429s per TODO.md), WEBCAM_RECHECK_MS = 14 days.
 
 Skipped entirely (with a log) when env.WINDY_WEBCAM_API_TOKEN is unset.
 SELECT id, lat, lon FROM beaches WHERE webcam_checked IS NULL OR
-webcam_checked < (nowIso - 14 days) ORDER BY webcam_checked ASC, id ASC LIMIT 100
-(SQLite sorts NULLs first ASC, so never-checked rows drain before rechecks; 100/night
-fills the pilot in a few nights and the 14-day recheck cadence stays ahead of the
-beach count). Due beaches are BUCKETED onto a coarse lat/lon grid (F14,
+webcam_checked < (nowIso - 14 days) ORDER BY (webcam_checked IS NULL) DESC,
+last_viewed DESC NULLS LAST, webcam_checked ASC, id ASC LIMIT 100. The leading
+(webcam_checked IS NULL) DESC keeps never-checked rows strictly ahead of any recheck
+(explicit rather than relying on SQLite's NULLs-first ASC ordering, since last_viewed now
+sits between them); last_viewed DESC NULLS LAST is the demand tiebreak within each of
+those two buckets (a viewed beach's webcam lookup, or recheck, fills first); webcam_checked
+ASC, id ASC is the original oldest-first/stable fallback order (100/night fills the pilot
+in a few nights and the 14-day recheck cadence stays ahead of the beach count). Due
+beaches are BUCKETED onto a coarse lat/lon grid (F14,
 WEBCAM_CLUSTER_SPAN_DEG = 0.2): a cell holding >1 beach shares ONE fetchWebcamsInBbox
 request (the cell's bounding box grown by WEBCAM_BBOX_MARGIN_DEG = 0.07 on every side so
 each beach's full WEBCAM_RADIUS_KM neighborhood sits inside it), then
@@ -2222,7 +2260,11 @@ Routing table (method GET only; anything else → 405):
   LAST_VIEWED_MIN_INTERVAL_MS (3600000). Failures are caught and logged — the stamp
   can never delay or fail a render. With the response cache enabled, cache HITs do
   not run the Worker, so stamps only land on misses/revalidations — acceptable: it
-  is a coarse demand signal, not analytics.
+  is a coarse demand signal, not analytics. Consumers (section 7, section 3
+  migration 0007): runFlagRecompute/runWaveRefresh's hot/cold recompute-rotation
+  split, and runNwsEnrichment/runEcccEnrichment/runWebcamSync's last_viewed DESC
+  NULLS LAST candidate-queue tiebreak. The home list (GET /) never stamps
+  last_viewed — only the two single-beach routes do.
 - The router NEVER fetches upstream. It imports only src/frontend/render.js and uses env.DB
   and env.FLAGS. The last_viewed UPDATE above is its only write.
 

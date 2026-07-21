@@ -8,6 +8,7 @@
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
+import { HOT_VIEW_WINDOW_MS } from "../src/index.js";
 import { runScheduledCron } from "./helpers/cron.js";
 
 function makeBeachRow(overrides) {
@@ -51,6 +52,11 @@ function makeEnv(beachRows, kvSeed) {
   const kvGets = kvSeed instanceof Map
     ? kvSeed
     : new Map(Object.entries(kvSeed || {}));
+  // Every bind() call is recorded (sql + args) so the demand-ordering tests
+  // can assert on the SELECT's ORDER BY shape and its single bound cutoff arg;
+  // the returned statement supports BOTH .all() (the candidate SELECT) and
+  // .run() (the per-beach UPDATEs), since the same stub backs both call sites.
+  const preparedBinds = [];
   const env = {
     OPEN_METEO_BATCH_GAP_MS: 0,
     OPEN_METEO_RETRY_MS: 0,
@@ -62,7 +68,18 @@ function makeEnv(beachRows, kvSeed) {
             return Promise.resolve({ results: beachRows });
           },
           bind: function () {
-            return { sql: sql };
+            const args = Array.prototype.slice.call(arguments);
+            preparedBinds.push({ sql: sql, args: args });
+            return {
+              sql: sql,
+              args: args,
+              all: function () {
+                return Promise.resolve({ results: beachRows });
+              },
+              run: function () {
+                return Promise.resolve({ success: true });
+              }
+            };
           }
         };
       },
@@ -80,7 +97,7 @@ function makeEnv(beachRows, kvSeed) {
       }
     }
   };
-  return { env: env, kvPuts: kvPuts, kvGets: kvGets };
+  return { env: env, kvPuts: kvPuts, kvGets: kvGets, preparedBinds: preparedBinds };
 }
 
 function runHourlyCron(env) {
@@ -439,7 +456,13 @@ function makeBatchRecordingEnv(beachRows) {
           },
           bind: function () {
             const args = Array.prototype.slice.call(arguments);
-            return { sql: sql, args: args };
+            return {
+              sql: sql,
+              args: args,
+              all: function () {
+                return Promise.resolve({ results: beachRows });
+              }
+            };
           }
         };
       },
@@ -1544,5 +1567,129 @@ describe("runFlagRecompute recompute_updated rotation stamping", function () {
     // ...and its failure never poisoned the estimates already written.
     expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
     expect(made.kvPuts.get("flag:osm-node-2")).toBeDefined();
+  });
+});
+
+// last_viewed demand-aware ordering: the recompute rotation's normal
+// (recompute_updated ASC, id ASC) queue is fronted by a hot-first guard so a
+// beach a real visitor looked at within HOT_VIEW_WINDOW_MS gets refreshed
+// before the cold sweep catches up to it. The window is 7 days — far longer
+// than the 2 h flag KV TTL — so a beach's hotness never flaps mid-lifecycle.
+describe("HOT_VIEW_WINDOW_MS demand window constant", function () {
+  it("is exactly 7 days in milliseconds", function () {
+    expect(HOT_VIEW_WINDOW_MS).toBe(7 * 86400000);
+  });
+});
+
+describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("SELECT ORDERs hot-first ahead of recompute_updated/id, and binds exactly ONE ISO cutoff arg near Date.now() - HOT_VIEW_WINDOW_MS", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const before = Date.now();
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1" })
+    ]);
+    await runHourlyCron(made.env);
+    const after = Date.now();
+
+    const selectBinds = made.preparedBinds.filter(function (b) {
+      return b.sql.indexOf("SELECT * FROM beaches WHERE") !== -1 && b.sql.indexOf("ORDER BY") !== -1;
+    });
+    expect(selectBinds.length).toBe(1);
+    const sql = selectBinds[0].sql;
+    const hotIdx = sql.indexOf("(last_viewed IS NOT NULL AND last_viewed >= ?1) DESC");
+    const recomputeIdx = sql.indexOf("recompute_updated ASC, id ASC");
+    expect(hotIdx).toBeGreaterThan(-1);
+    // The hot guard MUST precede the pre-existing rotation key — NULLS/never-
+    // viewed rows evaluate the guard to 0 and sort after hot rows into the
+    // unchanged recompute_updated/id rotation.
+    expect(recomputeIdx).toBeGreaterThan(hotIdx);
+
+    // FLAG_WORTHY_WATER_SQL is an inlined literal with no bind params, so ?1
+    // (the hot cutoff) is the SELECT's only bound argument.
+    expect(selectBinds[0].args.length).toBe(1);
+    const boundIso = selectBinds[0].args[0];
+    expect(typeof boundIso).toBe("string");
+    const boundMs = Date.parse(boundIso);
+    expect(Number.isNaN(boundMs)).toBe(false);
+    // Cutoff = now - HOT_VIEW_WINDOW_MS, within a few minutes of test wall time
+    // (a generous tolerance for CI scheduling jitter, not a precision check).
+    const toleranceMs = 5 * 60000;
+    expect(boundMs).toBeGreaterThanOrEqual(before - HOT_VIEW_WINDOW_MS - toleranceMs);
+    expect(boundMs).toBeLessThanOrEqual(after - HOT_VIEW_WINDOW_MS + toleranceMs);
+  });
+
+  it("summary log includes hot=<count of beaches last_viewed within the window>", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+
+    const recentIso = new Date(Date.now() - 60000).toISOString(); // 1 min ago: hot
+    const staleIso = new Date(Date.now() - (HOT_VIEW_WINDOW_MS + 86400000)).toISOString(); // 8 days ago: cold
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", last_viewed: recentIso }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.81, lon: -83.31, last_viewed: staleIso }),
+      makeBeachRow({ id: "osm-node-3", name: "Test Beach Gamma", lat: 44.82, lon: -83.32, last_viewed: null })
+    ]);
+    await runHourlyCron(made.env);
+
+    const calls = logSpy.mock.calls;
+    logSpy.mockRestore();
+
+    const summaryLine = calls
+      .map(function (c) { return c[0]; })
+      .filter(function (line) { return typeof line === "string" && line.indexOf("flag recompute complete") !== -1; })[0];
+    expect(summaryLine).toBeDefined();
+    expect(summaryLine).toContain("hot=1");
+  });
+});
+
+// The 6-hourly wave-refresh cron shares the exact same hybrid ORDER BY (F8):
+// a beach's wave inputs matter most when someone is actually about to look at
+// it, so the hot-first guard fronts the same recompute_updated/id rotation
+// here too, sharing the identical hotCutoffIso derivation.
+describe("runWaveRefresh demand-aware ordering (last_viewed)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("SELECT includes last_viewed, ORDERs hot-first via the same hybrid clause, and binds ONE ISO cutoff arg", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const before = Date.now();
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    await runWaveCron(made.env);
+    const after = Date.now();
+
+    const selectBinds = made.preparedBinds.filter(function (b) {
+      return b.sql.indexOf("SELECT id, lat, lon, last_viewed FROM beaches WHERE") !== -1;
+    });
+    expect(selectBinds.length).toBe(1);
+    const sql = selectBinds[0].sql;
+    const hotIdx = sql.indexOf("(last_viewed IS NOT NULL AND last_viewed >= ?1) DESC");
+    const recomputeIdx = sql.indexOf("recompute_updated ASC, id ASC");
+    expect(hotIdx).toBeGreaterThan(-1);
+    expect(recomputeIdx).toBeGreaterThan(hotIdx);
+
+    expect(selectBinds[0].args.length).toBe(1);
+    const boundIso = selectBinds[0].args[0];
+    const boundMs = Date.parse(boundIso);
+    expect(Number.isNaN(boundMs)).toBe(false);
+    const toleranceMs = 5 * 60000;
+    expect(boundMs).toBeGreaterThanOrEqual(before - HOT_VIEW_WINDOW_MS - toleranceMs);
+    expect(boundMs).toBeLessThanOrEqual(after - HOT_VIEW_WINDOW_MS + toleranceMs);
   });
 });
