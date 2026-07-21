@@ -366,12 +366,28 @@ describe("renderListPage geolocation script", () => {
     // The script is always embedded; skipping is a RUNTIME decision so the
     // near-less page can upgrade itself. Assert the load-bearing pieces: the
     // capability check, the near short-circuit (loop prevention), the rounded
-    // near param, and the replace-not-assign navigation.
+    // near param, the in-place fetch-and-swap (no navigation on success), the
+    // URL rewrite that keeps refreshes/links/submits proximity-sorted, the map
+    // notification event, and the full-navigation fallback for a failed fetch.
     expect(html).toContain("'geolocation' in navigator");
     expect(html).toContain("params.get('near')");
     expect(html).toContain("getCurrentPosition");
     expect(html).toContain("lat.toFixed(3) + ',' + lon.toFixed(3)");
-    expect(html).toContain("window.location.replace('/?' + params.toString())");
+    expect(html).toContain("fetch(nextUrl)");
+    expect(html).toContain("new DOMParser().parseFromString(html, 'text/html')");
+    expect(html).toContain("window.history.replaceState(null, '', nextUrl)");
+    expect(html).toContain("document.dispatchEvent(new CustomEvent('swimreport:nearupdate'))");
+    expect(html).toContain("window.location.replace(nextUrl)");
+  });
+
+  it("renders the polite live region the swap announces into", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z"
+    });
+    expect(html).toContain(
+      "<p id=\"geo-live-region\" class=\"visually-hidden\" role=\"status\" aria-live=\"polite\"></p>"
+    );
   });
 });
 

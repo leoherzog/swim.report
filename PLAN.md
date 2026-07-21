@@ -2293,14 +2293,29 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // keeps filtering rendered rows; a q-filtered page with zero rows shows "No
       // beaches match your search." (not the empty-database copy).
       // The page embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a browser-side
-      // geolocation upgrade: on load, when the URL has no "near" param, it calls
-      // navigator.geolocation.getCurrentPosition and on success reloads via
-      // location.replace with "?near=lat,lon" (3-decimal rounding, ~110 m — matching
-      // the rough distance labels; other params like q are preserved), so the
-      // server-side proximity sort (section 8) upgrades from IP-derived request.cf
-      // coordinates to real browser location. No geolocation API, denied permission,
-      // or timeout silently keeps the IP-based ordering; an existing "near" param
-      // short-circuits the script, so the reload happens at most once and can never loop.
+      // geolocation upgrade that stays ON the page: on load, when the URL has no
+      // "near" param, it calls navigator.geolocation.getCurrentPosition and on
+      // success fetch()es the same list URL with "?near=lat,lon" appended
+      // (3-decimal rounding, ~110 m — matching the rough distance labels; other
+      // params like q are preserved), parses the response with DOMParser, and swaps
+      // the server-rendered pieces in place — #beach-list-items innerHTML, the
+      // #beach-list-empty block (updated IN PLACE, never replaced: the search
+      // script holds it by reference), the .clear-search href, a hidden "near"
+      // input appended to #beach-search-form, and the #home-map-data JSON +
+      // #home-map data-center/data-center-precise attributes (the #home-map node
+      // itself is never replaced — the MapLibre instance stays alive) — then
+      // rewrites the URL via history.replaceState and dispatches a
+      // "swimreport:nearupdate" CustomEvent on document so LIST_MAP_SCRIPT
+      // re-centers/rebuilds, and announces the reorder into the #geo-live-region
+      // aria-live element (rendered empty, class visually-hidden, role=status,
+      // aria-live=polite, placed before the list section). The server still owns
+      // the sort: the nearest-100 SET can differ from the rendered rows, so the
+      // client swaps whole fragments and never re-sorts locally. No geolocation
+      // API, denied permission, or timeout silently keeps the IP-based ordering; a
+      // failed fetch or unexpected markup falls back to the old full navigation
+      // (location.replace of the same URL); an existing "near" param
+      // short-circuits the script, so the upgrade happens at most once and can
+      // never loop.
       // Between the intro and the search form the page embeds a home-page map:
       // <section class="home-map-section"><div id="home-map"
       // class="home-map framed-embed wa-border-radius-m"
@@ -2324,7 +2339,11 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // (https://tiles.openfreemap.org/styles/positron), centered on data-center
       // (zoom 10 when precise, else 9) else fitBounds over the markers else a
       // Great Lakes default ([-84, 44], zoom 5), with one clickable flag
-      // <a href="/beach/<id>"> marker per beach. All browser-only — the Worker
+      // <a href="/beach/<id>"> marker per beach. The script also listens for the
+      // "swimreport:nearupdate" CustomEvent on document (dispatched by
+      // LIST_GEO_SCRIPT after its in-place swap): it re-reads #home-map-data and
+      // data-center, removes the previously added markers, adds the new set, and
+      // map.easeTo()s the new center/zoom. All browser-only — the Worker
       // request path fetches nothing upstream (section "two-path rule").
 
     export function renderDetailPage(data)

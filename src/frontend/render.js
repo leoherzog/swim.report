@@ -596,6 +596,13 @@ export function renderListPage(data) {
       escapeHtml(query) + "</strong>. " +
       "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
 
+  // Polite live region for the browser-geolocation upgrade: geoScript.js swaps
+  // the list in place (no navigation), so the reorder would otherwise be
+  // invisible to screen-reader users. Empty at render; the script fills it
+  // after a successful swap.
+  const geoLiveHtml =
+    "<p id=\"geo-live-region\" class=\"visually-hidden\" role=\"status\" aria-live=\"polite\"></p>";
+
   const listHtml = "<section class=\"beach-list-section\">" +
     "<ul class=\"beach-list wa-list-plain wa-stack wa-gap-xs\" id=\"beach-list-items\">" + rowsHtml + "</ul>" +
     "<p id=\"beach-list-empty\"" + emptyStyle + " class=\"empty-state\">" +
@@ -604,7 +611,7 @@ export function renderListPage(data) {
     "</p>" +
     "</section>";
 
-  const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + listHtml;
+  const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + geoLiveHtml + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
     "<script>" + LIST_GEO_SCRIPT + "</script>" +

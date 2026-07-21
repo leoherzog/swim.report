@@ -166,4 +166,13 @@ describe("renderListPage home map", () => {
     expect(html).toContain("id=\"home-map\"");
     expect(html).toContain("<script type=\"application/json\" id=\"home-map-data\">[]</script>");
   });
+
+  it("embeds the map script's live-update hook for the geolocation swap", () => {
+    const html = renderListPage({ entries: [] });
+    // geoScript.js swaps the marker JSON + data-center in place and dispatches
+    // this event; the map script must re-read both and ease to the new center
+    // (rebuilding markers — the nearest-100 set can change, not just the view).
+    expect(html).toContain("document.addEventListener('swimreport:nearupdate'");
+    expect(html).toContain("map.easeTo({ center: updated.center, zoom: updated.zoom })");
+  });
 });

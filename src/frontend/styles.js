@@ -381,6 +381,21 @@ const RULES = [
   "  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));",
   "}",
 
+  // Screen-reader-only content (the geolocation live region): visually removed
+  // via the standard clip pattern but still announced by assistive tech.
+  ".visually-hidden {",
+  "  position: absolute;",
+  "  width: 1px;",
+  "  height: 1px;",
+  "  margin: -1px;",
+  "  padding: 0;",
+  "  border: 0;",
+  "  overflow: hidden;",
+  "  clip: rect(0 0 0 0);",
+  "  clip-path: inset(50%);",
+  "  white-space: nowrap;",
+  "}",
+
   // MapLibre's default (compact) attribution control is a native <details> whose
   // toggle is a <summary class=\"maplibregl-ctrl-attrib-button\"> — the round \"i\"
   // info button. Web Awesome's native-element styling themes every bare <summary>
