@@ -24,7 +24,9 @@ describe("nearby-webcam section", () => {
       webcam_title: "South Pier Cam",
       webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day"
     });
-    expect(html).toContain("<h2 class=\"webcam-heading wa-font-size-l\">Nearby webcam</h2>");
+    // no per-cam heading — the section is just the player and a quiet title caption
+    expect(html).not.toContain("webcam-heading");
+    expect(html).not.toContain(">Nearby webcam</h2>");
     // same plain-iframe wrapper as the wave map, so the player's own controls
     // work and the title reaches the frame as its accessible name
     expect(html).toContain("<iframe class=\"webcam-frame\"");
@@ -33,10 +35,9 @@ describe("nearby-webcam section", () => {
       "src=\"https://webcams.windy.com/webcams/public/embed/player/1595253287/day\"");
     expect(html).toContain("loading=\"lazy\"");
     expect(html).toContain("allowfullscreen");
-    // caption carries the webcam title and the Windy.com attribution link
+    // caption carries the webcam title only — no per-cam attribution line
     expect(html).toContain("<span class=\"webcam-title\">South Pier Cam</span>");
-    expect(html).toContain(
-      "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a>");
+    expect(html).not.toContain("Webcam via");
   });
 
   it("uses the title as the embed's title attribute for accessibility", () => {
@@ -48,19 +49,18 @@ describe("nearby-webcam section", () => {
     expect(html).toContain("title=\"South Pier Cam\"");
   });
 
-  it("renders the section but no title span when the title is an empty string", () => {
+  it("renders the section but no caption when the title is an empty string", () => {
     const html = renderWith({
       webcam_id: "1595253287",
       webcam_title: "",
       webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day"
     });
-    expect(html).toContain("<h2 class=\"webcam-heading wa-font-size-l\">Nearby webcam</h2>");
+    expect(html).toContain("<iframe class=\"webcam-frame\"");
+    // no visible title text, so no caption paragraph at all
     expect(html).not.toContain("webcam-title");
-    // falls back to a generic embed title
+    expect(html).not.toContain("webcam-caption");
+    // the empty title still falls back to a generic embed accessible name
     expect(html).toContain("title=\"Nearby webcam\"");
-    // attribution still renders
-    expect(html).toContain(
-      "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a>");
   });
 
   it("renders nothing webcam-related when webcam_player_url is null", () => {
@@ -71,12 +71,8 @@ describe("nearby-webcam section", () => {
     });
     expect(html).not.toContain("Nearby webcam");
     expect(html).not.toContain("class=\"webcam-frame\"");
-    // the per-webcam caption ("Webcam via Windy.com") must not leak, but the
-    // page's footer always carries a site-wide Windy credit link regardless
-    // of whether this beach has a cam, so assert on the caption specifically
-    // rather than on the shared windy.com/webcams URL string
+    // no webcam section renders at all for a beach with no cam
     expect(html).not.toContain("class=\"webcam-caption");
-    expect(html).not.toContain("Webcam via");
   });
 
   it("renders nothing and does not throw for a pre-migration row (fields undefined)", () => {
@@ -85,7 +81,6 @@ describe("nearby-webcam section", () => {
     expect(html).not.toContain("Nearby webcam");
     expect(html).not.toContain("class=\"webcam-frame\"");
     expect(html).not.toContain("class=\"webcam-caption");
-    expect(html).not.toContain("Webcam via");
   });
 
   it("renders nothing when webcam_player_url is an empty string", () => {
@@ -108,43 +103,6 @@ describe("nearby-webcam section", () => {
       "<span class=\"webcam-title\">Beach &lt;Cam&gt; &amp; &quot;Pier&quot;</span>");
     // the raw, unescaped title must never appear
     expect(html).not.toContain("Beach <Cam> & \"Pier\"");
-  });
-
-  it("links the caption to the cam's OWN detail page when webcam_detail_url is stored (Windy Terms)", () => {
-    const html = renderWith({
-      webcam_id: "1595253287",
-      webcam_title: "South Pier Cam",
-      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
-      webcam_detail_url: "https://windy.com/webcams/1595253287"
-    });
-    expect(html).toContain(
-      "Webcam via <a href=\"https://windy.com/webcams/1595253287\" rel=\"noopener noreferrer\">Windy.com</a>");
-    // the caption must not fall back to the generic hub when a per-cam page exists
-    expect(html).not.toContain(
-      "Webcam via <a href=\"https://www.windy.com/webcams\"");
-  });
-
-  it("falls back to the generic hub link for a pre-refresh row (webcam_detail_url null/undefined)", () => {
-    const html = renderWith({
-      webcam_id: "1595253287",
-      webcam_title: "South Pier Cam",
-      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
-      webcam_detail_url: null
-    });
-    expect(html).toContain(
-      "Webcam via <a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a>");
-  });
-
-  it("escapes a quote in the detail URL so it cannot break out of the href attribute", () => {
-    const html = renderWith({
-      webcam_id: "1595253287",
-      webcam_title: "Cam",
-      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
-      webcam_detail_url: "https://windy.com/webcams/\"><script>alert(1)</script>"
-    });
-    expect(html).toContain(
-      "href=\"https://windy.com/webcams/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\"");
-    expect(html).not.toContain("<script>alert(1)</script>");
   });
 
   it("escapes a quote in the player URL so it cannot break out of the src attribute", () => {

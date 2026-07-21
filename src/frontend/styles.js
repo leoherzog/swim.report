@@ -232,7 +232,7 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
-  // Grouping/spacing come from the parent .beach-identity (wa-stack wa-gap-xs),
+  // Grouping/spacing come from the parent .beach-identity (wa-stack wa-gap-l),
   // which also zero-margins its children — so the title needs no rule of its
   // own, and the subtitle keeps only its quiet color and size.
   ".beach-subtitle {",

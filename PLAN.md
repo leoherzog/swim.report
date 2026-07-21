@@ -2357,15 +2357,13 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
 - Disclaimer in the footer of EVERY page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
-  Rendered inside the shared footer <small> alongside the data attributions ("NOAA/NWS,
-  Environment and Climate Change Canada, and Open-Meteo"). The sentence itself is the
-  invariant. The footer ALSO carries the site-wide Windy webcam attribution the free
-  tier's Terms require (https://api.windy.com/webcams/terms), exact text "Webcams
-  provided by Windy.com — add a webcam." with "Windy.com" linking to
-  https://www.windy.com/webcams and "add a webcam" linking to
-  https://www.windy.com/webcams/add, positioned BETWEEN the data-attributions sentence
-  and the disclaimer sentence. This once-per-page footer credit satisfies Windy's Terms
-  credit obligation on every page.
+  Rendered as the first footer paragraph (its own <small>); the sentence itself is the
+  invariant. A second footer paragraph carries the site-wide data-source attributions as
+  a single sentence with each service linked: "Thanks to OpenStreetMap (openstreetmap.org)
+  for beach locations, NOAA/NWS (weather.gov) + ECCC (weather.gc.ca) + Open-Meteo
+  (open-meteo.com/en/docs/marine-weather-api) for marine and weather data, and Windy.com
+  (windy.com/webcams) for webcams." This once-per-page Windy credit (Windy.com linking to
+  the webcams hub) satisfies the free tier's attribution expectation on every page.
 
 ### Flag rendering rules
 

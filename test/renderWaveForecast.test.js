@@ -277,18 +277,21 @@ describe("wave-forecast section", () => {
       "Estimated — not the official flag status. Always obey posted flags and lifeguards.");
   });
 
-  it("carries the Windy webcam credit required by Windy's Terms in the footer", () => {
+  it("carries the data-source attribution links in the footer", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({})
     });
-    // exact wording required by https://api.windy.com/webcams/terms, split
-    // across the two required links
     expect(html).toContain(
-      "Webcams provided by <a href=\"https://www.windy.com/webcams\" " +
-      "rel=\"noopener noreferrer\">Windy.com</a> — <a href=\"https://www.windy.com/webcams/add\" " +
-      "rel=\"noopener noreferrer\">add a webcam</a>.");
+      "<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
+      "for beach locations, " +
+      "<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a> + " +
+      "<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a> + " +
+      "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a> " +
+      "for marine and weather data, and " +
+      "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> " +
+      "for webcams.");
   });
 });
 

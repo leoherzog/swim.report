@@ -325,20 +325,22 @@ function renderBrandHeader() {
 
 // The disclaimer sentence below is a product invariant (PLAN.md section 9):
 // estimates must never read as official flag status, on any page.
-// The Windy credit sentence is the site-wide attribution the free webcam tier's
-// Terms require (https://api.windy.com/webcams/terms: credit "Webcams provided
-// by Windy.com — add a webcam", with Windy.com linking to the webcams hub and
-// "add a webcam" linking to the submission page) — carried here, once, on every
-// page, rather than duplicated per-webcam; the per-webcam caption's own
-// "Webcam via Windy.com" link (renderWebcam) satisfies the SEPARATE
-// link-every-image obligation by targeting that cam's own detail page, and is
-// unaffected by this footer line.
+// The second paragraph is the site-wide attribution for the data sources; the
+// Windy credit links Windy.com to the webcams hub. This footer line is now the
+// only Windy attribution on the page — renderWebcam no longer carries a
+// per-cam credit.
 function renderFooter() {
-  return "<small>Beach locations via OpenStreetMap contributors. Marine and weather data via " +
-    "NOAA/NWS, Environment and Climate Change Canada, and Open-Meteo. Webcams provided by " +
-    "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> — " +
-    "<a href=\"https://www.windy.com/webcams/add\" rel=\"noopener noreferrer\">add a webcam</a>. " +
-    "Estimated — not the official flag status. Always obey posted flags and lifeguards.</small>";
+  return "<p><small>Estimated — not the official flag status. " +
+    "Always obey posted flags and lifeguards.</small></p>" +
+    "<p><small>Thanks to " +
+    "<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
+    "for beach locations, " +
+    "<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a> + " +
+    "<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a> + " +
+    "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a> " +
+    "for marine and weather data, and " +
+    "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> " +
+    "for webcams.</small></p>";
 }
 
 // Ambient, Firewatch-style layered wave swells anchored to the bottom of the
@@ -642,13 +644,10 @@ function renderWaveMap(beach) {
 // reads only D1/KV.
 // Rendered only when webcam_player_url is a non-empty string; the columns are
 // null (no nearby cam) or undefined (pre-migration rows), so both are skipped.
-// The heading and caption stay honest that this is a NEARBY cam, and the free
-// tier requires the Windy.com attribution link-back. Windy's Terms further
-// require every image be linked to that cam's OWN webcam page (or timelapse
-// player) — the caption link targets webcam_detail_url (the cam's Windy
-// detail page, stored by the webcam cron from include=urls) and only falls
-// back to the generic webcams hub for pre-refresh rows that predate the
-// column.
+// The site-wide Windy.com credit now lives once in the footer (renderFooter),
+// so this section carries no per-cam heading or attribution line — just the
+// player and, when known, the cam's own name as a quiet caption. The frame's
+// accessible name falls back to "Nearby webcam" when the title is empty.
 function renderWebcam(beach) {
   const playerUrl = beach.webcam_player_url;
   if (typeof playerUrl !== "string" || playerUrl.length === 0) {
@@ -656,24 +655,16 @@ function renderWebcam(beach) {
   }
   const title = (typeof beach.webcam_title === "string") ? beach.webcam_title : "";
   const frameTitle = title ? title : "Nearby webcam";
-  const detailUrl =
-    (typeof beach.webcam_detail_url === "string" && beach.webcam_detail_url.length > 0)
-      ? beach.webcam_detail_url
-      : "https://www.windy.com/webcams";
-  const captionParts = [];
-  if (title) {
-    captionParts.push("<span class=\"webcam-title\">" + escapeHtml(title) + "</span>");
-  }
-  captionParts.push("Webcam via <a href=\"" + escapeHtml(detailUrl) + "\" " +
-    "rel=\"noopener noreferrer\">Windy.com</a>");
   const lines = [];
   lines.push("<section class=\"webcam-section wa-stack wa-gap-s\">");
-  lines.push("<h2 class=\"webcam-heading wa-font-size-l\">Nearby webcam</h2>");
   lines.push("<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
     "<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
     " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen></iframe>" +
     "</div>");
-  lines.push("<p class=\"webcam-caption wa-caption-s\">" + captionParts.join(" &middot; ") + "</p>");
+  if (title) {
+    lines.push("<p class=\"webcam-caption wa-caption-s\">" +
+      "<span class=\"webcam-title\">" + escapeHtml(title) + "</span></p>");
+  }
   lines.push("</section>");
   return lines.join("\n");
 }
@@ -924,7 +915,7 @@ export function renderDetailPage(data) {
   // no margins of their own.) wa-flex-nowrap keeps the flag icon and beach
   // name on one flex line at narrow widths — long names wrap inside their own
   // span, beside the icon, instead of dropping below it.
-  const headerBlock = "<div class=\"beach-identity wa-stack wa-gap-xs\">" +
+  const headerBlock = "<div class=\"beach-identity wa-stack wa-gap-l\">" +
     "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +

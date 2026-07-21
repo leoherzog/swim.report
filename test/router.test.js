@@ -461,9 +461,11 @@ describe("renderListPage proximity output", () => {
     });
     expect(html).toContain("with-header-actions");
     expect(html).toContain("<div slot=\"header-actions\">");
-    // Labels render as quiet badge chips — the upstream url is never hyperlinked.
+    // Labels render as quiet badge chips — the source url is never hyperlinked in
+    // the card. (The one allowed occurrence of the docs url is the footer's own
+    // Open-Meteo attribution link, unrelated to this beach's sources.)
     expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>ECMWF Wave Forecast</wa-badge>");
-    expect(html).not.toContain("https://open-meteo.com/en/docs/marine-weather-api");
+    expect(html.split("https://open-meteo.com/en/docs/marine-weather-api").length - 1).toBe(1);
     expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>NWS Surf Zone Forecast</wa-badge>");
     // Legacy bare-string sources render as their hostname, unlinked.
     expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>api.weather.gov</wa-badge>");
