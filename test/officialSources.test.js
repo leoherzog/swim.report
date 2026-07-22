@@ -682,7 +682,7 @@ describe("findScraper", function() {
   });
 
   it("returns null for a non-matching BeachRow", function() {
-    const beach = makeBeach({ name: "Holland State Park", lat: 42.7739, lon: -86.2109 });
+    const beach = makeBeach({ name: "Remote Lake Huron Shoreline", lat: 44.8, lon: -83.3 });
     expect(findScraper(beach)).toBe(null);
   });
 });
@@ -872,7 +872,7 @@ describe("scrapeOfficialFlag unmatched-beach early return", function() {
     const calls = installFetch(function() {
       throw new Error("must never be called");
     });
-    const beach = makeBeach({ name: "Holland State Park", lat: 42.7739, lon: -86.2109 });
+    const beach = makeBeach({ name: "Remote Lake Huron Shoreline", lat: 44.8, lon: -83.3 });
     const result = await scrapeOfficialFlag(beach, "2026-07-05T12:00:00.000Z");
     expect(result).toBe(null);
     expect(calls.length).toBe(0);

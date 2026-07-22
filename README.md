@@ -105,7 +105,7 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.4.0",
+        "rules_version": "1.5.0",
         "official": false,
         "waveHeightFt": 2.62,
         "alertDetails": [],
@@ -194,7 +194,7 @@ IP-derived location and must never be shared across visitors.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.4.0`. Given the same inputs it always returns the same output.
+`rules_version` is `1.5.0`. Given the same inputs it always returns the same output.
 
 Precedence is strict: the first matching rule (steps 1–5) wins, evaluated top to
 bottom. Step 6 is the sole exception — an NWS severe-weather **watch** acts as a
@@ -215,10 +215,12 @@ higher color (see the notes below).
 | 1 | Active NWS alert | same | Event = "Lakeshore Flood Warning" or "Coastal Flood Warning" | red | "Active NWS alert: Lakeshore Flood Warning" |
 | 1b | Active ECCC alert (Canadian beaches) | `api.weather.gc.ca` `weather-alerts` collection, matched by alert-region polygon | Event = "tornado warning" | double-red | "Active Environment Canada alert: tornado warning" |
 | 1b | Active ECCC alert | same | Event = "storm surge warning" | double-red | "Active Environment Canada alert: storm surge warning" |
-| 1b | Active ECCC alert | same | Event = "squall warning" | red | "Active Environment Canada alert: squall warning" |
+| 1b | Active ECCC marine alert | `api.weather.gc.ca` `marineweather-realtime` collection, matched by marine-zone polygon | Event = "storm warning" (marine, ≥ 48 kt) | double-red | "Active Environment Canada alert: storm warning" |
+| 1b | Active ECCC alert | `weather-alerts` | Event = "squall warning" | red | "Active Environment Canada alert: squall warning" |
 | 1b | Active ECCC alert | same | Event = "waterspout warning" | red | "Active Environment Canada alert: waterspout warning" |
 | 1b | Active ECCC alert | same | Event = "severe thunderstorm warning" | red | "Active Environment Canada alert: severe thunderstorm warning" |
-| 1b | Active ECCC alert | same | Event = "wind warning" | red | "Active Environment Canada alert: wind warning" |
+| 1b | Active ECCC marine alert | `marineweather-realtime` | Event = "gale warning" (marine, ≥ 34 kt) | red | "Active Environment Canada alert: gale warning" |
+| 1b | Active ECCC alert | `weather-alerts` | Event = "wind warning" | red | "Active Environment Canada alert: wind warning" |
 | 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product, regex-parsed | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
 | 2 | Rip current risk | same | MODERATE | yellow | "NWS surf zone forecast rip current risk: MODERATE" |
 | 3 | Wave height | Open-Meteo Marine API (m converted to ft, `m * 3.28084`) | >= 4 ft | red | "Estimated wave height X.X ft (at or above 4 ft)" |
@@ -230,6 +232,8 @@ higher color (see the notes below).
 | 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
 | 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models" |
 | 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Tornado, Severe Thunderstorm, High Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
+| 6b | ECCC marine yellow floor (Canadian beaches) | `marineweather-realtime` collection | Event = "strong wind warning" or "marine weather advisory", **and** the decided color is green/unknown | yellow | "Active Environment Canada alert: <event>" |
+| 7 | Water-quality advisory floor (raise-only) | `src/wqFloor/` registry (E. coli / bacteria / HAB advisories) | An active advisory whose floor color (yellow or red) **outranks** the color steps 1–6b decided | yellow or red | "Water-quality advisory (<source>): <detail>" |
 
 Notes on the precedence design (all intentional, see `src/rules.js` and
 `test/rules.test.js`):
@@ -272,6 +276,24 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
   lowercase `alert_name_en` strings. Each beach is alert-checked by exactly one
   authority (NWS via its `nws_zone`, or ECCC via alert-region polygon containment
   once `eccc_zone` is set).
+- **ECCC marine warnings** (Canadian beaches) come from a **separate** GeoMet
+  collection (`marineweather-realtime`, `src/clients/ecccMarine.js`) than the land
+  weather-alerts — the two are disjoint, so they add new signal rather than
+  duplicates. Marine matches are concatenated onto the land ECCC matches into the
+  same alerts list, exactly as the US path concatenates marine onto land. The two
+  marine **warnings** fold into `ECCC_ALERT_PRECEDENCE` (Storm Warning → double-red,
+  Gale Warning → red); the two weaker marine products (Strong Wind Warning, Marine
+  Weather Advisory) are yellow **floors** at step 6b, never short-circuits, so they
+  can only raise a green/unknown to yellow.
+- **Water-quality advisory floor (raise-only)** — step 7. E. coli / bacteria / HAB
+  advisories are a *different axis* from surf hazard: a clean reading says nothing
+  about surf, so it may never pull a hazard estimate down. An **active** advisory
+  (from the `src/wqFloor/` registry) may raise a flag **up** to its floor color
+  (yellow or red) using the same worst-of logic as the NWS/ECCC floors, but never
+  downgrades a higher color already decided by an alert, rip risk, or wave/wind. A
+  clean/absent reading is modeled as *no advisory* and has zero effect. This is
+  baked into the estimate (`official: false`); it is never an official override.
+  See [Water-quality advisory floor](#water-quality-advisory-floor-raise-only) below.
 - Rip current risk beats wave height even when the wave height alone would imply a
   worse (or better) color. A MODERATE rip risk yields yellow even with a 6 ft wave
   height reading.
@@ -296,10 +318,10 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 
 Every `FlagEstimate` carries: `color`, a human-readable `reason`, `trigger` (which
 precedence branch decided the color: `nws-alert`, `eccc-alert`, `rip-current`,
-`wave-height`, `wind`, `rip-current-low`, `no-data`, or `nws-floor` — the detail page renders
-this as a natural-language explanation), `rules_version`, `official: false`, `sources`
-(`{ label, url }` entries for the data actually used for that beach), and `updated`
-(ISO 8601 UTC).
+`wave-height`, `wind`, `rip-current-low`, `no-data`, `nws-floor`, `eccc-floor`, or
+`wq-floor` — the detail page renders this as a natural-language explanation),
+`rules_version`, `official: false`, `sources` (`{ label, url }` entries for the data
+actually used for that beach), and `updated` (ISO 8601 UTC).
 
 ## Local development
 
@@ -605,15 +627,56 @@ Registered scrapers (registry order — most-specific match first, since
 | South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version"; the page itself is only a static legend) | Real flag colors per site (~9 sites, multiple poles roll up to most severe); Gray = unmonitored → no data |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion (never an inferred green) |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red (no-lifeguard closure); records >36 h old dropped; a beach reports green only when its own Surf row is fresh (a green resting solely on a fresh water-quality row → no data, never a false green) |
+| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product (`api.weather.gov`) — the fixed "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors** (gold-standard hazard axis): Green/Yellow/Red map 1:1; no double-red; None / unrecognized → no data. `updated` = the product's morning issuance time |
+| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for the single Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed + surf-hazard reason → red; Closed for water-quality → no data (that's the wqFloor axis); any other closure → no data |
+| PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality / off-axis → no data; never green. Hazard-keyword mapping is provisional (verified against fixtures only — live feed is currently all off-axis boilerplate) |
+| NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (verified-live: CLE, BUF — Lake Erie/Ontario) | Zonal (county-scale) rip "Swim Risk" (Low→green/Moderate→yellow/High→red) and surf-height text (max ft → `waveColorForHeight`); site color = more severe of the two; both null → no data. Bound to beaches by curated name/proximity table. Registered **last** (broad bbox) |
 
 Only hazard/flag/closure sources are registered. An official color **overrides**
 the estimate wherever it is shown, so water-quality (E. coli / bacteria)
-monitoring sources are deliberately excluded — a clean-water reading is a
-different axis from surf hazard, and letting its "green" win would mask a genuine
-hazard estimate (e.g. a gale-driven red). Six such water-quality scrapers
-(`lenawee-mi`, `michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`, `bldhd-mi`,
-`wisconsin-dnr`) were removed for this reason. The `reason` string on each
-official reading says exactly what the source reported.
+monitoring sources are deliberately excluded from *this* registry — a clean-water
+reading is a different axis from surf hazard, and letting its "green" win would
+mask a genuine hazard estimate (e.g. a gale-driven red). Six such water-quality
+scrapers (`lenawee-mi`, `michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`,
+`bldhd-mi`, `wisconsin-dnr`) were removed for this reason. Water-quality now feeds
+a **separate raise-only floor** (see below) that can never lower a flag. The
+`reason` string on each official reading says exactly what the source reported.
+
+### Water-quality advisory floor (raise-only)
+
+Water-quality advisories (E. coli / bacteria / harmful algal bloom) come from a
+second registry, `src/wqFloor/`, and are handled on a **different axis** from the
+official hazard scrapers above. Because a clean water reading says nothing about
+surf, a water-quality source is admissible **only as a raise-only floor**: an
+active advisory may raise a flag **up** (to yellow or red), but a clean or absent
+reading can **never pull a flag down**. It is baked into the estimate (rules step
+7, `official: false`), so it is **never** an official override and never wins over
+the map marker / list / detail title the way an official hazard flag does.
+Mechanically it mirrors the NWS/ECCC yellow floors: worst-of by severity, applied
+after the hazard color is already decided, so a 4 ft-wave red is never masked down
+to a clean-water green.
+
+Registered wqFloor sources (most-specific match first; the coarse USGS NowCast
+bbox is consulted last, only for beaches no curated source claims):
+
+| Source (id) | Coverage |
+|---|---|
+| NY State Parks (`ny-oprhp-beach-status`) | OPRHP Lake Erie/Ontario state-park beaches |
+| Chautauqua County NY (`chautauqua-county-ny`) | Chautauqua County bacteria/HAB postings |
+| Lake County OH (`lake-county-oh-beaches`) | Lake County (OH) GHD water-quality program |
+| Erie County PA (`erie-county-pa-kml`) | Erie County (PA) DoH KML — **URL unconfirmed** (see follow-ups) |
+| Illinois BeachGuard (`illinois-beachguard`) | IDPH per-beach detail |
+| Kenosha County WI (`kenosha-beach-conditions`) | Kenosha County beach conditions |
+| Minnesota DoH (`mn-beaches`) | mnbeaches.org (~6 Duluth-area sites) |
+| Grey Bruce ON (`grey-bruce-rec-water`) | Grey Bruce Health Unit (Lake Huron) — low confidence |
+| Ontario Parks (`ontario-parks-beach-postings`) | Ontario Parks per-park Alerts |
+| Evanston IL (`evanston-statusfy`) | City of Evanston beach status |
+| USGS Great Lakes NowCast (`usgs-great-lakes-nowcast`) | Predicted E. coli, coarse US-shore bbox (fallback) |
+
+Each wqFloor source obeys the same never-a-wrong-color rule (a schema change
+degrades to `null`, i.e. no floor) and reports only `yellow` or `red` — green and
+double-red are invalid floor colors by construction. See PLAN.md section 6
+(`src/wqFloor/`) for the full contract.
 
 ### Scraper health monitoring
 

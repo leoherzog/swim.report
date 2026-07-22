@@ -14,6 +14,10 @@ import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
 import { southHaven } from "./southHaven.js";
 import { metroparks } from "./metroparks.js";
 import { chicagoParkDistrict } from "./chicagoParkDistrict.js";
+import { nwsOmr } from "./nwsOmr.js";
+import { winnetkaTowerBeach } from "./winnetkaTowerBeach.js";
+import { paDcnrPresqueIsle } from "./paDcnrPresqueIsle.js";
+import { nwsMarineBeachForecast } from "./nwsMarineBeachForecast.js";
 
 // Ordered most-specific-match first: findScraper returns the FIRST scraper
 // whose matches(beach) is true, so tight single-city boxes and fixed-site
@@ -27,10 +31,20 @@ import { chicagoParkDistrict } from "./chicagoParkDistrict.js";
 // reading is a DIFFERENT axis from surf hazard, and letting its "green" win
 // would mask a genuine hazard estimate (e.g. a gale-driven red). Only
 // hazard/flag/closure sources belong here.
+// Ordering is most-specific-first (findScraper is first-match-wins):
+//   - southHaven / metroparks / chicagoParkDistrict / nwsOmr /
+//     winnetkaTowerBeach / paDcnrPresqueIsle all have tight single-city,
+//     fixed-site, or narrow-park-cluster matches().
+//   - nwsMarineBeachForecast is LAST: its matches() is a broad Lake
+//     Erie/Ontario bbox, so every tighter scraper must be consulted first.
 export const scrapers = [
   southHaven,
   metroparks,
-  chicagoParkDistrict
+  chicagoParkDistrict,
+  nwsOmr,
+  winnetkaTowerBeach,
+  paDcnrPresqueIsle,
+  nwsMarineBeachForecast
 ];
 
 const OFFICIAL_COLORS = ["green", "yellow", "red", "double-red"];

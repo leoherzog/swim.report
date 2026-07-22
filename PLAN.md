@@ -96,7 +96,7 @@ cross-module interface.
       "color": "yellow",             // "green" | "yellow" | "red" | "double-red" | "unknown"
       "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
       "trigger": "wave-height",      // which precedence branch decided the color — see section 4
-      "rules_version": "1.4.0",
+      "rules_version": "1.5.0",
       "official": false,
       "waveHeightFt": 2.62,          // structured echo of the input wave reading (null when
                                      // absent) — ALWAYS present regardless of which branch
@@ -209,12 +209,36 @@ Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data T
 (WAVE_DATA_TTL_SECONDS = 25200) and read by the hourly runFlagRecompute, which takes the
 current wave height and the wind fallback for its estimate from this payload instead of a
 live fetch. Written ONLY when the run produced something usable for the beach: a wave
-height (from the marine models or the buoy gap-fill) OR a wind fallback reading. A beach
-whose marine fetch merely FAILED this run (the hoursFt === null batch-failure sentinel)
-with no buoy reading is SKIPPED so its last-good key rides the TTL — the same
-graceful-degradation contract the WaveSeries has; a fetched-but-fully-masked beach with no
-buoy and no wind is skipped too. Absent/expired key → the hourly estimate simply has no
-wave input this run (degrades to the wind fallback or "unknown", never a wrong flag).
+height (from the marine models, the buoy gap-fill, OR a SUPPLEMENTAL fallback wave source —
+section 5/7) OR a wind fallback reading. A beach whose marine fetch merely FAILED this run
+(the hoursFt === null batch-failure sentinel) with no buoy reading is SKIPPED so its
+last-good key rides the TTL — the same graceful-degradation contract the WaveSeries has; a
+fetched-but-fully-masked beach with no buoy and no wind is skipped too. Absent/expired key →
+the hourly estimate simply has no wave input this run (degrades to the wind fallback or
+"unknown", never a wrong flag). The `model` may name a supplemental source (e.g.
+"nws_gridpoint_wave", "ndbc_buoy") when Open-Meteo + GLOS were both null and a fallback
+supplied the reading — the estimate's wave source label resolves it through WAVE_MODEL_LABELS
+either way.
+
+### WqFloorAdvisory (KV value under "wqfloor:" + beachId)
+
+    {
+      "beachId": "osm-node-123456",
+      "color": "red",                // "yellow" | "red" ONLY — a water-quality advisory can
+                                     // RAISE a flag but never assert green/double-red
+      "reason": "beach posted for elevated E. coli",  // the source's own advisory detail
+      "source": "Lake County General Health District Beach Water Quality Program",
+      "updated": "2026-07-19T13:00:00.000Z" // the reading's own issue/sample timestamp when
+                                            // the source carries one, else the cron nowIso
+    }
+
+Written by the hourly cron (runFlagRecompute, section 7 step 6) with { expirationTtl: 7200 }
+ONLY when a src/wqFloor source resolved an ACTIVE advisory for the beach — a clean/absent
+reading writes NOTHING (the key expires naturally, exactly like "official:"). This is a
+RAISE-ONLY floor baked INTO the estimate (rules.js step 7, official:false); it is NEVER an
+official override and NEVER feeds render.js markerFlagFields / titleColor. The request path
+reads it to render a distinct water-quality callout. See section 6 (src/wqFloor registry) and
+section 4 (estimateFlag's waterQualityAdvisory input + step 7).
 
 ## 2. D1 schema — migrations/
 
@@ -382,6 +406,14 @@ Binding name: FLAGS (single namespace for both key families).
   wave height or a wind fallback for the beach (section 1). Read by the hourly
   runFlagRecompute — the current wave height + wind fallback for the estimate come from
   here, NOT a live fetch. Absent key → the estimate has no wave input this run.
+- Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
+  (runFlagRecompute) with { expirationTtl: 7200 }, and ONLY when a src/wqFloor source
+  resolved an active water-quality advisory for the beach — a clean/absent reading writes
+  nothing (the key expires naturally, exactly like "official:"). Read by the request path to
+  render a distinct water-quality callout. This is NOT an official override: it is the same
+  advisory the estimate already folded in as a raise-only floor (rules.js step 7,
+  official:false), surfaced separately for the UI. Absent key → no active advisory (never a
+  "clean" green). See section 6 (src/wqFloor).
 - Key "glcfs:catalogs" → JSON.stringify({ platforms: [{ obsDatasetId, lat, lon }, ...],
   waveParameterIds: number[] }) — the two SMALL derived structures parsed from the ~5.5 MB
   semi-static GLOS Seagull catalogs (the wave-parameter-id Set serialized as an array).
@@ -401,7 +433,7 @@ official card when official is null.
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.4.0";
+    export const RULES_VERSION = "1.5.0";
 
     export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
       // Appended to the reason (see the caveat rule after step 5) when the cron
@@ -452,10 +484,13 @@ Pure module. No fetch, no Date, no env. Exports:
 
     export const ECCC_ALERT_PRECEDENCE = [
       "tornado warning",             // -> double-red
-      "storm surge warning",         // -> double-red
+      "storm surge warning",         // -> double-red (land)
+      "storm warning",               // -> double-red (MARINE, >= 48 kt — distinct from
+                                     //    the land "storm surge warning")
       "squall warning",              // -> red
       "waterspout warning",          // -> red
       "severe thunderstorm warning", // -> red
+      "gale warning",                // -> red (MARINE, >= 34 kt)
       "wind warning"                 // -> red
     ];
       // Environment and Climate Change Canada issues NO beach-specific hazard
@@ -466,7 +501,23 @@ Pure module. No fetch, no Date, no env. Exports:
       // would let it mask a wave-height red under strict step precedence.
       // Names are exact-match against GeoMet's alert_name_en strings, which
       // ECCC serves LOWERCASE — the two authorities' namespaces can never
-      // collide with NWS Title Case.
+      // collide with NWS Title Case. MARINE warnings (ECCC's GeoMet
+      // marineweather-realtime collection, fetched via src/clients/ecccMarine.js
+      // — section 5) fold into this SAME lowercase namespace: "storm warning"
+      // (marine >= 48 kt) and "gale warning" (>= 34 kt) short-circuit here; the
+      // two weaker marine products are yellow FLOORS instead (see
+      // ECCC_FLOOR_PRECEDENCE). ORDER: every double-red precedes every red.
+
+    export const ECCC_FLOOR_PRECEDENCE = [
+      "strong wind warning",         // -> yellow (floor only, step 6b; marine)
+      "marine weather advisory"      // -> yellow (floor only, step 6b; marine)
+    ];
+      // ECCC's below-gale MARINE products (also from ecccMarine.js). Applied as a
+      // yellow floor at step 6b exactly like NWS_FLOOR_PRECEDENCE — raise a
+      // green/unknown estimate to yellow, NEVER downgrade a decided higher color —
+      // so a marine advisory can never mask a wave-height red. Kept out of
+      // ECCC_ALERT_PRECEDENCE for that reason. Same lowercase namespace as the
+      // ECCC short-circuit warnings.
 
     // metersToFeet moved to src/geo.js (section 5) — rules.js no longer exports it.
 
@@ -481,9 +532,11 @@ Pure module. No fetch, no Date, no env. Exports:
       // Pure. The flag color a recognized alert maps to — NWS (ALERT_PRECEDENCE
       // warnings: Tornado/High Surf/Storm Warning -> "double-red", the rest -> "red";
       // NWS_FLOOR_PRECEDENCE watches/advisories -> "yellow") and ECCC ("tornado warning"
-      // / "storm surge warning" -> "double-red"; the other ECCC_ALERT_PRECEDENCE
-      // events -> "red") share this one lookup — null for any other event. Steps
-      // 1/1b/6 derive their colors from this function and the frontend's hazard lane
+      // / "storm surge warning" / marine "storm warning" -> "double-red"; the other
+      // ECCC_ALERT_PRECEDENCE events (incl. marine "gale warning") -> "red";
+      // ECCC_FLOOR_PRECEDENCE marine "strong wind warning" / "marine weather advisory"
+      // -> "yellow") share this one lookup — null for any other event. Steps
+      // 1/1b/6/6b derive their colors from this function and the frontend's hazard lane
       // (section 9) colors alert bands from it, so they can never disagree.
 
     export function alertAuthorityForEvent(eventName)
@@ -519,10 +572,10 @@ Pure module. No fetch, no Date, no env. Exports:
       ],                                // decision. null/missing -> echoed as [].
       alertsCheckable: true,            // true | false | null (missing/undefined -> null):
                                         // true when the cron could look up alerts (beach
-                                        // has an nws_zone OR an eccc_zone; a transient
-                                        // fetch failure this run still counts as true),
-                                        // false when neither is resolved (not yet enriched
-                                        // for either authority, so alerts are never
+                                        // has an nws_zone, marine_zone, OR an eccc_zone; a
+                                        // transient fetch failure this run still counts as
+                                        // true), false when none is resolved (not yet
+                                        // enriched for any authority, so alerts are never
                                         // checkable), null for legacy callers (no
                                         // caveat). Drives the reason caveat after step 5.
       ripCurrentRisk: "HIGH",           // "HIGH" | "MODERATE" | "LOW" | null
@@ -532,6 +585,14 @@ Pure module. No fetch, no Date, no env. Exports:
                                         // live fetch; the shape into estimateFlag is unchanged.
       windSpeedMph: 18,                 // number (mph, sustained) or null — wind FALLBACK, also
       windGustMph: 27,                  // number (mph) or null   from the "waveinput:" KV
+      waterQualityAdvisory: {           // RAISE-ONLY water-quality floor, or null. Shape
+        color: "red",                   // { color: "yellow"|"red", reason, source }. A clean/
+        reason: "beach posted for E. coli", // absent reading is null and has ZERO effect —
+        source: "Lake County GHD"       // it can only RAISE the flag (step 7), never pull a
+      },                                // hazard estimate down. Resolved cron-side from the
+                                        // src/wqFloor registry (section 6); estimateFlag reads
+                                        // only .color/.reason/.source. Baked into the estimate
+                                        // (official:false), never an official override.
       sources: [{ label, url }],        // array of source entries (may be []); passed through verbatim
       updated: "2026-07-04T15:00:03.000Z" // ISO string; passed through verbatim
     }
@@ -552,13 +613,15 @@ must NOT be mutated.
      "Special Marine Warning" (marine) / "Lakeshore Flood Warning" / "Coastal Flood Warning"
      → "red", reason: "Active NWS alert: " + eventName
 1b. Environment Canada alerts. Same inputs.alerts array (the cron fills it from ECCC
-   for Canadian beaches; the namespaces cannot collide), scanned against
-   ECCC_ALERT_PRECEDENCE in ECCC_ALERT_PRECEDENCE order; exact string equality;
+   for Canadian beaches, merging land weather-alerts AND marine warnings — the two
+   collections are disjoint, and the namespaces cannot collide with NWS), scanned
+   against ECCC_ALERT_PRECEDENCE in ECCC_ALERT_PRECEDENCE order; exact string equality;
    unknown events (watches, heat/air-quality warnings) ignored.
-   - "tornado warning" / "storm surge warning" → "double-red",
+   - "tornado warning" / "storm surge warning" / "storm warning" (marine) → "double-red",
      reason: "Active Environment Canada alert: " + eventName
    - "squall warning" / "waterspout warning" / "severe thunderstorm warning" /
-     "wind warning" → "red", reason: "Active Environment Canada alert: " + eventName
+     "gale warning" (marine) / "wind warning" → "red",
+     reason: "Active Environment Canada alert: " + eventName
 2. Rip current risk (from SRF product).
    - "HIGH" → "red",     reason: "NWS surf zone forecast rip current risk: HIGH"
    - "MODERATE" → "yellow", reason: "NWS surf zone forecast rip current risk: MODERATE"
@@ -603,11 +666,30 @@ must NOT be mutated.
      "Lake Wind Advisory" / "Small Craft Advisory" (marine) / "Lakeshore Flood Advisory" /
      "Coastal Flood Advisory" (over green/unknown) → "yellow",
      trigger "nws-floor", reason: "Active NWS alert: " + eventName
+6b. Environment Canada marine yellow floor (applied AFTER step 6). Scan inputs.alerts
+   against ECCC_FLOOR_PRECEDENCE in that order. If one is present AND the decided color
+   is "green" or "unknown", raise it to "yellow"; it NEVER downgrades an already-higher
+   color (worst-of, like step 6). Same masking rationale — a below-gale marine product
+   can never mask a wave-height red.
+   - "strong wind warning" / "marine weather advisory" (over green/unknown) → "yellow",
+     trigger "eccc-floor", reason: "Active Environment Canada alert: " + eventName
+7. Raise-only water-quality floor (applied AFTER steps 1–6b). When
+   inputs.waterQualityAdvisory is a non-null object with color "yellow" or "red", raise
+   the flag UP to at least that floor color using SEVERITY_RANK worst-of (unknown < green
+   < yellow < red < double-red), but NEVER downgrade a higher color already decided by an
+   alert, rip risk, or wave/wind. Water quality is a DIFFERENT axis from surf hazard: a
+   clean/absent reading is modeled as waterQualityAdvisory === null and has ZERO effect,
+   so a clean reading can never present as a green that masks a hazard estimate. This is
+   the raise-only mechanism modeled on the NWS/ECCC yellow floors (steps 6/6b); it is
+   BAKED INTO the estimate (official: false), never an official override.
+   - floor color outranks the decided color → color = floor color,
+     trigger "wq-floor", reason: "Water-quality advisory (" + source + "): " + reason
 
 ### Alerts-unavailable caveat (applied AFTER the color/reason are decided)
 
 When inputs.alertsCheckable === false AND the deciding trigger is NOT "nws-alert",
-"eccc-alert", or "nws-floor", append " (" + ALERTS_UNAVAILABLE_CAVEAT + ")" to the final reason, e.g.
+"eccc-alert", "nws-floor", or "eccc-floor", append " (" + ALERTS_UNAVAILABLE_CAVEAT + ")"
+to the final reason, e.g.
 "Estimated wave height 1.0 ft (below 2 ft) (Weather alerts not yet available for this
 beach)". This distinguishes "alerts checked, none active" from "alerts never checkable"
 so a wave/wind/no-data estimate can never present as alert-verified. Skipped when an
@@ -618,7 +700,8 @@ Return value: a FlagEstimate (section 1) with beachId, color, reason as above, t
 (the branch that decided the color: step 1 → "nws-alert", step 1b → "eccc-alert",
 step 2 → "rip-current", step 3 → "wave-height", step 4 → "wind",
 step 5 LOW → "rip-current-low", step 5 otherwise → "no-data",
-step 6 watch/advisory floor → "nws-floor"), rules_version: RULES_VERSION, official: false,
+step 6 watch/advisory floor → "nws-floor", step 6b ECCC marine floor → "eccc-floor",
+step 7 water-quality floor → "wq-floor"), rules_version: RULES_VERSION, official: false,
 sources: inputs.sources (or []), updated: inputs.updated, plus the structured
 echoes waveHeightFt / alertDetails / ripCurrentRisk (section 1). Two calls with
 the same inputs return deeply-equal objects.
@@ -854,6 +937,93 @@ and matches beaches locally via pointInGeometry (src/geo.js).
       // polygon (a shoreline centroid nudged offshore) resolves to null and the
       // caller parks it, exactly as a US point (no containing Canadian region)
       // does. Malformed input -> null.
+
+### src/clients/ecccMarine.js (ECCC GeoMet marine-warnings client, cron-side)
+
+The marine-weather counterpart to src/clients/eccc.js, for the Canadian-shore Great
+Lakes beaches api.weather.gov 404s. Fetch + pure defensive parse ONLY — it NEVER
+decides a flag color (rules.js does). Verified DISJOINT from fetchActiveEcccAlerts
+(the land weather-alerts collection carries ZERO marine warnings), so it adds NEW
+signal for Canadian beaches, not duplicates. Wired into the Canadian-beach alert path:
+its matches CONCAT onto the land ECCC matches in the same alerts[] input, exactly as
+the US branch concats marine onto land (section 7 step 3b/7).
+
+    export const ECCC_MARINE_COLLECTION = "marineweather-realtime";
+    export const ECCC_MARINE_INFO_URL = "https://weather.gc.ca/marine/index_e.html";
+    export const ECCC_MARINE_GREAT_LAKES_REGION = "Great Lakes";
+    export const ECCC_MARINE_MAX_EDGE_KM = 15;
+
+    export const MARINE_EVENT_COLOR_MAP    // { "storm warning": "double-red",
+                                           //   "gale warning"/"squall warning"/
+                                           //   "waterspout warning": "red",
+                                           //   "strong wind warning"/"marine weather
+                                           //   advisory": "yellow" } — the FLOOR events
+                                           //   are the two yellows (see ECCC_FLOOR_PRECEDENCE,
+                                           //   section 4). Exported for the integrator/tests;
+                                           //   rules.js is the single home of color.
+    export const MARINE_FLOOR_EVENTS = ["strong wind warning", "marine weather advisory"];
+
+    export function marineEventColor(name)
+      // Pure. Lowercased event name -> its MARINE_EVENT_COLOR_MAP color, else null.
+
+    export function parseEcccMarineAlerts(json, nowIso)
+      // Pure, exported for tests. Raw GeoMet FeatureCollection -> { alerts: [...] } | null.
+      // One Feature per marine zone (Polygon/MultiPolygon over water). Scoped to
+      // area.region.en === "Great Lakes" and event category.en === "marine". Marine
+      // events carry NO per-event datetime, only a status — keep IN EFFECT / CONTINUED,
+      // drop ENDED. name.en arrives Title-cased ("Gale warning") and is LOWERCASED to
+      // match rules.js's lowercase keys; an unknown/unmapped string -> no event (never a
+      // wrong color).
+
+    export async function fetchActiveEcccMarineAlerts(nowIso)
+      // Cron-side ONLY. One GET of the marineweather-realtime collection (ECCC_USER_AGENT),
+      // parsed via parseEcccMarineAlerts. Null on any failure — never throws.
+
+    export function ecccMarineAlertsForPoint(alerts, lat, lon)
+      // Pure. -> { events: string[], details: [{ event, onset, ends }] } for the marine
+      // zone(s) whose polygon contains (lat, lon) (nearest-edge within ECCC_MARINE_MAX_EDGE_KM
+      // as a fallback for shoreline points just outside the water polygon). onset =
+      // feature lastUpdated; ends = null (no per-event end). The Canadian-beach branch
+      // (section 7) concats these events/details onto the land ECCC matches.
+
+### src/waveSources/ (supplemental fallback wave-height registry, cron-side)
+
+An ORDERED FALLBACK registry (src/waveSources/index.js) consulted by runWaveRefresh
+(section 7 step 2b) ONLY for beaches whose PRIMARY wave height (Open-Meteo marine batch
++ GLOS Seagull buoy gap-fill) came back null. NEVER additive and never double-counted:
+the first matching source that returns a finite ft wins; the reading is then treated
+EXACTLY like the primary (same wave-height rule, same source badge) — only the model id
+differs. Wave-height ONLY — rip-current signal deliberately does NOT belong here (the SRF
+client stays the single primary rip path). Two-path rule: fetches are reachable only from
+runWaveRefresh; the request path never imports this module's network code.
+
+    export const waveSources     // ordered = fallback precedence:
+                                 //   1. nws-gridpoint-waves (model "nws_gridpoint_wave") —
+                                 //      keyed on beach.nws_grid_url (precise NWS forecast cell)
+                                 //   2. nws-nsh-nearshore (model "nws_nsh_nearshore_wave") —
+                                 //      keyed on beach.marine_zone (nearshore marine text)
+                                 //   3. uw-sea-caves-watch (model "uw_sea_caves_watch") —
+                                 //      single UW-Madison Lake Superior gauge (proximity)
+                                 //   4. toronto-beach-obs (model "toronto_beach_obs") —
+                                 //      10 curated Lake Ontario beaches (self-memoized/run)
+                                 //   5. ndbc-buoys (model "ndbc_buoy") — nearest NOAA NDBC
+                                 //      buoy within 40 km (broad last resort)
+                                 // Key-shaped US sources first, regional gauges next, the
+                                 // broad buoy net last. NOTE: there was NO prior NDBC
+                                 // ingestion — this is the first. Each source object:
+                                 //   { id, model, label, url, matches(beach),
+                                 //     waveFt(beach, nowIso, env) -> finite ft | null }
+                                 // Sources that share a key across beaches (gridpoint by
+                                 // nws_grid_url, NSH by marine_zone, NDBC by buoy id) MUST
+                                 // dedup/memoize that key within a run to stay under the
+                                 // subrequest budget on a fully wave-null (winter) run.
+
+    export async function resolveSupplementalWaveFt(beach, nowIso, env)
+      // Cron-side ONLY. Tries each matching source in registry order; returns the FIRST
+      // finite result WITH its provenance { waveHeightFt, model, label, url } so the caller
+      // stamps the correct model on the WaveInput (never a generic label that would
+      // mislabel the source badge), else null. A source that throws is isolated and
+      // treated as "no reading" — never throws across the boundary.
 
 ### src/clients/srfParser.js (pure, no fetch)
 
@@ -1314,11 +1484,17 @@ wrapper). No Date.now(), no ambient clock.
     // "green" is a different axis from surf hazard and would mask a genuine
     // hazard estimate (e.g. a gale-driven red). Six such sources (bldhd-mi,
     // lenawee-mi, michigan-city-in, ohio-beachguard, hdnw-michigan, wisconsin-dnr)
-    // were removed for exactly this reason.
+    // were removed for exactly this reason; water-quality now feeds the SEPARATE
+    // raise-only src/wqFloor registry (below), never this override registry.
     export const scrapers = [
       southHaven,          // south-haven-mi        — city flag CSV (multi-site)
       metroparks,          // huron-clinton-metroparks — 4 fixed beaches, closure-only
-      chicagoParkDistrict  // chicago-park-district — lakefront flag JSON (~23 beaches)
+      chicagoParkDistrict, // chicago-park-district — lakefront flag JSON (~23 beaches)
+      nwsOmr,              // nws-omr-grr — NWS GRR posted-flag beach report (~7 W-MI parks)
+      winnetkaTowerBeach,  // winnetka-tower-beach — single-site dangerous-conditions closure
+      paDcnrPresqueIsle,   // pa-dcnr-presque-isle — Presque Isle Danger-advisory closure (red-only)
+      nwsMarineBeachForecast // nws-marine-beach-forecast — LAST (broad Erie/Ontario bbox);
+                             //   ArcGIS rip+surf, resolved to a color
     ];
 
     export function findScraper(beach)
@@ -1501,6 +1677,104 @@ would downgrade a hazard flag.
   Quality/Weather row while the Surf row is stale or missing yields NO data
   (never a false official green); red/yellow/double-red keep the plain
   most-severe-fresh-row gate.
+- src/officialSources/nwsOmr.js (nws-omr-grr) — NWS Grand Rapids (WFO GRR) "Other
+  Marine Reports" text product (AWIPS OMRGRR), carrying the fixed "Lake Michigan
+  Beach Reports" table for ~7 west-Michigan Lake Michigan state-park beaches
+  (Ludington, Mears/Pentwater, Muskegon, P.J. Hoffmaster, Grand Haven, Holland,
+  Saugatuck Oval). Two-legged fetch through api.weather.gov products API
+  (types/OMR/locations/GRR -> newest product id -> productText), NWS User-Agent.
+  POSTED-FLAG source (gold-standard hazard axis): Green/Yellow/Red map 1:1; no
+  double-red tier; None / "M ft" / unrecognized -> site omitted. updated = the
+  product's issuanceTime (morning observations, so the reading time drives the
+  stale warning). Name + tight (2 mi) proximity matches(); disjoint from South
+  Haven / Metroparks / Chicago.
+- src/officialSources/winnetkaTowerBeach.js (winnetka-tower-beach) — Winnetka Park
+  District, single Tower Road Beach (Lake Michigan, IL) via a rainoutline.com
+  server-rendered status page. DANGEROUS-CONDITIONS CLOSURE, hazard axis only:
+  "Open" -> green; "Closed" + HAZARD keyword (beach hazard statement / rip current /
+  high waves-surf / dangerous surf-conditions) -> red; "Closed" + WATER-QUALITY
+  keyword (e.coli / bacteria / water quality / advisory) -> null (that signal is the
+  separate wqFloor axis); any other/unrecognized closure or markup -> null. The
+  water-quality check runs FIRST so an ambiguous "advisory" fails safe to null. Tight
+  name-within-bbox matches(); register ahead of any broad regional scraper.
+- src/officialSources/paDcnrPresqueIsle.js (pa-dcnr-presque-isle) — PA DCNR Park
+  Advisory feed scoped to Presque Isle State Park (Lake Erie, PA). CLOSURE-ONLY,
+  RED-ONLY: an IsAlert:true advisory whose free text describes a genuine swimming
+  hazard (beach closed / swimming prohibited / dangerous conditions / rip current /
+  high water-surf) -> park-wide red; water-quality / E. coli / algae -> null (wqFloor
+  axis); road/facility/event/boilerplate -> null. NEVER emits green (absence of a
+  hazard advisory is no site), so it can only RAISE to red. Proximity site (peninsula
+  centroid, 6 mi) so a bare "Beach 6" resolves. PROVISIONAL: live payload is currently
+  100% off-axis boilerplate, so the hazard-keyword mapping is verified only against
+  synthetic fixtures — every unrecognized shape degrades to null.
+- src/officialSources/nwsMarineBeachForecast.js (nws-marine-beach-forecast) —
+  REGISTERED LAST (broad Lake Erie/Ontario bbox; every tighter scraper wins first).
+  NWS Marine Beach Forecast ArcGIS MapServer, per-WFO "Day 1" layers (VERIFIED-live
+  only: layer 19 = CLE, layer 7 = BUF — do NOT enable an unverified layer id). Each
+  county-scale zone feature carries rip ("Swim Risk": Low->green/Moderate->yellow/
+  High->red) and a surf-height text (parsed to the MAX foot value, colored via
+  rules.js waveColorForHeight); the site color is the MORE SEVERE of the two, no
+  double-red; both null -> zone omitted. ZONAL not per-beach: bound to swim.report
+  beaches via a curated SITE_DEFS table (name substrings, then nearest centroid within
+  radius). STALE_MAX_DAYS = 2 gate. DEDUP: its rip OVERLAPS the primary SRF client —
+  it emits a resolved OFFICIAL color (not a rip input), so it does not double-count
+  into estimateFlag, and the SRF client stays the one authoritative rip input lane.
+
+### src/wqFloor/ (raise-only water-quality advisory FLOOR registry)
+
+A SECOND source registry (src/wqFloor/index.js), architecturally parallel to
+src/officialSources/ but on a DIFFERENT axis and with the opposite effect direction.
+Water-quality (E. coli / bacteria / HAB) is NOT the surf-hazard axis: a clean reading
+says nothing about surf, so it must NEVER win as an official override (which is why the
+six removed water-quality scrapers are gone). Instead, an ACTIVE advisory feeds
+estimateFlag's waterQualityAdvisory input (section 4, step 7) as a RAISE-ONLY floor: it
+may lift a flag UP to yellow/red (worst-of by SEVERITY_RANK) but can NEVER pull a hazard
+estimate down. A clean/absent reading is modeled as the ABSENCE of an advisory (resolves
+to null -> zero effect). Baked INTO the estimate (official:false), never an override; it
+lives inside the estimate precisely because an official color overrides everywhere.
+
+Runs cron-side ONLY (the request path reads the pre-computed "wqfloor:" + beachId KV,
+section 1/3). The resolver reuses officialSources/util.js resolveSiteForBeach (names win
+over proximity), so a wqFloor source is authored exactly like an official scraper — but
+its Site carries `floorColor` ("yellow"|"red" ONLY — green/double-red are INVALID: a
+clean reading must never appear as a green floor, and its absence IS the "no floor").
+
+    export const wqFloorSources     // ordered most-specific-first (findWqFloorSource is
+                                    // first-match-wins), curated single-region sources
+                                    // before the coarse NowCast bbox:
+      // ny-oprhp-beach-status         — NY State Parks (OPRHP) beach status
+      // chautauqua-county-ny          — Chautauqua County NY (bacteria/HAB)
+      // lake-county-oh-beaches        — Lake County (OH) GHD water-quality program
+      // erie-county-pa-kml            — Erie County (PA) DoH  [KML URL UNCONFIRMED — see below]
+      // illinois-beachguard           — Illinois BeachGuard (IDPH) per-beach detail
+      // kenosha-beach-conditions      — Kenosha County (WI) beach conditions (E. coli)
+      // mn-beaches                    — Minnesota DoH monitoring (mnbeaches.org), ~6 Duluth sites
+      // grey-bruce-rec-water          — Grey Bruce Health Unit (ON, Lake Huron) [low confidence]
+      // ontario-parks-beach-postings  — Ontario Parks per-park Alerts postings
+      // evanston-statusfy             — City of Evanston (IL) beach status via RainoutLine
+      // usgs-great-lakes-nowcast      — USGS Great Lakes NowCast predicted E. coli (LAST;
+      //                                 coarse Lake Erie/Ontario US-shore bbox — only beaches
+      //                                 no curated source claims fall through to it)
+      // Each source object: { id, label, infoUrl?, matches(beach),
+      //   scrape(nowIso) -> { perBeach: true, sites: Site[], source, updated } | null }
+      // Site: { siteId, floorColor: "yellow"|"red", names?, lat?, lon?, radiusMi?, reason?,
+      //   updated? }. scrape() is called ONCE per source per run (not per beach); null on ANY
+      //   failure/empty, never a wrong color (error-isolation).
+
+    export function findWqFloorSource(beach)     // -> source | null (first match).
+    export function scrapeWqFloorFromResult(beach, source, result)
+      // Pure (no fetch). Resolves an already-fetched perBeach result to ONE beach's
+      // advisory, or null (no site / invalid floorColor / clean run). Returns exactly the
+      // shape estimateFlag's waterQualityAdvisory input reads — { color (from the Site's
+      // floorColor), reason, source } plus beachId/updated for the KV payload. Never throws.
+      // Aliased as scrapeFloorFromResult.
+
+The cron gathers these once per run and folds the result into the per-beach estimate BEFORE
+computing it (section 7 step 5b/6), and persists a WqFloorAdvisory to "wqfloor:" + beachId
+only when an advisory is active. FOLLOW-UPS (human to verify): the erie-county-pa-kml source
+ships with its KML URL EMPTY/unconfirmed (it resolves to null until a real URL is supplied);
+grey-bruce-rec-water is flagged low-confidence; several source URLs across the registry are
+best-effort and should be re-verified live before relying on their coverage.
 
 ## 7. Cron design (src/index.js)
 
@@ -1576,11 +1850,15 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    calls. A failed or thrown national fetch maps EVERY zone to null (per-beach
    alertsCheckable stays true — same as the old per-zone failure mode).
 3b. ECCC alerts: for the Canadian rows (nws_zone NULL, eccc_zone NOT NULL), ONE
-   fetchActiveEcccAlerts(nowIso) call for the whole national active set (no bbox)
-   — the alert features carry their region polygons, so per-beach matching
-   happens locally in step 7 via ecccAlertsForPoint and this costs a single
-   subrequest regardless of beach count. Skipped when the run has no Canadian
-   rows; a failed fetch (null) just means those beaches get alerts: null this run.
+   fetchActiveEcccAlerts(nowIso) call (land weather-alerts) PLUS ONE
+   fetchActiveEcccMarineAlerts(nowIso) call (marine warnings, src/clients/ecccMarine.js —
+   section 5) for the whole national active sets (no bbox) — the alert features carry
+   their region polygons, so per-beach matching happens locally in step 7 via
+   ecccAlertsForPoint / ecccMarineAlertsForPoint and this costs two subrequests total
+   regardless of beach count. The two fetches have INDEPENDENT try/catch (the collections
+   are disjoint — a marine-fetch failure never nulls the land alerts, and vice versa).
+   Skipped when the run has no Canadian rows; a failed fetch (null) just means those
+   beaches get that authority's alerts: null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
 5. Wave inputs: READ ONLY — the hourly cron performs NO Open-Meteo or GLOS fetch. The
@@ -1592,27 +1870,45 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    estimate degrades to the wind fallback or "unknown", never a wrong flag.
 6. (Wind is not fetched here — the wind fallback the estimate uses is carried on the
    waveinput payload, recorded by runWaveRefresh only for beaches still wave-null there.)
+6b. Water-quality floor gather: group beaches by findWqFloorSource(beach) id (mirrors the
+   step-8 official-scraper grouping) and call each distinct wqFloor source's scrape(nowIso)
+   ONCE per run into a wqResultsBySource Map. This MUST happen BEFORE the per-beach estimate
+   below, because the resolved advisory feeds estimateFlag's waterQualityAdvisory input (a
+   raise-only floor — section 4 step 7) — the step-8 official gather is too late. A scrape
+   failure is isolated (result null -> no floor for that source's beaches).
 7. Per beach: assemble inputs (nulls for anything missing), including
-   alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false (section 4 —
-   a beach enriched for neither authority gets the honesty caveat instead of a
+   alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false
+   (section 4 — a beach enriched for no authority gets the honesty caveat instead of a
    silent wave-only green) and alertDetails from the zone's alerts result (null
    when the fetch failed or the beach has no zone — estimateFlag echoes it into
-   the stored payload for the detail page's hazard lane). Canadian beaches
-   (nws_zone NULL, eccc_zone set) fill alerts/alertDetails from the step-3b
-   result via ecccAlertsForPoint(ecccAlerts.alerts, beach.lat, beach.lon) — a
-   successful fetch with zero containing polygons is a real "no active alerts"
-   ([]), exactly like an empty NWS zone response. sources = array of
-   { label, url } entries (section 1) for every source that returned data for THIS
-   beach — alerts: "NWS Alerts", or "Environment Canada Alerts" with url
-   ECCC_ALERTS_INFO_URL for Canadian beaches; SRF: "NWS Surf Zone Forecast";
+   the stored payload for the detail page's hazard lane). US beaches merge land-zone
+   (nws_zone) and adjacent marine-zone (marine_zone) matches from the one national NWS
+   fetch. Canadian beaches (nws_zone NULL, eccc_zone set) CONCAT the step-3b land matches
+   (ecccAlertsForPoint) AND marine matches (ecccMarineAlertsForPoint) into one
+   alerts/alertDetails list — exactly as the US branch concats marine onto land; a
+   successful fetch with zero containing polygons is a real "no active alerts" ([]). The
+   branch still processes when only ONE of the two ECCC fetches succeeded (each defaults to
+   empty when null), so a land outage never hides an active marine gale, and vice versa.
+   sources = array of { label, url } entries (section 1) for every source that returned
+   data for THIS beach — alerts: "NWS Alerts" / "NWS Marine Alerts", or "Environment Canada
+   Alerts" (ECCC_ALERTS_INFO_URL) / "Environment Canada Marine Alerts" (ECCC_MARINE_INFO_URL)
+   for Canadian beaches; SRF: "NWS Surf Zone Forecast";
    waves: waveSourceLabel(waveInput.model) from WAVE_MODEL_LABELS
-   (GLCFS_WAVE_MODEL -> "GLOS Buoy Observations") with url
-   waveSourceUrl(waveInput.model) (Open-Meteo marine docs, or SEAGULL_INFO_URL for buoy
-   readings — always a human-readable page, never the raw API request); wind:
-   "Wind Forecast" (only when waveHeightFt is null and a wind fallback is present).
-   waveHeightFt, windSpeedMph, and windGustMph all come from the beach's "waveinput:" KV
-   payload (step 5), not a live fetch; updated = nowIso; call estimateFlag;
-   env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate), { expirationTtl: 7200 }).
+   (GLCFS_WAVE_MODEL -> "GLOS Buoy Observations"; supplemental fallback models resolve their
+   own labels — section 5) with url waveSourceUrl(waveInput.model) (always a human-readable
+   page, never the raw API request); wind: "Wind Forecast" (only when waveHeightFt is null
+   and a wind fallback is present); water quality: the advisory's own source label with the
+   wqFloor source's infoUrl, added only when an advisory is active.
+   Resolve the water-quality floor for this beach against its group's step-6b result via
+   scrapeWqFloorFromResult -> waterQualityAdvisory (null when clean/absent), and pass it into
+   estimateFlag (raise-only, step 7). waveHeightFt, windSpeedMph, and windGustMph all come
+   from the beach's "waveinput:" KV payload (step 5), not a live fetch; updated = nowIso;
+   call estimateFlag; env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate),
+   { expirationTtl: 7200 }). When (and ONLY when) the advisory is non-null, ALSO write
+   env.FLAGS.put("wqfloor:" + beach.id, JSON.stringify(waterQualityAdvisory),
+   { expirationTtl: 7200 }) for the request path's water-quality callout (WqFloorAdvisory,
+   section 1/3) — a clean reading writes nothing, so the key expires naturally. This is NOT
+   an official override (never feeds markerFlagFields / titleColor).
    The "waves:" WaveSeries is NOT written here — the wave cron owns it (see runWaveRefresh).
 8. Officials: group beaches by findScraper(beach) id; call each distinct scraper's
    scrape(nowIso) ONCE per run; for every matched beach resolve the shared result via
@@ -1660,12 +1956,14 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
 
 Subrequest budget (paid plan, 10,000/invocation): 1 NWS national alerts call (step 3) +
-1 ECCC national alerts call (step 3b) + ~2×15 SRF calls + ~13 waveinput KV gets batches
-(≤613 gets, step 5 — no upstream marine/GLOS/wind fetch) + a handful of official-scraper
-fetches (one scrape() per matched scraper; South Haven uses 2 fetches, metroparks and
-chicago-park-district 1 each) + ~2 scraper-health KV ops per
+2 ECCC national fetches (land + marine, step 3b, only when Canadian rows exist) + ~2×15
+SRF calls + ~13 waveinput KV gets batches (≤613 gets, step 5 — no upstream marine/GLOS/wind
+fetch) + a handful of wqFloor scrapes (one scrape() per matched wqFloor source, step 6b) +
+a handful of official-scraper fetches (one scrape() per matched scraper; South Haven uses 2
+fetches, metroparks and chicago-park-district 1 each) + ~2 scraper-health KV ops per
 matched scraper + ≤1 flag_history D1 batch (step 9, only when >= 1 estimate/official pair
-exists) + ≤700 flag/official KV puts ≈ well under 10,000 at the full ~613-row pilot table.
+exists) + ≤700 flag/official KV puts + ≤(active-advisory) wqfloor KV puts ≈ well under
+10,000 at the full ~613-row pilot table.
 Both authorities' alerts are ONE national fetch each — not a call per distinct zone — so
 alert cost stays flat as the table grows. Free plan (50 subrequests, 1000 KV writes/day) is
 NOT sufficient at this cadence — README states the paid-plan assumption; alternatively cap
@@ -1716,8 +2014,16 @@ strip showing slightly-older-but-still-model-current data instead of blanking it
    cached. Non-null readings overwrite ONLY the entry's waveHeightFt and model
    (model: GLCFS_WAVE_MODEL), PRESERVING hoursFt/models/byModel — buoys are nearest-point
    now-observations with no hourly series, and one is never synthesized.
-4. Wind: only for beaches whose waveHeightFt is still null (recomputed fresh — step 3 may
-   have gap-filled some out of the wave-null set) — fetchWinds, paced by the same
+2b. Supplemental fallback wave sources: for beaches STILL wave-null after steps 2–3, consult
+   the ordered src/waveSources registry (section 5) via resolveSupplementalWaveFt(beach,
+   nowIso, env) — the first matching source that returns a finite ft wins (never additive).
+   Merged into the entry exactly like the buoy gap-fill (overwrite waveHeightFt + model,
+   PRESERVING hoursFt/models/byModel — single-point fallbacks write no "waves:" strip). MUST
+   run BEFORE step 4 so wind stays the true last resort. Each source isolates its own
+   failures (a throw is treated as "no reading"). With an all-null (winter) run this is the
+   costliest step — sources that share a key across beaches dedup/memoize (section 5).
+4. Wind: only for beaches whose waveHeightFt is still null (recomputed fresh — steps 3 and
+   2b may have gap-filled some out of the wave-null set) — fetchWinds, paced by the same
    batchByBeach.
 5. Persist per beach, isolated failures. Write "waveinput:" + id → WaveInput (section 1:
    { beachId, waveHeightFt, model, windSpeedMph, windGustMph, updated }) with
@@ -1733,8 +2039,10 @@ strip showing slightly-older-but-still-model-current data instead of blanking it
 
 Subrequest budget: ~7 paced marine batches (100/batch over ~613 beaches) + ≤62 GLCFS buoy
 (the 2 catalog fetches are AVOIDED on a "glcfs:catalogs" cache hit — most runs — so GLCFS
-cost is typically ≤60 deduped platform obs fetches) + ≤7 paced wind batches + ≤613
-waveinput KV puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the
+cost is typically ≤60 deduped platform obs fetches) + supplemental fallback fetches for the
+still-wave-null remainder (step 2b — key-shared sources dedup, so cost is roughly the number
+of distinct gridpoint/marine-zone/buoy keys, not one per beach) + ≤7 paced wind batches +
+≤613 waveinput KV puts + ≤613 waves KV puts — well under the paid-plan ceiling, and the
 inter-wave sleeps burn no CPU so the paced run stays inside the scheduled invocation's
 time budget.
 

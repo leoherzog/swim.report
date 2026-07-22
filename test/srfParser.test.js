@@ -80,6 +80,49 @@ describe("parseRipCurrentRisk", function() {
     expect(parseRipCurrentRisk(text)).toBe("LOW");
   });
 
+  it("parses the Great Lakes 'SWIM RISK...HIGH' variant as HIGH", function() {
+    const text = buildSrf([
+      ".TODAY...",
+      "SWIM RISK...HIGH. DANGEROUS SWIMMING CONDITIONS EXPECTED.",
+      "WAVE HEIGHTS...4 TO 6 FEET."
+    ]);
+    expect(parseRipCurrentRisk(text)).toBe("HIGH");
+  });
+
+  it("parses 'SWIM RISK...MODERATE' as MODERATE", function() {
+    const text = buildSrf([
+      ".TODAY...",
+      "SWIM RISK...MODERATE. USE CAUTION.",
+      "WAVE HEIGHTS...2 TO 3 FEET."
+    ]);
+    expect(parseRipCurrentRisk(text)).toBe("MODERATE");
+  });
+
+  it("parses 'SWIM RISK: LOW' (colon form) as LOW", function() {
+    const text = buildSrf([
+      ".TODAY...",
+      "SWIM RISK: LOW. CONDITIONS FAVORABLE."
+    ]);
+    expect(parseRipCurrentRisk(text)).toBe("LOW");
+  });
+
+  it("treats 'SWIM RISK...LOW TO MODERATE' conservatively as LOW", function() {
+    const text = buildSrf([
+      ".TODAY...",
+      "SWIM RISK...LOW TO MODERATE. CONDITIONS MAY WORSEN LATER."
+    ]);
+    expect(parseRipCurrentRisk(text)).toBe("LOW");
+  });
+
+  it("prefers the explicit rip-current wording over a swim-risk line in the same product", function() {
+    const text = buildSrf([
+      ".TODAY...",
+      "SWIM RISK...LOW.",
+      "RIP CURRENT RISK...HIGH. DANGEROUS CONDITIONS."
+    ]);
+    expect(parseRipCurrentRisk(text)).toBe("HIGH");
+  });
+
   it("returns null when there is no rip current mention", function() {
     const text = buildSrf([
       ".TODAY...",

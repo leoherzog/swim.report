@@ -20,6 +20,11 @@ import {
   ecccZoneNameForPoint,
   ECCC_ALERTS_INFO_URL
 } from "./clients/eccc.js";
+import {
+  fetchActiveEcccMarineAlerts,
+  ecccMarineAlertsForPoint,
+  ECCC_MARINE_INFO_URL
+} from "./clients/ecccMarine.js";
 import { parseRipCurrentRisk } from "./clients/srfParser.js";
 import { fetchWaveHeightsFt, fetchWinds } from "./clients/openMeteo.js";
 import {
@@ -37,6 +42,8 @@ import {
   WEBCAM_FETCH_LIMIT
 } from "./clients/windyWebcams.js";
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
+import { wqFloorSources, findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
+import { waveSources, resolveSupplementalWaveFt } from "./waveSources/index.js";
 import { updateScraperHealth } from "./scraperHealth.js";
 
 // Re-export the discovery merge helper from its new home (src/discovery.js) so
@@ -171,6 +178,18 @@ const WAVE_MODEL_LABELS = {
 };
 WAVE_MODEL_LABELS[GLCFS_WAVE_MODEL] = "GLOS Buoy Observations";
 
+// Supplemental fallback wave sources (src/waveSources/) are the single source of
+// truth for their own model label + provenance url. Registering them here (once,
+// at module load) keeps the flag source badge and the detail strip labeling a
+// supplemental reading correctly instead of the generic "Wave Forecast" /
+// Open-Meteo fallback. With the empty registry this loop is a no-op.
+const SUPPLEMENTAL_WAVE_URLS = {};
+for (let i = 0; i < waveSources.length; i++) {
+  const s = waveSources[i];
+  WAVE_MODEL_LABELS[s.model] = s.label;
+  SUPPLEMENTAL_WAVE_URLS[s.model] = s.url;
+}
+
 function waveSourceLabel(model) {
   if (Object.prototype.hasOwnProperty.call(WAVE_MODEL_LABELS, model)) {
     return WAVE_MODEL_LABELS[model];
@@ -180,10 +199,14 @@ function waveSourceLabel(model) {
 
 // Buoy readings come from the GLOS Seagull network, so their source entry
 // carries the human-readable Seagull portal url, not the Open-Meteo docs (and
-// never the raw API request).
+// never the raw API request). Supplemental sources carry their own provenance
+// url from the registry.
 function waveSourceUrl(model) {
   if (model === GLCFS_WAVE_MODEL) {
     return SEAGULL_INFO_URL;
+  }
+  if (Object.prototype.hasOwnProperty.call(SUPPLEMENTAL_WAVE_URLS, model)) {
+    return SUPPLEMENTAL_WAVE_URLS[model];
   }
   return OPEN_METEO_MARINE_URL;
 }
@@ -374,12 +397,24 @@ async function runFlagRecompute(env) {
       return !b.nws_zone && b.eccc_zone;
     });
     let ecccAlerts = null;
+    let ecccMarineAlerts = null;
     if (ecccBeaches.length > 0) {
       try {
         ecccAlerts = await fetchActiveEcccAlerts(nowIso);
       } catch (err) {
         console.log("index: eccc alerts fetch threw: " + err.message);
         ecccAlerts = null;
+      }
+      // ECCC marine warnings (Gale/Storm/Strong-wind, per-zone polygons) come
+      // from a SEPARATE GeoMet collection and add new signal for Canadian
+      // beaches — verified disjoint from the land weather-alerts client. Own
+      // try/catch so a marine-fetch failure never nulls the land alerts (and
+      // vice versa); one national fetch, matched locally per beach in step 7.
+      try {
+        ecccMarineAlerts = await fetchActiveEcccMarineAlerts(nowIso);
+      } catch (err) {
+        console.log("index: eccc marine alerts fetch threw: " + err.message);
+        ecccMarineAlerts = null;
       }
     }
 
@@ -431,6 +466,36 @@ async function runFlagRecompute(env) {
       }
     }
 
+    // Step 5b: water-quality floor gather. Mirrors the step-8 official-scraper
+    // grouping: group beaches by their matching wqFloor source and fetch each
+    // source ONCE per run (not per beach), so a table-wide advisory source
+    // costs one fetch. The resolved advisory feeds estimateFlag's
+    // waterQualityAdvisory input (rules.js step 7) as a RAISE-ONLY floor, so it
+    // must be in hand BEFORE the per-beach estimate below — the step-8 official
+    // gather is too late. With the empty wqFloorSources registry this whole
+    // block is a no-op (no groups, no fetches, advisory stays null).
+    const wqGroups = new Map();
+    for (const beach of beaches) {
+      const wqs = findWqFloorSource(beach);
+      if (wqs) {
+        if (!wqGroups.has(wqs.id)) {
+          wqGroups.set(wqs.id, { source: wqs, beaches: [] });
+        }
+        wqGroups.get(wqs.id).beaches.push(beach);
+      }
+    }
+    const wqResultsBySource = new Map();
+    for (const group of wqGroups.values()) {
+      let wqResult = null;
+      try {
+        wqResult = await group.source.scrape(nowIso);
+      } catch (err) {
+        console.log("index: wqFloor scrape threw for " + group.source.id + ": " + err.message);
+        wqResult = null;
+      }
+      wqResultsBySource.set(group.source.id, { source: group.source, result: wqResult });
+    }
+
     // Step 6: per-beach estimate, isolated failures.
     for (const beach of beaches) {
       try {
@@ -456,18 +521,35 @@ async function runFlagRecompute(env) {
           if (marineEntry) {
             sources.push({ label: "NWS Marine Alerts", url: marineEntry.sourceUrl });
           }
-        } else if (beach.eccc_zone && ecccAlerts !== null) {
-          // Canadian beach: match the run's single ECCC fetch to this point
-          // via the alert-region polygons. A successful fetch with zero
-          // containing polygons is a real "no active alerts" ([]), exactly
-          // like an empty NWS zone response.
-          const matched = ecccAlertsForPoint(ecccAlerts.alerts, beach.lat, beach.lon);
-          alerts = matched.events;
-          alertDetails = matched.details;
-          sources.push({
-            label: "Environment Canada Alerts",
-            url: ECCC_ALERTS_INFO_URL
-          });
+        } else if (beach.eccc_zone && (ecccAlerts !== null || ecccMarineAlerts !== null)) {
+          // Canadian beach: match the run's single ECCC land fetch AND the
+          // single marine fetch to this point via their region polygons, then
+          // CONCAT into one alerts list (exactly like the US branch concats
+          // marine warnings onto land). A successful fetch with zero containing
+          // polygons is a real "no active alerts" ([]). The branch still
+          // processes when only ONE of the two fetches succeeded (each defaults
+          // to empty when null), so a land-alerts outage never hides an active
+          // marine gale, and vice versa.
+          const landMatched = ecccAlerts !== null
+            ? ecccAlertsForPoint(ecccAlerts.alerts, beach.lat, beach.lon)
+            : { events: [], details: [] };
+          const marineMatched = ecccMarineAlerts !== null
+            ? ecccMarineAlertsForPoint(ecccMarineAlerts.alerts, beach.lat, beach.lon)
+            : { events: [], details: [] };
+          alerts = landMatched.events.concat(marineMatched.events);
+          alertDetails = landMatched.details.concat(marineMatched.details);
+          if (ecccAlerts !== null) {
+            sources.push({
+              label: "Environment Canada Alerts",
+              url: ECCC_ALERTS_INFO_URL
+            });
+          }
+          if (ecccMarineAlerts !== null) {
+            sources.push({
+              label: "Environment Canada Marine Alerts",
+              url: ECCC_MARINE_INFO_URL
+            });
+          }
         }
 
         let ripCurrentRisk = null;
@@ -510,6 +592,27 @@ async function runFlagRecompute(env) {
           });
         }
 
+        // Water-quality advisory floor: resolve this beach against its group's
+        // already-fetched scrape result (step 5b). A RAISE-ONLY floor baked
+        // INTO the estimate (never an official override) — a clean/absent
+        // reading resolves to null and has zero effect (rules.js step 7). When
+        // present, cite the WQ source on the estimate card so the reason's
+        // "Water-quality advisory (...)" attribution is visible.
+        let waterQualityAdvisory = null;
+        const wqSourceForBeach = findWqFloorSource(beach);
+        if (wqSourceForBeach) {
+          const wr = wqResultsBySource.get(wqSourceForBeach.id);
+          if (wr && wr.result) {
+            waterQualityAdvisory = scrapeWqFloorFromResult(beach, wqSourceForBeach, wr.result);
+          }
+        }
+        if (waterQualityAdvisory !== null) {
+          sources.push({
+            label: waterQualityAdvisory.source,
+            url: typeof wqSourceForBeach.infoUrl === "string" ? wqSourceForBeach.infoUrl : ""
+          });
+        }
+
         // alertsCheckable distinguishes "alerts checked, none active"
         // (alerts === []) from "alerts not checkable" (neither nws_zone nor
         // eccc_zone resolved — beach not yet enriched for either authority).
@@ -527,6 +630,7 @@ async function runFlagRecompute(env) {
           waveHeightFt: waveHeightFt,
           windSpeedMph: windSpeedMph,
           windGustMph: windGustMph,
+          waterQualityAdvisory: waterQualityAdvisory,
           sources: sources,
           updated: nowIso
         };
@@ -537,6 +641,19 @@ async function runFlagRecompute(env) {
           JSON.stringify(estimate),
           { expirationTtl: KV_TTL_SECONDS }
         );
+
+        // Persist the structured advisory for the request path (D1+KV only) to
+        // render a distinct water-quality callout. Written ONLY when non-null;
+        // a clean reading writes nothing, so the key expires naturally (exactly
+        // like "official:"). NOT an official override — never feeds
+        // markerFlagFields / titleColor.
+        if (waterQualityAdvisory !== null) {
+          await env.FLAGS.put(
+            "wqfloor:" + beach.id,
+            JSON.stringify(waterQualityAdvisory),
+            { expirationTtl: KV_TTL_SECONDS }
+          );
+        }
 
         // The detail-page WaveSeries ("waves:" + id) is written by the wave
         // cron, not here — this loop only reads wave inputs.
@@ -734,8 +851,12 @@ async function runWaveRefresh(env) {
   const hotCutoffIso = new Date(Date.parse(nowIso) - HOT_VIEW_WINDOW_MS).toISOString();
 
   try {
+    // nws_grid_url / nws_zone / marine_zone are selected so the supplemental
+    // wave sources (step 2b) can key off them (gridpoint by nws_grid_url, NSH
+    // by marine_zone) — the primary Open-Meteo/GLOS passes need only lat/lon,
+    // but the fallback registry resolves per full beach row.
     const beachesResult = await env.DB.prepare(
-      "SELECT id, lat, lon, last_viewed FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+      "SELECT id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
       " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
     ).bind(hotCutoffIso).all();
     const beaches = beachesResult.results || [];
@@ -828,6 +949,55 @@ async function runWaveRefresh(env) {
         }
       } catch (err) {
         console.log("index: glcfs wave gap-fill threw: " + err.message);
+      }
+    }
+
+    // Step 2b: supplemental fallback wave sources (ordered registry). Consulted
+    // ONLY for beaches STILL wave-null after Open-Meteo + the GLOS buoy pass —
+    // an ordered fallback, never additive: the first matching source that
+    // returns a finite ft wins (resolveSupplementalWaveFt breaks on it). Merged
+    // into waveResults exactly like the buoy merge (waveHeightFt + model set,
+    // hoursFt/models/byModel preserved — single-point fallbacks write no
+    // "waves:" strip). MUST run BEFORE step 3 so wind stays the true last
+    // resort. The full beach row is needed (gridpoint/NSH keys), so build a
+    // beachById map — waveNullPoints only carries {beachId,lat,lon}. With the
+    // empty waveSources registry this is a no-op.
+    const supPoints = waveNullPoints(beaches, waveResults);
+    if (supPoints.length > 0 && waveSources.length > 0) {
+      const beachById = new Map();
+      for (const b of beaches) {
+        beachById.set(b.id, b);
+      }
+      // Run-scoped dedup memo: many wave-null beaches share one gridpoint cell
+      // (nws_grid_url), one marine zone (NSH), or one nearest NDBC station, so
+      // resolveSupplementalWaveFt fetches each unique (source, key) ONCE and
+      // fans the ft-or-null to every beach sharing it — mirroring the step-2
+      // GLOS platform dedup and the step-5b wqFloor gather grouping. Without
+      // this a fully wave-null (winter) run would issue thousands of duplicate
+      // upstream fetches and risk the per-invocation subrequest ceiling. Fallback
+      // semantics are unchanged: ordered registry, first finite value wins.
+      const supMemo = new Map();
+      for (const point of supPoints) {
+        const beach = beachById.get(point.beachId);
+        if (!beach) {
+          continue;
+        }
+        let resolved = null;
+        try {
+          resolved = await resolveSupplementalWaveFt(beach, nowIso, env, supMemo);
+        } catch (err) {
+          console.log("index: supplemental wave resolve threw for beach " + beach.id + ": " + err.message);
+          resolved = null;
+        }
+        if (resolved && typeof resolved.waveHeightFt === "number" && isFinite(resolved.waveHeightFt)) {
+          const existing = waveResults.get(point.beachId);
+          const merged = existing
+            ? { hoursFt: existing.hoursFt, models: existing.models, byModel: existing.byModel }
+            : { hoursFt: null, models: [], byModel: {} };
+          merged.waveHeightFt = resolved.waveHeightFt;
+          merged.model = resolved.model;
+          waveResults.set(point.beachId, merged);
+        }
       }
     }
 

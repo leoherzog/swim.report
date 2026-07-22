@@ -4,7 +4,15 @@
 // complete FlagEstimate object out. This is the ONLY place in the codebase
 // where a flag color is decided for an estimate.
 
-export const RULES_VERSION = "1.4.0";
+export const RULES_VERSION = "1.5.0";
+
+// Flag color severity ordering. The raise-only water-quality floor (step 7)
+// uses this to compare an advisory's floor color against the already-decided
+// color: it may raise the flag UP to at least the floor color but must NEVER
+// pull a higher hazard color down. unknown ranks below green so an advisory can
+// also lift a no-data unknown to yellow/red (a real advisory is more actionable
+// than "no data"), matching how the NWS floor treats unknown.
+const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-red": 4 };
 
 // Caveat appended to the reason when the cron reports that weather alerts
 // were not checkable for this beach (neither NWS nor ECCC enrichment has
@@ -90,22 +98,43 @@ const ALERT_COLOR_MAP = {
 // EXCLUDED: mapping a watch to yellow would let it mask a wave-height red
 // under the strict step precedence. Event names are exact-match against the
 // GeoMet weather-alerts alert_name_en strings, which ECCC serves lowercase.
+// Marine warnings (ECCC's GeoMet marine-alerts collection, served via
+// src/clients/ecccMarine.js) fold into this SAME lowercase namespace: "storm
+// warning" (marine >= 48 kt — DISTINCT from the land "storm surge warning")
+// short-circuits to double-red, "gale warning" (>= 34 kt) to red. The two
+// weaker marine advisories ("strong wind warning", "marine weather advisory")
+// are yellow FLOORS instead (ECCC_FLOOR_PRECEDENCE / step 6), so they can never
+// mask a wave-height red.
 export const ECCC_ALERT_PRECEDENCE = [
   "tornado warning",
   "storm surge warning",
+  "storm warning",
   "squall warning",
   "waterspout warning",
   "severe thunderstorm warning",
+  "gale warning",
   "wind warning"
+];
+
+// Marine yellow-floor events (raise-only, like NWS_FLOOR_PRECEDENCE). Kept out
+// of the short-circuit precedence so a strong-wind / marine-advisory can only
+// RAISE a green/unknown to yellow, never downgrade a decided higher color.
+export const ECCC_FLOOR_PRECEDENCE = [
+  "strong wind warning",
+  "marine weather advisory"
 ];
 
 const ECCC_ALERT_COLOR_MAP = {
   "tornado warning": "double-red",
   "storm surge warning": "double-red",
+  "storm warning": "double-red",
   "squall warning": "red",
   "waterspout warning": "red",
   "severe thunderstorm warning": "red",
-  "wind warning": "red"
+  "gale warning": "red",
+  "wind warning": "red",
+  "strong wind warning": "yellow",
+  "marine weather advisory": "yellow"
 };
 
 // The flag color a recognized alert maps to — NWS events (ALERT_PRECEDENCE
@@ -184,6 +213,12 @@ export function estimateFlag(inputs) {
   // enriched for either authority), null/undefined for legacy callers
   // (treated as "no caveat").
   const alertsCheckable = source.alertsCheckable !== undefined ? source.alertsCheckable : null;
+  // Raise-only water-quality advisory. Shape { color: "yellow"|"red", reason,
+  // source } or null. A clean/absent reading is null and has ZERO effect — it
+  // can only RAISE a flag (step 7), never pull a hazard estimate down, so a
+  // clean water reading can never mask a wave/rip/alert red. This lives INSIDE
+  // the estimate (official:false); it is never an official override.
+  const waterQualityAdvisory = source.waterQualityAdvisory !== undefined ? source.waterQualityAdvisory : null;
 
   let color = null;
   let reason = null;
@@ -304,12 +339,49 @@ export function estimateFlag(inputs) {
     }
   }
 
+  // Step 6b: Environment Canada marine yellow floor. A "strong wind warning" or
+  // "marine weather advisory" (ECCC's below-gale marine products) raises a green
+  // or unknown estimate to yellow, worst-of like the NWS floor — never
+  // downgrades a decided higher color. Same lowercase namespace as the ECCC
+  // short-circuit warnings; kept separate so it can only lift.
+  if (alerts !== null && (color === "green" || color === "unknown")) {
+    for (let i = 0; i < ECCC_FLOOR_PRECEDENCE.length; i++) {
+      const eventName = ECCC_FLOOR_PRECEDENCE[i];
+      if (alerts.indexOf(eventName) !== -1) {
+        color = "yellow";
+        reason = "Active Environment Canada alert: " + eventName;
+        trigger = "eccc-floor";
+        break;
+      }
+    }
+  }
+
+  // Step 7: raise-only water-quality floor. An active E. coli / bacteria / HAB
+  // advisory raises the flag UP to at least its floor color (yellow or red)
+  // using SEVERITY_RANK worst-of, but NEVER downgrades a higher color already
+  // decided by an alert, rip risk, or wave/wind. Water quality is a DIFFERENT
+  // axis from surf hazard, so a clean reading is modeled as the ABSENCE of an
+  // advisory (waterQualityAdvisory === null) and has zero effect — it can never
+  // present as a green that masks a hazard estimate. Baked into the estimate
+  // (official:false), never an official override.
+  if (waterQualityAdvisory !== null && typeof waterQualityAdvisory === "object") {
+    const floorColor = waterQualityAdvisory.color;
+    const decidedRank = SEVERITY_RANK[color] !== undefined ? SEVERITY_RANK[color] : 0;
+    if ((floorColor === "yellow" || floorColor === "red") && SEVERITY_RANK[floorColor] > decidedRank) {
+      color = floorColor;
+      const wqSource = typeof waterQualityAdvisory.source === "string" ? waterQualityAdvisory.source : "unknown";
+      const wqDetail = typeof waterQualityAdvisory.reason === "string" ? waterQualityAdvisory.reason : "";
+      reason = "Water-quality advisory (" + wqSource + "): " + wqDetail;
+      trigger = "wq-floor";
+    }
+  }
+
   // Honesty caveat: when alerts were not checkable for this beach (neither
   // nws_zone nor eccc_zone resolved yet), say so explicitly so a
   // wave/wind/no-data estimate is never read as "alerts were checked and none
   // were active". Skipped only when an alert itself decided the color
   // (contradictory input — alerts were evidently available).
-  if (alertsCheckable === false && trigger !== "nws-alert" && trigger !== "eccc-alert" && trigger !== "nws-floor") {
+  if (alertsCheckable === false && trigger !== "nws-alert" && trigger !== "eccc-alert" && trigger !== "nws-floor" && trigger !== "eccc-floor") {
     reason = reason + " (" + ALERTS_UNAVAILABLE_CAVEAT + ")";
   }
 

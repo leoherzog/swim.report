@@ -78,9 +78,11 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   rather than the generic Windy webcams hub.
 - **Threshold calibration against real flag history.** The `flag_history` table
   (migration 0006, PLAN.md sections 2 and 7) accumulates estimated-vs-official
-  pairs for beaches with a scraped official flag (South Haven and Chicago
-  publish true flag colors; the water-quality health-dept scrapers were removed —
-  see the official-source coverage section). Once enough history exists, revisit the wave/wind
+  pairs for beaches with a scraped official flag (South Haven, Chicago, the NWS
+  GRR beach report, Winnetka, Presque Isle, and NWS Marine Beach Forecast publish
+  official hazard colors; the raise-only wqFloor water-quality sources are NOT
+  official and do not feed calibration — see the official-source coverage section).
+  Once enough history exists, revisit the wave/wind
   thresholds in `src/rules.js` (2 ft / 4 ft wave, 15/25 mph wind, 25/35 mph
   gust) against how often the estimate matches the posted flag, and bump
   `RULES_VERSION` if thresholds move — cached `FlagEstimate` objects carry their
@@ -122,20 +124,23 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   rescues beach polygons that exist. P.J. Hoffmaster State Park has a park
   polygon but no `natural=beach` element inside it, so it still doesn't appear.
   Fixing OSM is the fix.
-- **Canadian beaches: alerts supported, no rip/surf signal.** Ontario shoreline
-  beaches get Environment Canada alert coverage (ECCC zone enrichment cron + the
-  hourly national GeoMet `weather-alerts` fetch matched per beach by
-  alert-region polygon, `src/clients/eccc.js` — rules step 1b). But ECCC issues
-  no rip current / high surf / beach hazards product, so Canadian estimates lean
-  entirely on the curated warning set plus wave/wind — there is no step-2
-  analog. Possible future refinements: the ECCC colour-coded tier
-  (`risk_colour_en`) as a severity signal, the experimental
-  `marineweather-realtime` GeoMet collection for lake marine warnings, and
-  pairing with a Canadian official source (Windsor-Essex, below). **WARNING:**
-  the "waterspout warning" / "storm surge warning" / "tornado warning" literal
-  API strings are inferred from ECCC's product list but not yet observed live in
-  `alert_name_en` (none observed live yet) — verify the exact strings when one
-  fires; a mismatch fails safe (event ignored).
+- **Canadian beaches: alerts + marine warnings supported, no rip/surf signal.**
+  Ontario shoreline beaches get Environment Canada land alert coverage (ECCC zone
+  enrichment cron + the hourly national GeoMet `weather-alerts` fetch matched per
+  beach by alert-region polygon, `src/clients/eccc.js` — rules step 1b) AND marine
+  warnings (the `marineweather-realtime` GeoMet collection, `src/clients/ecccMarine.js`,
+  matched per beach by marine-zone polygon and concatenated into the same alerts
+  list — Storm/Gale Warning short-circuit, Strong Wind Warning / Marine Weather
+  Advisory as a yellow floor at step 6b). But ECCC issues no rip current / high surf /
+  beach hazards product, so Canadian estimates still have no step-2 rip analog and
+  lean on the curated warning set plus wave/wind. Possible future refinements: the
+  ECCC colour-coded tier (`risk_colour_en`) as a severity signal, and pairing with a
+  Canadian official source. **WARNING:** several land warning literal API strings
+  ("waterspout warning" / "storm surge warning" / "tornado warning") are inferred
+  from ECCC's product list but not yet observed live in `alert_name_en` — verify the
+  exact strings when one fires; a mismatch fails safe (event ignored). The marine
+  event names (`storm warning` / `gale warning` / `strong wind warning` / `marine
+  weather advisory`) are lowercased from the live `marineweather-realtime` payload.
 - **ECCC zone enrichment: consider a conservative shoreline-nearest fallback.**
   `runEcccEnrichment` now does one bulk `fetchEcccForecastZones()` polygon fetch per run +
   local exact point-in-polygon (`ecccZoneNameForPoint`). A beach centroid that sits just
@@ -255,6 +260,46 @@ verdicts (parse strategies, `matches()` sketches, render modes):
 verified (mostly single-beach county pages) are in the workflow logs if coverage
 gaps appear.
 
+### Newly integrated sources (shipped) + human-verify follow-ups
+
+A batch of new data sources landed across three registries. **Official HAZARD
+scrapers** (`src/officialSources/`, may override the estimate): `nws-omr-grr`,
+`winnetka-tower-beach`, `pa-dcnr-presque-isle`, `nws-marine-beach-forecast`.
+**Raise-only water-quality FLOOR sources** (`src/wqFloor/`, may only lift a flag,
+never lower it — see README "Water-quality advisory floor"): `ny-oprhp-beach-status`,
+`chautauqua-county-ny`, `lake-county-oh-beaches`, `erie-county-pa-kml`,
+`illinois-beachguard`, `kenosha-beach-conditions`, `mn-beaches`, `grey-bruce-rec-water`,
+`ontario-parks-beach-postings`, `evanston-statusfy`, `usgs-great-lakes-nowcast`.
+**Supplemental fallback wave sources** (`src/waveSources/`, wave-height only, used
+only where Open-Meteo + GLOS are null): `nws-gridpoint-waves`, `nws-nsh-nearshore`,
+`uw-sea-caves-watch`, `toronto-beach-obs`, `ndbc-buoys`. **ECCC marine warnings**
+(`src/clients/ecccMarine.js`) are wired into the Canadian alert path (rules step
+1b/6b). Nothing was punted — every surveyed source above is registered.
+
+Follow-ups a human must verify (parsers fail safe to `null`/no-effect, so these are
+coverage gaps, not wrong-color risks):
+
+- **`erie-county-pa-kml` KML URL is UNCONFIRMED** — it ships with an empty
+  `ERIE_COUNTY_PA_KML_URL`, so the source resolves to null (no floor) until a real
+  KML endpoint is supplied. Several other wqFloor source URLs are best-effort and
+  should be re-verified live before their coverage is relied on; `grey-bruce-rec-water`
+  is flagged low-confidence in its own header.
+- **`nws-marine-beach-forecast` ArcGIS layer enumeration** — only layers verified
+  live (CLE = 19, BUF = 7, Lake Erie/Ontario) are enabled. Enumerate the MapServer
+  for additional Great Lakes Day-1 layers (e.g. other WFOs) and enable each ONLY
+  after confirming it returns features live — a wrong layer id silently yields no
+  features (safe-fail).
+- **`pa-dcnr-presque-isle` hazard-keyword mapping is PROVISIONAL** — the live DCNR
+  advisory feed is currently 100% off-axis boilerplate, so the swimming-hazard →
+  red mapping is verified only against synthetic fixtures. Re-verify against a real
+  Danger-tier swimming-hazard advisory when one appears.
+- **NDBC-vs-GLOS double-count audit** — `ndbc-buoys` is the first NDBC ingestion and
+  is a *fallback* consulted only for beaches still wave-null after Open-Meteo + the
+  GLOS/GLERL buoy pass, so it is by design non-additive. Audit that no NDBC buoy is
+  double-counting a beach the GLOS Seagull pass already covers (the ordered
+  registry breaks on the first finite reading, but confirm the GLOS pass runs first
+  and the wave-null set is recomputed between passes).
+
 ### Registered scrapers — live caveats
 
 Three scrapers are registered in `src/officialSources/index.js` (contract v2,
@@ -304,9 +349,9 @@ whose "clean" reading would downgrade a hazard flag. Caveats for the survivors:
 - **Swim Guide Indiana pages** (`theswimguide.org/beach/{id}`) — Nuxt SSR with
   literal `waterQuality:{description:...}` in raw HTML, but it's a mirror one hop
   from IDEM and needs a hardcoded numeric-ID table.
-- **Ontario Parks** (`ontarioparks.ca/beachresults`, CA) — fully static table,
-  easier than the South Haven gold standard, but binary open/posted and
-  Canadian.
+- **Ontario Parks** (`ontarioparks.ca/beachresults`, CA) — NOW SHIPPED as the
+  `ontario-parks-beach-postings` raise-only wqFloor source (binary posted/open, so
+  a posting raises the floor; open is no-effect).
 - **Barry-Eaton DHD** — parseable dated bulletins, but only 1 of 3 claimed
   beaches has entries; absence isn't a clear signal.
 - **Kalamazoo County CivicAlerts** (`kalcounty.gov/m/newsflash?cat=9`) —
@@ -321,13 +366,16 @@ whose "clean" reading would downgrade a hazard flag. Caveats for the survivors:
 - **Indiana IDEM BeachAlert** (`portal.idem.in.gov/BeachAlert`) — the natural IN
   statewide play but NOT implementable: Power Pages anonymous role is
   permission-denied and it sits behind Cloudflare Bot Management.
-- The surviving flag/closure integrations (South Haven, Huron-Clinton Metroparks,
-  Chicago Park District) are hazard sources — the kind that may safely override the
-  estimate. The statewide water-quality registries (Wisconsin DNR, Ohio BeachGuard)
-  were removed: as bacteria monitors their "clean → green" would mask a hazard flag.
-  If a statewide *hazard/advisory* feed surfaces later (or a water-quality source is
-  reworked to only RAISE a flag, never downgrade one — a floor, like the NWS yellow
-  floor in `src/rules.js`), it can be reconsidered on that basis.
+- The flag/closure integrations (South Haven, Huron-Clinton Metroparks, Chicago
+  Park District, NWS GRR beach report, Winnetka, Presque Isle, NWS Marine Beach
+  Forecast) are hazard sources — the kind that may safely override the estimate.
+  The statewide water-quality registries that were removed as *overrides* (Wisconsin
+  DNR, Ohio BeachGuard) are exactly the "clean → green masks a hazard" case — and the
+  raise-only floor anticipated here is now BUILT (`src/wqFloor/` + rules step 7): a
+  water-quality source may RAISE a flag but never lower one, so bacteria/HAB feeds
+  (Illinois BeachGuard, Lake County OH, and the rest of the wqFloor registry) are
+  now admissible on that basis. Illinois BeachGuard shipped as `illinois-beachguard`;
+  a reworked Ohio/Wisconsin floor source could be added the same way.
 
 ### Dead ends (verified — don't re-investigate without new info)
 

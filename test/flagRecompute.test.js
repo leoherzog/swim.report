@@ -1634,7 +1634,7 @@ describe("runWaveRefresh demand-aware ordering (last_viewed)", function () {
     const after = Date.now();
 
     const selectBinds = made.preparedBinds.filter(function (b) {
-      return b.sql.indexOf("SELECT id, lat, lon, last_viewed FROM beaches WHERE") !== -1;
+      return b.sql.indexOf("SELECT id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed FROM beaches WHERE") !== -1;
     });
     expect(selectBinds.length).toBe(1);
     const sql = selectBinds[0].sql;
@@ -1650,5 +1650,264 @@ describe("runWaveRefresh demand-aware ordering (last_viewed)", function () {
     const toleranceMs = 5 * 60000;
     expect(boundMs).toBeGreaterThanOrEqual(before - HOT_VIEW_WINDOW_MS - toleranceMs);
     expect(boundMs).toBeLessThanOrEqual(after - HOT_VIEW_WINDOW_MS + toleranceMs);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration coverage for the newly-registered sources (added at the
+// integration/registration pass): ECCC marine warnings raising a Canadian
+// beach, a raise-only water-quality floor lifting a green (and NOT lowering a
+// hazard red), an official scraper overriding via KV, and a supplemental
+// wave-height fallback filling in only when the primary wave is null. All run
+// through the real cron handler + registries; only upstream fetch is stubbed.
+// ---------------------------------------------------------------------------
+describe("runFlagRecompute - registered-source integration", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("ECCC marine gale warning raises a Canadian beach to red (eccc-alert)", function () {
+    return (async function () {
+      // Only the marine-alerts collection answers; the land weather-alerts
+      // fetch fails, proving the branch still processes on marine alone.
+      vi.stubGlobal("fetch", function (url) {
+        const target = typeof url === "string" ? url : (url && url.url) || "";
+        if (target.indexOf("collections/marineweather-realtime/items") !== -1) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: function () {
+              return Promise.resolve({
+                features: [{
+                  type: "Feature",
+                  properties: {
+                    lastUpdated: "2026-07-18T11:00:00.000Z",
+                    area: { region: { en: "Great Lakes" }, value: { en: "Lake Erie" } },
+                    warnings: {
+                      locations: [{
+                        events: [{
+                          name: { en: "Gale Warning" },
+                          category: { en: "marine" },
+                          status: { en: "in effect" }
+                        }]
+                      }]
+                    }
+                  },
+                  geometry: {
+                    type: "Polygon",
+                    coordinates: [[
+                      [-83.2, 41.7], [-82.6, 41.7], [-82.6, 42.3], [-83.2, 42.3], [-83.2, 41.7]
+                    ]]
+                  }
+                }]
+              });
+            }
+          });
+        }
+        return Promise.reject(new Error("network disabled in test"));
+      });
+
+      const made = makeEnv([
+        makeBeachRow({
+          id: "osm-way-marine-1",
+          name: "Colchester Beach",
+          lat: 41.9836774,
+          lon: -82.9343626,
+          eccc_zone: "Windsor - Essex - Chatham-Kent",
+          enrichment_attempts: 5
+        })
+      ]);
+      await runHourlyCron(made.env);
+
+      const estimate = JSON.parse(made.kvPuts.get("flag:osm-way-marine-1").value);
+      expect(estimate.color).toBe("red");
+      expect(estimate.trigger).toBe("eccc-alert");
+      expect(estimate.reason).toBe("Active Environment Canada alert: gale warning");
+      expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+      const labels = estimate.sources.map(function (s) { return s.label; });
+      expect(labels.indexOf("Environment Canada Marine Alerts")).toBeGreaterThan(-1);
+    })();
+  });
+
+  // A Duluth / Lake Superior beach covered by the mnBeaches water-quality
+  // floor source; MNBstatus reports a not-recommended reading.
+  function mnAdvisoryFetch(reason) {
+    return function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("mnbeaches.org") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              MNBstatus: [{
+                Name: "Park Point Sky Harbor",
+                Region: "Duluth",
+                Status: "Water Contact Not Recommended",
+                Reason: reason,
+                lat: 46.7282128,
+                lng: -92.0519435
+              }]
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    };
+  }
+
+  function mnBeachRow() {
+    return makeBeachRow({
+      id: "osm-node-duluth-1",
+      name: "Park Point Sky Harbor",
+      lat: 46.7282128,
+      lon: -92.0519435
+    });
+  }
+
+  it("a water-quality advisory raises a wave-green estimate to yellow (wq-floor)", function () {
+    return (async function () {
+      vi.stubGlobal("fetch", mnAdvisoryFetch("Elevated E. coli bacteria"));
+      const made = makeEnv([mnBeachRow()], {
+        "waveinput:osm-node-duluth-1": {
+          beachId: "osm-node-duluth-1",
+          waveHeightFt: 1.0,
+          model: "ecmwf_wam025",
+          windSpeedMph: null,
+          windGustMph: null,
+          updated: "2026-07-18T12:00:00.000Z"
+        }
+      });
+      await runHourlyCron(made.env);
+
+      const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-duluth-1").value);
+      expect(estimate.color).toBe("yellow");
+      expect(estimate.trigger).toBe("wq-floor");
+      expect(estimate.reason.indexOf("Water-quality advisory (")).toBe(0);
+
+      // The structured advisory is persisted for the request path.
+      const wqPut = made.kvPuts.get("wqfloor:osm-node-duluth-1");
+      expect(wqPut).toBeDefined();
+      expect(JSON.parse(wqPut.value).color).toBe("yellow");
+    })();
+  });
+
+  it("a water-quality advisory NEVER lowers a wave-height red", function () {
+    return (async function () {
+      vi.stubGlobal("fetch", mnAdvisoryFetch("Elevated E. coli bacteria"));
+      const made = makeEnv([mnBeachRow()], {
+        "waveinput:osm-node-duluth-1": {
+          beachId: "osm-node-duluth-1",
+          waveHeightFt: 5.0,
+          model: "ecmwf_wam025",
+          windSpeedMph: null,
+          windGustMph: null,
+          updated: "2026-07-18T12:00:00.000Z"
+        }
+      });
+      await runHourlyCron(made.env);
+
+      const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-duluth-1").value);
+      expect(estimate.color).toBe("red");
+      expect(estimate.trigger).toBe("wave-height");
+      // The advisory is still recorded for the request path — it just did not
+      // (and must not) pull the hazard red down.
+      expect(made.kvPuts.get("wqfloor:osm-node-duluth-1")).toBeDefined();
+    })();
+  });
+
+  it("a registered official scraper writes an official override to KV", function () {
+    return (async function () {
+      vi.stubGlobal("fetch", function (url) {
+        const target = typeof url === "string" ? url : (url && url.url) || "";
+        if (target.indexOf("rainoutline.com") !== -1) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            text: function () {
+              return Promise.resolve(
+                "<div><span class=\"status2\">Closed</span>&nbsp;-&nbsp;" +
+                "Dangerous high waves and rip currents<br /><br />" +
+                "<span class=\"clue\"><em>Last updated at 7/18/26 8:00 am</em></span></div>"
+              );
+            }
+          });
+        }
+        return Promise.reject(new Error("network disabled in test"));
+      });
+
+      const made = makeEnv([
+        makeBeachRow({
+          id: "osm-node-tower-1",
+          name: "Tower Road Beach",
+          lat: 42.115585,
+          lon: -87.733837
+        })
+      ]);
+      await runHourlyCron(made.env);
+
+      const officialPut = made.kvPuts.get("official:osm-node-tower-1");
+      expect(officialPut).toBeDefined();
+      const official = JSON.parse(officialPut.value);
+      expect(official.official).toBe(true);
+      expect(official.color).toBe("red");
+      expect(official.scraperId).toBe("winnetka-tower-beach");
+    })();
+  });
+
+  it("a supplemental wave source fills in ONLY when the primary wave is null", function () {
+    return (async function () {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-07-15T16:20:33Z"));
+
+      // Primary (Open-Meteo marine) fully masked, GLOS buoy catalog fails, so
+      // the beach is still wave-null when step 2b consults the registry. The
+      // NWS gridpoint fallback then supplies the height.
+      vi.stubGlobal("fetch", function (url) {
+        const target = typeof url === "string" ? url : (url && url.url) || "";
+        if (target.indexOf(MARINE_HOST) !== -1) {
+          return marineOkResponse(marinePayload(1, { ecmwf_wam025: null }));
+        }
+        if (target.indexOf("api.weather.gov/gridpoints") !== -1) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: function () {
+              return Promise.resolve({
+                properties: {
+                  waveHeight: {
+                    uom: "wmoUnit:m",
+                    values: [
+                      { validTime: "2026-07-15T16:00:00+00:00/PT6H", value: 1.5 }
+                    ]
+                  }
+                }
+              });
+            }
+          });
+        }
+        return Promise.reject(new Error("network disabled in test"));
+      });
+
+      const made = makeEnv([
+        makeBeachRow({
+          id: "osm-node-grid-1",
+          lat: 44.8,
+          lon: -83.3,
+          nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33"
+        })
+      ]);
+      await runWaveCron(made.env);
+
+      const inputPut = made.kvPuts.get("waveinput:osm-node-grid-1");
+      expect(inputPut).toBeDefined();
+      const input = JSON.parse(inputPut.value);
+      expect(input.model).toBe("nws_gridpoint_wave");
+      // 1.5 m -> ~4.9213 ft.
+      expect(input.waveHeightFt).toBeCloseTo(4.92126, 4);
+      // A single-point fallback writes NO 24h strip.
+      expect(made.kvPuts.get("waves:osm-node-grid-1")).toBeUndefined();
+    })();
   });
 });
