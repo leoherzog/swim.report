@@ -369,8 +369,9 @@ Binding name: FLAGS (single namespace for both key families).
 - Key "official:" + beachId → JSON.stringify(OfficialFlag). Written by hourly cron with
   { expirationTtl: 7200 } by default (KV_TTL_SECONDS), but the TTL is per-scraper
   overridable: a scraper object may set an optional `officialTtlSeconds` field to extend it
-  when it fetches on a reduced cadence (wisconsin-dnr uses 28800 / 8 h so its ~6h-spaced
-  color persists in KV between fetches). See section 7 step 8.
+  when it fetches on a reduced cadence, so its last color persists in KV between fetches.
+  No registered scraper currently declares one (the sole prior user, wisconsin-dnr, was
+  removed); the hook is retained as a generic extension point. See section 7 step 8.
 - Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the 6-hourly wave cron
   (runWaveRefresh) with { expirationTtl: 25200 }, and only when the series has >= 1 finite
   hour (section 1). Read ONLY by the detail route (the list page must not gain per-row
@@ -1271,8 +1272,9 @@ wrapper). No Date.now(), no ambient clock.
       // { timeoutMs } (outbound-request deadline in ms, default 30000; enforced
       // via AbortSignal.timeout — the resulting AbortError flows through the
       // existing catch and degrades to null like any other failure). Backward
-      // compatible: callers that omit timeoutMs get the 30 s default.
-      // wisconsinDnr passes timeoutMs: 45000 (that endpoint routinely takes ~30 s).
+      // compatible: callers that omit timeoutMs get the 30 s default. (The
+      // slow-endpoint override was used by the now-removed wisconsin-dnr
+      // scraper; the timeoutMs option itself remains part of fetchText.)
 
     export function perBeachResult(sites, source, updated)
       // Pure. The standard multi-site (contract shape (b)) result for the common
@@ -1305,16 +1307,18 @@ wrapper). No Date.now(), no ambient clock.
     // Registry, ordered MOST-SPECIFIC-MATCH FIRST (findScraper returns the first
     // scraper whose matches(beach) is true): tight single-city boxes and
     // fixed-site scrapers, then regional tables, then broad statewide bboxes.
+    //
+    // SCOPE: hazard/flag/closure sources ONLY. An official color OVERRIDES the
+    // estimate everywhere it is shown, so water-quality (E. coli / bacteria)
+    // monitoring sources are deliberately NOT registered here — clean-water
+    // "green" is a different axis from surf hazard and would mask a genuine
+    // hazard estimate (e.g. a gale-driven red). Six such sources (bldhd-mi,
+    // lenawee-mi, michigan-city-in, ohio-beachguard, hdnw-michigan, wisconsin-dnr)
+    // were removed for exactly this reason.
     export const scrapers = [
       southHaven,          // south-haven-mi        — city flag CSV (multi-site)
-      lenawee,             // lenawee-mi            — 2 fixed county HD sites
       metroparks,          // huron-clinton-metroparks — 4 fixed beaches, closure-only
-      michiganCity,        // michigan-city-in      — 2 fixed sites, E. coli prose
-      ohioBeachGuard,      // ohio-beachguard       — 51 curated ODH BeachGuard ids (bbox-gated)
-      hdnwMichigan,        // hdnw-michigan         — 4-county WQI table (~32 beaches)
-      bldhd,               // bldhd-mi              — Benzie/Leelanau weekly report
-      chicagoParkDistrict, // chicago-park-district — lakefront flag JSON (~23 beaches)
-      wisconsinDnr         // wisconsin-dnr         — statewide ArcGIS layer (441 rows)
+      chicagoParkDistrict  // chicago-park-district — lakefront flag JSON (~23 beaches)
     ];
 
     export function findScraper(beach)
@@ -1392,13 +1396,11 @@ wrapper). No Date.now(), no ambient clock.
       //   (unmonitored, "no flag", unparseable) must simply be OMITTED from
       //   sites — a beach that resolves to no site gets no official flag.
       //   updated honesty: real-time sources (live flag feeds) use nowIso;
-      //   PERIODIC sources (E. coli sampling, weekly reports, advisory issue
-      //   dates) must stamp the source's own report/sample timestamp — result
-      //   level when the whole page shares one date (michiganCity, bldhd), or
-      //   per-site updated when readings differ per beach (lenawee, hdnw,
-      //   wisconsinDnr, ohioBeachGuard advisories). Stamping nowIso on a
-      //   days-old reading would suppress the frontend's 2 h stale-data
-      //   warning and present old data as fresh.
+      //   PERIODIC sources (weekly reports, advisory issue dates) must stamp
+      //   the source's own report/sample timestamp — result level when the whole
+      //   page shares one date, or per-site updated when readings differ per
+      //   beach. Stamping nowIso on a days-old reading would suppress the
+      //   frontend's 2 h stale-data warning and present old data as fresh.
     }
 
 ### src/officialSources/southHaven.js
@@ -1471,61 +1473,24 @@ against inline fixtures, scrape(nowIso) wrapped in try/catch returning null on
 ANY failure, and ambiguous / stale / unrecognized-status sites OMITTED (never a
 guessed color). Full color semantics are in README.md's official-sources table.
 
-- src/officialSources/lenawee.js (lenawee-mi) — Lenawee County Health Dept page,
-  Hayes State Park + Lake Hudson Rec Area. "No Advisory Posted" -> green; any
-  other status text logged + omitted; shared "Last Updated" older than 10 days
-  vs nowIso omits both sites. Per-site updated = the page's own Last Updated
-  timestamp (periodic source — never nowIso). Active-advisory status wording is
-  still UNCONFIRMED (only "No Advisory Posted" ever observed live), so the
-  unrecognized-status log emits the verbatim status text with a greppable
-  "lenawee: UNMAPPED STATUS" marker to capture the real wording the first time an
-  advisory posts (to be mapped then — never guessed).
+REGISTRY SCOPE — hazard/flag/closure sources only. An official color OVERRIDES
+the estimate everywhere it is shown (render.js markerFlagFields / titleColor), so
+water-quality (E. coli / bacteria) monitoring sources are NOT registered: a
+clean-water "green" is a different axis from surf hazard and would mask a genuine
+hazard estimate (e.g. a gale-driven red). Six such water-quality scrapers were
+REMOVED for exactly this reason — lenawee-mi (Lenawee County HD), michigan-city-in
+(Michigan City E. coli prose), ohio-beachguard (ODH BeachGuard), hdnw-michigan
+(HD of NW Michigan WQI), bldhd-mi (Benzie-Leelanau weekly WQI report), and
+wisconsin-dnr (Wisconsin DNR Beach Health ArcGIS layer). Their modules, test
+files, and doc entries were deleted; do not re-add a source whose "clean" reading
+would downgrade a hazard flag.
+
 - src/officialSources/metroparks.js (huron-clinton-metroparks) — Metroparks
   park-closures page, panels scoped by id (Kensington / Stony Creek), 4 beaches.
   CLOSURE-ONLY: "Closed" -> red; "Open" -> site omitted (never an asserted
   green). Sites are name-resolved only (no lat/lon) so an open sibling beach
   can never inherit its neighbor's red by proximity. Excludes Lake St. Clair
   Metropark (that page entry defers to EGLE BeachGuard).
-- src/officialSources/michiganCity.js (michigan-city-in) — Washington Park
-  prose block with per-site E. coli readings; page's own thresholds <=235 green,
-  236-999 yellow, >=1000 red; reading date parsed from the page, >8 days stale
-  -> null; updated = reading date (honest, may trip the UI stale warning).
-- src/officialSources/ohioBeachGuard.js (ohio-beachguard) — ODH BeachGuard
-  public API, 51 curated Lake Erie public-beach ids (OHIO_SITES — the registry
-  bulk endpoint returns null monitorings/advisories, so each id still needs its
-  own detail GET), one GET per id with per-id failure isolation, issued in chunks
-  of OHIO_FETCH_CHUNK_SIZE (exported const, 8) via Promise.allSettled (bounded
-  concurrency, same total subrequest count as a serial loop). matches() is
-  HARD-GATED by OHIO_MATCH_BBOX (lat 41.2-42.1, lon -83.6..-80.4) BEFORE any
-  names[]/proximity check, so a same-named Michigan/Ontario beach can never
-  inherit an Ohio official flag; only distinctive, low-collision names go in
-  names[] (generic labels resolve by proximity only).
-  scrape() has a coarse PRE-FETCH off-season gate (F1, isOhioSeasonPossible,
-  America/New_York): BeachGuard is a summer-only program, so for roughly Nov-Apr
-  the whole ~51-request detail fan-out is skipped entirely (returns null without
-  fetching), mirroring southHaven's pre-fetch skip; the authoritative per-plan
-  swim-season check in parseOhioBeach still gates the color inside the window.
-  Out-of-season -> omitted; current advisory -> red for any HAB advisory
-  (HAB_WARNING_ADV OR HAB_WATCH_ADV — both advise against water contact, watch
-  collapsed UP to red per the never-a-false-green bias — or severity >= 4) else
-  yellow (CONTAM_ADV is ODH's own lowest tier); in-season with zero current
-  advisories -> affirmative green (BeachGuard is Ohio's official statewide advisory
-  system of record). Advisory sites carry per-site updated = the advisory's issue
-  date (startDate); monitored-and-clear greens have no source-side record date, so
-  they fall back to nowIso (the "no advisory" state is live at query time).
-- src/officialSources/hdnwMichigan.js (hdnw-michigan) — Health Dept of NW
-  Michigan WQI table (~32 curated beach names, 4-county bbox). WQI 1/2/3/4 ->
-  green/yellow/red/double-red; samples >8 days old vs nowIso dropped; most
-  recent sample per beach wins; uncurated names skipped. Per-site updated =
-  the row's own sample date (periodic source — never nowIso).
-- src/officialSources/bldhd.js (bldhd-mi) — Benzie-Leelanau District Health
-  Dept weekly "Beach Report M/D/YYYY" table, 10 curated sites. Water Quality Index
-  Level 1/2/3/4 -> green/yellow/red/double-red, mapped from BLDHD's OWN legend
-  published in its weekly PDF press release (Level 2 "contact above the waist not
-  advised", Level 3 "no body contact advised", Level 4 "Health Alert … avoid
-  contact"). Any Level NOT in the 1-4 legend (e.g. a future Level 5, a malformed
-  cell) is logged + omitted (never guessed); report older than 8 days (or
-  future-dated) -> null.
 - src/officialSources/chicagoParkDistrict.js (chicago-park-district) — Chicago
   Park District /flag-status JSON API (~23 lakefront beaches). Per-record 36h
   staleness gate (CHICAGO_MAX_AGE_HOURS = 36; payload mixes in prior-season rows);
@@ -1536,28 +1501,6 @@ guessed color). Full color semantics are in README.md's official-sources table.
   Quality/Weather row while the Surf row is stale or missing yields NO data
   (never a false official green); red/yellow/double-red keep the plain
   most-severe-fresh-row gate.
-- src/officialSources/wisconsinDnr.js (wisconsin-dnr) — Wisconsin DNR Beach
-  Health ArcGIS layer (441 statewide rows). MAP_STATUS Open -> green, Advisory
-  -> yellow, Closed -> red; Closed For Season / No Data Available / Other
-  Status omitted; SAMPLEDATE older than 21 days vs nowIso omitted; per-site
-  updated = the row's own SAMPLEDATE (periodic source — never nowIso). Sites
-  carry lat/lon + radiusMi 1.0 and deliberately NO names[] (generic statewide names
-  like "North Beach" would win over proximity and mis-bind); its broad bbox
-  overlaps Michigan's western UP, which is safe because unresolved beaches just
-  get no official flag.
-  Fetch-cadence gating (F2): scrape() has a PRE-FETCH gate that skips the slow
-  ~34 s statewide query entirely outside a deliberately WIDE May-October
-  (America/Chicago) monitoring season, and in-season fetches only on evenly-spread
-  local hours [0, 6, 12, 18] (4x/day) rather than hourly — the feed changes at most
-  ~daily (partner labs sample 1-5x/week, summer only). The last official color
-  persists in KV between fetches via the per-scraper official-KV TTL
-  (officialTtlSeconds = WISCONSIN_DNR_OFFICIAL_TTL_SECONDS = 28800 / 8 h; section 3,
-  section 7 step 8). Exported pure gate helpers: isWisconsinDnrInSeason(nowIso),
-  isWisconsinDnrFetchHour(nowIso), shouldFetchWisconsinDnr(nowIso). The User-Agent
-  is now SELF-IDENTIFYING ("Mozilla/5.0 (swim.report; +https://swim.report)",
-  re-probed 2026-07-20: the full statewide outFields=* query returns 200 with all
-  441 features under it) — no longer a spoofed desktop Chrome UA; the 60 s cron
-  timeout override is retained (the query is still slow).
 
 ## 7. Cron design (src/index.js)
 
@@ -1678,7 +1621,8 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    { expirationTtl: scraper.officialTtlSeconds ?? KV_TTL_SECONDS } — i.e. a scraper may
    opt into a longer official-KV TTL (its optional officialTtlSeconds field) when it
    fetches on a reduced cadence, so its last color persists between infrequent fetches;
-   default 7200 (section 3, and wisconsin-dnr's 28800 in section 6). Null scrape result,
+   default 7200 (section 3). No registered scraper currently declares officialTtlSeconds
+   (the hook is a retained extension point), so this resolves to the default today. Null scrape result,
    or a beach that resolves to no site (multi-site shape), → NO KV write for that beach
    (old key expires naturally).
    Scraper health monitoring (hourly path only): around each distinct MATCHED
@@ -1717,9 +1661,9 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
 
 Subrequest budget (paid plan, 10,000/invocation): 1 NWS national alerts call (step 3) +
 1 ECCC national alerts call (step 3b) + ~2×15 SRF calls + ~13 waveinput KV gets batches
-(≤613 gets, step 5 — no upstream marine/GLOS/wind fetch) + ~62 official-scraper
-fetches (one scrape() per matched scraper; South Haven uses 2 fetches, Ohio BeachGuard
-issues ONE GET per OHIO_SITES entry = 51, the rest 1 each) + ~2 scraper-health KV ops per
+(≤613 gets, step 5 — no upstream marine/GLOS/wind fetch) + a handful of official-scraper
+fetches (one scrape() per matched scraper; South Haven uses 2 fetches, metroparks and
+chicago-park-district 1 each) + ~2 scraper-health KV ops per
 matched scraper + ≤1 flag_history D1 batch (step 9, only when >= 1 estimate/official pair
 exists) + ≤700 flag/official KV puts ≈ well under 10,000 at the full ~613-row pilot table.
 Both authorities' alerts are ONE national fetch each — not a call per distinct zone — so
@@ -2724,11 +2668,11 @@ legacy defaults).
   most-severe rollup, piers ignored, unknown/HTML/empty→null, all-gray→[]); extractSouthHavenCsvUrl;
   southHaven.matches; findScraper; resolveSiteForBeach / scrapeOfficialFlagFromResult
   (name beats proximity, array-order, radius default, invalid color→null, no site→null).
-- test/lenawee.test.js, test/metroparks.test.js, test/michiganCity.test.js,
-  test/ohioBeachGuard.test.js, test/hdnwMichigan.test.js, test/bldhd.test.js,
-  test/chicagoParkDistrict.test.js, test/wisconsinDnr.test.js — each exercises its scraper's
+- test/metroparks.test.js, test/chicagoParkDistrict.test.js — each exercises its scraper's
   pure parse function(s) against inline fixtures (incl. ambiguous/unknown-status rows OMITTED)
-  plus matches() with matching and non-matching BeachRow fixtures.
+  plus matches() with matching and non-matching BeachRow fixtures. (The six water-quality
+  scrapers and their test files — lenawee, michigan-city, ohio-beachguard, hdnw-michigan,
+  bldhd, wisconsin-dnr — were removed; see the registry-scope note in section 6.)
 - test/scraperHealth.test.js — updateScraperHealth (increment/reset, 23-vs-24 boundary,
   exact alert strings, "never" fallback).
 - test/glerl.test.js — GLOS buoy gap-fill client against a stubbed global fetch.

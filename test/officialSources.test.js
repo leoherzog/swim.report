@@ -695,12 +695,11 @@ describe("findScraper", function() {
 // cleanup per test/helpers/fetch.js.
 // ---------------------------------------------------------------------------
 
-// A timestamp at which EVERY scraper's pre-fetch gate passes, so scrape()
-// actually reaches its fetch path:
+// A timestamp at which EVERY registered scraper's pre-fetch gate passes, so
+// scrape() actually reaches its fetch path:
 //   - South Haven: 2026-07-09 13:00 America/Detroit (in season, 9am-9pm);
-//   - Wisconsin DNR: 2026-07-09 12:00 America/Chicago (July in season AND
-//     12 is a FETCH_HOURS cadence hour);
-//   - Ohio BeachGuard: July is inside the coarse May-Oct fetch window.
+//   - metroparks and chicagoParkDistrict have no season/cadence pre-fetch gate
+//     and always fetch.
 const GATES_OPEN_ISO = "2026-07-09T17:00:00.000Z";
 
 describe("registry-wide scrape() fetch-failure contract", function() {
@@ -740,12 +739,11 @@ describe("registry-wide scrape() null-on-markup-change contract", function() {
 
   // A 200 response whose body is a redesigned page: no recognizable table,
   // panels, spreadsheet link, or JSON. Every scraper must degrade to null —
-  // a markup change may never surface a color object. metroparks and
-  // hdnwMichigan have empty-success ([]) semantics only for PARSEABLE pages;
-  // for this body their parsers find no panels / no table and return null,
-  // so scrape() is null for them too. For chicagoParkDistrict and
-  // wisconsinDnr this body is invalid JSON, exercising the JSON.parse
-  // failure path end-to-end.
+  // a markup change may never surface a color object. metroparks has
+  // empty-success ([]) semantics only for PARSEABLE pages; for this body its
+  // parser finds no panels and returns null, so scrape() is null for it too.
+  // For chicagoParkDistrict this body is invalid JSON, exercising the
+  // JSON.parse failure path end-to-end.
   const REDESIGNED_BODY = "<html><body>site redesigned</body></html>";
 
   for (const scraper of scrapers) {

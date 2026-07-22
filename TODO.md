@@ -79,8 +79,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 - **Threshold calibration against real flag history.** The `flag_history` table
   (migration 0006, PLAN.md sections 2 and 7) accumulates estimated-vs-official
   pairs for beaches with a scraped official flag (South Haven and Chicago
-  publish true flag colors; the health-dept scrapers report water quality, a
-  different signal). Once enough history exists, revisit the wave/wind
+  publish true flag colors; the water-quality health-dept scrapers were removed —
+  see the official-source coverage section). Once enough history exists, revisit the wave/wind
   thresholds in `src/rules.js` (2 ft / 4 ft wave, 15/25 mph wind, 25/35 mph
   gust) against how often the estimate matches the posted flag, and bump
   `RULES_VERSION` if thresholds move — cached `FlagEstimate` objects carry their
@@ -240,9 +240,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   possible follow-up.
 - **Not every scraper implements empty-success yet.** The contract (PLAN.md §6)
   distinguishes "parsed cleanly, nothing to report" (empty `sites: []` result, a
-  health success) from `null` (genuine fetch/parse failure). metroparks,
-  hdnw-michigan, and michigan-city comply; the others (wisconsin-dnr, bldhd,
-  lenawee, south-haven, ohio-beachguard, chicago-park-district) still return
+  health success) from `null` (genuine fetch/parse failure). metroparks complies;
+  south-haven and chicago-park-district still return
   `null` when they parse fine but no site survives their gates — rare in season,
   but off-season or stale-only data would log a false failure streak. Migrate
   them the same way.
@@ -258,8 +257,15 @@ gaps appear.
 
 ### Registered scrapers — live caveats
 
-Nine scrapers are registered in `src/officialSources/index.js` (contract v2,
-multi-site, one test file each). Caveats worth remembering per scraper:
+Three scrapers are registered in `src/officialSources/index.js` (contract v2,
+multi-site, one test file each) — hazard/flag/closure sources only. An official
+color OVERRIDES the estimate wherever shown, so water-quality (E. coli / bacteria)
+sources are deliberately excluded: a clean-water "green" is a different axis from
+surf hazard and would mask a genuine hazard estimate (e.g. a gale-driven red).
+Six water-quality scrapers were REMOVED for this reason (`lenawee-mi`,
+`michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`, `bldhd-mi`,
+`wisconsin-dnr`) — modules, tests, and doc entries deleted. Do not re-add a source
+whose "clean" reading would downgrade a hazard flag. Caveats for the survivors:
 
 - **South Haven CSV** (`south-haven-mi`) — real flag colors, ~9 sites. CSV URL
   is re-discovered from the flag page each run (hardcoded fallback); Gray =
@@ -272,54 +278,11 @@ multi-site, one test file each). Caveats worth remembering per scraper:
   requires the beach's own Surf row to be fresh; "Afterhours" → red
   (lifeguards-off closure, noted in reason). Undocumented/unversioned API;
   off-season behavior still unverified.
-- **Wisconsin DNR Beach Health ArcGIS layer** (`wisconsin-dnr`) — 441 statewide
-  rows. Open/Advisory/Closed → green/yellow/red; Closed For Season / No Data /
-  Other Status omitted; 21-day sample staleness gate. Proximity-only resolution
-  (no names[] — generic statewide names like "North Beach" would mis-bind);
-  mostly pays off when the bbox expands past the pilot. The slow ~34 s statewide
-  query is now PRE-FETCH gated (F2): skipped entirely outside a wide May–October
-  season and, in-season, run only at local hours [0, 6, 12, 18] (America/Chicago)
-  rather than hourly — the color persists between fetches via `officialTtlSeconds`
-  = 8 h. Its User-Agent is now self-identifying (no longer a spoofed Chrome UA).
-- **Ohio ODH BeachGuard API** (`ohio-beachguard`) — 51 curated Lake Erie
-  public-beach ids (one GET per id per scrape; the registry bulk endpoint omits
-  monitorings/advisories, so per-id detail is required). In-season + zero current
-  advisories → affirmative green (BeachGuard is Ohio's system of record);
-  out-of-season → no data (a coarse Nov–Apr pre-fetch guard, `isOhioSeasonPossible`,
-  now skips the whole ~51-request fan-out off-season, mirroring southHaven);
-  `OHIO_MATCH_BBOX` hard-gates `matches()` so a
-  same-named Michigan/Ontario beach can never inherit an Ohio flag. A few real
-  public beaches carry 64-bit ids (Conneaut Sandbar, the Bay Point beaches, Yacht
-  Port, Zeller's, Castaway) and are intentionally not yet covered (under-claim);
-  add explicitly later. Minor UX gap: `HAB_WATCH_ADV` and `HAB_WARNING_ADV` share
-  the typeText "Recreational Public Health Advisory", so `advisoryReason` renders
-  them identically.
-- **Health Dept of Northwest Michigan** (`hdnw-michigan`) — curated 32-beach
-  name map (not a loose regex); WQI 1–4 → green/yellow/red/double-red; 8-day
-  staleness gate. Hand-edited WYSIWYG markup remains the fragility risk; some
-  aliases are generic (bounded by the four-county bbox).
 - **Huron-Clinton Metroparks** (`huron-clinton-metroparks`) — closure-only
   (Closed → red, Open → no assertion); parsing strictly scoped to the
   Kensington/Stony Creek panel ids; name-only site resolution so an open sibling
   beach can't inherit its neighbor's red; Lake St. Clair Metropark excluded
   (defers to EGLE).
-- **Benzie-Leelanau District Health Dept** (`bldhd-mi`) — Level 1–4 →
-  green/yellow/red/double-red, mapped from BLDHD's own Water Quality Index legend
-  (published in its weekly PDF press release). No live Level 2/3/4 has been
-  observed yet, only Level 1 — documentary confirmation only. Levels outside 1–4
-  are logged + omitted (never guessed); 8-day staleness gate.
-- **Lenawee County Health Dept** (`lenawee-mi`) — "No Advisory Posted" → green.
-  Active-advisory wording is still UNCONFIRMED (only "No Advisory Posted" seen
-  live) — an unrecognized status logs the verbatim text with a greppable
-  `lenawee: UNMAPPED STATUS` marker so production captures the real wording the
-  first time an advisory posts; map it then (advisory → yellow or red per its
-  meaning), never guessed. Shared Last-Updated staleness gate (10 days).
-  (Michigan's statewide advisory wording also lives at the MiEnviro Beach Guard
-  portal if a future direct-wording source is wanted.)
-- **Michigan City IN parks page** (`michigan-city-in`) — page's own E. coli
-  thresholds; hand-edited prose remains fragile (fails closed); weekday-only
-  cadence tolerated up to 8 days; `updated` = reading date, so the UI stale
-  warning fires by design.
 - **Windsor-Essex County Health Unit** (`wechu.org/beaches/beach-water-testing`,
   Ontario) — NOT built (US focus; Canadian beaches lack NWS enrichment anyway).
   Still the most feasible CA source when that becomes relevant.
@@ -358,10 +321,13 @@ multi-site, one test file each). Caveats worth remembering per scraper:
 - **Indiana IDEM BeachAlert** (`portal.idem.in.gov/BeachAlert`) — the natural IN
   statewide play but NOT implementable: Power Pages anonymous role is
   permission-denied and it sits behind Cloudflare Bot Management.
-- The built statewide integrations (Wisconsin DNR, Ohio BeachGuard, Chicago Park
-  District) mostly pay off when `REGIONS` expands beyond Michigan — each is worth
-  dozens of beaches at that point. Ohio's remaining registry ids (beyond the 51
-  curated) need enumerating then.
+- The surviving flag/closure integrations (South Haven, Huron-Clinton Metroparks,
+  Chicago Park District) are hazard sources — the kind that may safely override the
+  estimate. The statewide water-quality registries (Wisconsin DNR, Ohio BeachGuard)
+  were removed: as bacteria monitors their "clean → green" would mask a hazard flag.
+  If a statewide *hazard/advisory* feed surfaces later (or a water-quality source is
+  reworked to only RAISE a flag, never downgrade one — a floor, like the NWS yellow
+  floor in `src/rules.js`), it can be reconsidered on that basis.
 
 ### Dead ends (verified — don't re-investigate without new info)
 
@@ -397,24 +363,22 @@ multi-site, one test file each). Caveats worth remembering per scraper:
 
 ### Coverage math
 
-Site capacity by scraper: South Haven ~9 sites, HDNW ~32, BLDHD 10, Metroparks 4,
-Lenawee 2, Michigan City 2, Ohio BeachGuard 51, Chicago ~23, Wisconsin DNR 441
-monitoring sites. Within the current Michigan-centric `REGIONS` coverage that
-translates to official status for roughly 40–60 of ~613 DB beaches (~7–10%) in
+Site capacity by registered scraper: South Haven ~9 sites, Metroparks 4,
+Chicago ~23. Within the current Michigan-centric `REGIONS` coverage that
+translates to official (hazard/flag) status for a few dozen of ~613 DB beaches in
 season — actual counts depend on per-beach resolution (name/proximity) and each
-source's staleness gates, and shrink off-season by design. Chicago's lakefront
-and Wisconsin's Door County peninsula fall inside the covered regions already;
-the rest of Wisconsin's 441 sites and Ohio's registry become disproportionately
-valuable once the discovery regions expand past the pilot. The 70+-beach prize
-(Michigan EGLE BeachGuard) remains partnership-gated — see
-`docs/swimsmart-outreach-draft.md`.
+source's staleness gates, and shrink off-season by design. (The six removed
+water-quality scrapers previously added ~90 monitored sites of E. coli status,
+but that is a different signal from hazard flags and was masking hazard estimates
+where it overrode them.) The 70+-beach prize (Michigan EGLE BeachGuard) remains
+partnership-gated — see `docs/swimsmart-outreach-draft.md`.
 
 ## Free vs. paid Workers plan
 
 - The cron subrequest budgets assume the Workers **Paid** plan (10,000
   subrequests/invocation, no daily KV-write cap). The hourly `runFlagRecompute`
   runs alert + SRF + scraper fetches plus up to ~700 `flag:`/`official:` KV
-  writes (Ohio BeachGuard alone is 51 per-id GETs; it no longer fetches waves),
+  writes (it no longer fetches waves),
   and the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy
   + wind fetches plus up to ~1200 `waveinput:`/`waves:` KV writes (per PLAN.md
   section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day

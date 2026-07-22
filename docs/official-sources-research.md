@@ -1,5 +1,16 @@
 # swim.report — Official Source Scraper Prioritization Report
 
+> **Historical survey — partially superseded.** This is the original web-survey
+> snapshot. Six water-quality (E. coli / bacteria) sources it recommended and that
+> were later built — Wisconsin DNR, Ohio BeachGuard, HD of Northwest Michigan,
+> Benzie-Leelanau DHD, Lenawee County HD, and Michigan City IN — have since been
+> **removed**. An official color overrides the flag estimate wherever shown, and a
+> bacteria "clean → green" reading is a different axis from surf hazard: letting it
+> win would mask a genuine hazard estimate (e.g. a gale-driven red). Only
+> hazard/flag/closure sources remain registered (South Haven, Huron-Clinton
+> Metroparks, Chicago Park District). See TODO.md's "Official-source coverage" and
+> PLAN.md section 6 for the current registry.
+
 ## 1. TL;DR
 
 - **Fix the South Haven scraper first**: the live flag data isn't on the HTML page currently being parsed — it's a linked Google Sheets CSV export (`/pub?...output=csv`) that refreshes every 5 minutes with real per-beach flag colors; the current scraper is reading a static 2018-frozen legend image table.

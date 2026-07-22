@@ -374,7 +374,8 @@ in one job never starves another. Beach discovery and water-body classification 
   matched scraper, resolved per beach, with KV-backed health monitoring), and
   writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
   TTL (a scraper may set an optional `officialTtlSeconds` to extend its own
-  official-KV TTL when it fetches on a reduced cadence — wisconsin-dnr uses 8 h). The
+  official-KV TTL when it fetches on a reduced cadence; no registered scraper
+  declares one today — it is a retained extension point). The
   `7` minute offset keeps this hourly burst off the congested top-of-hour `:00` slot;
   it only **reads** the `waveinput:` KV the `:15` wave cron wrote, so the ordering is
   unchanged. A missing `waveinput:` key (wave cron hasn't run, or its data aged out) just
@@ -544,7 +545,7 @@ and never touching the delete path. The committed geometry file is regenerated
 **Paid-plan assumption**: the cron subrequest budgets exceed the free plan's
 50-subrequest ceiling (the paid plan allows 10,000 per invocation). The hourly
 `runFlagRecompute` runs alert + SRF + scraper fetches plus up to ~700 KV
-reads/writes (Ohio BeachGuard alone is 51 per-id GETs), and
+reads/writes, and
 the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy gap-fill + wind
 fetches plus up to ~1200 `waveinput:`/`waves:` KV writes — each well under 10,000 but far
 past the free ceiling. Production deployment assumes the Workers Paid plan. `runWaveRefresh`
@@ -602,18 +603,17 @@ Registered scrapers (registry order — most-specific match first, since
 | Scraper (id) | Source | Color semantics |
 |---|---|---|
 | South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version"; the page itself is only a static legend) | Real flag colors per site (~9 sites, multiple poles roll up to most severe); Gray = unmonitored → no data |
-| Lenawee County MI (`lenawee-mi`) | County health dept beach-monitoring page (Hayes SP, Lake Hudson RA) | "No Advisory Posted" → green; any other status omitted; >10-day-old report → no data |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion (never an inferred green) |
-| Michigan City IN (`michigan-city-in`) | Washington Park page's dated E. coli prose block | Page's own thresholds: ≤235 green, 236–999 yellow, ≥1000 red; reading >8 days old → no data |
-| Ohio ODH BeachGuard (`ohio-beachguard`) | Ohio Dept of Health BeachGuard public API, 51 curated Lake Erie public-beach ids | Current advisory → red (any HAB advisory — warning or watch — / high severity) or yellow (bacteria contamination); in-season, no advisory → green; out-of-season → no data. `matches()` is geographically gated to Ohio's Lake Erie shore so a same-named out-of-state beach can't inherit a flag |
-| HD of Northwest Michigan (`hdnw-michigan`) | nwhealth.org Water Quality Index table (~32 curated beaches, 4 counties) | WQI 1/2/3/4 → green/yellow/red/double-red; samples >8 days old dropped |
-| Benzie-Leelanau DHD (`bldhd-mi`) | bldhd.org weekly "Beach Report" table (10 curated sites) | WQI Level 1/2/3/4 → green/yellow/red/double-red (mapped from BLDHD's own weekly-report legend); a Level outside 1–4 omitted; report >8 days old → no data |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red (no-lifeguard closure); records >36 h old dropped; a beach reports green only when its own Surf row is fresh (a green resting solely on a fresh water-quality row → no data, never a false green) |
-| Wisconsin DNR (`wisconsin-dnr`) | DNR Beach Health ArcGIS REST layer (441 statewide monitoring sites) | Open → green, Advisory → yellow, Closed → red; Closed For Season / No Data omitted; samples >21 days old dropped |
 
-Health-department sources report water-quality (E. coli) status, not literal
-beach flags — the `reason` string on each official reading says exactly what was
-reported and, for periodic-testing sources, when it was sampled.
+Only hazard/flag/closure sources are registered. An official color **overrides**
+the estimate wherever it is shown, so water-quality (E. coli / bacteria)
+monitoring sources are deliberately excluded — a clean-water reading is a
+different axis from surf hazard, and letting its "green" win would mask a genuine
+hazard estimate (e.g. a gale-driven red). Six such water-quality scrapers
+(`lenawee-mi`, `michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`, `bldhd-mi`,
+`wisconsin-dnr`) were removed for this reason. The `reason` string on each
+official reading says exactly what the source reported.
 
 ### Scraper health monitoring
 

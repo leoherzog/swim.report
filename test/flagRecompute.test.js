@@ -1036,9 +1036,12 @@ describe("scraper health season/cadence gate (healthMonitored)", function () {
     vi.unstubAllGlobals();
   });
 
-  function milwaukeeBeach() {
-    // Inside ONLY the wisconsin-dnr matches() box.
-    return makeBeachRow({ id: "osm-node-mke", name: "Bradford Beach", lat: 43.0, lon: -87.9 });
+  function southHavenBeach() {
+    // Inside the south-haven-mi matches() box (North Beach). south-haven-mi is
+    // a season/hours-gated scraper (healthMonitored = isSouthHavenMonitored:
+    // May 15-Sept 15, 9am-9pm America/Detroit), so it exercises the deliberate
+    // season/cadence pre-fetch skip the same way the retired wisconsin-dnr did.
+    return makeBeachRow({ id: "osm-node-sh", name: "North Beach", lat: 42.406, lon: -86.28 });
   }
 
   function runAt(isoTime, beachRows) {
@@ -1052,21 +1055,22 @@ describe("scraper health season/cadence gate (healthMonitored)", function () {
   }
 
   it("off-season (January): the deliberate skip writes NO scraperhealth: key", async function () {
-    const made = await runAt("2026-01-15T18:00:00Z", [milwaukeeBeach()]);
-    expect(made.kvPuts.get("scraperhealth:wisconsin-dnr")).toBeUndefined();
+    const made = await runAt("2026-01-15T18:00:00Z", [southHavenBeach()]);
+    expect(made.kvPuts.get("scraperhealth:south-haven-mi")).toBeUndefined();
   });
 
-  it("in-season off-cadence hour: still not counted (no scraperhealth: write)", async function () {
-    // 2026-07-15T19:00:00Z = 14:00 America/Chicago — not a FETCH_HOURS slot.
-    const made = await runAt("2026-07-15T19:00:00Z", [milwaukeeBeach()]);
-    expect(made.kvPuts.get("scraperhealth:wisconsin-dnr")).toBeUndefined();
+  it("in-season off-hours: still not counted (no scraperhealth: write)", async function () {
+    // 2026-07-15T10:00:00Z = 06:00 America/Detroit — in season but before the
+    // 9am monitored-hours window, so the pre-fetch skip is deliberate.
+    const made = await runAt("2026-07-15T10:00:00Z", [southHavenBeach()]);
+    expect(made.kvPuts.get("scraperhealth:south-haven-mi")).toBeUndefined();
   });
 
-  it("in-season ON-cadence hour with a real fetch failure: the null IS counted", async function () {
-    // 2026-07-15T17:00:00Z = 12:00 America/Chicago — a FETCH_HOURS slot; the
-    // stubbed network failure is a genuine scrape null.
-    const made = await runAt("2026-07-15T17:00:00Z", [milwaukeeBeach()]);
-    const put = made.kvPuts.get("scraperhealth:wisconsin-dnr");
+  it("in-season monitored hour with a real fetch failure: the null IS counted", async function () {
+    // 2026-07-15T16:00:00Z = 12:00 America/Detroit — in season AND inside the
+    // 9am-9pm monitored window; the stubbed network failure is a genuine null.
+    const made = await runAt("2026-07-15T16:00:00Z", [southHavenBeach()]);
+    const put = made.kvPuts.get("scraperhealth:south-haven-mi");
     expect(put).toBeDefined();
     const health = JSON.parse(put.value);
     expect(health.consecutiveNulls).toBe(1);
@@ -1250,8 +1254,9 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
 });
 
 // Step 8's official: KV TTL: default KV_TTL_SECONDS (7200) unless the scraper
-// declares a numeric officialTtlSeconds (wisconsin-dnr uses 28800 to bridge
-// its reduced ~6h fetch cadence).
+// declares a numeric officialTtlSeconds. No registered scraper currently
+// declares one (the override hook is retained as a generic extension point for
+// a future reduced-cadence scraper), so only the default branch is exercised.
 describe("runFlagRecompute official: KV TTL (default vs officialTtlSeconds)", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
@@ -1295,53 +1300,6 @@ describe("runFlagRecompute official: KV TTL (default vs officialTtlSeconds)", fu
     expect(JSON.parse(official.value).color).toBe("red");
   });
 
-  it("wisconsin-dnr's officialTtlSeconds (28800) overrides the default on its official: put", async function () {
-    // 2026-07-15T17:00:00Z = 12:00 America/Chicago — in-season AND a
-    // FETCH_HOURS slot, so the DNR scraper actually fetches.
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-07-15T17:00:00Z"));
-
-    vi.stubGlobal("fetch", function (url) {
-      const target = typeof url === "string" ? url : (url && url.url) || "";
-      if (target.indexOf("dnrmaps.wi.gov") !== -1) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          text: function () {
-            return Promise.resolve(JSON.stringify({
-              features: [{
-                attributes: {
-                  OBJECTID: 12,
-                  OGW_BEACH_NAME_TEXT: "Bradford Beach",
-                  MAP_STATUS: "Open",
-                  // Sampled the day before the frozen run time — well inside
-                  // the 21-day staleness cutoff.
-                  SAMPLEDATE: Date.parse("2026-07-14T12:00:00Z")
-                },
-                geometry: { x: -87.9, y: 43.0 }
-              }]
-            }));
-          }
-        });
-      }
-      return Promise.reject(new Error("network disabled in test"));
-    });
-
-    // Bradford Beach fixture — inside only the wisconsin-dnr matches() box,
-    // sitting exactly on the DNR site's geometry so proximity resolution binds.
-    const made = makeEnv([
-      makeBeachRow({ id: "osm-node-mke", name: "Bradford Beach", lat: 43.0, lon: -87.9 })
-    ]);
-    await runHourlyCron(made.env);
-
-    const official = made.kvPuts.get("official:osm-node-mke");
-    expect(official).toBeDefined();
-    expect(official.opts).toEqual({ expirationTtl: 28800 });
-    const flag = JSON.parse(official.value);
-    expect(flag.color).toBe("green");
-    expect(flag.official).toBe(true);
-    expect(flag.scraperId).toBe("wisconsin-dnr");
-  });
 });
 
 // A corrupt "scraperhealth:" KV value must degrade to prev = null inside the
@@ -1354,9 +1312,10 @@ describe("runFlagRecompute corrupt scraperhealth: KV", function () {
   });
 
   it("unparseable health JSON restarts the streak at 1 and the run still completes", async function () {
-    // In-season FETCH_HOURS slot so wisconsin-dnr is health-monitored this run.
+    // 2026-07-15T16:00:00Z = 12:00 America/Detroit — in season AND inside the
+    // monitored 9am-9pm window, so south-haven-mi is health-monitored this run.
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-07-15T17:00:00Z"));
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -1364,20 +1323,20 @@ describe("runFlagRecompute corrupt scraperhealth: KV", function () {
     // The health read uses env.FLAGS.get(key) WITHOUT { type: "json" }, so the
     // stand-in hands back this raw corrupt string for JSON.parse to choke on.
     const made = makeEnv(
-      [makeBeachRow({ id: "osm-node-mke", name: "Bradford Beach", lat: 43.0, lon: -87.9 })],
-      { "scraperhealth:wisconsin-dnr": "not-json{{" }
+      [makeBeachRow({ id: "osm-node-sh", name: "North Beach", lat: 42.406, lon: -86.28 })],
+      { "scraperhealth:south-haven-mi": "not-json{{" }
     );
     await runHourlyCron(made.env);
 
-    const put = made.kvPuts.get("scraperhealth:wisconsin-dnr");
+    const put = made.kvPuts.get("scraperhealth:south-haven-mi");
     expect(put).toBeDefined();
     expect(JSON.parse(put.value)).toEqual({
       consecutiveNulls: 1,
       lastSuccess: null,
-      lastFailure: "2026-07-15T17:00:00.000Z"
+      lastFailure: "2026-07-15T16:00:00.000Z"
     });
     // The corrupt health state never blocked the estimate writes.
-    expect(made.kvPuts.get("flag:osm-node-mke")).toBeDefined();
+    expect(made.kvPuts.get("flag:osm-node-sh")).toBeDefined();
   });
 });
 

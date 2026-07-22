@@ -12,28 +12,25 @@
 import { distanceMi } from "../geo.js";
 import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
 import { southHaven } from "./southHaven.js";
-import { lenawee } from "./lenawee.js";
 import { metroparks } from "./metroparks.js";
-import { michiganCity } from "./michiganCity.js";
-import { ohioBeachGuard } from "./ohioBeachGuard.js";
-import { hdnwMichigan } from "./hdnwMichigan.js";
-import { bldhd } from "./bldhd.js";
 import { chicagoParkDistrict } from "./chicagoParkDistrict.js";
-import { wisconsinDnr } from "./wisconsinDnr.js";
 
 // Ordered most-specific-match first: findScraper returns the FIRST scraper
 // whose matches(beach) is true, so tight single-city boxes and fixed-site
 // scrapers come before regional tables, and broad statewide bboxes come last.
+//
+// Registry scope note: this product's official flags are HAZARD flags
+// (surf/rip/closure) — the authoritative version of what src/rules.js
+// estimates — and an official color OVERRIDES the estimate everywhere it is
+// shown (render.js markerFlagFields / titleColor). Water-quality (E. coli /
+// bacteria) monitoring sources were intentionally removed: a clean-water
+// reading is a DIFFERENT axis from surf hazard, and letting its "green" win
+// would mask a genuine hazard estimate (e.g. a gale-driven red). Only
+// hazard/flag/closure sources belong here.
 export const scrapers = [
   southHaven,
-  lenawee,
   metroparks,
-  michiganCity,
-  ohioBeachGuard,
-  hdnwMichigan,
-  bldhd,
-  chicagoParkDistrict,
-  wisconsinDnr
+  chicagoParkDistrict
 ];
 
 const OFFICIAL_COLORS = ["green", "yellow", "red", "double-red"];
