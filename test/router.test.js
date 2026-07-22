@@ -355,6 +355,21 @@ describe("renderListPage search form", () => {
     });
     expect(noMore).not.toContain("Search all beaches");
   });
+
+  it("marks the list data-complete only on an uncapped default listing", () => {
+    const row = { beach: { id: "b", name: "A", lat: 42, lon: -86 }, estimate: null, official: null, distanceMi: null };
+    const base = { entries: [row], nowIso: "2026-07-05T12:00:00.000Z" };
+    // Whole table rendered (not capped, no query): local filter is exhaustive.
+    // (Match the ul attribute specifically — the inline search script also
+    // mentions data-complete, so a bare substring check would be meaningless.)
+    expect(renderListPage(base)).toContain("id=\"beach-list-items\" data-complete=\"1\"");
+    // More beaches exist than rendered: the client must still hit the server.
+    expect(renderListPage({ ...base, hasMore: true }))
+      .not.toContain("id=\"beach-list-items\" data-complete");
+    // A q-filtered page's rows are matches, not the full table.
+    expect(renderListPage({ ...base, query: "oval" }))
+      .not.toContain("id=\"beach-list-items\" data-complete");
+  });
 });
 
 describe("renderListPage geolocation script", () => {
@@ -667,10 +682,26 @@ const CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-erro
 describe("cache-control policy (Workers Cache)", () => {
   const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1", last_viewed: null };
 
-  it("never caches the home page (personalized by request.cf geolocation)", async () => {
+  it("never caches the home page WITHOUT near (personalized by request.cf geolocation)", async () => {
     const { env } = viewEnv(beach);
     const res = await handleRequest(getRequest("/"), env);
     expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("caches the home page WITH an explicit near (URL-determined, no request.cf read)", async () => {
+    // Every live-search / geo-upgrade fetch carries near, so this is the hot
+    // path: resolveUserLocation short-circuits on near and never touches
+    // request.cf, making the response safe for the Workers Cache.
+    const near = await handleRequest(getRequest("/?near=42.658,-86.211"), viewEnv(beach).env);
+    expect(near.status).toBe(200);
+    expect(near.headers.get("cache-control")).toBe(CACHEABLE);
+
+    const searchNear = await handleRequest(getRequest("/?q=oval&near=42.658,-86.211"), viewEnv(beach).env);
+    expect(searchNear.headers.get("cache-control")).toBe(CACHEABLE);
+
+    // A q search WITHOUT near still falls through to request.cf, so it stays no-store.
+    const searchNoNear = await handleRequest(getRequest("/?q=oval"), viewEnv(beach).env);
+    expect(searchNoNear.headers.get("cache-control")).toBe("no-store");
   });
 
   it("marks a found detail page cacheable with bounded stale windows", async () => {
@@ -783,6 +814,8 @@ import { vi } from "vitest";
 import worker from "../src/index.js";
 import { escapeHtml } from "../src/frontend/render.js";
 import { LIST_SEARCH_SCRIPT } from "../src/frontend/searchScript.js";
+import { LIST_SWAP_SCRIPT } from "../src/frontend/listSwapScript.js";
+import { LIST_GEO_SCRIPT } from "../src/frontend/geoScript.js";
 
 const NOW_ISO = "2026-07-05T12:00:00.000Z";
 const OVAL = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
@@ -1292,10 +1325,27 @@ describe("search script <-> rendered markup id contract", () => {
   it("pins the ids/attributes the client script queries to what renderListPage emits", () => {
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-search')");
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-list-empty')");
+    expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-search-form')");
     expect(LIST_SEARCH_SCRIPT).toContain("querySelectorAll('.beach-row')");
     expect(LIST_SEARCH_SCRIPT).toContain("getAttribute('data-name')");
-    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('input', filterRows)");
-    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('wa-clear', filterRows)");
+    // Filters on every keystroke (input) and on the clear button, with no enter.
+    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('input', onInput)");
+    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('wa-clear', onInput)");
+    // The debounced full-table pass fetches the server-rendered page and swaps it
+    // in via the shared helper; a submit is intercepted rather than reloading.
+    expect(LIST_SEARCH_SCRIPT).toContain("__swimReportSwapList");
+    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('submit'");
+    // A stale response (value moved on) or one overtaken by another swap
+    // (generation advanced, e.g. the geo upgrade) must not be applied.
+    expect(LIST_SEARCH_SCRIPT).toContain("input.value.trim() !== term");
+    expect(LIST_SEARCH_SCRIPT).toContain("__swimReportListGen");
+    // No sticky "last sent" term — a failed fetch must not disable retries.
+    expect(LIST_SEARCH_SCRIPT).not.toContain("lastSent");
+    // The fetch carries a near (URL's or the baked-in center) so the response is
+    // cacheable, while the shareable replaceState url stays clean.
+    expect(LIST_SEARCH_SCRIPT).toContain("data-complete");
+    expect(LIST_SEARCH_SCRIPT).toContain("fetchUrl");
+    expect(LIST_SEARCH_SCRIPT).toContain("bakedCenter");
 
     const html = renderListPage({
       entries: [{ beach: OVAL, estimate: null, official: null, distanceMi: null }],
@@ -1303,7 +1353,34 @@ describe("search script <-> rendered markup id contract", () => {
     });
     expect(html).toContain("id=\"beach-search\"");
     expect(html).toContain("id=\"beach-list-empty\"");
+    expect(html).toContain("id=\"list-active-query\"");
     expect(html).toContain("class=\"beach-row\"");
     expect(html).toContain("data-name=");
+  });
+});
+
+describe("shared list-swap helper contract", () => {
+  it("defines the swap helper and swaps the in-place-updated nodes by id", () => {
+    expect(LIST_SWAP_SCRIPT).toContain("window.__swimReportSwapList");
+    expect(LIST_SWAP_SCRIPT).toContain("getElementById('beach-list-items')");
+    expect(LIST_SWAP_SCRIPT).toContain("getElementById('beach-list-empty')");
+    expect(LIST_SWAP_SCRIPT).toContain("getElementById('list-active-query')");
+  });
+
+  it("has both the geo upgrade and the live search delegate to the shared helper", () => {
+    expect(LIST_GEO_SCRIPT).toContain("__swimReportSwapList");
+    expect(LIST_SEARCH_SCRIPT).toContain("__swimReportSwapList");
+  });
+
+  it("loads the swap helper before the scripts that call it", () => {
+    const html = renderListPage({
+      entries: [{ beach: OVAL, estimate: null, official: null, distanceMi: null }],
+      nowIso: NOW_ISO
+    });
+    const swapAt = html.indexOf("window.__swimReportSwapList =");
+    const searchCallAt = html.indexOf("window.__swimReportSwapList &&");
+    expect(swapAt).toBeGreaterThan(-1);
+    expect(searchCallAt).toBeGreaterThan(-1);
+    expect(swapAt).toBeLessThan(searchCallAt);
   });
 });

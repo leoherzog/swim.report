@@ -33,8 +33,7 @@ const SCRIPT_LINES = [
   "  if (!('geolocation' in navigator)) {",
   "    return;",
   "  }",
-  "  const params = new URLSearchParams(window.location.search);",
-  "  if (params.get('near')) {",
+  "  if (new URLSearchParams(window.location.search).get('near')) {",
   "    return;",
   "  }",
   "  navigator.geolocation.getCurrentPosition(function (pos) {",
@@ -44,7 +43,19 @@ const SCRIPT_LINES = [
   "        !isFinite(lat) || !isFinite(lon)) {",
   "      return;",
   "    }",
+  // Read the params FRESH here, not at load: the visitor may have typed a search
+  // (which live search reflected into the URL via replaceState) during the
+  // permission prompt. Overlay the current search box value as q so the upgrade
+  // preserves an in-progress query instead of wiping it back to the full list.
+  "    const params = new URLSearchParams(window.location.search);",
   "    params.set('near', lat.toFixed(3) + ',' + lon.toFixed(3));",
+  "    const searchInput = document.getElementById('beach-search');",
+  "    const currentQuery = searchInput ? searchInput.value.trim() : '';",
+  "    if (currentQuery) {",
+  "      params.set('q', currentQuery);",
+  "    } else {",
+  "      params.delete('q');",
+  "    }",
   "    const nextUrl = '/?' + params.toString();",
   "    const fallbackReload = function () {",
   "      window.location.replace(nextUrl);",
@@ -56,25 +67,12 @@ const SCRIPT_LINES = [
   "      return res.text();",
   "    }).then(function (html) {",
   "      const doc = new DOMParser().parseFromString(html, 'text/html');",
-  "      const nextList = doc.getElementById('beach-list-items');",
-  "      const currentList = document.getElementById('beach-list-items');",
-  "      if (!nextList || !currentList) {",
+  // Swap the list, empty state, and active-query line in place via the shared
+  // helper (same merge the live search uses). A false return means the core list
+  // nodes were missing, so fall back to a full navigation.
+  "      if (!window.__swimReportSwapList || !window.__swimReportSwapList(doc)) {",
   "        fallbackReload();",
   "        return;",
-  "      }",
-  "      currentList.innerHTML = nextList.innerHTML;",
-  // Update the empty state IN PLACE (innerHTML + inline style), never replace
-  // the node: searchScript.js captured #beach-list-empty by reference at load.
-  "      const nextEmpty = doc.getElementById('beach-list-empty');",
-  "      const currentEmpty = document.getElementById('beach-list-empty');",
-  "      if (nextEmpty && currentEmpty) {",
-  "        currentEmpty.innerHTML = nextEmpty.innerHTML;",
-  "        const emptyStyle = nextEmpty.getAttribute('style');",
-  "        if (emptyStyle) {",
-  "          currentEmpty.setAttribute('style', emptyStyle);",
-  "        } else {",
-  "          currentEmpty.removeAttribute('style');",
-  "        }",
   "      }",
   "      const form = document.getElementById('beach-search-form');",
   "      if (form && !form.querySelector('input[name=near]')) {",
@@ -83,11 +81,6 @@ const SCRIPT_LINES = [
   "        hidden.name = 'near';",
   "        hidden.value = params.get('near');",
   "        form.appendChild(hidden);",
-  "      }",
-  "      const nextClear = doc.querySelector('.clear-search');",
-  "      const currentClear = document.querySelector('.clear-search');",
-  "      if (nextClear && currentClear) {",
-  "        currentClear.setAttribute('href', nextClear.getAttribute('href'));",
   "      }",
   // Refresh the map's data in place: new marker JSON into the (same, cached-
   // by-reference) #home-map-data tag, new center onto the container, then the

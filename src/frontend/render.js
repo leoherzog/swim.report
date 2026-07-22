@@ -7,6 +7,7 @@
 
 import { PAGE_STYLES } from "./styles.js";
 import { LIST_SEARCH_SCRIPT } from "./searchScript.js";
+import { LIST_SWAP_SCRIPT } from "./listSwapScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
 import { LIST_MAP_SCRIPT } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
@@ -603,12 +604,16 @@ export function renderListPage(data) {
     "</form>";
 
   // On a q-filtered page, surface the active query and a way back to the full
-  // list (preserving any near param).
+  // list (preserving any near param). The line lives inside a stable,
+  // always-present #list-active-query container (empty on the default listing)
+  // so the client scripts can swap it in place as the query changes — see
+  // listSwapScript.js.
   const backHref = "/" + (nearParam ? ("?near=" + encodeURIComponent(nearParam)) : "");
-  const activeQueryHtml = query.length > 0 ?
+  const activeQueryInner = query.length > 0 ?
     ("<p class=\"list-active-query wa-color-text-quiet\">Showing results for <strong>" +
       escapeHtml(query) + "</strong>. " +
       "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
+  const activeQueryHtml = "<div id=\"list-active-query\">" + activeQueryInner + "</div>";
 
   // Polite live region for the browser-geolocation upgrade: geoScript.js swaps
   // the list in place (no navigation), so the reorder would otherwise be
@@ -617,8 +622,15 @@ export function renderListPage(data) {
   const geoLiveHtml =
     "<p id=\"geo-live-region\" class=\"visually-hidden\" role=\"status\" aria-live=\"polite\"></p>";
 
+  // data-complete signals that the rendered rows ARE the whole flag-worthy
+  // table (the default listing was not capped), so the client's instant local
+  // filter is exhaustive and searchScript can skip the server round-trip
+  // entirely. Only the default (no-query) listing can assert this — a q-filtered
+  // page's rows are query matches, not the full table.
+  const listComplete = !hasMore && query.length === 0;
+  const completeAttr = listComplete ? " data-complete=\"1\"" : "";
   const listHtml = "<section class=\"beach-list-section\">" +
-    "<ul class=\"beach-list wa-list-plain wa-stack wa-gap-xs\" id=\"beach-list-items\">" + rowsHtml + "</ul>" +
+    "<ul class=\"beach-list wa-list-plain wa-stack wa-gap-xs\" id=\"beach-list-items\"" + completeAttr + ">" + rowsHtml + "</ul>" +
     "<p id=\"beach-list-empty\"" + emptyStyle + " class=\"empty-state\">" +
     "<span class=\"empty-state-message\">" + escapeHtml(emptyMessage) + "</span>" +
     searchAllHtml +
@@ -627,6 +639,7 @@ export function renderListPage(data) {
 
   const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + geoLiveHtml + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
+    "<script>" + LIST_SWAP_SCRIPT + "</script>" +
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
     "<script>" + LIST_GEO_SCRIPT + "</script>" +
     "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +

@@ -226,7 +226,18 @@ async function handleHome(env, location, rawQuery, nearParam) {
     hasMore: hasMore,
     near: (typeof nearParam === "string") ? nearParam : ""
   });
-  return htmlResponse(html, 200, CACHE_CONTROL_NO_STORE);
+  // A home URL carrying an explicit "near" is fully URL-determined:
+  // resolveUserLocation short-circuits on it and never reads request.cf, so the
+  // response is location-independent per its cache key and safe for the Workers
+  // Cache (same short-lived policy the detail/API routes use). This is exactly
+  // the path live search and the geo upgrade hammer — one D1 LIKE + KV bulk read
+  // per keystroke otherwise. WITHOUT a near param the page IS personalized by
+  // request.cf (not in the cache key, not expressible via Vary), so it must stay
+  // no-store.
+  const cacheControl = (nearParam !== null && nearParam !== undefined)
+    ? CACHE_CONTROL_CACHEABLE
+    : CACHE_CONTROL_NO_STORE;
+  return htmlResponse(html, 200, cacheControl);
 }
 
 async function handleDetail(env, ctx, beachId) {
