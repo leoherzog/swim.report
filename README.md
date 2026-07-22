@@ -64,7 +64,9 @@ Example response:
           "lat": 42.401,
           "lon": -86.288,
           "nws_zone": "MIZ071",
-          "osm_id": "node/123456"
+          "osm_id": "node/123456",
+          "iconClass": "flag-icon-green",
+          "label": "Green flag"
         }
       ]
     }
@@ -73,6 +75,12 @@ Example response:
 for the beach named `"Ottawa Beach"`), or `null` when the beach is not inside any
 named park. The UI titles such beaches by park name with the beach's own name as a
 subtitle.
+
+`iconClass` and `label` are the map-marker flag color class and accessible label
+for the beach's current best-known status (a scraped official reading wins over the
+estimate, which wins over `unknown`; a missing or expired reading maps to
+`flag-icon-unknown` / `"Flag status unknown"`, never a green default). The homepage
+map uses these to render correctly-tinted markers for beaches panned into view.
 
 Invalid or missing `bbox` returns `400`:
 

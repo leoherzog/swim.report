@@ -97,6 +97,21 @@ function flagIconColorClass(color) {
   return "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
 }
 
+// The map-marker flag fields (tint class + accessible label) for a beach, given
+// its cached estimate and official reading. Best-color precedence mirrors the
+// detail page's titleColor: official wins over estimate, estimate wins over
+// "unknown". Exported so BOTH the server-embedded homepage markers
+// (renderHomeMap) and the /api/beaches viewport endpoint (router.js, for markers
+// panned into view) build identical marker JSON from one color rule.
+export function markerFlagFields(estimate, official) {
+  const best = official ? official.color
+    : (estimate ? estimate.color : "unknown");
+  return {
+    iconClass: flagIconColorClass(best),
+    label: FLAG_ICON_LABELS[normalizeColor(best)]
+  };
+}
+
 function isStale(nowIso, updatedIso, thresholdMs) {
   if (!nowIso || !updatedIso) {
     return false;
@@ -498,15 +513,14 @@ function renderHomeMap(entries, near, location) {
     if (!isFinite(lat) || !isFinite(lon)) {
       continue;
     }
-    const best = entry.official ? entry.official.color
-      : (entry.estimate ? entry.estimate.color : "unknown");
+    const flagFields = markerFlagFields(entry.estimate, entry.official);
     markers.push({
       id: beach.id,
       name: displayName(beach),
       lat: lat,
       lon: lon,
-      iconClass: flagIconColorClass(best),
-      label: FLAG_ICON_LABELS[normalizeColor(best)]
+      iconClass: flagFields.iconClass,
+      label: flagFields.label
     });
   }
   const markersJson = JSON.stringify(markers).split("<").join("\\u003c");

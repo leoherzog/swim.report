@@ -1,4 +1,4 @@
-import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/render.js";
+import { renderListPage, renderDetailPage, renderErrorPage, markerFlagFields } from "./frontend/render.js";
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 
@@ -273,10 +273,51 @@ async function handleApiBeaches(env, url) {
     " LIMIT " + String(API_BEACHES_LIMIT)
   ).bind(bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat).all();
   const rows = result.results || [];
+  // Attach the map-marker flag color + label so the homepage map can render
+  // correctly-tinted markers for beaches panned into view — same shape and
+  // color rule (markerFlagFields) as the server-embedded initial markers. The
+  // existing BeachRow fields are preserved; iconClass/label are additive.
+  await attachMarkerFlags(env, rows);
   return Response.json(
     { beaches: rows },
     { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
   );
+}
+
+// Bulk-reads flag:/official: KV for every row and stamps iconClass + label onto
+// it in place. Chunked to the 100-key bulk-get ceiling (the same limit the home
+// list caps its rows to); the /api/beaches SELECT caps at 500, so at most five
+// chunks per key family, all read in parallel. A missing/expired KV value maps
+// to the honest "unknown" marker, never a green default.
+async function attachMarkerFlags(env, rows) {
+  if (!rows || rows.length === 0) {
+    return;
+  }
+  const chunks = [];
+  for (let i = 0; i < rows.length; i = i + 100) {
+    chunks.push(rows.slice(i, i + 100));
+  }
+  const reads = await Promise.all(chunks.map(function (chunk) {
+    const flagKeys = chunk.map(function (row) { return "flag:" + row.id; });
+    const officialKeys = chunk.map(function (row) { return "official:" + row.id; });
+    return Promise.all([
+      env.FLAGS.get(flagKeys, { type: "json" }),
+      env.FLAGS.get(officialKeys, { type: "json" })
+    ]);
+  }));
+  for (let i = 0; i < chunks.length; i = i + 1) {
+    const flagMap = reads[i][0];
+    const officialMap = reads[i][1];
+    const chunk = chunks[i];
+    for (let j = 0; j < chunk.length; j = j + 1) {
+      const row = chunk[j];
+      const estimate = flagMap.get("flag:" + row.id) || null;
+      const official = officialMap.get("official:" + row.id) || null;
+      const fields = markerFlagFields(estimate, official);
+      row.iconClass = fields.iconClass;
+      row.label = fields.label;
+    }
+  }
 }
 
 async function handleApiFlag(env, ctx, beachId) {

@@ -13,10 +13,19 @@
 // geoScript.js after its in-place proximity swap) makes the LIVE map re-read
 // the (updated) marker JSON and data-center: existing markers are removed, the
 // new set is added, and the map eases to the new center — the nearest-100
-// marker set can change with the location, not just the viewport. Everything
-// degrades silently: a missing maplibregl global, a missing container, bad or
-// empty JSON, or any MapLibre throw simply leaves the page with its
-// (server-rendered) beach list.
+// marker set can change with the location, not just the viewport.
+//
+// VIEWPORT LOADING: the embedded JSON is only the initial (nearest) set. On
+// every 'load' and 'moveend' the script fetches /api/beaches?bbox=<current
+// view> and ADDS any beach not already shown, so panning/zooming reveals every
+// flag-worthy beach in view — markers accumulate (keyed by id, never
+// duplicated) up to the whole directory. The fetch is debounced, single-flight
+// with a trailing re-run, and skips a repeat of the last bbox. This still obeys
+// the two-path rule: /api/beaches reads only D1 + KV.
+//
+// Everything degrades silently: a missing maplibregl global, a missing
+// container, bad or empty JSON, a missing/failed fetch, or any MapLibre throw
+// simply leaves the page with its (server-rendered) beach list.
 
 const SCRIPT_LINES = [
   "(function () {",
@@ -77,33 +86,45 @@ const SCRIPT_LINES = [
   "  try {",
   "    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');",
   "  } catch (e) {}",
-  // Rebuilds the marker layer from a beaches array: every previously added
-  // marker is removed first so a nearupdate swap never strands stale flags.
-  "  let activeMarkers = [];",
-  "  const renderMarkers = function (beaches) {",
-  "    for (let i = 0; i < activeMarkers.length; i++) {",
-  "      try { activeMarkers[i].remove(); } catch (e) {}",
+  // Keyed marker registry so viewport loads ACCUMULATE flags without ever
+  // duplicating a beach already on the map: addMarkers is idempotent by id.
+  // clearMarkers wipes the whole set and is used only by the proximity swap,
+  // which rebuilds from a fresh nearest-set.
+  "  const markersById = Object.create(null);",
+  "  const clearMarkers = function () {",
+  "    const ids = Object.keys(markersById);",
+  "    for (let i = 0; i < ids.length; i++) {",
+  "      try { markersById[ids[i]].remove(); } catch (e) {}",
+  "      delete markersById[ids[i]];",
   "    }",
-  "    activeMarkers = [];",
+  "  };",
+  // Adds a marker for each beach not already shown. Returns the bounds of the
+  // NEWLY added markers plus how many were added (drives the initial fitBounds).
+  "  const addMarkers = function (beaches) {",
   "    const bounds = new maplibregl.LngLatBounds();",
-  "    let markerCount = 0;",
+  "    let added = 0;",
   "    for (let i = 0; i < beaches.length; i++) {",
   "      const b = beaches[i];",
   "      if (!b) { continue; }",
+  "      const id = b.id;",
+  "      if (id === undefined || id === null || markersById[id]) { continue; }",
   "      const lat = Number(b.lat);",
   "      const lon = Number(b.lon);",
   "      if (!isFinite(lat) || !isFinite(lon)) { continue; }",
   // The tint class and the accessible label are computed server-side (the
-  // shared flagIconColorClass / FLAG_ICON_LABELS in render.js) and ride in the
-  // marker JSON, so this script never re-derives the icon or its color. The
-  // <wa-icon name=\"flag\"> is the same component the rest of the UI uses; it
-  // inherits the anchor's flag-icon-* color via currentColor.
+  // shared markerFlagFields in render.js) and ride in the marker JSON / the
+  // /api/beaches rows alike, so this script never re-derives the icon or its
+  // color. The display name is the park name when set (embedded markers ship it
+  // pre-coalesced as name; API rows carry park_name + name separately), so
+  // b.park_name || b.name covers both sources. The <wa-icon name=\"flag\"> is the
+  // same component the rest of the UI uses; it inherits the anchor's
+  // flag-icon-* color via currentColor.
   "      const iconClass = typeof b.iconClass === 'string' ? b.iconClass : 'flag-icon-unknown';",
   "      const label = typeof b.label === 'string' ? b.label : 'Flag';",
-  "      const name = typeof b.name === 'string' ? b.name : '';",
+  "      const name = b.park_name || b.name || '';",
   "      const el = document.createElement('a');",
   "      el.className = 'home-map-marker ' + iconClass;",
-  "      el.setAttribute('href', '/beach/' + encodeURIComponent(b.id));",
+  "      el.setAttribute('href', '/beach/' + encodeURIComponent(id));",
   "      el.setAttribute('aria-label', name + ' \\u2014 ' + label);",
   "      el.setAttribute('title', name);",
   "      const icon = document.createElement('wa-icon');",
@@ -113,26 +134,82 @@ const SCRIPT_LINES = [
   "      try {",
   "        marker = new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([lon, lat]).addTo(map);",
   "      } catch (e) { continue; }",
-  "      activeMarkers.push(marker);",
+  "      markersById[id] = marker;",
   "      bounds.extend([lon, lat]);",
-  "      markerCount = markerCount + 1;",
+  "      added = added + 1;",
   "    }",
-  "    return { bounds: bounds, count: markerCount };",
+  "    return { bounds: bounds, count: added };",
   "  };",
-  "  const initial = renderMarkers(readMarkerData());",
+  "  const initial = addMarkers(readMarkerData());",
   "  if (!initialCenter && initial.count > 0) {",
   "    try {",
   "      map.fitBounds(initial.bounds, { padding: 40, maxZoom: 10, animate: false });",
   "    } catch (e) {}",
   "  }",
+  // Viewport loading: fetch every flag-worthy beach in the current view and add
+  // the ones not already shown. Debounced (one fetch 300 ms after the last
+  // move), single-flight with a trailing re-run so a move during a fetch is not
+  // lost, and skips a repeat of the identical bbox. lastBbox is cleared on any
+  // failure so a transient error never permanently dedupes (and blanks) that
+  // view — the next move retries it. An AbortController timeout guarantees the
+  // chain always settles (clearing inFlight) even if a request hangs, so one
+  // stuck fetch can't disable viewport loading for the rest of the session.
+  "  const VIEWPORT_TIMEOUT_MS = 10000;",
+  "  let viewportTimer = null;",
+  "  let lastBbox = '';",
+  "  let inFlight = false;",
+  "  let pending = false;",
+  "  const loadViewport = function () {",
+  "    if (typeof fetch === 'undefined') { return; }",
+  "    if (inFlight) { pending = true; return; }",
+  "    let vb;",
+  "    try { vb = map.getBounds(); } catch (e) { return; }",
+  "    if (!vb) { return; }",
+  "    const bbox = vb.getWest().toFixed(4) + ',' + vb.getSouth().toFixed(4) + ',' +",
+  "      vb.getEast().toFixed(4) + ',' + vb.getNorth().toFixed(4);",
+  "    if (bbox === lastBbox) { return; }",
+  "    lastBbox = bbox;",
+  "    inFlight = true;",
+  "    let controller = null;",
+  "    let timeoutId = null;",
+  "    if (typeof AbortController !== 'undefined') {",
+  "      controller = new AbortController();",
+  "      timeoutId = setTimeout(function () { try { controller.abort(); } catch (e) {} }, VIEWPORT_TIMEOUT_MS);",
+  "    }",
+  "    fetch('/api/beaches?bbox=' + encodeURIComponent(bbox), controller ? { signal: controller.signal } : undefined)",
+  "      .then(function (resp) { return resp && resp.ok ? resp.json() : null; })",
+  "      .then(function (data) {",
+  "        if (data && Array.isArray(data.beaches)) { addMarkers(data.beaches); }",
+  "        else { lastBbox = ''; }",
+  "      })",
+  "      .catch(function () { lastBbox = ''; })",
+  "      .then(function () {",
+  "        if (timeoutId) { clearTimeout(timeoutId); }",
+  "        inFlight = false;",
+  "        if (pending) { pending = false; loadViewport(); }",
+  "      });",
+  "  };",
+  "  const scheduleViewportLoad = function () {",
+  "    if (viewportTimer) { clearTimeout(viewportTimer); }",
+  "    viewportTimer = setTimeout(loadViewport, 300);",
+  "  };",
+  "  try {",
+  "    map.on('moveend', scheduleViewportLoad);",
+  "    map.on('load', scheduleViewportLoad);",
+  "  } catch (e) {}",
   "  document.addEventListener('swimreport:nearupdate', function () {",
-  "    renderMarkers(readMarkerData());",
+  "    clearMarkers();",
+  // Force the next viewport load to run even if the view (hence bbox) does not
+  // change: the markers were just wiped and must be repopulated.
+  "    lastBbox = '';",
+  "    addMarkers(readMarkerData());",
   "    const updated = readCenter();",
   "    if (updated) {",
   "      try {",
   "        map.easeTo({ center: updated.center, zoom: updated.zoom });",
   "      } catch (e) {}",
   "    }",
+  "    scheduleViewportLoad();",
   "  });",
   "})();"
 ];

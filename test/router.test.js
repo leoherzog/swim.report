@@ -938,6 +938,64 @@ describe("router guards: method and bbox validation", () => {
   });
 });
 
+describe("/api/beaches marker flag fields (viewport pan-to-load)", () => {
+  // Bulk-get KV stub: resolves each requested key from a fixed color map,
+  // matching the Workers binding's Map return for an array of keys.
+  function flagsFrom(colors) {
+    return {
+      get: function (key) {
+        if (!Array.isArray(key)) {
+          return Promise.resolve(colors[key] || null);
+        }
+        return Promise.resolve(new Map(key.map(function (k) {
+          return [k, colors[k] || null];
+        })));
+      }
+    };
+  }
+
+  function bbox(env) {
+    return handleRequest(getRequest("/api/beaches?bbox=-87,41,-82,47"), env);
+  }
+
+  it("stamps iconClass + label, official color winning over the estimate", async () => {
+    const rows = [
+      { id: "b1", name: "One", park_name: null, lat: 42, lon: -86, nws_zone: "MIZ1", osm_id: "way/1" },
+      { id: "b2", name: "Two", park_name: null, lat: 43, lon: -85, nws_zone: "MIZ2", osm_id: "way/2" }
+    ];
+    const { env } = makeEnv(rows, flagsFrom({
+      "flag:b1": { color: "yellow" },
+      "official:b1": { color: "red" },
+      "flag:b2": { color: "green" }
+    }));
+    const body = await (await bbox(env)).json();
+    // Official red beats the yellow estimate.
+    expect(body.beaches[0].iconClass).toBe("flag-icon-red");
+    expect(body.beaches[0].label).toBe("Red flag");
+    // Estimate green with no official reading.
+    expect(body.beaches[1].iconClass).toBe("flag-icon-green");
+    expect(body.beaches[1].label).toBe("Green flag");
+    // Existing BeachRow fields are preserved alongside the additive marker fields.
+    expect(body.beaches[0].osm_id).toBe("way/1");
+  });
+
+  it("tints double-red as the red class with a double-red label", async () => {
+    const rows = [{ id: "dr", name: "DR", park_name: null, lat: 42, lon: -86, nws_zone: null, osm_id: "way/9" }];
+    const { env } = makeEnv(rows, flagsFrom({ "official:dr": { color: "double-red" } }));
+    const body = await (await bbox(env)).json();
+    expect(body.beaches[0].iconClass).toBe("flag-icon-red");
+    expect(body.beaches[0].label).toBe("Double red flags");
+  });
+
+  it("maps a beach with no cached flag to the honest unknown marker", async () => {
+    const rows = [{ id: "b3", name: "Three", park_name: null, lat: 42, lon: -86, nws_zone: null, osm_id: "way/3" }];
+    const { env } = makeEnv(rows, nullFlags());
+    const body = await (await bbox(env)).json();
+    expect(body.beaches[0].iconClass).toBe("flag-icon-unknown");
+    expect(body.beaches[0].label).toBe("Flag status unknown");
+  });
+});
+
 describe("handleHome proximity branch: in-memory distance sort", () => {
   function rowNamed(id, name, lat, lon) {
     return { id: id, name: name, park_name: null, lat: lat, lon: lon };

@@ -175,4 +175,18 @@ describe("renderListPage home map", () => {
     expect(html).toContain("document.addEventListener('swimreport:nearupdate'");
     expect(html).toContain("map.easeTo({ center: updated.center, zoom: updated.zoom })");
   });
+
+  it("wires viewport pan-to-load against /api/beaches", () => {
+    const html = renderListPage({ entries: [] });
+    // On move/load the script fetches the current viewport bbox and adds any
+    // beach not already shown, so panning reveals flags beyond the initial set.
+    expect(html).toContain("map.on('moveend', scheduleViewportLoad)");
+    expect(html).toContain("map.on('load', scheduleViewportLoad)");
+    expect(html).toContain("fetch('/api/beaches?bbox=' + encodeURIComponent(bbox)");
+    // A transient failure must clear lastBbox so the view retries instead of
+    // staying permanently deduped (and blank).
+    expect(html).toContain(".catch(function () { lastBbox = ''; })");
+    // Markers accumulate by id (idempotent add), never a full-map rebuild on pan.
+    expect(html).toContain("const markersById = Object.create(null)");
+  });
 });
