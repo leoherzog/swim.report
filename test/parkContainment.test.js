@@ -5,7 +5,10 @@
 // src/frontend/render.js.
 
 import { describe, it, expect } from "vitest";
-import { parseParkBeachElements, associateParkForBeach, isPondBeach, WATER_MIN_AREA_DEG2 } from "../src/clients/overpass.js";
+import {
+  parseParkBeachElements, associateParkForBeach, isPondBeach, WATER_MIN_AREA_DEG2,
+  pondWaterSeeds, buildPondWaterQuery, POND_TEST_MAX_BEACH_AREA_DEG2
+} from "../src/clients/overpass.js";
 import { mergeBeachRows } from "../src/index.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
 import { distanceKm } from "../src/geo.js";
@@ -470,5 +473,84 @@ describe("mergeBeachRows: compass-separation threshold boundary", () => {
     expect(merged.skippedUnnamed).toBe(0);
     expect(merged.rows.find(function (r) { return r.id === "osm-way-23"; }).name)
       .toBe("Ludington State Park — North Beach");
+  });
+});
+
+describe("pondWaterSeeds", () => {
+  // The pond-water query (the around:60 water fetch that used to ride inside
+  // the single park query) is seeded ONLY with beaches small enough to
+  // plausibly need the pond test. Oversized multipolygons (Beaver Islands /
+  // Sleeping Bear scale) made the server-side around evaluation exceed
+  // [timeout:180] and took park discovery down for days — they must never
+  // appear in the seed list.
+  function beach(osmType, osmId, name, areaDeg2) {
+    return { osmType: osmType, osmId: osmId, name: name, areaDeg2: areaDeg2 };
+  }
+
+  it("seeds every small beach, named ones included, when an unnamed candidate exists", () => {
+    // Named beaches are seeded too: water found near a named beach fed
+    // neighboring unnamed beaches' pond tests under the old single query.
+    const seeds = pondWaterSeeds([
+      beach("way", 1, null, 1e-6),
+      beach("way", 2, "Named Beach", 1e-6),
+      beach("node", 3, null, 0)
+    ]);
+    expect(seeds).toEqual([
+      { osmType: "way", osmId: 1 },
+      { osmType: "way", osmId: 2 },
+      { osmType: "node", osmId: 3 }
+    ]);
+  });
+
+  it("excludes beaches at or above POND_TEST_MAX_BEACH_AREA_DEG2 from the seed list", () => {
+    const seeds = pondWaterSeeds([
+      beach("relation", 2995932, null, 0.0111), // Beaver Islands scale: the pathological case
+      beach("way", 1, null, POND_TEST_MAX_BEACH_AREA_DEG2), // exactly at the cutoff: excluded
+      beach("way", 2, null, POND_TEST_MAX_BEACH_AREA_DEG2 - 1e-9)
+    ]);
+    expect(seeds).toEqual([{ osmType: "way", osmId: 2 }]);
+  });
+
+  it("returns [] when no UNNAMED beach is under the cutoff (query 2 is skipped)", () => {
+    // Only named beaches under the cutoff: nothing can be pond-filtered, so
+    // there is no reason to spend an Overpass query on water evidence.
+    expect(pondWaterSeeds([
+      beach("way", 1, "Named Beach", 1e-6),
+      beach("relation", 2, null, 0.02) // unnamed but oversized: skips the pond test
+    ])).toEqual([]);
+    expect(pondWaterSeeds([])).toEqual([]);
+  });
+});
+
+describe("buildPondWaterQuery", () => {
+  it("returns null for an empty seed list", () => {
+    expect(buildPondWaterQuery([])).toBe(null);
+    expect(buildPondWaterQuery(null)).toBe(null);
+  });
+
+  it("groups seed ids by element type and keeps the around:60 water pair", () => {
+    const q = buildPondWaterQuery([
+      { osmType: "way", osmId: 100 },
+      { osmType: "relation", osmId: 300 },
+      { osmType: "way", osmId: 101 },
+      { osmType: "node", osmId: 7 }
+    ]);
+    expect(q).toContain("[out:json][timeout:180][maxsize:134217728];");
+    expect(q).toContain("way(id:100,101);");
+    expect(q).toContain("relation(id:300);");
+    expect(q).toContain("node(id:7);");
+    expect(q).toContain("way[\"natural\"=\"water\"](around.b:60);");
+    expect(q).toContain("way[\"natural\"=\"coastline\"](around.b:60);");
+    expect(q).toContain(".water out tags bb;");
+    // No bbox on the water statements: the id seeds bound the search, and the
+    // old single query's water statements had no bbox either.
+    expect(q.indexOf("(around.b:60)(")).toBe(-1);
+  });
+
+  it("omits type groups with no seeds", () => {
+    const q = buildPondWaterQuery([{ osmType: "way", osmId: 1 }]);
+    expect(q).toContain("way(id:1);");
+    expect(q.indexOf("relation(id:")).toBe(-1);
+    expect(q.indexOf("node(id:")).toBe(-1);
   });
 });

@@ -142,19 +142,19 @@ describe("fetchParkBeaches wiring (pond drop, park association, output shape)", 
     vi.restoreAllMocks();
   });
 
-  // One Overpass body exercising the full fetchParkBeaches pipeline:
-  //   - pond water way (bbox area 1e-6 deg2 < WATER_MIN_AREA_DEG2) at ~42.0
-  //   - way/100: UNNAMED beach on that pond -> dropped by the pond filter
+  // fetchParkBeaches runs TWO sequential queries: parks+beaches first, then
+  // the id-seeded pond-water query (only when an unnamed beach is small
+  // enough to need the pond test). The mock serves each call its own body,
+  // keyed off the request payload (the water query contains "around.b:60").
+  //
+  // Query-1 body exercising the full pipeline:
+  //   - way/100: UNNAMED beach at ~42.0 on pond water -> dropped by the filter
   //   - way/101: NAMED beach on the same pond -> kept (filter is unnamed-only)
   //   - way/102: unnamed beach at ~43.0 overlapping TWO parks (no water
   //     nearby, so it is kept) -> smaller-bbox park wins
   //   - way/103: unnamed beach at ~44.0 carrying a loc_name tag -> locality
   const PARK_BODY = {
     elements: [
-      {
-        type: "way", id: 900, tags: { natural: "water" },
-        bounds: { minlat: 42.0, minlon: -86.0, maxlat: 42.001, maxlon: -85.999 }
-      },
       {
         type: "way", id: 100, tags: { natural: "beach" },
         bounds: { minlat: 42.0, minlon: -86.0001, maxlat: 42.0002, maxlon: -86.0 }
@@ -182,11 +182,30 @@ describe("fetchParkBeaches wiring (pond drop, park association, output shape)", 
     ]
   };
 
-  it("drops the unnamed pond beach, keeps everything else, and logs the drop", async function () {
-    const log = vi.spyOn(console, "log").mockImplementation(function () {});
-    installFetch(function () {
+  // Query-2 body: the pond water way (bbox area 1e-6 deg2 <
+  // WATER_MIN_AREA_DEG2) adjacent to way/100 and way/101.
+  const POND_WATER_BODY = {
+    elements: [
+      {
+        type: "way", id: 900, tags: { natural: "water" },
+        bounds: { minlat: 42.0, minlon: -86.0, maxlat: 42.001, maxlon: -85.999 }
+      }
+    ]
+  };
+
+  function installParkFetch() {
+    return installFetch(function (url, init) {
+      const query = init.body.get("data");
+      if (query.indexOf("around.b:60") !== -1) {
+        return Promise.resolve(jsonResponse(POND_WATER_BODY));
+      }
       return Promise.resolve(jsonResponse(PARK_BODY));
     });
+  }
+
+  it("drops the unnamed pond beach, keeps everything else, and logs the drop", async function () {
+    const log = vi.spyOn(console, "log").mockImplementation(function () {});
+    installParkFetch();
     const result = await fetchParkBeaches(BBOX);
     expect(result.map(function (b) { return b.osmId; })).toEqual([101, 102, 103]);
     expect(log).toHaveBeenCalledWith("overpass: park beaches dropped 1 unnamed pond beaches");
@@ -194,9 +213,7 @@ describe("fetchParkBeaches wiring (pond drop, park association, output shape)", 
 
   it("keeps the NAMED beach on pond-sized water (pond filter is unnamed-only)", async function () {
     vi.spyOn(console, "log").mockImplementation(function () {});
-    installFetch(function () {
-      return Promise.resolve(jsonResponse(PARK_BODY));
-    });
+    installParkFetch();
     const result = await fetchParkBeaches(BBOX);
     const named = result.find(function (b) { return b.osmId === 101; });
     expect(named.name).toBe("Pond Cove Beach");
@@ -210,9 +227,7 @@ describe("fetchParkBeaches wiring (pond drop, park association, output shape)", 
 
   it("attaches the smaller-bbox overlapping park and builds parkKey from its element identity", async function () {
     vi.spyOn(console, "log").mockImplementation(function () {});
-    installFetch(function () {
-      return Promise.resolve(jsonResponse(PARK_BODY));
-    });
+    installParkFetch();
     const result = await fetchParkBeaches(BBOX);
     const parked = result.find(function (b) { return b.osmId === 102; });
     // Both parks overlap way/102; Little Cove Park's bbox (4e-6 deg2) is
@@ -224,9 +239,7 @@ describe("fetchParkBeaches wiring (pond drop, park association, output shape)", 
 
   it("passes the beach element's loc_name tag through as locality", async function () {
     vi.spyOn(console, "log").mockImplementation(function () {});
-    installFetch(function () {
-      return Promise.resolve(jsonResponse(PARK_BODY));
-    });
+    installParkFetch();
     const result = await fetchParkBeaches(BBOX);
     const localized = result.find(function (b) { return b.osmId === 103; });
     expect(localized.locality).toBe("Hamlin Lake");
@@ -235,9 +248,7 @@ describe("fetchParkBeaches wiring (pond drop, park association, output shape)", 
 
   it("emits exactly the documented output object shape", async function () {
     vi.spyOn(console, "log").mockImplementation(function () {});
-    installFetch(function () {
-      return Promise.resolve(jsonResponse(PARK_BODY));
-    });
+    installParkFetch();
     const result = await fetchParkBeaches(BBOX);
     for (let i = 0; i < result.length; i++) {
       expect(Object.keys(result[i]).sort()).toEqual([
@@ -307,5 +318,114 @@ describe("per-query transport timeout caps (named 150 s vs default 240 s)", func
     await vi.advanceTimersByTimeAsync(OVERPASS_MIRROR_TIMEOUT_MS);
     expect(aborts.count).toBe(2);
     expect(await pending).toBeNull();
+  });
+});
+
+describe("fetchParkBeaches two-query orchestration (pond-water seeding)", function () {
+  afterEach(function () {
+    vi.restoreAllMocks();
+  });
+
+  // Bodies for a tile holding one small unnamed candidate, one small NAMED
+  // beach, and one oversized unnamed multipolygon (the Beaver Islands /
+  // Sleeping Bear shape whose around evaluation blew [timeout:180] and took
+  // park discovery down): bbox 0.1 x 0.15 deg = 0.015 deg2, far above
+  // POND_TEST_MAX_BEACH_AREA_DEG2.
+  const TWO_QUERY_PARK_BODY = {
+    elements: [
+      {
+        type: "way", id: 100, tags: { natural: "beach" },
+        bounds: { minlat: 42.0, minlon: -86.0001, maxlat: 42.0002, maxlon: -86.0 }
+      },
+      {
+        type: "way", id: 101, tags: { natural: "beach", name: "Named Cove Beach" },
+        bounds: { minlat: 42.0003, minlon: -85.9999, maxlat: 42.0005, maxlon: -85.9997 }
+      },
+      {
+        type: "relation", id: 2995932, tags: { natural: "beach" },
+        bounds: { minlat: 45.6, minlon: -85.6, maxlat: 45.7, maxlon: -85.45 }
+      }
+    ]
+  };
+
+  // Pond-sized water overlapping BOTH way/100 (dropped) and — hypothetically —
+  // anything else the filter is asked about.
+  const SMALL_WATER_BODY = {
+    elements: [
+      {
+        type: "way", id: 900, tags: { natural: "water" },
+        bounds: { minlat: 42.0, minlon: -86.0, maxlat: 42.001, maxlon: -85.999 }
+      }
+    ]
+  };
+
+  function isWaterQuery(init) {
+    return init.body.get("data").indexOf("around.b:60") !== -1;
+  }
+
+  it("seeds the second query with small beaches only, named included, oversized excluded", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    const calls = installFetch(function (url, init) {
+      if (isWaterQuery(init)) {
+        return Promise.resolve(jsonResponse(SMALL_WATER_BODY));
+      }
+      return Promise.resolve(jsonResponse(TWO_QUERY_PARK_BODY));
+    });
+    await fetchParkBeaches(BBOX);
+    expect(calls.length).toBe(2);
+    const waterQuery = calls[1].init.body.get("data");
+    // Small beaches seed the around fetch — the named one too (water near it
+    // fed neighboring unnamed beaches' pond tests under the old single query).
+    expect(waterQuery).toContain("way(id:100,101);");
+    // The oversized multipolygon must NEVER seed around — that is the whole fix.
+    expect(waterQuery.indexOf("2995932")).toBe(-1);
+  });
+
+  it("drops the small unnamed pond beach but always keeps the oversized one", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    installFetch(function (url, init) {
+      if (isWaterQuery(init)) {
+        return Promise.resolve(jsonResponse(SMALL_WATER_BODY));
+      }
+      return Promise.resolve(jsonResponse(TWO_QUERY_PARK_BODY));
+    });
+    const result = await fetchParkBeaches(BBOX);
+    expect(result.map(function (b) { return b.osmId; })).toEqual([101, 2995932]);
+  });
+
+  it("skips the second query entirely when no unnamed beach is under the cutoff", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse({
+        elements: [
+          {
+            type: "way", id: 101, tags: { natural: "beach", name: "Named Cove Beach" },
+            bounds: { minlat: 42.0003, minlon: -85.9999, maxlat: 42.0005, maxlon: -85.9997 }
+          },
+          {
+            type: "relation", id: 2995932, tags: { natural: "beach" },
+            bounds: { minlat: 45.6, minlon: -85.6, maxlat: 45.7, maxlon: -85.45 }
+          }
+        ]
+      }));
+    });
+    const result = await fetchParkBeaches(BBOX);
+    expect(calls.length).toBe(1);
+    expect(result.map(function (b) { return b.osmId; })).toEqual([101, 2995932]);
+  });
+
+  it("fails the whole fetch (null) when the pond-water query fails on every mirror", async function () {
+    // Pond-filtering without water evidence would ingest pond slivers as
+    // beach rows, so a query-2 failure degrades exactly like a query-1
+    // failure: null, leaving the batch's retry/degrade path to handle it.
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    installFetch(function (url, init) {
+      if (isWaterQuery(init)) {
+        return Promise.resolve(jsonResponse({ remark: "runtime error: Query timed out", elements: [] }));
+      }
+      return Promise.resolve(jsonResponse(TWO_QUERY_PARK_BODY));
+    });
+    const result = await fetchParkBeaches(BBOX);
+    expect(result).toBeNull();
   });
 });

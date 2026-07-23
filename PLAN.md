@@ -1312,32 +1312,54 @@ entirely when it is unset.
       // Park-containment discovery. Most OSM mappers name the park polygon
       // (Holland State Park) and leave the beach way inside it unnamed, so the
       // named-beach query above misses most state park swim beaches.
-      // One POST with query (timeout 180):
+      // TWO sequential POSTs (both [timeout:180][maxsize:134217728]).
+      // Query 1 — parks + contained beaches:
       //   ( way/relation["leisure"="park"]["name"](bbox);
       //     way/relation["leisure"="nature_reserve"]["name"](bbox);
       //     way/relation["boundary"="protected_area"]["name"](bbox); )->.parks;
       //   .parks map_to_area->.pa;
       //   nwr["natural"="beach"](area.pa)(bbox)->.b;
-      //   ( way["natural"="water"](around.b:60);
-      //     way["natural"="coastline"](around.b:60); )->.water;
       //   .b out tags bb;
       //   .parks out tags bb;
+      // Query 2 — pond-water evidence, sent ONLY when >= 1 UNNAMED beach has
+      // bbox area < POND_TEST_MAX_BEACH_AREA_DEG2 (1e-3 deg²; skipped
+      // entirely otherwise), seeded by EXPLICIT ids (buildPondWaterQuery over
+      // pondWaterSeeds) — every beach, named too, under that area cutoff:
+      //   ( way(id:...); relation(id:...); node(id:...); )->.b;
+      //   ( way["natural"="water"](around.b:60);
+      //     way["natural"="coastline"](around.b:60); )->.water;
       //   .water out tags bb;
+      // WHY TWO QUERIES (2026-07-23): around.b:60 with .b = the whole-tile
+      // beach set is pathological when the tile holds multi-km beach
+      // MULTIPOLYGONS (Beaver Islands / Sleeping Bear, bboxes up to ~96 km²):
+      // the server buffers every member way's node geometry against thousands
+      // of water-way candidates, measured > 300 s on the northern Lake
+      // Michigan tile — a hard [timeout:180] kill that took park discovery
+      // AND reconciliation down. Seeded with only small elements the same
+      // around answers in seconds. Oversized (>= cutoff) beaches skip the
+      // pond test entirely — 200x the pond threshold means they cannot sit
+      // ONLY on pond-sized water, so skipping errs toward KEEPING (verified
+      // output-identical against the single query on the southern Lake
+      // Michigan control tile). No bbox on the water statements (the old
+      // query had none; the id seeds bound the search). Water near named
+      // beaches still feeds neighboring unnamed beaches' pond tests, matching
+      // old coverage. A failure of EITHER query fails the whole fetch (null):
+      // pond-filtering without water evidence would ingest pond slivers.
       // All three park tag filters are REQUIRED (some state parks are mapped as
       // nature_reserve + protected_area, not leisure=park). Association happens
       // locally, NOT via Overpass is_in (is_in only accepts nodes) and NEVER via
       // name-based area lookup (name collisions across states: Silver Lake State
       // Park exists in MI, NH, and VT).
-      // POND FILTER: an UNNAMED beach is dropped before park association when
-      // isPondBeach(beach, waters) — at least one water record overlaps its
-      // bbox padded by 0.001 deg (~100 m) AND every overlapping one is
-      // smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈ 4.5 ha at MI latitudes).
-      // Beach size itself is NOT a usable signal (sub-100 m² unnamed slivers
-      // exist on real Great Lakes shore).
+      // POND FILTER: an UNNAMED beach under the area cutoff is dropped before
+      // park association when isPondBeach(beach, waters) — at least one water
+      // record overlaps its bbox padded by 0.001 deg (~100 m) AND every
+      // overlapping one is smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈
+      // 4.5 ha at MI latitudes). Beach size alone below the cutoff is NOT a
+      // usable pond signal (sub-100 m² unnamed slivers exist on real Great
+      // Lakes shore).
       // The water fetch is WAYS ONLY (+ natural=coastline ways as always-large
       // shoreline evidence): `around` on water RELATIONS loads the Great Lakes
-      // multipolygons' full geometry and is pathological (server-side runs many
-      // minutes and [timeout:180] would kill the query nightly). Ponds are
+      // multipolygons' full geometry and is equally pathological. Ponds are
       // essentially always closed ways, so way-water carries the whole pond
       // signal; a beach on a relation-mapped lake sees either a coastline way
       // (Great Lakes) or no nearby water (kept).
@@ -1352,7 +1374,18 @@ entirely when it is unset.
       // OWN loc_name tag (a local/unofficial water-body label, e.g. "Hamlin Lake"),
       // null when absent — consumed by deriveUnnamedSuffix / mergeBeachRows in
       // src/index.js to distinguish a park's secondary unnamed beaches (section 7).
-      // Never substitutes for name. Failure -> null.
+      // Never substitutes for name. Failure of either query -> null.
+
+    export function pondWaterSeeds(beaches)  // + export const POND_TEST_MAX_BEACH_AREA_DEG2
+      // Pure, exported for tests. Parsed beach list -> [{ osmType, osmId }]
+      // seed refs for the pond-water query: every beach (named included) with
+      // areaDeg2 < POND_TEST_MAX_BEACH_AREA_DEG2 (1e-3 deg² ≈ 8.7 km² at MI
+      // latitudes). Returns [] when NO unnamed beach is under the cutoff —
+      // nothing can be pond-filtered, so query 2 is skipped.
+
+    export function buildPondWaterQuery(seeds)
+      // Pure, exported for tests. Seed refs -> the query-2 string above
+      // (ids grouped way/relation/node), or null for an empty seed list.
 
     export function parseParkBeachElements(elements)
       // Pure, exported for tests. Raw Overpass elements -> { beaches, parks, waters }.

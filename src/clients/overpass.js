@@ -8,8 +8,9 @@ import { fetchJson } from "./http.js";
 export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 
 // Failover mirrors, tried IN ORDER: the primary is the official FOSSGIS
-// instance (overpass-api.de) — our volume (two discovery queries per bbox tile,
-// ~a few dozen tiles, plus a few hundred classification probes per day) sits far
+// instance (overpass-api.de) — our volume (up to three discovery queries per
+// bbox tile: named, park, pond-water — ~a few dozen tiles, plus a few hundred
+// classification probes per day) sits far
 // under its "< 10,000 queries/day, < 1 GB/day" courtesy limit. When it is overloaded (it periodically returns a
 // server-side [timeout] "remark", which we treat as a failure) runQuery falls
 // through to Private.coffee's unlimited public instance. Mirrors are distinct
@@ -167,12 +168,26 @@ export async function fetchBeaches(bbox) {
 // commonly bulge lakeward past the park boundary, pulling their center
 // outside the park bbox. Smallest overlapping park bbox wins so a nested
 // specific park beats a containing forest or protected area.
+//
+// TWO QUERIES, NOT ONE (2026-07-23): this used to be a single query whose tail
+// ran way["natural"="water"](around.b:60) with .b = EVERY beach in the tile.
+// `around` seeded with multi-kilometre beach MULTIPOLYGONS (Beaver Islands /
+// Sleeping Bear relations, bboxes up to ~96 km²) forces the server to buffer
+// every member way's full node geometry against thousands of candidate water
+// ways — measured >300 s (a hard [timeout:180] kill) on the northern Lake
+// Michigan tile, which took park discovery AND reconciliation down for days.
+// The same around seeded with only small elements answers in seconds. So the
+// water evidence now fetches SEPARATELY (buildPondWaterQuery), seeded only
+// with beaches small enough to plausibly need the pond test (see
+// POND_TEST_MAX_BEACH_AREA_DEG2), and this first query returns just beaches
+// and parks. Verified output-identical on a control tile (southern Lake
+// Michigan: 171 kept, 9 pond-dropped, zero diffs vs the single query).
 
 // Declares a conservative [maxsize] below the 512 MiB default, improving
 // admission odds during a 504 overload storm (see buildQuery's comment for
-// the commons-doc rationale). 128 MiB accounts for the park query's larger
-// output ("out tags bb" on beaches, parks, AND nearby water ways) plus the
-// area-membership computation the ->.pa map_to_area step performs.
+// the commons-doc rationale). 128 MiB accounts for the query's larger output
+// ("out tags bb" on beaches AND parks) plus the area-membership computation
+// the ->.pa map_to_area step performs.
 function buildParkBeachQuery(bbox) {
   const bb = bboxLine(bbox);
   return "[out:json][timeout:180][maxsize:134217728];\n" +
@@ -186,12 +201,84 @@ function buildParkBeachQuery(bbox) {
     ")->.parks;\n" +
     ".parks map_to_area->.pa;\n" +
     "nwr[\"natural\"=\"beach\"](area.pa)" + bb + "->.b;\n" +
+    ".b out tags bb;\n" +
+    ".parks out tags bb;";
+}
+
+// A beach whose own bbox is at least this large is never pond-tested and never
+// seeds the pond-water query. 1e-3 deg² ≈ 8.7 km² at Michigan latitudes —
+// 200x the WATER_MIN_AREA_DEG2 pond threshold, so a beach this size cannot
+// plausibly sit ONLY on pond-sized water (its own footprint dwarfs any pond);
+// skipping the test can only err toward KEEPING, the same safe direction as
+// the missing-water rule in isPondBeach. Every pathological around seed
+// observed in production (the 19-96 km² unnamed island/dune multipolygons on
+// the northern Lake Michigan tile) sits far above this; every genuine pond
+// sliver observed sits orders of magnitude below (~e-8 to e-6 deg²).
+// Exported for tests and for the seed-selection helper below.
+export const POND_TEST_MAX_BEACH_AREA_DEG2 = 0.001;
+
+// Pure; exported for tests. Selects the seed elements for the pond-water
+// query from the parsed beach list: every beach (NAMED ones too — water found
+// near a named beach fed neighboring unnamed beaches' pond tests under the old
+// single query, so keeping them preserves that coverage) whose bbox area is
+// under POND_TEST_MAX_BEACH_AREA_DEG2. Returns [] when NO unnamed beach is
+// under the cutoff — named beaches are never pond-filtered and oversized ones
+// skip the test, so there is nothing for the water evidence to decide and the
+// second query is skipped entirely.
+export function pondWaterSeeds(beaches) {
+  const seeds = [];
+  let unnamedCandidate = false;
+  for (let i = 0; i < beaches.length; i++) {
+    const beach = beaches[i];
+    if (beach.areaDeg2 < POND_TEST_MAX_BEACH_AREA_DEG2) {
+      seeds.push({ osmType: beach.osmType, osmId: beach.osmId });
+      if (beach.name === null) {
+        unnamedCandidate = true;
+      }
+    }
+  }
+  return unnamedCandidate ? seeds : [];
+}
+
+// Pure; exported for tests. Builds the follow-up water-evidence query for the
+// pond filter: the same way["natural"="water"] / way["natural"="coastline"]
+// around:60 pair the single park query used to run, but seeded by explicit
+// element ids (small beaches only) instead of the whole-tile beach set.
+// Deliberately NO bbox on the water statements — the old query had none
+// either (water just outside the tile edge still counts), and the id seeds
+// already bound the search spatially. Same [timeout:180][maxsize:134217728]
+// envelope as the park query; measured 1-18 s per tile against live mirrors.
+// Returns null for an empty seed list (callers skip the fetch).
+export function buildPondWaterQuery(seeds) {
+  if (!Array.isArray(seeds) || seeds.length === 0) {
+    return null;
+  }
+  const idsByType = { way: [], relation: [], node: [] };
+  for (let i = 0; i < seeds.length; i++) {
+    const seed = seeds[i];
+    if (idsByType[seed.osmType]) {
+      idsByType[seed.osmType].push(String(seed.osmId));
+    }
+  }
+  let seedBlock = "";
+  const types = ["way", "relation", "node"];
+  for (let i = 0; i < types.length; i++) {
+    const type = types[i];
+    if (idsByType[type].length > 0) {
+      seedBlock = seedBlock + "  " + type + "(id:" + idsByType[type].join(",") + ");\n";
+    }
+  }
+  if (seedBlock === "") {
+    return null;
+  }
+  return "[out:json][timeout:180][maxsize:134217728];\n" +
+    "(\n" +
+    seedBlock +
+    ")->.b;\n" +
     "(\n" +
     "  way[\"natural\"=\"water\"](around.b:60);\n" +
     "  way[\"natural\"=\"coastline\"](around.b:60);\n" +
     ")->.water;\n" +
-    ".b out tags bb;\n" +
-    ".parks out tags bb;\n" +
     ".water out tags bb;";
 }
 
@@ -225,9 +312,10 @@ function isParkTagged(tags) {
 // full beach row named after the park). Beach size alone cannot separate these
 // from real beaches: verified against live data, sub-100 m² unnamed slivers
 // sit on Lake Erie, Torch Lake, and Mullett Lake. The separating signal is the
-// ADJACENT WATER BODY's size, so the query also fetches natural=water within
-// 60 m of every candidate beach and the client drops unnamed beaches whose
-// nearby water is ALL smaller than WATER_MIN_AREA_DEG2.
+// ADJACENT WATER BODY's size, so the follow-up pond-water query
+// (buildPondWaterQuery) fetches natural=water within 60 m of every candidate
+// beach and the client drops unnamed beaches whose nearby water is ALL smaller
+// than WATER_MIN_AREA_DEG2.
 //
 // The water fetch is WAYS ONLY — around on natural=water RELATIONS forces the
 // server to load the Great Lakes multipolygons' full geometry and is
@@ -361,12 +449,31 @@ export function associateParkForBeach(beach, parks) {
 // (parkKey identifies the park ELEMENT — two same-named parks in different
 // towns stay distinct; locality is the element's own loc_name tag, if any)
 // or null on any failure.
+//
+// TWO sequential queries per tile (see the buildParkBeachQuery comment for
+// why): parks+beaches first, then — only when at least one unnamed beach is
+// small enough to need the pond test — the id-seeded pond-water query. A
+// failure of EITHER query fails the whole fetch (null): pond-filtering with
+// missing water evidence would ingest pond slivers as beach rows, so partial
+// data degrades to the same retry/degrade path a full failure does.
 export async function fetchParkBeaches(bbox) {
   const elements = await runQuery(buildParkBeachQuery(bbox), "park beaches");
   if (elements === null) {
     return null;
   }
   const parsed = parseParkBeachElements(elements);
+  const waterQuery = buildPondWaterQuery(pondWaterSeeds(parsed.beaches));
+  let waters = [];
+  if (waterQuery !== null) {
+    const waterElements = await runQuery(waterQuery, "park pond water");
+    if (waterElements === null) {
+      return null;
+    }
+    // Reuse the shared parser so oddly-tagged elements (a named park-tagged
+    // lake, say) route through the exact same branch logic the single query
+    // used; only the water records feed the pond filter.
+    waters = parseParkBeachElements(waterElements).waters;
+  }
   const out = [];
   let droppedPond = 0;
   for (let i = 0; i < parsed.beaches.length; i++) {
@@ -374,7 +481,12 @@ export async function fetchParkBeaches(bbox) {
     // Pond filter applies to UNNAMED beaches only: they become rows purely by
     // park inference, so they need the water evidence. A beach someone named
     // in OSM is kept regardless (it also arrives via the named-beach query).
-    if (beach.name === null && isPondBeach(beach, parsed.waters)) {
+    // Oversized beaches (>= POND_TEST_MAX_BEACH_AREA_DEG2) skip the test —
+    // they never seeded the water fetch, and a beach that big cannot sit only
+    // on pond-sized water (see the constant's comment).
+    if (beach.name === null &&
+        beach.areaDeg2 < POND_TEST_MAX_BEACH_AREA_DEG2 &&
+        isPondBeach(beach, waters)) {
       droppedPond = droppedPond + 1;
       continue;
     }
