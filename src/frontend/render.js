@@ -26,6 +26,16 @@ import {
 // stale. The wave strip is refreshed on the 6-hourly wave cron (its KV lives
 // 7 h and the marine models only publish every 6–12 h), so it is only stale
 // once it has clearly missed a cycle — an 8 h threshold, not the 2 h flag one.
+//
+// STALE_MS is the DEFAULT horizon, not a universal one: it is calibrated to our
+// own hourly recompute cadence, which is the right yardstick for the estimate
+// card and for official sources we re-read every hour. An official source that
+// publishes on its OWN slower schedule (a once-daily NWS product, a
+// human-posted beach status) is not stale merely because our 2 h window
+// elapsed — the record is rewritten hourly and the color is still current. Such
+// a scraper may declare an optional staleMs (see PLAN.md's scraper contract),
+// which arrives on the official KV record and overrides the default for that
+// source only. Anything that does not declare one keeps the honest 2 h signal.
 const STALE_MS = 7200000;
 const WAVE_STALE_MS = 28800000;
 
@@ -166,6 +176,26 @@ function renderStaleWarning(updatedIso) {
     "</wa-callout>";
 }
 
+// The honest middle ground for a POINT-IN-TIME official reading whose source
+// publishes on a slower schedule than our 2 h default: past 2 h the reading is
+// no longer "just taken", but well inside the source's own cadence it is not
+// stale either — it is simply an observation from earlier in the day, still the
+// latest thing the source has published. A warning callout would cry wolf for
+// most of every day; saying nothing would let a morning observation read as if
+// it were current. So the scraper supplies a sentence FRAGMENT (readingNote)
+// and we render it NEUTRAL, with the age appended — informative, not alarming.
+// Deliberately not styled: recoloring a wa-callout is the classic way to break
+// text contrast in one color scheme, and the theme's neutral tokens already
+// handle both. Pure like renderStaleWarning — <wa-relative-time> does the
+// locale-aware formatting client-side, so no Date access happens here.
+function renderReadingNote(note, updatedIso) {
+  return "<wa-callout variant=\"neutral\" size=\"s\">" +
+    "<wa-icon slot=\"icon\" name=\"clock\"></wa-icon>" +
+    escapeHtml(note) + " <wa-relative-time date=\"" + escapeHtml(updatedIso) +
+    "\" sync></wa-relative-time>." +
+    "</wa-callout>";
+}
+
 // labelText (optional): accessible name for a standalone icon (the detail-page
 // title). Without it the icon renders decorative (aria-hidden), which is right
 // wherever visible flag text sits next to it.
@@ -276,6 +306,17 @@ function renderFlagRow(color, reason) {
 // header-actions (top right), flag row + stale warning in the body, "Updated"
 // in the footer. The with-* attributes track slotted content per the wa-card
 // SSR contract.
+//
+// Two optional options tune the body callout, and only renderOfficialCard ever
+// passes them (the estimate card is on our own hourly cadence, so it always
+// gets the plain 2 h behaviour):
+//   staleMs     — this source's own staleness horizon; absent -> STALE_MS.
+//   readingNote — copy for the neutral note shown between the 2 h default and
+//                 that horizon.
+// The two callouts are MUTUALLY EXCLUSIVE and the warning always wins: a card
+// that is genuinely stale must never also carry a reassuring note next to the
+// warning, which is exactly the mixed signal the never-present-stale-data-as-
+// fresh constraint forbids.
 function renderFlagCard(options) {
   const attrs = " with-header" +
     (options.sourcesHtml ? " with-header-actions" : "") +
@@ -288,8 +329,16 @@ function renderFlagCard(options) {
     lines.push("<div slot=\"header-actions\">" + options.sourcesHtml + "</div>");
   }
   lines.push(renderFlagRow(options.color, options.reason));
-  if (options.updated && isStale(options.nowIso, options.updated)) {
-    lines.push(renderStaleWarning(options.updated));
+  if (options.updated) {
+    // A source-declared horizon replaces the default outright; anything else
+    // (undefined on every record written before this contract existed, and on
+    // every scraper that declares nothing) falls back to STALE_MS.
+    const limit = typeof options.staleMs === "number" ? options.staleMs : STALE_MS;
+    if (isStale(options.nowIso, options.updated, limit)) {
+      lines.push(renderStaleWarning(options.updated));
+    } else if (options.readingNote && isStale(options.nowIso, options.updated, STALE_MS)) {
+      lines.push(renderReadingNote(options.readingNote, options.updated));
+    }
   }
   if (options.updated) {
     lines.push("<div slot=\"footer\" class=\"wa-caption-s\">Updated " +
@@ -328,6 +377,13 @@ function renderOfficialCard(official, nowIso) {
     reason: official.reason || "",
     sourcesHtml: sourcesHtml,
     updated: official.updated || null,
+    // Passed through raw: scrapeOfficialFlagFromResult is the validating
+    // boundary (it omits both fields unless the scraper declared them well), so
+    // undefined here means "no declaration" and renderFlagCard falls back to the
+    // 2 h default — which is also what a legacy KV record written before this
+    // contract yields, since it simply lacks the keys.
+    staleMs: official.staleMs,
+    readingNote: official.readingNote,
     nowIso: nowIso
   });
 }

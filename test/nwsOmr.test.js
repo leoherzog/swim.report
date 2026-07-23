@@ -252,6 +252,32 @@ describe("nwsOmr.matches", function () {
   });
 });
 
+// The OMR GRR product is issued ONCE PER DAY (observed ~14:30-16:00 UTC) and
+// scrape() stamps updated with the product's issuanceTime, so the frontend's 2 h
+// default would mark the official card stale for ~22 of every 24 hours. The
+// scraper therefore declares its own horizon plus honest copy for the window
+// between the two.
+describe("nwsOmr staleness contract", function () {
+  it("declares a 30 h staleMs (24 h cadence + issuance jitter + margin)", function () {
+    expect(nwsOmr.staleMs).toBe(30 * 60 * 60 * 1000);
+    expect(nwsOmr.staleMs).toBe(108000000);
+    expect(Number.isFinite(nwsOmr.staleMs)).toBe(true);
+    expect(nwsOmr.staleMs).toBeGreaterThan(0);
+  });
+
+  it("declares readingNote as a fragment that completes with a relative time", function () {
+    expect(nwsOmr.readingNote).toBe(
+      "Morning reading — conditions may have changed since it was posted"
+    );
+    // Real U+2014 em dash, matching the project's existing copy.
+    expect(nwsOmr.readingNote.indexOf("—")).toBeGreaterThan(-1);
+    // No trailing punctuation: the renderer appends the age and the period.
+    expect(nwsOmr.readingNote.slice(-1)).not.toBe(".");
+    // The official card asserts it never contains "Source:".
+    expect(nwsOmr.readingNote.indexOf("Source:")).toBe(-1);
+  });
+});
+
 describe("nwsOmr end-to-end resolution", function () {
   it("resolves a Holland beach to the posted red via scrapeOfficialFlagFromResult", function () {
     const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
@@ -268,6 +294,11 @@ describe("nwsOmr end-to-end resolution", function () {
     expect(flag.official).toBe(true);
     expect(flag.scraperId).toBe("nws-omr-grr");
     expect(flag.updated).toBe(ISSUANCE);
+    // The declared per-source horizon and note ride along onto the KV record.
+    expect(flag.staleMs).toBe(30 * 60 * 60 * 1000);
+    expect(flag.readingNote).toBe(
+      "Morning reading — conditions may have changed since it was posted"
+    );
   });
 
   it("a beach ~1.7 mi from a centroid (no name match) both matches AND resolves to that site", function () {

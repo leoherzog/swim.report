@@ -230,6 +230,28 @@ export const winnetkaTowerBeach = {
   id: "winnetka-tower-beach",
   label: TOWER_BEACH_LABEL,
   url: TOWER_BEACH_URL,
+  // Staleness horizon for THIS source (the frontend's 2 h default is calibrated
+  // to our hourly estimate recompute, not to a posted status).
+  // parseTowerBeachUpdated reads the page's OWN "Last updated at M/D/YY h:mm
+  // am|pm" line, which rainoutline.com stamps when a park-district staffer
+  // POSTS a status change — a status-change time, not a page-regeneration time,
+  // and nothing ever advances it automatically. Evidence (all Winnetka beach
+  // extensions on 8475633131, sampled 2026-07-23T02:31Z): ext 6/7/8/9 were all
+  // stamped 7/21/26 4:43-4:46 pm — one human batch posting — and were still
+  // unchanged ~29 h later while the posted status was accurate and current; the
+  // site itself renders that as "Updated yesterday". Dormant extensions on the
+  // same account carry untouched 2019-2021 stamps, confirming there is no
+  // auto-refresh. 72 h covers the worst realistic in-season gap (a
+  // Friday-afternoon post read Monday morning is ~63 h) while still warning once
+  // a swim-season posting has gone unattended for more than a long weekend —
+  // this scraper can emit RED, so a wider horizon (a week) would hide a stale
+  // red, or a stale green, for too long. Caveat: that is a reasoned bound from a
+  // single-day sample, not a measured distribution; if real holds routinely run
+  // longer, raise it rather than leaving false warnings in place.
+  // No readingNote: this is a persistent posted open/closed STATE that stays
+  // correct until someone changes it, not a point-in-time observation, so
+  // "conditions may have changed since the reading" copy would be wrong here.
+  staleMs: 72 * 60 * 60 * 1000,
   matches: function (beach) {
     const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
     if (haystack.indexOf("tower road") !== -1) {

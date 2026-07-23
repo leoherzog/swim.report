@@ -180,6 +180,20 @@ filtered first and then distance-sorted. Empty or whitespace-only `q` is ignored
 on-page search box submits this parameter as a `GET` form while also filtering the
 rendered rows instantly client-side as you type.
 
+**The staleness warning.** When a flag card's `updated` time is older than its
+staleness horizon, the card carries a visible warning callout reading "Stale data —
+last updated <em>N hours ago</em>". The horizon is 2 hours by default, matching the
+hourly recompute, and the estimate card always uses that default. An official card
+may use a longer horizon when its source publishes on a slower schedule — a
+once-daily NWS product is not stale at 3 hours old — in which case the warning fires
+only once that source has actually missed its own cadence; for a point-in-time
+reading, the gap between 2 hours and that horizon is filled by a neutral note instead
+("Morning reading — conditions may have changed since it was posted 11 hours ago").
+See [How to add a new official-source
+scraper](#how-to-add-a-new-official-source-scraper) for the `staleMs` / `readingNote`
+fields behind this. The wave forecast strip has its own separate 8 hour threshold,
+since the marine models only publish every 6–12 hours.
+
 All `/api/*` responses set `content-type: application/json`; HTML responses set
 `content-type: text/html; charset=utf-8`. Responses are cached at Cloudflare's edge
 (Workers Cache, `[cache]` in `wrangler.toml`) under an explicit per-route policy:
@@ -397,7 +411,9 @@ in one job never starves another. Beach discovery and water-body classification 
   writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
   TTL (a scraper may set an optional `officialTtlSeconds` to extend its own
   official-KV TTL when it fetches on a reduced cadence; no registered scraper
-  declares one today — it is a retained extension point). The
+  declares one today — it is a retained extension point). The official record
+  also carries the scraper's optional `staleMs` / `readingNote` when it declares
+  them — a display-side staleness horizon for the UI, not a TTL. The
   `7` minute offset keeps this hourly burst off the congested top-of-hour `:00` slot;
   it only **reads** the `waveinput:` KV the `:15` wave cron wrote, so the ordering is
   unchanged. A missing `waveinput:` key (wave cron hasn't run, or its data aged out) just
@@ -627,8 +643,8 @@ Registered scrapers (registry order — most-specific match first, since
 | South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version"; the page itself is only a static legend) | Real flag colors per site (~9 sites, multiple poles roll up to most severe); Gray = unmonitored → no data |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion (never an inferred green) |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red (no-lifeguard closure); records >36 h old dropped; a beach reports green only when its own Surf row is fresh (a green resting solely on a fresh water-quality row → no data, never a false green) |
-| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product (`api.weather.gov`) — the fixed "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors** (gold-standard hazard axis): Green/Yellow/Red map 1:1; no double-red; None / unrecognized → no data. `updated` = the product's morning issuance time |
-| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for the single Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed + surf-hazard reason → red; Closed for water-quality → no data (that's the wqFloor axis); any other closure → no data |
+| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product (`api.weather.gov`) — the fixed "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors** (gold-standard hazard axis): Green/Yellow/Red map 1:1; no double-red; None / unrecognized → no data. `updated` = the product's morning issuance time (issued once daily, ~14:30–16:00 UTC), so it declares a 30 h `staleMs` and a neutral "Morning reading" note instead of a false 2 h stale warning |
+| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for the single Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed + surf-hazard reason → red; Closed for water-quality → no data (that's the wqFloor axis); any other closure → no data. `updated` = the page's own "Last updated" stamp, which only moves when a staffer posts a status change, so it declares a 72 h `staleMs` (no reading note — it is a posted status, not an observation) |
 | PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality / off-axis → no data; never green. Hazard-keyword mapping is provisional (verified against fixtures only — live feed is currently all off-axis boilerplate) |
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (verified-live: CLE, BUF — Lake Erie/Ontario) | Zonal (county-scale) rip "Swim Risk" (Low→green/Moderate→yellow/High→red) and surf-height text (max ft → `waveColorForHeight`); site color = more severe of the two; both null → no data. Bound to beaches by curated name/proximity table. Registered **last** (broad bbox) |
 
@@ -700,6 +716,12 @@ nothing to report must never return null, or it would raise a false alert.
          id: "stable-kebab-case-id",
          label: "Human-readable operator name",
          url: "https://the-page-you-scrape",
+         // OPTIONAL, see "Staleness horizons" below:
+         staleMs: 108000000,         // this source's own staleness horizon (ms)
+         readingNote: "Morning reading — conditions may have changed since it was posted",
+         // OPTIONAL, unrelated to the two above: extends this scraper's own
+         // official-KV TTL when it fetches on a reduced cadence.
+         // officialTtlSeconds: 21600,
          matches: function (beach) {
            // BeachRow -> boolean, pure. Match by name regex and/or a lat/lon
            // bounding box that covers every OSM beach row for that area.
@@ -741,6 +763,37 @@ nothing to report must never return null, or it would raise a false alert.
    `parseSouthHavenCsv` in `src/officialSources/southHaven.js`) so they can be
    unit tested with fixture strings and no network access. `scrape(nowIso)`
    receives its timestamp — never call `Date.now()` or `new Date()`.
+
+   **Staleness horizons (`staleMs` / `readingNote`).** The UI's stale-data
+   warning defaults to 2 hours, a threshold calibrated to the hourly *estimate*
+   recompute. That default is wrong for a source that publishes on its own,
+   slower schedule: the NWS Grand Rapids beach report is issued once a day
+   (~14:30–16:00 UTC), so an honest `updated` of the product's issuance time
+   would show "Stale data" for roughly 22 of every 24 hours even though the KV
+   record is rewritten hourly and the posted colors are the current ones. Such a
+   scraper declares `staleMs` — the number of milliseconds after which *its*
+   reading is genuinely stale — and the warning then fires only when the source
+   actually misses its cadence (`nws-omr-grr` uses 30 h, covering the daily
+   cadence plus issuance jitter; `winnetka-tower-beach` uses 72 h, covering a
+   Friday-afternoon status post read on Monday morning). A scraper that declares
+   nothing keeps the honest 2 h signal.
+
+   A source whose reading is a **point in time** (an observation taken once, in
+   the morning) may additionally declare `readingNote`: a sentence fragment
+   rendered as a neutral (not warning) callout whenever the reading is older
+   than the 2 h default but still inside `staleMs`, with the relative age
+   appended — "Morning reading — conditions may have changed since it was posted
+   11 hours ago." A persistent posted **status** (open/closed, valid until
+   somebody changes it) declares `staleMs` alone. The two callouts are mutually
+   exclusive and the warning always wins, so a `readingNote` can never suppress
+   a real stale warning. Both fields are validated when the record is written
+   (`staleMs` must be a finite number > 0, `readingNote` a non-empty string) and
+   are otherwise omitted entirely. Neither has anything to do with
+   `officialTtlSeconds`, which governs how long the KV value itself lives.
+
+   `staleMs` is an addition to honest `updated` stamping, never a substitute for
+   it — stamping `nowIso` on a days-old reading and covering it with a long
+   horizon is exactly the failure the honesty rule above exists to prevent.
 
 2. Register it in the `scrapers` array in `src/officialSources/index.js`,
    keeping the most-specific `matches()` earliest — `findScraper(beach)`

@@ -340,6 +340,25 @@ export const nwsOmr = {
   id: "nws-omr-grr",
   label: OMR_LABEL,
   url: OMR_URL,
+  // Staleness horizon for THIS source. The frontend's 2 h default is calibrated
+  // to our own hourly estimate recompute, but the OMR GRR product is issued
+  // ONCE PER DAY, late morning local time — observed issuances: 2026-07-17
+  // 16:13Z, 07-18 15:17Z, 07-19 15:16Z, 07-20 16:00Z, 07-21 14:56Z, 07-22
+  // 15:33Z, i.e. roughly 14:30-16:00 UTC. Since the updated field below is the
+  // product's issuanceTime, a flat 2 h horizon would mark the official card
+  // stale for ~22 of every 24 hours even though we rewrite the record hourly
+  // and the posted flag colors are the current ones. 30 h covers the 24 h
+  // cadence plus the ~1.5 h issuance jitter with margin, so the stale warning
+  // fires only when NWS genuinely SKIPS an issuance — which is exactly when a
+  // reader should stop trusting the colors.
+  staleMs: 30 * 60 * 60 * 1000,
+  // ...but the reading is still a point-in-time morning observation, and the
+  // product text itself warns the observations "may not be representative of
+  // conditions later in the day". So between the 2 h default and the 30 h
+  // horizon we say so plainly instead of saying nothing. Rendered as a neutral
+  // callout with the age appended: "Morning reading — conditions may have
+  // changed since it was posted 11 hours ago."
+  readingNote: "Morning reading — conditions may have changed since it was posted",
   matches: function(beach) {
     return matchesOmr(beach);
   },

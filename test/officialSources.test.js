@@ -579,6 +579,142 @@ describe("scrapeOfficialFlagFromResult", function() {
   });
 });
 
+// The optional per-source staleness contract. A scraper may declare staleMs
+// (its own staleness horizon, ms) and readingNote (neutral copy for a
+// point-in-time reading past the frontend's 2 h default but inside that
+// horizon). Both are read off the SCRAPER OBJECT, like officialTtlSeconds, and
+// are OMITTED from the record unless valid — staleMs suppresses a safety
+// warning, so an unvalidated value must never reach KV.
+describe("scrapeOfficialFlagFromResult: staleMs / readingNote contract", function() {
+  const NOTE = "Morning reading — conditions may have changed since it was posted";
+  const THIRTY_HOURS = 30 * 60 * 60 * 1000;
+
+  function scraperWith(extra) {
+    return Object.assign({
+      id: "fake-v2",
+      label: "Fake Flag Program",
+      url: "https://example.gov/flags"
+    }, extra || {});
+  }
+
+  function perBeachFlag(extra) {
+    return scrapeOfficialFlagFromResult(V2_BEACH, scraperWith(extra), multiSiteResult([
+      { siteId: "oval", color: "green", reason: "Oval flag is green", names: ["oval beach"] }
+    ]));
+  }
+
+  function singleColorResult(extra) {
+    return Object.assign({
+      color: "red",
+      reason: "Official flag reported by Fake Flag Program",
+      official: true,
+      scraperId: "fake-v2",
+      source: "https://example.gov/flags",
+      sources: ["https://example.gov/flags"],
+      updated: "2026-07-05T12:00:00.000Z"
+    }, extra || {});
+  }
+
+  function singleColorFlag(scraperExtra, resultExtra) {
+    return scrapeOfficialFlagFromResult(
+      V2_BEACH,
+      scraperWith(scraperExtra),
+      singleColorResult(resultExtra)
+    );
+  }
+
+  it("copies both fields onto the record on the perBeach branch", function() {
+    const flag = perBeachFlag({ staleMs: THIRTY_HOURS, readingNote: NOTE });
+    expect(flag.staleMs).toBe(THIRTY_HOURS);
+    expect(flag.readingNote).toBe(NOTE);
+  });
+
+  it("copies both fields onto the record on the single-color branch", function() {
+    const flag = singleColorFlag({ staleMs: THIRTY_HOURS, readingNote: NOTE });
+    expect(flag.staleMs).toBe(THIRTY_HOURS);
+    expect(flag.readingNote).toBe(NOTE);
+  });
+
+  it("copies staleMs alone when the scraper declares no readingNote", function() {
+    const flag = perBeachFlag({ staleMs: THIRTY_HOURS });
+    expect(flag.staleMs).toBe(THIRTY_HOURS);
+    expect("readingNote" in flag).toBe(false);
+  });
+
+  it("omits BOTH keys entirely (not undefined-valued) when the scraper declares neither", function() {
+    // Present-with-undefined is not the same as absent to a whole-record
+    // comparison, and it would bloat every KV record for the scrapers that
+    // declare nothing.
+    const perBeach = perBeachFlag(null);
+    expect("staleMs" in perBeach).toBe(false);
+    expect("readingNote" in perBeach).toBe(false);
+    expect(Object.keys(perBeach).indexOf("staleMs")).toBe(-1);
+    const single = singleColorFlag(null, null);
+    expect("staleMs" in single).toBe(false);
+    expect("readingNote" in single).toBe(false);
+  });
+
+  it("rejects a non-number staleMs", function() {
+    const flag = perBeachFlag({ staleMs: "108000000" });
+    expect("staleMs" in flag).toBe(false);
+  });
+
+  it("rejects a zero or negative staleMs", function() {
+    expect("staleMs" in perBeachFlag({ staleMs: 0 })).toBe(false);
+    expect("staleMs" in perBeachFlag({ staleMs: -1 })).toBe(false);
+  });
+
+  it("rejects NaN and Infinity (typeof both === \"number\")", function() {
+    // A NaN threshold would make the renderer's (now - updated) > NaN false
+    // forever, silently disabling the stale warning for this source.
+    expect("staleMs" in perBeachFlag({ staleMs: NaN })).toBe(false);
+    expect("staleMs" in perBeachFlag({ staleMs: Infinity })).toBe(false);
+    expect("staleMs" in perBeachFlag({ staleMs: -Infinity })).toBe(false);
+    expect("staleMs" in singleColorFlag({ staleMs: NaN })).toBe(false);
+  });
+
+  it("rejects an empty-string or non-string readingNote", function() {
+    expect("readingNote" in perBeachFlag({ readingNote: "" })).toBe(false);
+    expect("readingNote" in perBeachFlag({ readingNote: 42 })).toBe(false);
+    expect("readingNote" in perBeachFlag({ readingNote: null })).toBe(false);
+    expect("readingNote" in singleColorFlag({ readingNote: "" })).toBe(false);
+  });
+
+  it("strips a result-carried staleMs/readingNote the scraper never declared", function() {
+    // The single-color branch spreads the whole scrape result, so an unvalidated
+    // per-fetch value must not survive into KV.
+    const flag = singleColorFlag(null, { staleMs: 999999999, readingNote: "sneaky" });
+    expect("staleMs" in flag).toBe(false);
+    expect("readingNote" in flag).toBe(false);
+  });
+
+  it("lets the scraper declaration win over a result-carried value", function() {
+    const flag = singleColorFlag(
+      { staleMs: THIRTY_HOURS, readingNote: NOTE },
+      { staleMs: 1, readingNote: "sneaky" }
+    );
+    expect(flag.staleMs).toBe(THIRTY_HOURS);
+    expect(flag.readingNote).toBe(NOTE);
+  });
+
+  it("never mutates the result while stripping", function() {
+    const result = singleColorResult({ staleMs: 999999999, readingNote: "sneaky" });
+    scrapeOfficialFlagFromResult(V2_BEACH, scraperWith(null), result);
+    expect(result.staleMs).toBe(999999999);
+    expect(result.readingNote).toBe("sneaky");
+    expect(result.beachId).toBe(undefined);
+  });
+
+  it("still returns null for an invalid color even when the scraper declares a horizon", function() {
+    const flag = scrapeOfficialFlagFromResult(
+      V2_BEACH,
+      scraperWith({ staleMs: THIRTY_HOURS, readingNote: NOTE }),
+      multiSiteResult([{ siteId: "oval", color: "purple", reason: "r", names: ["oval beach"] }])
+    );
+    expect(flag).toBe(null);
+  });
+});
+
 describe("scrapeOfficialFlag (dual-shape via registry)", function() {
   function withFakeScraper(scraper, fn) {
     scrapers.unshift(scraper);

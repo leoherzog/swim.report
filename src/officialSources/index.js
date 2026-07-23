@@ -78,6 +78,29 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
     if (!result) {
       return null;
     }
+    // Optional per-source staleness contract, read off the SCRAPER OBJECT (like
+    // officialTtlSeconds in src/index.js), never off the per-fetch result. The
+    // frontend's 2 h stale warning is calibrated to OUR hourly recompute; a
+    // source that publishes once a day (an NWS morning product) or holds a
+    // human-posted status for days is not stale just because 2 h passed. A
+    // scraper declares its own horizon (staleMs) and, for point-in-time
+    // readings, a neutral note (readingNote) to show inside it.
+    //
+    // Validated hard, because staleMs SUPPRESSES a safety warning: typeof alone
+    // admits NaN and Infinity (typeof NaN === "number"), and a NaN threshold
+    // makes the renderer's (now - updated) > NaN false forever — silently
+    // disabling the stale warning for that source. Invalid or absent -> OMIT the
+    // key entirely rather than write an undefined-valued one: it keeps the KV
+    // records (and the public /api/flag response) minimal and lets render fall
+    // back to its default.
+    const staleMs = typeof scraper.staleMs === "number" &&
+      Number.isFinite(scraper.staleMs) && scraper.staleMs > 0
+      ? scraper.staleMs
+      : null;
+    const readingNote = typeof scraper.readingNote === "string" &&
+      scraper.readingNote.length > 0
+      ? scraper.readingNote
+      : null;
     if (result.perBeach === true) {
       const site = resolveSiteForBeach(beach, result.sites);
       if (!site) {
@@ -100,7 +123,7 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       const updated = typeof site.updated === "string" && site.updated.length > 0
         ? site.updated
         : result.updated;
-      return {
+      const record = {
         beachId: beach.id,
         color: site.color,
         reason: reason,
@@ -110,6 +133,16 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
         sources: result.sources,
         updated: updated
       };
+      // Attached AFTER the literal, never inline as staleMs: maybeNull — an
+      // undefined-valued key is not the same as an absent one to consumers that
+      // compare whole records.
+      if (staleMs !== null) {
+        record.staleMs = staleMs;
+      }
+      if (readingNote !== null) {
+        record.readingNote = readingNote;
+      }
+      return record;
     }
     if (OFFICIAL_COLORS.indexOf(result.color) === -1) {
       console.log(
@@ -117,11 +150,28 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       );
       return null;
     }
-    return Object.assign({}, result, {
+    const flag = Object.assign({}, result, {
       beachId: beach.id,
       official: true,
       scraperId: result.scraperId || scraper.id
     });
+    // This branch SPREADS the scrape result, so a result that happened to carry
+    // staleMs/readingNote would otherwise smuggle an unvalidated value into KV
+    // and defeat the check above. These are scraper-object contract fields: the
+    // declaration wins, and a result-only value never survives. Deleting from
+    // the fresh copy leaves result itself untouched (this function must never
+    // mutate result).
+    if (staleMs !== null) {
+      flag.staleMs = staleMs;
+    } else {
+      delete flag.staleMs;
+    }
+    if (readingNote !== null) {
+      flag.readingNote = readingNote;
+    } else {
+      delete flag.readingNote;
+    }
+    return flag;
   } catch (err) {
     console.log(
       "officialSources: resolve failed for " + scraper.id + ": " + err.message

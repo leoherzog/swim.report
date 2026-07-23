@@ -144,7 +144,23 @@ before this shape existed.
       "scraperId": "south-haven-mi",
       "source": "https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php",
       "sources": ["https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php"],
-      "updated": "2026-07-04T15:00:04.000Z"
+      "updated": "2026-07-04T15:00:04.000Z",
+      "staleMs": 108000000,          // OPTIONAL — this source's OWN staleness horizon
+                                     // in ms, copied from the scraper object by
+                                     // scrapeOfficialFlagFromResult (section 6) only
+                                     // when it is a finite number > 0. Absent -> the
+                                     // frontend's default 2 h STALE_MS (section 9).
+                                     // OMITTED entirely when absent/invalid, never
+                                     // written as null, so legacy KV values (and every
+                                     // scraper that declares nothing) keep the default.
+      "readingNote": "Morning reading — conditions may have changed since it was posted"
+                                     // OPTIONAL sentence FRAGMENT, copied the same way
+                                     // only when it is a non-empty string. Rendered as
+                                     // a NEUTRAL (not warning) callout when the reading
+                                     // is older than the default 2 h but still inside
+                                     // staleMs; the renderer appends a
+                                     // <wa-relative-time> and a "." after it, so it must
+                                     // read naturally as "... 11 hours ago."
     }
 
 ### WaveSeries (KV value under "waves:" + beachId)
@@ -396,6 +412,12 @@ Binding name: FLAGS (single namespace for both key families).
   when it fetches on a reduced cadence, so its last color persists in KV between fetches.
   No registered scraper currently declares one (the sole prior user, wisconsin-dnr, was
   removed); the hook is retained as a generic extension point. See section 7 step 8.
+  Independently of the TTL, the written record may carry the scraper's optional
+  `staleMs` / `readingNote` (section 1) — a per-source staleness horizon and a neutral
+  point-in-time note for the FRONTEND (section 9). The two knobs are orthogonal:
+  `officialTtlSeconds` governs how long the KV VALUE lives, `staleMs` governs how the
+  renderer judges the reading's AGE. nws-omr-grr (30 h) and winnetka-tower-beach (72 h)
+  declare `staleMs` today; only nws-omr-grr declares a `readingNote` (section 6).
 - Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the 6-hourly wave cron
   (runWaveRefresh) with { expirationTtl: 25200 }, and only when the series has >= 1 finite
   hour (section 1). Read ONLY by the detail route (the list page must not gain per-row
@@ -1520,9 +1542,20 @@ wrapper). No Date.now(), no ambient clock.
       // scraperId: scraper.id, source: result.source, sources: result.sources,
       // updated: site.updated when it is a non-empty string, else
       // result.updated } — periodic sources stamp each site with the reading's
-      // own timestamp so the UI stale-data warning stays honest.
+      // own timestamp so the UI stale-data warning stays honest (that warning's
+      // threshold is per-source when the scraper declares staleMs, below).
       // Either shape: a color outside green/yellow/red/double-red -> null
       // (never guess a color).
+      // Either shape: copies the SCRAPER OBJECT's optional staleness fields onto
+      // the record — scraper.staleMs only when it is a finite number > 0, and
+      // scraper.readingNote only when it is a non-empty string. Anything else
+      // (absent, null, NaN, Infinity, 0, negative, empty string, non-string)
+      // OMITS the key entirely, so the record stays small and render falls back
+      // to its 2 h default. Read off the SCRAPER, never off result: shape (a)
+      // spreads result, so a result-carried staleMs is deleted from the copy
+      // rather than smuggled unvalidated into KV. The finiteness check is
+      // load-bearing — typeof NaN === "number", and a NaN threshold makes
+      // (now - updated) > NaN false forever, silently disabling a safety warning.
 
     export async function scrapeOfficialFlag(beach, nowIso)
       // -> OfficialFlag | null. Finds scraper, awaits scraper.scrape(nowIso)
@@ -1537,6 +1570,24 @@ wrapper). No Date.now(), no ambient clock.
       id: "south-haven-mi",              // stable string
       label: "City of South Haven Beach Flag Program",
       url: "https://...",                // page scraped; goes into source/sources
+      staleMs: 108000000,                // OPTIONAL number of ms after which THIS
+                                         // source's reading is genuinely stale.
+                                         // Copied onto the OfficialFlag record
+                                         // (section 1) and used by the frontend
+                                         // INSTEAD of the default 2 h STALE_MS
+                                         // (section 9). Absent -> the 2 h default.
+      readingNote: "Morning reading — ...", // OPTIONAL sentence FRAGMENT, rendered as
+                                         // a NEUTRAL (not warning) callout when the
+                                         // reading is older than the default 2 h but
+                                         // still inside staleMs. Must read naturally
+                                         // with a relative time appended
+                                         // ("... 11 hours ago."). Only for POINT-IN-
+                                         // TIME observations; a persistent posted
+                                         // STATUS declares staleMs alone.
+      // officialTtlSeconds: OPTIONAL — extends this scraper's own official-KV TTL
+      // (section 3 / section 7 step 8) when it fetches on a reduced cadence.
+      // Independent of staleMs: TTL = how long the VALUE lives, staleMs = how the
+      // frontend judges the reading's AGE.
       matches: function(beach) { ... },  // BeachRow -> boolean, pure
       scrape: async function(nowIso) { ... }
       // -> result | null. null is FAILURE-ONLY: a fetch failure, an unparseable
@@ -1577,6 +1628,14 @@ wrapper). No Date.now(), no ambient clock.
       //   page shares one date, or per-site updated when readings differ per
       //   beach. Stamping nowIso on a days-old reading would suppress the
       //   frontend's 2 h stale-data warning and present old data as fresh.
+      //   A source that legitimately publishes on a SLOWER cadence than that 2 h
+      //   default (a once-daily NWS product, a human-posted status held for days)
+      //   must still stamp its honest updated and then declare staleMs — and, for
+      //   point-in-time observations, readingNote — so the warning fires only when
+      //   the source actually MISSES its own cadence. staleMs is an addition to
+      //   honest `updated` stamping, NEVER a substitute for it: papering a
+      //   days-old reading over with nowIso plus a long staleMs is exactly the
+      //   failure this rule exists to prevent.
     }
 
 ### src/officialSources/southHaven.js
@@ -1685,9 +1744,17 @@ would downgrade a hazard flag.
   (types/OMR/locations/GRR -> newest product id -> productText), NWS User-Agent.
   POSTED-FLAG source (gold-standard hazard axis): Green/Yellow/Red map 1:1; no
   double-red tier; None / "M ft" / unrecognized -> site omitted. updated = the
-  product's issuanceTime (morning observations, so the reading time drives the
-  stale warning). Name + tight (2 mi) proximity matches(); disjoint from South
-  Haven / Metroparks / Chicago.
+  product's issuanceTime — the product is issued ONCE PER DAY, observed between
+  ~14:30 and 16:00 UTC (2026-07-17 16:13Z, 07-18 15:17Z, 07-19 15:16Z, 07-20 16:00Z,
+  07-21 14:56Z, 07-22 15:33Z), so the module declares staleMs = 30 h (108000000: the
+  24 h cadence plus the ~1.5 h issuance jitter plus margin) and readingNote =
+  "Morning reading — conditions may have changed since it was posted". At 30 h the
+  stale WARNING fires only when NWS actually SKIPS an issuance; between 2 h and 30 h
+  the neutral reading note carries the honesty instead, rather than the false "stale"
+  the default would show for ~22 of every 24 hours. The OMR product text itself warns
+  the morning observations "may not be representative of conditions later in the day".
+  Name + tight (2 mi) proximity matches(); disjoint from South Haven / Metroparks /
+  Chicago.
 - src/officialSources/winnetkaTowerBeach.js (winnetka-tower-beach) — Winnetka Park
   District, single Tower Road Beach (Lake Michigan, IL) via a rainoutline.com
   server-rendered status page. DANGEROUS-CONDITIONS CLOSURE, hazard axis only:
@@ -1697,6 +1764,18 @@ would downgrade a hazard flag.
   separate wqFloor axis); any other/unrecognized closure or markup -> null. The
   water-quality check runs FIRST so an ambiguous "advisory" fails safe to null. Tight
   name-within-bbox matches(); register ahead of any broad regional scraper.
+  updated = the source page's OWN "Last updated at M/D/YY h:mm am|pm" stamp
+  (parseTowerBeachUpdated, falling back to nowIso when unparseable), which rainoutline
+  writes when a staffer POSTS a status change and nothing ever advances automatically
+  (observed: all four Winnetka beach extensions stamped in one 7/21/26 4:43-4:46 pm
+  human batch and still unchanged — and still accurate — ~29 h later; dormant
+  extensions on the same account hold untouched 2019-2021 stamps). It therefore
+  declares staleMs = 72 h (259200000), which covers the worst realistic in-season gap
+  (a Friday-afternoon post read Monday morning is ~63 h) yet still warns once an
+  in-season posting has gone unattended past a long weekend — a wider horizon would
+  hide a stale RED, which this scraper can emit. NO readingNote: its signal is a
+  posted open/closed STATUS that stays correct until someone changes it, not a
+  point-in-time observation.
 - src/officialSources/paDcnrPresqueIsle.js (pa-dcnr-presque-isle) — PA DCNR Park
   Advisory feed scoped to Presque Isle State Park (Lake Erie, PA). CLOSURE-ONLY,
   RED-ONLY: an IsAlert:true advisory whose free text describes a genuine swimming
@@ -1918,7 +1997,13 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    opt into a longer official-KV TTL (its optional officialTtlSeconds field) when it
    fetches on a reduced cadence, so its last color persists between infrequent fetches;
    default 7200 (section 3). No registered scraper currently declares officialTtlSeconds
-   (the hook is a retained extension point), so this resolves to the default today. Null scrape result,
+   (the hook is a retained extension point), so this resolves to the default today.
+   The record written here also carries the scraper's validated staleMs / readingNote
+   when declared (copied by scrapeOfficialFlagFromResult, section 6) — a DISPLAY-side
+   horizon, orthogonal to expirationTtl. This cron rewrites the official record every
+   hour no matter how slowly the upstream source itself publishes, which is precisely
+   why the display horizon is needed: the record is fresh, the reading may not be.
+   Null scrape result,
    or a beach that resolves to no site (multi-site shape), → NO KV write for that beach
    (old key expires naturally).
    Scraper health monitoring (hourly path only): around each distinct MATCHED
@@ -2707,13 +2792,29 @@ exporting a CSS string); render.js is the sole module the router imports.
   page — the one source that links out; estimate: small filled-neutral pill wa-badges,
   deliberately unlike the square outlined ESTIMATE badge, never variant="success" —
   green is reserved for OFFICIAL — and never hyperlinked
-  to the upstream data), flag row + stale warning in the body, and an
+  to the upstream data), flag row + at most ONE age callout (stale warning OR reading
+  note, never both) in the body, and an
   "Updated <wa-relative-time date=updated sync>" in slot="footer". Distinction comes from
-  card class / appearance / badge, never from layout differences.
-- Stale-data warning: if (Date.parse(nowIso) - Date.parse(x.updated)) > 7200000 for either
-  card, append a visible wa-callout (variant="warning") inside that card reading
+  card class / appearance / badge, never from layout differences. renderFlagCard's options
+  also include the optional staleMs and readingNote, passed through by renderOfficialCard
+  from official.staleMs / official.readingNote; renderEstimateCard passes NEITHER, so the
+  estimate card always keeps the plain default (it is on our own hourly cadence, which is
+  what the default was calibrated to).
+- Stale-data warning: the age threshold is STALE_MS = 7200000 (2 h) by DEFAULT,
+  overridable per official record by its optional staleMs (section 1) — the estimate card
+  always uses the default. Let limit = typeof x.staleMs === "number" ? x.staleMs : STALE_MS.
+  If (Date.parse(nowIso) - Date.parse(x.updated)) > limit, append the visible warning
+  wa-callout (variant="warning", triangle-exclamation icon) inside that card reading
   "Stale data — last updated " followed by a <wa-relative-time date=x.updated sync>
-  (again browser-formatted, not a raw ISO + " UTC").
+  (again browser-formatted, not a raw ISO + " UTC"), and NO reading note. Else if
+  x.readingNote is a non-empty string AND the record is older than the DEFAULT STALE_MS,
+  append instead a NEUTRAL callout (renderReadingNote: <wa-callout variant="neutral"
+  size="s"> + <wa-icon slot="icon" name="clock"> + escapeHtml(note) + " " +
+  <wa-relative-time date=x.updated sync> + "."). Otherwise neither. The two callouts are
+  MUTUALLY EXCLUSIVE and the warning always wins — a source may never use readingNote to
+  soften or suppress a genuine stale warning. isStale(nowIso, updatedIso, thresholdMs) is
+  the single shared age helper (it already accepts a threshold and defaults it to
+  STALE_MS; the wave strip passes WAVE_STALE_MS).
 - Park-name-first display (both pages): displayName = beach.park_name || beach.name;
   a subtitle with beach.name renders ONLY when park_name is set AND differs from
   name ("Holland State Park" title with quiet "Ottawa Beach" subtitle; unnamed park
@@ -2852,7 +2953,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     ("Under 2 ft for 5 hours from now, then ..."). Being plain HTML the strip renders
     with JS off / kit unreachable; only the tooltips need the component kit.
   - Stale warning (WAVE_STALE_MS = 28800000 ms / 8 h, keyed on waves.updated) inside the
-    section — a LONGER threshold than the flag cards' 2 h STALE_MS because the wave strip
+    section — a LONGER threshold than the flag cards' DEFAULT 2 h STALE_MS because the wave strip
     refreshes on the 6-hourly wave cron (its KV lives 7 h and the marine models publish
     only every 6-12 h), so a few-hours-old strip is model-current, not stale. The ESTIMATE
     badge plus footer disclaimer keep the not-official framing on the page.

@@ -208,6 +208,22 @@ describe("winnetkaTowerBeach.matches", function () {
   });
 });
 
+// The scraper stamps updated from the page's OWN human-posted "Last updated"
+// line, which only advances when a park-district staffer posts a status change,
+// so the frontend's 2 h default would cry wolf on an accurate posted status.
+describe("winnetkaTowerBeach staleness contract", function () {
+  it("declares a 72 h staleMs (covers a Friday post read Monday morning)", function () {
+    expect(winnetkaTowerBeach.staleMs).toBe(72 * 60 * 60 * 1000);
+    expect(winnetkaTowerBeach.staleMs).toBe(259200000);
+    expect(Number.isFinite(winnetkaTowerBeach.staleMs)).toBe(true);
+    expect(winnetkaTowerBeach.staleMs).toBeGreaterThan(0);
+  });
+
+  it("declares NO readingNote (a latched posted state, not a point-in-time reading)", function () {
+    expect(winnetkaTowerBeach.readingNote).toBe(undefined);
+  });
+});
+
 describe("winnetkaTowerBeach.scrape", function () {
   afterEach(function () {
     vi.unstubAllGlobals();

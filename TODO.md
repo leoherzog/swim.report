@@ -293,6 +293,16 @@ coverage gaps, not wrong-color risks):
   advisory feed is currently 100% off-axis boilerplate, so the swimming-hazard →
   red mapping is verified only against synthetic fixtures. Re-verify against a real
   Danger-tier swimming-hazard advisory when one appears.
+- **`winnetka-tower-beach` `staleMs` rests on a single-day sample** — its 72 h
+  staleness horizon is reasoned from one observation of the rainoutline page (all four
+  Winnetka beach extensions stamped in one 7/21/26 4:43-4:46 pm human batch, still
+  unchanged and still accurate ~29 h later; dormant extensions holding 2019-2021
+  stamps prove there is no auto-refresh), plus the ~63 h Friday-post/Monday-read
+  weekend bound — not a measured distribution. Re-verify the real in-season posting
+  cadence; if genuine holds routinely run longer, raise the horizon rather than
+  leaving false stale warnings in place. Note also that a `staleMs` that never trips
+  makes a silently-dead source indistinguishable from a healthy one — the
+  `scraperhealth:` counter, not the horizon, is what catches that.
 - **NDBC-vs-GLOS double-count audit** — `ndbc-buoys` is the first NDBC ingestion and
   is a *fallback* consulted only for beaches still wave-null after Open-Meteo + the
   GLOS/GLERL buoy pass, so it is by design non-additive. Audit that no NDBC buoy is
