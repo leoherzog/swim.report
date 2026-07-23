@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseNdbcWaveFt,
+  parseNdbcWaterTempF,
   nearestStation,
   stationUrl,
   matches,
@@ -14,7 +15,8 @@ import {
   ndbcWaveSource,
   NDBC_MODEL,
   NDBC_STATIONS,
-  NDBC_MAX_DISTANCE_KM
+  NDBC_MAX_DISTANCE_KM,
+  NDBC_WATER_TEMP_MAX_OBS_AGE_MS
 } from "../src/waveSources/ndbcBuoys.js";
 
 const METERS_TO_FEET = 3.28084;
@@ -135,6 +137,112 @@ describe("parseNdbcWaveFt", function () {
     const bad = "YYYY MM DD hh mm 280 5.0 6.0 1.2 5 MM MM 1016 18 22 MM MM MM MM";
     const text = ndbcFile([bad, row("2026 07 22 11 00", "0.7")]);
     expect(parseNdbcWaveFt(text, NOW)).toBeCloseTo(0.7 * METERS_TO_FEET, 5);
+  });
+});
+
+// A single data row for the WATER-TEMP tests: ts is "YYYY MM DD hh mm"; wtmp is
+// the WTMP token (a Celsius string or "MM"), placed at column index 14. WVHT and
+// the intervening columns are filler so the row is full-width.
+function wtRow(ts, wtmp) {
+  return ts + " 280  5.0  6.0   1.2     5    MM  MM 1016.2  18.3  " + wtmp + "    MM   MM   MM    MM";
+}
+
+describe("parseNdbcWaterTempF", function () {
+  it("parses the newest fresh WTMP and converts Celsius to Fahrenheit", function () {
+    const text = ndbcFile([
+      wtRow("2026 07 22 11 00", "24.6"),
+      wtRow("2026 07 22 10 00", "24.0")
+    ]);
+    const out = parseNdbcWaterTempF(text, NOW);
+    expect(out).not.toBe(null);
+    expect(out.tempC).toBeCloseTo(24.6, 5);
+    expect(out.tempF).toBeCloseTo(76.28, 5);
+    expect(out.observedIso).toBe("2026-07-22T11:00:00.000Z");
+  });
+
+  it("passes 0 C (near-freezing water) through as a finite reading", function () {
+    const out = parseNdbcWaterTempF(ndbcFile([wtRow("2026 07 22 11 00", "0.0")]), NOW);
+    expect(out).not.toBe(null);
+    expect(out.tempF).toBeCloseTo(32, 5);
+  });
+
+  it("skips a newest MM WTMP and uses the next fresh valid row still in window", function () {
+    const text = ndbcFile([
+      wtRow("2026 07 22 11 20", "MM"),
+      wtRow("2026 07 22 11 00", "20.0")
+    ]);
+    const out = parseNdbcWaterTempF(text, NOW);
+    expect(out).not.toBe(null);
+    expect(out.tempC).toBeCloseTo(20.0, 5);
+    expect(out.tempF).toBeCloseTo(68, 5);
+    expect(out.observedIso).toBe("2026-07-22T11:00:00.000Z");
+  });
+
+  it("returns null when the freshest real WTMP is older than the 12 h window", function () {
+    // Freshest real reading is 07-21 22:00Z, 13.5 h before NOW (07-22 11:30Z).
+    const text = ndbcFile([
+      wtRow("2026 07 22 11 00", "MM"),
+      wtRow("2026 07 21 22 00", "18.0")
+    ]);
+    expect(parseNdbcWaterTempF(text, NOW)).toBe(null);
+  });
+
+  it("accepts a reading right at the edge of the 12 h freshness window", function () {
+    const edgeIso = new Date(Date.parse(NOW) - NDBC_WATER_TEMP_MAX_OBS_AGE_MS).toISOString();
+    // NOW is 2026-07-22T11:30Z, so the edge is 2026-07-21T23:30Z.
+    const text = ndbcFile([wtRow("2026 07 21 23 30", "17.0")]);
+    const out = parseNdbcWaterTempF(text, NOW);
+    expect(out).not.toBe(null);
+    expect(out.observedIso).toBe(edgeIso);
+  });
+
+  it("rejects a reading more than 10 min in the future (clock skew guard)", function () {
+    // 11:45Z is 15 min after NOW (11:30Z) -> skipped; no other rows -> null.
+    expect(parseNdbcWaterTempF(ndbcFile([wtRow("2026 07 22 11 45", "22.0")]), NOW)).toBe(null);
+  });
+
+  it("rejects an out-of-range WTMP as corrupt (never a wrong temperature)", function () {
+    const text = ndbcFile([
+      wtRow("2026 07 22 11 00", "99.0"),
+      wtRow("2026 07 22 10 30", "21.0")
+    ]);
+    const out = parseNdbcWaterTempF(text, NOW);
+    expect(out).not.toBe(null);
+    expect(out.tempC).toBeCloseTo(21.0, 5);
+  });
+
+  it("rejects a WTMP below the sanity floor (MIN_REASONABLE_C = -2 C)", function () {
+    // Unlike WVHT (all negatives rejected), WTMP allows negatives down to -2 C,
+    // so -10 C is corrupt and must degrade — falling through to the next valid row.
+    const text = ndbcFile([
+      wtRow("2026 07 22 11 00", "-10.0"),
+      wtRow("2026 07 22 10 30", "3.0")
+    ]);
+    const out = parseNdbcWaterTempF(text, NOW);
+    expect(out).not.toBe(null);
+    expect(out.tempC).toBeCloseTo(3.0, 5);
+  });
+
+  it("skips a row too short to hold the WTMP column (index 14)", function () {
+    const short = "2026 07 22 11 00 280 5.0 6.0 1.2 5 MM MM";
+    const text = ndbcFile([short, wtRow("2026 07 22 10 40", "19.5")]);
+    const out = parseNdbcWaterTempF(text, NOW);
+    expect(out).not.toBe(null);
+    expect(out.tempC).toBeCloseTo(19.5, 5);
+  });
+
+  it("returns null for null, empty, header-only, and garbage input", function () {
+    expect(parseNdbcWaterTempF(null, NOW)).toBe(null);
+    expect(parseNdbcWaterTempF("", NOW)).toBe(null);
+    expect(parseNdbcWaterTempF(ndbcFile([]), NOW)).toBe(null);
+    expect(parseNdbcWaterTempF("<<< not the expected format >>>", NOW)).toBe(null);
+  });
+
+  it("returns null when nowIso is missing or unparseable", function () {
+    const text = ndbcFile([wtRow("2026 07 22 11 00", "24.6")]);
+    expect(parseNdbcWaterTempF(text, null)).toBe(null);
+    expect(parseNdbcWaterTempF(text, "")).toBe(null);
+    expect(parseNdbcWaterTempF(text, "not-a-date")).toBe(null);
   });
 });
 

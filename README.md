@@ -435,7 +435,12 @@ in one job never starves another. Beach discovery and water-body classification 
   is left untouched so its last-good KV survives. Reads beaches with the same hot-first
   ordering as `runFlagRecompute` (`last_viewed` within `HOT_VIEW_WINDOW_MS`, then oldest
   `recompute_updated` first), sharing that column as a read-only rotation cursor — only
-  `runFlagRecompute` ever writes `recompute_updated`.
+  `runFlagRecompute` ever writes `recompute_updated`. A final self-contained step writes
+  `watertemp:` + beachId (same 7 h TTL) — the nearest NOAA NDBC realtime2 buoy's water
+  temperature (WTMP), deduped by station id so each buoy file is fetched once and fanned to
+  every beach sharing it. This reading is **display-only**: the detail page appends it to the
+  beach subtitle (e.g. "Ottawa Beach • 72°F Water") when it is fresh, but it never feeds
+  `src/rules.js` and cannot change a flag color.
 - `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
   `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
   api.weather.gov/points. A beach without `nws_zone` silently skips the alert and

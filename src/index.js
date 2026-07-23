@@ -44,6 +44,7 @@ import {
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
 import { wqFloorSources, findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
 import { waveSources, resolveSupplementalWaveFt } from "./waveSources/index.js";
+import { nearestStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
 import { updateScraperHealth } from "./scraperHealth.js";
 
 // Re-export the discovery merge helper from its new home (src/discovery.js) so
@@ -1092,6 +1093,74 @@ async function runWaveRefresh(env) {
         console.log("index: wave input write failed for beach " + beach.id + ": " + err.message);
       }
     }
+
+    // Step 5: NDBC water temperature (DISPLAY-ONLY). Self-contained pass over the
+    // beaches already SELECTed this run — never reads or mutates waveResults /
+    // windResults / the wave KV, and never feeds src/rules.js (it colors no flag).
+    // Many beaches share one nearest NDBC buoy, so dedup by station id (exactly
+    // like the step-2b supplemental memo): fetch each unique station's realtime2
+    // file ONCE via stationWaterTemp and fan the parsed reading to every beach
+    // under it. It is fine that this may re-fetch a couple of station files the
+    // wave fallback also touched (<=10 unique stations total) — the pass is kept
+    // isolated on purpose rather than sharing a cache across passes. Per-station
+    // and per-beach failures are isolated; a bad station never poisons the pass.
+    let waterTempCount = 0;
+    try {
+      const stationBeaches = new Map();
+      for (const beach of beaches) {
+        const station = nearestStation(beach.lat, beach.lon);
+        if (station === null) {
+          continue;
+        }
+        if (!stationBeaches.has(station.id)) {
+          stationBeaches.set(station.id, []);
+        }
+        stationBeaches.get(station.id).push({ beachId: beach.id, station: station });
+      }
+      for (const entry of stationBeaches) {
+        const stationId = entry[0];
+        const members = entry[1];
+        let reading = null;
+        try {
+          reading = await stationWaterTemp(stationId, nowIso, env);
+        } catch (err) {
+          console.log("index: water temp fetch threw for station " + stationId + ": " + err.message);
+          reading = null;
+        }
+        // Station fetch/parse returned null (winter gap, all-"MM", stale, 404):
+        // write nothing so every beach's old "watertemp:" key expires on its own.
+        if (reading === null) {
+          continue;
+        }
+        for (const member of members) {
+          try {
+            const waterTemp = {
+              beachId: member.beachId,
+              tempF: reading.tempF,
+              tempC: reading.tempC,
+              station: {
+                id: member.station.id,
+                name: member.station.name,
+                distanceKm: member.station.distanceKm
+              },
+              observedIso: reading.observedIso,
+              updated: nowIso
+            };
+            await env.FLAGS.put(
+              "watertemp:" + member.beachId,
+              JSON.stringify(waterTemp),
+              { expirationTtl: WAVE_DATA_TTL_SECONDS }
+            );
+            waterTempCount = waterTempCount + 1;
+          } catch (err) {
+            console.log("index: water temp write failed for beach " + member.beachId + ": " + err.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.log("index: water temp pass threw: " + err.message);
+    }
+    console.log("index: water temp writes this run=" + String(waterTempCount));
 
     // Open-Meteo weighted-call accounting (U1): each location in a batch costs
     // ~1 weighted call and the one backoff retry doubles a throttled batch, so

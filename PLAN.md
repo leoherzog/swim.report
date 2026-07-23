@@ -236,6 +236,32 @@ the hourly estimate simply has no wave input this run (degrades to the wind fall
 supplied the reading — the estimate's wave source label resolves it through WAVE_MODEL_LABELS
 either way.
 
+### WaterTemp (KV value under "watertemp:" + beachId)
+
+    {
+      "beachId": "osm-node-123456",
+      "tempF": 72.14,                // number (°F): the beach's nearest NDBC buoy water temp
+      "tempC": 22.3,                 // number (°C): the raw realtime2 WTMP reading before convert
+      "station": {                   // the nearest curated NDBC buoy that supplied the reading
+        "id": "45161",
+        "name": "Muskegon, MI",
+        "distanceKm": 5.02
+      },
+      "observedIso": "2026-07-12T15:00:00.000Z", // the buoy observation's own UTC timestamp
+      "updated": "2026-07-12T15:00:03.000Z"      // when the wave cron wrote this record
+    }
+
+DISPLAY-ONLY. Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data
+TTL (WAVE_DATA_TTL_SECONDS = 25200) from the nearest curated NDBC realtime2 buoy's WTMP
+column (src/waveSources/ndbcBuoys.js, parseNdbcWaterTempF — the freshest non-"MM" reading
+inside the NDBC_WATER_TEMP_MAX_OBS_AGE_MS = 12 h window and the sanity band, else null). Read
+by handleDetail and passed to renderDetailPage, which appends a fresh reading to the
+.beach-subtitle ("Ottawa Beach • 72°F Water") ONLY when tempF is finite and observedIso is
+within WATER_TEMP_STALE_MS (12 h) of now. This value NEVER feeds src/rules.js — it colors no
+flag and does not bump RULES_VERSION. Written ONLY when the station fetch/parse produced a
+valid recent reading; a null (winter gap, all-"MM", stale, 404) writes nothing so the old key
+expires on its own. Absent/expired key → the subtitle simply omits the temp fragment.
+
 ### WqFloorAdvisory (KV value under "wqfloor:" + beachId)
 
     {
@@ -428,6 +454,12 @@ Binding name: FLAGS (single namespace for both key families).
   wave height or a wind fallback for the beach (section 1). Read by the hourly
   runFlagRecompute — the current wave height + wind fallback for the estimate come from
   here, NOT a live fetch. Absent key → the estimate has no wave input this run.
+- Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly wave cron
+  (runWaveRefresh, step 5) with { expirationTtl: 25200 }, and ONLY when the beach's nearest
+  NDBC buoy produced a valid recent water-temp reading (section 1). Read ONLY by the detail
+  route (like "waves:", the list page must not gain per-row reads) and passed to
+  renderDetailPage as the .beach-subtitle temp fragment. DISPLAY-ONLY — never feeds
+  src/rules.js. Absent key → the subtitle omits the temp fragment.
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
   (runFlagRecompute) with { expirationTtl: 7200 }, and ONLY when a src/wqFloor source
   resolved an active water-quality advisory for the beach — a clean/absent reading writes
@@ -2154,6 +2186,17 @@ strip showing slightly-older-but-still-model-current data instead of blanking it
    models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models" with url
    OPEN_METEO_MARINE_URL) with { expirationTtl: 25200 }. Summary log reports beaches /
    inputs / series counts.
+5. (water temp) NDBC water temperature — a self-contained DISPLAY-ONLY pass over the SAME
+   beaches SELECTed this run (no extra query), AFTER the step-4 wave-input writes and touching
+   ONLY the "watertemp:" KV (never waveResults/windResults or the wave KV). Dedup by nearest
+   station id (nearestStation, exactly like the step-2b supplemental memo): fetch each unique
+   station's realtime2 file ONCE via stationWaterTemp(stationId, nowIso, env) → parseNdbcWaterTempF
+   and fan the parsed reading to every beach under it. For each beach with a valid reading write
+   "watertemp:" + id → WaterTemp (section 1) with { expirationTtl: 25200 }; a null reading writes
+   nothing (old key expires). Per-station and per-beach failures are isolated; never throws out of
+   the step. NEVER feeds src/rules.js (colors no flag, does not bump RULES_VERSION). May re-fetch
+   a couple of station files the step-2b fallback also touched (≤10 unique stations total) — the
+   pass is kept isolated on purpose rather than sharing a cache. Logs a water-temp write count.
 
 Subrequest budget: ~7 paced marine batches (100/batch over ~613 beaches) + ≤62 GLCFS buoy
 (the 2 catalog fetches are AVOIDED on a "glcfs:catalogs" cache hit — most runs — so GLCFS
@@ -2591,7 +2634,7 @@ Routing table (method GET only; anything else → 405):
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: ONE bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — 2 KV reads per page regardless of row count; HOME_LIST_LIMIT (100) is load-bearing here, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
-| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null); 404 HTML if no row |
+| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null); 404 HTML if no row |
 | GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 [+ flag-worthy gate] LIMIT 500. Then attachMarkerFlags: bulk KV read of flag:/official: for the returned ids (chunked to the 100-key bulk-get cap → ≤5 chunks × 2 families, read in parallel) stamps map-marker iconClass + label (markerFlagFields, same best-color rule as the embedded homepage markers; missing/expired KV → "unknown"). Powers the homepage map's viewport pan-to-load. | JSON { "beaches": [BeachRow + iconClass + label ...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |

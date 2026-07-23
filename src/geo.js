@@ -43,6 +43,16 @@ export function metersToFeet(m) {
   return m * METERS_TO_FEET;
 }
 
+// Celsius -> Fahrenheit. Null-safe: null/undefined pass through as null (matching
+// the masked/no-data convention used across the buoy clients — e.g. NDBC water
+// temperature, whose missing token already resolves to null before conversion).
+export function celsiusToFahrenheit(c) {
+  if (c === null || c === undefined) {
+    return null;
+  }
+  return c * 9 / 5 + 32;
+}
+
 // Ray-casting point-in-ring test on a GeoJSON linear ring ([[lon, lat], ...]).
 // Planar math is fine at forecast-region scale; boundary points are accepted
 // or rejected by the crossing parity like any ray cast (no special casing).

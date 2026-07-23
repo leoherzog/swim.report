@@ -249,21 +249,25 @@ async function handleDetail(env, ctx, beachId) {
     return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
   }
   touchLastViewed(env, ctx, beach);
-  // The 24 h wave-forecast series is a detail-page-only read (the list page
-  // must never gain a per-row KV get). Fetched alongside the flag/official
-  // reads so the extra key costs no added latency.
+  // The 24 h wave-forecast series and the NDBC water-temperature reading are
+  // both detail-page-only reads (the list page must never gain a per-row KV
+  // get). Fetched alongside the flag/official reads so the extra keys cost no
+  // added latency.
   const results = await Promise.all([
     readFlagAndOfficial(env, beachId),
-    env.FLAGS.get("waves:" + beachId, { type: "json" })
+    env.FLAGS.get("waves:" + beachId, { type: "json" }),
+    env.FLAGS.get("watertemp:" + beachId, { type: "json" })
   ]);
   const data = results[0];
   const waves = results[1];
+  const waterTemp = results[2];
   const nowIso = new Date().toISOString();
   const html = renderDetailPage({
     beach: beach,
     estimate: data.estimate,
     official: data.official,
     waves: waves,
+    waterTemp: waterTemp,
     nowIso: nowIso
   });
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);

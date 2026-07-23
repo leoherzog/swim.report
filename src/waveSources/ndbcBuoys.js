@@ -51,7 +51,7 @@
 // stale or masked reading — NEVER a wrong height (which would mis-color a flag).
 // No template literals; string concat with + only; const/let only.
 
-import { distanceKm, metersToFeet } from "../geo.js";
+import { distanceKm, metersToFeet, celsiusToFahrenheit } from "../geo.js";
 import { fetchText } from "../officialSources/util.js";
 
 export const NDBC_MODEL = "ndbc_buoy";
@@ -80,6 +80,23 @@ const MAX_REASONABLE_METERS = 30;
 
 // Index of the WVHT column after splitting a data row on whitespace.
 const WVHT_INDEX = 8;
+
+// Index of the WTMP (water temperature) column after splitting a data row on
+// whitespace. DISPLAY-ONLY: water temp never feeds src/rules.js — it colors no
+// flag — so it lives beside the wave parser but shares none of its color path.
+const WTMP_INDEX = 14;
+
+// Water temp is slow-moving and the owning cron is 6-hourly, so allow a generous
+// window (one skipped run of safety margin). 12 h. Unlike the 2 h wave window,
+// a several-hour-old water temperature is still a faithful "how cold is the
+// water" reading, so the horizon is the cron cadence plus slack, not the flag TTL.
+export const NDBC_WATER_TEMP_MAX_OBS_AGE_MS = 43200000;
+
+// Great Lakes / coastal water-temp sanity band in Celsius; a token outside it is
+// corrupt input (or a mis-parsed column), not a real reading -> null. Lake ice
+// keeps the floor near freezing; summer surface temps never approach the ceiling.
+const MIN_REASONABLE_C = -2;
+const MAX_REASONABLE_C = 40;
 
 // Curated Great Lakes NDBC stations. Each id was verified (July 2026) to have a
 // live realtime2 file; lat/lon are the published station coordinates (decimal
@@ -167,6 +184,82 @@ function wvhtMeters(token) {
     return null;
   }
   return v;
+}
+
+// Pure. A WTMP token in Celsius, or null. "MM" (missing), non-numeric, or
+// outside the [MIN_REASONABLE_C, MAX_REASONABLE_C] sanity band all degrade to
+// null. 0 C (near-freezing water) is a legitimate finite reading and passes.
+function wtmpCelsius(token) {
+  if (typeof token !== "string") {
+    return null;
+  }
+  if (token === "MM") {
+    return null;
+  }
+  const v = parseFloat(token);
+  if (!isFinite(v) || v < MIN_REASONABLE_C || v > MAX_REASONABLE_C) {
+    return null;
+  }
+  return v;
+}
+
+// Pure, exported for tests. (realtime2 body text, nowIso) ->
+// { tempF, tempC, observedIso } | null. Structurally mirrors parseNdbcWaveFt:
+// walks data rows newest-first and returns the FIRST row whose WTMP is a finite
+// non-"MM" Celsius value inside the sanity band AND whose UTC timestamp is within
+// NDBC_WATER_TEMP_MAX_OBS_AGE_MS of nowIso (not more than NDBC_MAX_OBS_FUTURE_MS
+// in the future). Because rows are newest-first, once the freshest usable-WTMP
+// row is itself too old every row below it is older too, so we stop and return
+// null. Any parse issue, masked column, or stale/missing reading degrades to
+// null — never a wrong temperature. Comment lines ("#...") and blank lines are
+// skipped. DISPLAY-ONLY: this value never reaches src/rules.js.
+export function parseNdbcWaterTempF(text, nowIso) {
+  if (typeof text !== "string" || text.length === 0) {
+    return null;
+  }
+  if (typeof nowIso !== "string" || nowIso.length === 0) {
+    return null;
+  }
+  const nowMs = Date.parse(nowIso);
+  if (!isFinite(nowMs)) {
+    return null;
+  }
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.length === 0 || line.charAt(0) === "#") {
+      continue;
+    }
+    const fields = line.split(/\s+/);
+    if (fields.length <= WTMP_INDEX) {
+      continue;
+    }
+    const tempC = wtmpCelsius(fields[WTMP_INDEX]);
+    if (tempC === null) {
+      // Newer row with a masked/invalid WTMP — keep scanning older rows.
+      continue;
+    }
+    const tsMs = rowTimestampMs(fields);
+    if (tsMs === null) {
+      continue;
+    }
+    // Reject readings too far in the future (clock skew tolerance) or older than
+    // the freshness window. Rows are newest-first, so the first row carrying a
+    // real WTMP is the freshest such reading; if it is already stale, every row
+    // below it is older too, so we stop and return null.
+    if (tsMs - nowMs > NDBC_MAX_OBS_FUTURE_MS) {
+      continue;
+    }
+    if (nowMs - tsMs > NDBC_WATER_TEMP_MAX_OBS_AGE_MS) {
+      return null;
+    }
+    const tempF = celsiusToFahrenheit(tempC);
+    if (typeof tempF === "number" && isFinite(tempF)) {
+      return { tempF: tempF, tempC: tempC, observedIso: new Date(tsMs).toISOString() };
+    }
+    return null;
+  }
+  return null;
 }
 
 // Pure, exported for tests. (realtime2 body text, nowIso) -> finite feet | null.
@@ -267,6 +360,29 @@ async function waveFt(beach, nowIso, env) {
     console.log(
       "ndbcBuoys: parse failed for station " + station.id +
       " (beach " + (beach ? beach.id : "?") + "): " + err.message
+    );
+    return null;
+  }
+}
+
+// Cron-side ONLY. Fetches a station's realtime2 file and resolves its freshest
+// valid water temperature at nowIso as { tempF, tempC, observedIso }, or null.
+// Keyed by station id (not beach) so the wave cron fetches each unique station
+// ONCE and fans the reading to every beach sharing it — exactly like waveFt is
+// deduped by station in the wave pass. NEVER throws across the boundary. This is
+// a DISPLAY-ONLY reading: it never reaches src/rules.js and colors no flag.
+export async function stationWaterTemp(stationId, nowIso, env) {
+  const text = await fetchText(stationUrl(stationId), {
+    logPrefix: "ndbcBuoys: water-temp fetch failed for station " + stationId
+  });
+  if (text === null) {
+    return null;
+  }
+  try {
+    return parseNdbcWaterTempF(text, nowIso);
+  } catch (err) {
+    console.log(
+      "ndbcBuoys: water-temp parse failed for station " + stationId + ": " + err.message
     );
     return null;
   }

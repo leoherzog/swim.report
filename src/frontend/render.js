@@ -38,6 +38,10 @@ import {
 // source only. Anything that does not declare one keeps the honest 2 h signal.
 const STALE_MS = 7200000;
 const WAVE_STALE_MS = 28800000;
+// The subtitle's NDBC water-temperature fragment is shown only when the reading
+// is this fresh; matches the parser window (NDBC_WATER_TEMP_MAX_OBS_AGE_MS) —
+// water temp is slow-moving, so a several-hour-old reading is still faithful.
+const WATER_TEMP_STALE_MS = 43200000; // 12 h — matches the parser window; water temp is slow-moving
 
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
@@ -492,6 +496,36 @@ function displayName(beach) {
 function subtitleName(beach) {
   if (beach.park_name && beach.name && beach.name !== beach.park_name) {
     return beach.name;
+  }
+  return null;
+}
+
+// Composes the detail-page .beach-subtitle string from the beach's own name (the
+// park-first subtitle) plus an optional NDBC water-temperature fragment. Pure —
+// nowIso is passed in; no fetch, no Date. DISPLAY-ONLY: this reading never
+// touches the flag color. The temp fragment is included only when waterTemp is a
+// non-null object with a finite tempF AND its observedIso parses to within
+// WATER_TEMP_STALE_MS of nowIso (a missing/unparseable observedIso -> omit temp,
+// never a stale value). Returns the final subtitle string, or null when neither
+// piece is present (the caller's guard then renders no <p class="beach-subtitle">).
+function beachSubtitle(beach, waterTemp, nowIso) {
+  const base = subtitleName(beach);
+  let temp = null;
+  if (waterTemp && typeof waterTemp === "object" &&
+      typeof waterTemp.tempF === "number" && isFinite(waterTemp.tempF) &&
+      !isStale(nowIso, waterTemp.observedIso, WATER_TEMP_STALE_MS) &&
+      typeof waterTemp.observedIso === "string" &&
+      !Number.isNaN(Date.parse(waterTemp.observedIso))) {
+    temp = String(Math.round(waterTemp.tempF)) + "°F Water";
+  }
+  if (base && temp) {
+    return base + " • " + temp;
+  }
+  if (base) {
+    return base;
+  }
+  if (temp) {
+    return temp;
   }
   return null;
 }
@@ -979,6 +1013,10 @@ export function renderDetailPage(data) {
   // Absent on legacy KV payloads and for buoy-fallback/masked beaches — default
   // to null so the wave forecast section simply omits itself.
   const waves = (data.waves === undefined || data.waves === null) ? null : data.waves;
+  // NDBC water-temperature reading (DISPLAY-ONLY, never a flag input). Absent
+  // until the wave cron writes it, so default to null; the subtitle omits the
+  // temp fragment when it is null or stale.
+  const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
   const title = displayName(beach) + " — Swim Report";
   const lat = Number(beach.lat).toFixed(4);
   const lon = Number(beach.lon).toFixed(4);
@@ -989,7 +1027,10 @@ export function renderDetailPage(data) {
   const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null,
     FLAG_ICON_LABELS[normalizeColor(titleColor)]);
 
-  const subtitle = subtitleName(beach);
+  // Subtitle = the park-first beach name plus, when fresh, an NDBC water-temp
+  // fragment (e.g. "Ottawa Beach • 72°F Water"). The ° and • pass through
+  // escapeHtml unchanged; the guard keeps the <p> off the page when null.
+  const subtitle = beachSubtitle(beach, waterTemp, nowIso);
   const subtitleHtml = subtitle ?
     ("<p class=\"beach-subtitle\">" + escapeHtml(subtitle) + "</p>") : "";
 
