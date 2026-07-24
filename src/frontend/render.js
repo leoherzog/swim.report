@@ -103,28 +103,32 @@ function normalizeColor(color) {
   return "unknown";
 }
 
-// The single source for a flag color's tint class: double-red shares the red
-// tint (only its icon count differs), everything else maps to its own color.
-// Used by renderFlagIcon (the UI's flags) and renderHomeMap (the map markers)
-// so the color-to-class rule lives in exactly one place.
-function flagIconColorClass(color) {
+// The single collapse rule for a flag color's display keyword: double-red shares
+// the red tint (only its icon count differs), everything else normalizes to its
+// own color (unknown as the honest fallback). Behind BOTH the UI's flag-icon
+// class and the map marker's `flag` keyword, so the color-to-keyword rule lives
+// in exactly one place. Always returns one of green|yellow|red|unknown.
+function collapseFlagColor(color) {
   const normalized = normalizeColor(color);
-  return "flag-icon-" + (normalized === "double-red" ? "red" : normalized);
+  return normalized === "double-red" ? "red" : normalized;
 }
 
-// The map-marker flag fields (tint class + accessible label) for a beach, given
-// its cached estimate and official reading. Best-color precedence mirrors the
-// detail page's titleColor: official wins over estimate, estimate wins over
-// "unknown". Exported so BOTH the server-embedded homepage markers
-// (renderHomeMap) and the /api/beaches viewport endpoint (router.js, for markers
-// panned into view) build identical marker JSON from one color rule.
-export function markerFlagFields(estimate, official) {
+// The flag color's tint class, used by renderFlagIcon (the UI's flags).
+function flagIconColorClass(color) {
+  return "flag-icon-" + collapseFlagColor(color);
+}
+
+// The collapsed map-flag color KEYWORD for a beach, given its cached estimate
+// and official reading. Best-color precedence mirrors the detail page's
+// titleColor: official wins over estimate, estimate wins over "unknown".
+// double-red collapses to "red" (exactly as flagIconColorClass tints it), so
+// the result is always one of green|yellow|red|unknown. Exported so the
+// /api/beaches.geojson endpoint (router.js) stamps each feature's `flag`
+// property from the same single color rule the UI flags use.
+export function markerFlagColor(estimate, official) {
   const best = official ? official.color
     : (estimate ? estimate.color : "unknown");
-  return {
-    iconClass: flagIconColorClass(best),
-    label: FLAG_ICON_LABELS[normalizeColor(best)]
-  };
+  return collapseFlagColor(best);
 }
 
 function isStale(nowIso, updatedIso, thresholdMs) {
@@ -404,7 +408,11 @@ function renderBrandHeader() {
 // The second paragraph is the site-wide attribution for the data sources; the
 // Windy credit links Windy.com to the webcams hub. This footer line is now the
 // only Windy attribution on the page — renderWebcam no longer carries a
-// per-cam credit.
+// per-cam credit. The third paragraph is the homepage map's basemap credit:
+// mapScript.js runs the MapLibre map with attributionControl disabled (its
+// async-populated links would otherwise become focusable inside the aria-hidden
+// mount), so OpenFreeMap's required OpenStreetMap attribution lives here as
+// static, in-reading-order text instead.
 function renderFooter() {
   return "<p><small>Estimated — not the official flag status. " +
     "Always obey posted flags and lifeguards.</small></p>" +
@@ -416,7 +424,13 @@ function renderFooter() {
     "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a> " +
     "for marine and weather data, and " +
     "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> " +
-    "for webcams.</small></p>";
+    "for webcams.</small></p>" +
+    "<p><small>Map tiles by " +
+    "<a href=\"https://openfreemap.org\" rel=\"noopener noreferrer\">OpenFreeMap</a> " +
+    "(data © " +
+    "<a href=\"https://www.openstreetmap.org/copyright\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
+    "contributors), rendered with " +
+    "<a href=\"https://maplibre.org\" rel=\"noopener noreferrer\">MapLibre</a>.</small></p>";
 }
 
 // Ambient, Firewatch-style layered wave swells anchored to the bottom of the
@@ -578,51 +592,32 @@ function renderBeachRow(entry) {
   return lines.join("\n");
 }
 
-// Homepage map: one clickable flag marker per beach with finite coordinates,
-// embedded as JSON for the browser-side MapLibre init script (mapScript.js) to
-// read. Best-color precedence mirrors renderDetailPage's titleColor: official
-// wins over estimate, estimate wins over "unknown". Each marker carries a
-// server-computed iconClass (via the shared flagIconColorClass — double-red is
-// tinted red) and label (FLAG_ICON_LABELS) so the browser builds a <wa-icon
-// name="flag"> marker with no icon path or color logic of its own: the icon and
-// the color-to-class rule stay single-sourced here. The resolved user location
-// (the same signal that
-// sorts the list — a browser "near" fix or Cloudflare's IP estimate) rides
-// along as a data-center attribute so the browser can center the map without
-// another fetch; data-center-precise marks which source it came from.
-function renderHomeMap(entries, near, location) {
-  const list = Array.isArray(entries) ? entries : [];
-  const markers = [];
-  for (let i = 0; i < list.length; i++) {
-    const entry = list[i];
-    const beach = entry && entry.beach;
-    if (!beach) {
-      continue;
-    }
-    const lat = (beach.lat === null || beach.lat === undefined) ? NaN : Number(beach.lat);
-    const lon = (beach.lon === null || beach.lon === undefined) ? NaN : Number(beach.lon);
-    if (!isFinite(lat) || !isFinite(lon)) {
-      continue;
-    }
-    const flagFields = markerFlagFields(entry.estimate, entry.official);
-    markers.push({
-      id: beach.id,
-      name: displayName(beach),
-      lat: lat,
-      lon: lon,
-      iconClass: flagFields.iconClass,
-      label: flagFields.label
-    });
-  }
-  const markersJson = JSON.stringify(markers).split("<").join("\\u003c");
+// Homepage map: a purely visual MapLibre mount. It carries NO per-beach data —
+// the browser-side init script (mapScript.js) fetches every flag-worthy beach
+// once from the cacheable /api/beaches.geojson endpoint and renders them as a
+// native clustered GeoJSON source (count bubbles that expand on click, and
+// individual rasterized fa-flag icons tinted by each feature's `flag` keyword at
+// high zoom). This renderer only emits the mount plus the map center: the
+// resolved user location (the same signal that sorts the list — a browser "near"
+// fix or Cloudflare's IP estimate) rides along as a data-center attribute so the
+// browser can center without another fetch; data-center-precise marks which
+// source it came from.
+//
+// The map is a visual supplement only — the search box + results list is the
+// complete accessible path (it covers the full flag-worthy table server-side).
+// So the mount is aria-hidden and kept out of the tab order (mapScript.js also
+// disables MapLibre keyboard handling, sets the canvas to tabindex -1, and adds
+// no focusable control chrome — attributionControl is off, its OSM credit moved
+// to the static footer); there is no landmark aria-label advertising a hidden map.
+function renderHomeMap(near, location) {
   // Map center: the resolved user location that also sorts the list — the
   // browser "near" fix when the visitor granted geolocation, otherwise
   // Cloudflare's IP-derived request.cf estimate. data-center-precise ("1" for a
   // browser fix, "0" for the coarser IP estimate) lets the browser zoom tighter
   // on a real fix than on the estimate; with no location at all the attribute
-  // is omitted and the browser falls back to fitting the markers. Coordinates
-  // round to ~110 m (3 dp) — the map never needs finer, and it keeps precise
-  // coordinates out of the markup.
+  // is omitted and the browser falls back to fitting all the fetched features.
+  // Coordinates round to ~110 m (3 dp) — the map never needs finer, and it keeps
+  // precise coordinates out of the markup.
   const centerLat = location ? Number(location.lat) : NaN;
   const centerLon = location ? Number(location.lon) : NaN;
   const centerAttrs = (isFinite(centerLat) && isFinite(centerLon))
@@ -632,11 +627,11 @@ function renderHomeMap(entries, near, location) {
   // The framed box reuses the existing .framed-embed border + the
   // wa-border-radius-m utility (same treatment as the detail-page wave map /
   // webcam); .home-map itself only adds the map's fixed height and the
-  // clip-to-radius overflow. The section carries the single accessible name
-  // (its landmark label) — the map div is an unlabeled MapLibre mount.
-  return "<section class=\"home-map-section\" aria-label=\"Map of nearby beaches with estimated flag status\">" +
-    "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\"" + centerAttrs + "></div>" +
-    "<script type=\"application/json\" id=\"home-map-data\">" + markersJson + "</script>" +
+  // clip-to-radius overflow. aria-hidden + tabindex="-1" keep the visual-only
+  // map out of assistive-tech and keyboard tab order.
+  return "<section class=\"home-map-section\">" +
+    "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\" " +
+    "aria-hidden=\"true\" tabindex=\"-1\"" + centerAttrs + "></div>" +
     "</section>";
 }
 
@@ -676,7 +671,7 @@ export function renderListPage(data) {
     "Great Lakes region.</p>" +
     "</section>";
 
-  const mapHtml = renderHomeMap(entries, nearParam, location);
+  const mapHtml = renderHomeMap(nearParam, location);
 
   // The search box submits to the server (method GET, name=q) so results cover
   // the whole table, while the inline script keeps filtering rendered rows as

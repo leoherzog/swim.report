@@ -1,4 +1,4 @@
-import { renderListPage, renderDetailPage, renderErrorPage, markerFlagFields } from "./frontend/render.js";
+import { renderListPage, renderDetailPage, renderErrorPage, markerFlagColor } from "./frontend/render.js";
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 
@@ -7,7 +7,6 @@ import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 export { distanceMi };
 
 const HOME_LIST_LIMIT = 100;
-const API_BEACHES_LIMIT = 500;
 // When sorting by proximity we need every candidate row before slicing to
 // HOME_LIST_LIMIT, so the fetch bound is wider than the display bound.
 const HOME_GEO_FETCH_LIMIT = 500;
@@ -103,27 +102,6 @@ function touchLastViewed(env, ctx, beach) {
         console.log("router: last_viewed stamp failed for " + beach.id + ": " + err.message);
       })
   );
-}
-
-function parseBbox(bboxParam) {
-  if (!bboxParam) {
-    return null;
-  }
-  const parts = bboxParam.split(",");
-  if (parts.length !== 4) {
-    return null;
-  }
-  const nums = parts.map(function (p) { return Number(p); });
-  for (const n of nums) {
-    if (!Number.isFinite(n)) {
-      return null;
-    }
-  }
-  const bbox = { minLon: nums[0], minLat: nums[1], maxLon: nums[2], maxLat: nums[3] };
-  if (bbox.minLon >= bbox.maxLon || bbox.minLat >= bbox.maxLat) {
-    return null;
-  }
-  return bbox;
 }
 
 async function readFlagAndOfficial(env, beachId) {
@@ -273,38 +251,72 @@ async function handleDetail(env, ctx, beachId) {
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
 }
 
-async function handleApiBeaches(env, url) {
-  const bboxParam = url.searchParams.get("bbox");
-  const bbox = parseBbox(bboxParam);
-  if (bbox === null) {
-    return Response.json(
-      { error: "invalid bbox" },
-      { status: 400, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
-    );
-  }
+// Cacheable GeoJSON directory of EVERY flag-worthy beach (no bbox): the homepage
+// map fetches this once on load and hands it to a native MapLibre clustered
+// GeoJSON source. Location-independent (no request.cf, no bbox) so it is fully
+// cacheable. Reads only D1 + KV — the two-path rule holds. Each feature is a
+// Point [lon, lat] (GeoJSON coordinate order) carrying { id, name, flag } where
+// flag is the collapsed color keyword (green|yellow|red|unknown, double-red →
+// red) the browser keys its icon tint off. Beaches with non-finite coordinates
+// are skipped so no NaN coordinate is ever emitted. No LIMIT: the full
+// flag-worthy set (~613 today) is a few hundred KB and the 60 s edge cache
+// absorbs the cost; a server-clustering / paging story is needed before the
+// 10k–100k North America scaling target (see PLAN.md / TODO.md).
+async function handleBeachesGeojson(env) {
   const result = await env.DB.prepare(
-    "SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 " +
-    "AND lat >= ?2 AND lat <= ?4 AND " + FLAG_WORTHY_WATER_SQL +
-    " LIMIT " + String(API_BEACHES_LIMIT)
-  ).bind(bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat).all();
+    "SELECT id, name, park_name, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL
+  ).all();
   const rows = result.results || [];
-  // Attach the map-marker flag color + label so the homepage map can render
-  // correctly-tinted markers for beaches panned into view — same shape and
-  // color rule (markerFlagFields) as the server-embedded initial markers. The
-  // existing BeachRow fields are preserved; iconClass/label are additive.
-  await attachMarkerFlags(env, rows);
-  return Response.json(
-    { beaches: rows },
-    { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
-  );
+  // Drop non-finite-coordinate rows BEFORE the KV flag reads: only finite-coord
+  // rows become features, so filtering first means attachFeatureFlags never
+  // spends a bulk-get key on a row that would be discarded anyway.
+  const finite = [];
+  for (let i = 0; i < rows.length; i = i + 1) {
+    const row = rows[i];
+    const lat = (row.lat === null || row.lat === undefined) ? NaN : Number(row.lat);
+    const lon = (row.lon === null || row.lon === undefined) ? NaN : Number(row.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      continue;
+    }
+    row.lat = lat;
+    row.lon = lon;
+    finite.push(row);
+  }
+  await attachFeatureFlags(env, finite);
+  const features = [];
+  for (let i = 0; i < finite.length; i = i + 1) {
+    const row = finite[i];
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [row.lon, row.lat] },
+      properties: {
+        id: row.id,
+        // Retained for a possible future hover/popup label; the current
+        // clustered-map client does not read it.
+        name: row.park_name || row.name || "",
+        flag: row.flag
+      }
+    });
+  }
+  // application/geo+json is the RFC 7946 media type (the client sends a matching
+  // Accept). Build the Response by hand so the content-type is set while keeping
+  // the same cacheable policy the other request-path routes use.
+  const body = JSON.stringify({ type: "FeatureCollection", features: features });
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "application/geo+json; charset=utf-8",
+      "cache-control": CACHE_CONTROL_CACHEABLE
+    }
+  });
 }
 
-// Bulk-reads flag:/official: KV for every row and stamps iconClass + label onto
-// it in place. Chunked to the 100-key bulk-get ceiling (the same limit the home
-// list caps its rows to); the /api/beaches SELECT caps at 500, so at most five
-// chunks per key family, all read in parallel. A missing/expired KV value maps
-// to the honest "unknown" marker, never a green default.
-async function attachMarkerFlags(env, rows) {
+// Bulk-reads flag:/official: KV for every row and stamps the collapsed color
+// keyword onto row.flag in place. Chunked to the 100-key bulk-get ceiling and
+// read in parallel; with the full flag-worthy directory (~613 rows today) that
+// is ~7 chunks per key family, scaling linearly with row count. A missing or
+// expired KV value maps to the honest "unknown" keyword, never a green default.
+async function attachFeatureFlags(env, rows) {
   if (!rows || rows.length === 0) {
     return;
   }
@@ -328,9 +340,7 @@ async function attachMarkerFlags(env, rows) {
       const row = chunk[j];
       const estimate = flagMap.get("flag:" + row.id) || null;
       const official = officialMap.get("official:" + row.id) || null;
-      const fields = markerFlagFields(estimate, official);
-      row.iconClass = fields.iconClass;
-      row.label = fields.label;
+      row.flag = markerFlagColor(estimate, official);
     }
   }
 }
@@ -384,8 +394,8 @@ export async function handleRequest(request, env, ctx) {
     );
   }
 
-  if (path === "/api/beaches") {
-    return handleApiBeaches(env, url);
+  if (path === "/api/beaches.geojson") {
+    return handleBeachesGeojson(env);
   }
 
   const flagMatch = path.match(/^\/api\/flag\/([^/]+)$/);

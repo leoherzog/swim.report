@@ -42,49 +42,48 @@ from D1 (beach directory) and KV (flag estimates / official readings), which are
 fresh by scheduled cron jobs (see [Cron jobs](#cron-jobs) below — the hourly recompute
 and a 6-hourly wave refresh).
 
-### `GET /api/beaches?bbox=minLon,minLat,maxLon,maxLat`
+### `GET /api/beaches.geojson`
 
-Returns beaches from the D1 directory inside the given bounding box. `bbox` is
-required: exactly four comma-separated finite numbers, with `minLon < maxLon` and
-`minLat < maxLat`. Results exclude confirmed-inland beaches (only ocean / Great
-Lakes rows are returned; still-unclassified rows remain visible during backfill).
+Returns a GeoJSON `FeatureCollection` of **every** flag-worthy beach in the D1
+directory (no bounding box, no parameters). Results exclude confirmed-inland
+beaches (only ocean / Great Lakes rows are returned; still-unclassified rows remain
+visible during backfill). The response is location-independent and cacheable, so
+the homepage map fetches it once on load and hands it to a native MapLibre
+clustered GeoJSON source (count bubbles that expand on click, individual flag icons
+at high zoom).
 
 Example request:
 
-    GET /api/beaches?bbox=-86.32,42.35,-86.24,42.45
+    GET /api/beaches.geojson
 
 Example response:
 
     {
-      "beaches": [
+      "type": "FeatureCollection",
+      "features": [
         {
-          "id": "osm-node-123456",
-          "name": "South Beach",
-          "park_name": null,
-          "lat": 42.401,
-          "lon": -86.288,
-          "nws_zone": "MIZ071",
-          "osm_id": "node/123456",
-          "iconClass": "flag-icon-green",
-          "label": "Green flag"
+          "type": "Feature",
+          "geometry": { "type": "Point", "coordinates": [-86.288, 42.401] },
+          "properties": {
+            "id": "osm-node-123456",
+            "name": "Holland State Park",
+            "flag": "green"
+          }
         }
       ]
     }
 
-`park_name` is the containing park from OpenStreetMap (e.g. `"Holland State Park"`
-for the beach named `"Ottawa Beach"`), or `null` when the beach is not inside any
-named park. The UI titles such beaches by park name with the beach's own name as a
-subtitle.
+Each feature's geometry is a `Point` in GeoJSON `[longitude, latitude]` order
+(note: lon first). `properties.name` is the beach's display name — the containing
+park name from OpenStreetMap when the beach sits inside a named park (e.g.
+`"Holland State Park"` for the beach named `"Ottawa Beach"`), otherwise the beach's
+own name.
 
-`iconClass` and `label` are the map-marker flag color class and accessible label
-for the beach's current best-known status (a scraped official reading wins over the
-estimate, which wins over `unknown`; a missing or expired reading maps to
-`flag-icon-unknown` / `"Flag status unknown"`, never a green default). The homepage
-map uses these to render correctly-tinted markers for beaches panned into view.
-
-Invalid or missing `bbox` returns `400`:
-
-    { "error": "invalid bbox" }
+`properties.flag` is the beach's current best-known flag color as a keyword — one
+of `green`, `yellow`, `red`, or `unknown` (a scraped official reading wins over the
+estimate, which wins over `unknown`; `double-red` collapses to `red`; a missing or
+expired reading maps to `unknown`, never a green default). The map keys each flag
+icon's tint off this value. Beaches with non-finite coordinates are omitted.
 
 ### `GET /api/flag/:beachId`
 
@@ -194,7 +193,9 @@ scraper](#how-to-add-a-new-official-source-scraper) for the `staleMs` / `reading
 fields behind this. The wave forecast strip has its own separate 8 hour threshold,
 since the marine models only publish every 6–12 hours.
 
-All `/api/*` responses set `content-type: application/json`; HTML responses set
+All `/api/*` responses set `content-type: application/json` — except
+`GET /api/beaches.geojson`, which sends the RFC 7946 GeoJSON media type
+`content-type: application/geo+json; charset=utf-8`; HTML responses set
 `content-type: text/html; charset=utf-8`. Responses are cached at Cloudflare's edge
 (Workers Cache, `[cache]` in `wrangler.toml`) under an explicit per-route policy:
 successful API and beach-detail responses send
@@ -348,7 +349,7 @@ runs everything against local simulated storage regardless of those IDs. The loc
 database starts **empty** — populate it explicitly (see the seed steps below).
 
 Then visit `http://localhost:8787/health`, `http://localhost:8787/`, and
-`http://localhost:8787/api/beaches?bbox=-87.6,41.6,-82.3,46.6`.
+`http://localhost:8787/api/beaches.geojson`.
 
 Run tests (pure functions only, no network, no Workers runtime):
 

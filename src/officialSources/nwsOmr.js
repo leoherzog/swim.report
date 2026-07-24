@@ -2,7 +2,7 @@
 //
 // KIND: official HAZARD scraper (contract v2, per-beach resolution). An
 // official color OVERRIDES the estimate everywhere it is shown
-// (render.js markerFlagFields / titleColor). This source is admissible here
+// (render.js markerFlagColor / titleColor). This source is admissible here
 // because it reports POSTED LIFEGUARD FLAG COLORS — the gold-standard hazard
 // axis, exactly what src/rules.js estimates.
 //

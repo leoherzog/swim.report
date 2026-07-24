@@ -11,9 +11,9 @@
 // invariants: the #beach-list-empty and #list-active-query nodes are updated by
 // reference (innerHTML + style), NEVER replaced — searchScript.js captured
 // #beach-list-empty at load, and replacing the node would strand that
-// reference. The #home-map node and its data tag are deliberately NOT touched
-// here; the map has its own live MapLibre instance and its callers update it
-// (or leave it alone) as appropriate.
+// reference. The #home-map node is deliberately NOT touched here; the map has
+// its own live MapLibre instance and its callers update it (its data-center
+// attribute) or leave it alone as appropriate.
 //
 // window.__swimReportSwapList(doc) applies doc's #beach-list-items,
 // #beach-list-empty (content + inline style), and #list-active-query (the

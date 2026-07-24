@@ -367,19 +367,6 @@ const RULES = [
   "  height: 20rem;",
   "  overflow: hidden;",
   "}",
-  // Flag marker: an anchor carrying a flag-icon-* color class; its <wa-icon>
-  // sizes to 1em (so font-size sets the marker size) and inherits the color via
-  // currentColor. Drop-shadow keeps the flag legible over the light positron
-  // tiles; a CSS filter on the wa-icon host reaches its shadow-DOM svg.
-  ".home-map-marker {",
-  "  display: block;",
-  "  line-height: 0;",
-  "  font-size: 1.5rem;",
-  "}",
-  ".home-map-marker wa-icon {",
-  "  display: block;",
-  "  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));",
-  "}",
 
   // Screen-reader-only content (the geolocation live region): visually removed
   // via the standard clip pattern but still announced by assistive tech.

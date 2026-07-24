@@ -647,7 +647,7 @@ async function runFlagRecompute(env) {
         // render a distinct water-quality callout. Written ONLY when non-null;
         // a clean reading writes nothing, so the key expires naturally (exactly
         // like "official:"). NOT an official override — never feeds
-        // markerFlagFields / titleColor.
+        // markerFlagColor / titleColor.
         if (waterQualityAdvisory !== null) {
           await env.FLAGS.put(
             "wqfloor:" + beach.id,

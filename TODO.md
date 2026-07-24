@@ -464,8 +464,12 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
   (`ORDER BY COALESCE(park_name, name), name LIMIT 100`) with no pagination
   controls or `?page=` param (the server-side `?q=` search is the way to reach
   beaches past the cap). Fine while the pilot region has well under 100 named
-  beaches; needs real pagination (or a map-based `/api/beaches?bbox=` client
-  view) once nationwide scale-out lands.
+  beaches; needs real pagination once nationwide scale-out lands. (The homepage
+  map is already the whole-directory view: it fetches every flag-worthy beach
+  once from the cacheable `GET /api/beaches.geojson` and renders them via native
+  MapLibre clustering — no per-viewport paging. That single-fetch model is
+  comfortable to ~5–10k features; beyond that the GeoJSON endpoint itself needs
+  server-side clustering / tiling before the 10k–100k North America target.)
 
 ## Explicitly deferred by PLAN.md (not gaps, just out of scope for this pass)
 

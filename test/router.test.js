@@ -178,10 +178,13 @@ describe("flag-worthy water gate", () => {
     expect(statements[0].sql).toContain(" AND " + "(water_class IN ('ocean','great_lake')");
   });
 
-  it("ANDs the gate into the /api/beaches bbox SELECT", async () => {
+  it("ANDs the gate into the /api/beaches.geojson SELECT (no bbox predicate)", async () => {
     const { env, statements } = makeEnv([]);
-    await handleRequest(getRequest("/api/beaches?bbox=-87,41,-82,47"), env);
+    await handleRequest(getRequest("/api/beaches.geojson"), env);
     expect(statements[0].sql).toContain(GATE);
+    // The full-directory read has no bbox range predicate and no LIMIT.
+    expect(statements[0].sql).not.toContain("lon >=");
+    expect(statements[0].sql).not.toContain("LIMIT");
   });
 
   it("404s the detail page for a confirmed-inland beach", async () => {
@@ -718,7 +721,7 @@ describe("cache-control policy (Workers Cache)", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("marks /api/flag and /api/beaches cacheable, /api/flag 404 max-age only", async () => {
+  it("marks /api/flag and /api/beaches.geojson cacheable, /api/flag 404 max-age only", async () => {
     const found = viewEnv(beach);
     const flagRes = await handleRequest(getRequest("/api/flag/b-1"), found.env);
     expect(flagRes.headers.get("cache-control")).toBe(CACHEABLE);
@@ -728,16 +731,16 @@ describe("cache-control policy (Workers Cache)", () => {
     expect(flag404.status).toBe(404);
     expect(flag404.headers.get("cache-control")).toBe("public, max-age=60");
 
-    const bboxRes = await handleRequest(
-      getRequest("/api/beaches?bbox=-87,41,-82,47"), viewEnv(beach).env
+    const geoRes = await handleRequest(
+      getRequest("/api/beaches.geojson"), viewEnv(beach).env
     );
-    expect(bboxRes.headers.get("cache-control")).toBe(CACHEABLE);
+    expect(geoRes.headers.get("cache-control")).toBe(CACHEABLE);
+    expect(geoRes.headers.get("content-type")).toContain("application/geo+json");
   });
 
-  it("never caches /health, invalid bbox, or generic 404s", async () => {
+  it("never caches /health or generic 404s", async () => {
     const { env } = viewEnv(beach);
     expect((await handleRequest(getRequest("/health"), env)).headers.get("cache-control")).toBe("no-store");
-    expect((await handleRequest(getRequest("/api/beaches?bbox=bad"), env)).headers.get("cache-control")).toBe("no-store");
     expect((await handleRequest(getRequest("/api/nope"), env)).headers.get("cache-control")).toBe("no-store");
     expect((await handleRequest(getRequest("/nope"), env)).headers.get("cache-control")).toBe("no-store");
   });
@@ -805,7 +808,7 @@ describe("last_viewed demand stamping", () => {
 
 // ---------------------------------------------------------------------------
 // Appended coverage: worker entrypoint (error boundary + cron dispatch),
-// router guards (405, bbox validation, proximity ordering), and render.js
+// router guards (405, proximity ordering), and render.js
 // invariants (stale warnings, honest unknown, double-red, footer disclaimer,
 // source labels, escapeHtml, formatMiles, search-script id contract).
 // ---------------------------------------------------------------------------
@@ -886,7 +889,7 @@ describe("default fetch export: request-path error boundary", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
     try {
       const res = await worker.fetch(
-        getRequest("/api/beaches?bbox=-87,41,-82,47"), throwingEnv(), makeCtx()
+        getRequest("/api/beaches.geojson"), throwingEnv(), makeCtx()
       );
       expect(res.status).toBe(500);
       expect(res.headers.get("cache-control")).toBe("no-store");
@@ -931,7 +934,7 @@ describe("default scheduled export: cron dispatch", () => {
   });
 });
 
-describe("router guards: method and bbox validation", () => {
+describe("router guards: method validation", () => {
   it("rejects non-GET requests with a 405 text/plain body", async () => {
     const { env } = viewEnv(null);
     const res = await handleRequest({ method: "POST", url: "https://swim.report/", cf: {} }, env);
@@ -939,39 +942,9 @@ describe("router guards: method and bbox validation", () => {
     expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(await res.text()).toBe("Method not allowed");
   });
-
-  async function expectInvalidBbox(bbox) {
-    const { env, statements } = makeEnv([]);
-    const res = await handleRequest(getRequest("/api/beaches?bbox=" + bbox), env);
-    expect(res.status).toBe(400);
-    expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(await res.json()).toEqual({ error: "invalid bbox" });
-    // Rejected before any D1 query is built.
-    expect(statements.length).toBe(0);
-  }
-
-  it("400s a bbox with a non-finite part", async () => {
-    await expectInvalidBbox("-87,foo,-82,47");
-  });
-
-  it("400s an inverted-longitude bbox (minLon >= maxLon)", async () => {
-    await expectInvalidBbox("-82,41,-87,47");
-  });
-
-  it("400s inverted and degenerate latitude bboxes", async () => {
-    await expectInvalidBbox("-87,47,-82,41");
-    await expectInvalidBbox("-87,41,-82,41");
-  });
-
-  it("binds a valid bbox in (minLon, minLat, maxLon, maxLat) order", async () => {
-    const { env, statements } = makeEnv([]);
-    const res = await handleRequest(getRequest("/api/beaches?bbox=-87,41,-82,47"), env);
-    expect(res.status).toBe(200);
-    expect(statements[0].params).toEqual([-87, 41, -82, 47]);
-  });
 });
 
-describe("/api/beaches marker flag fields (viewport pan-to-load)", () => {
+describe("GET /api/beaches.geojson (clustered map directory)", () => {
   // Bulk-get KV stub: resolves each requested key from a fixed color map,
   // matching the Workers binding's Map return for an array of keys.
   function flagsFrom(colors) {
@@ -987,45 +960,161 @@ describe("/api/beaches marker flag fields (viewport pan-to-load)", () => {
     };
   }
 
-  function bbox(env) {
-    return handleRequest(getRequest("/api/beaches?bbox=-87,41,-82,47"), env);
+  function geojson(env) {
+    return handleRequest(getRequest("/api/beaches.geojson"), env);
   }
 
-  it("stamps iconClass + label, official color winning over the estimate", async () => {
+  it("returns a FeatureCollection of Point features in [lon, lat] order", async () => {
+    const rows = [{ id: "b1", name: "One", park_name: null, lat: 42, lon: -86 }];
+    const { env } = makeEnv(rows, nullFlags());
+    const res = await geojson(env);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.type).toBe("FeatureCollection");
+    expect(Array.isArray(body.features)).toBe(true);
+    const f = body.features[0];
+    expect(f.type).toBe("Feature");
+    expect(f.geometry.type).toBe("Point");
+    // GeoJSON coordinate order is [lon, lat], NOT [lat, lon].
+    expect(f.geometry.coordinates).toEqual([-86, 42]);
+    expect(f.properties.id).toBe("b1");
+    expect(f.properties.name).toBe("One");
+  });
+
+  it("uses park_name over name for the feature label", async () => {
+    const rows = [{ id: "b1", name: "Inner Beach", park_name: "Big Park", lat: 42, lon: -86 }];
+    const { env } = makeEnv(rows, nullFlags());
+    const body = await (await geojson(env)).json();
+    expect(body.features[0].properties.name).toBe("Big Park");
+  });
+
+  it("excludes beaches with non-finite coordinates", async () => {
     const rows = [
-      { id: "b1", name: "One", park_name: null, lat: 42, lon: -86, nws_zone: "MIZ1", osm_id: "way/1" },
-      { id: "b2", name: "Two", park_name: null, lat: 43, lon: -85, nws_zone: "MIZ2", osm_id: "way/2" }
+      { id: "good", name: "Good", park_name: null, lat: 42, lon: -86 },
+      { id: "nulllat", name: "Null Lat", park_name: null, lat: null, lon: -86 },
+      { id: "badlon", name: "Bad Lon", park_name: null, lat: 42, lon: "nope" }
+    ];
+    const { env } = makeEnv(rows, nullFlags());
+    const body = await (await geojson(env)).json();
+    const ids = body.features.map(function (f) { return f.properties.id; });
+    expect(ids).toEqual(["good"]);
+  });
+
+  it("carries the cacheable header and the geo+json content type", async () => {
+    const { env } = makeEnv([{ id: "b1", name: "One", park_name: null, lat: 42, lon: -86 }], nullFlags());
+    const res = await geojson(env);
+    expect(res.headers.get("cache-control")).toBe(CACHEABLE);
+    expect(res.headers.get("content-type")).toContain("application/geo+json");
+  });
+
+  it("reads flag:/official: KV in bulk (Map) not per-beach single gets", async () => {
+    // A stub that ONLY answers array (bulk) gets; a single-key get returns
+    // undefined, so a per-beach two-key read path would surface as unknown-only
+    // AND prove the endpoint never uses the single-key form. Here we assert the
+    // bulk Map is consulted by returning real colors only through the array path.
+    const rows = [{ id: "b1", name: "One", park_name: null, lat: 42, lon: -86 }];
+    let sawArray = false;
+    const flags = {
+      get: function (key) {
+        if (Array.isArray(key)) {
+          sawArray = true;
+          return Promise.resolve(new Map(key.map(function (k) {
+            return [k, k === "flag:b1" ? { color: "green" } : null];
+          })));
+        }
+        return Promise.resolve(null);
+      }
+    };
+    const body = await (await geojson({ DB: makeEnv(rows).env.DB, FLAGS: flags })).json();
+    expect(sawArray).toBe(true);
+    expect(body.features[0].properties.flag).toBe("green");
+  });
+
+  it("stamps the flag keyword: official wins over estimate", async () => {
+    const rows = [
+      { id: "b1", name: "One", park_name: null, lat: 42, lon: -86 },
+      { id: "b2", name: "Two", park_name: null, lat: 43, lon: -85 }
     ];
     const { env } = makeEnv(rows, flagsFrom({
       "flag:b1": { color: "yellow" },
       "official:b1": { color: "red" },
       "flag:b2": { color: "green" }
     }));
-    const body = await (await bbox(env)).json();
-    // Official red beats the yellow estimate.
-    expect(body.beaches[0].iconClass).toBe("flag-icon-red");
-    expect(body.beaches[0].label).toBe("Red flag");
-    // Estimate green with no official reading.
-    expect(body.beaches[1].iconClass).toBe("flag-icon-green");
-    expect(body.beaches[1].label).toBe("Green flag");
-    // Existing BeachRow fields are preserved alongside the additive marker fields.
-    expect(body.beaches[0].osm_id).toBe("way/1");
+    const body = await (await geojson(env)).json();
+    const byId = {};
+    body.features.forEach(function (f) { byId[f.properties.id] = f.properties.flag; });
+    // Official red beats the yellow estimate; b2 keeps its green estimate.
+    expect(byId.b1).toBe("red");
+    expect(byId.b2).toBe("green");
   });
 
-  it("tints double-red as the red class with a double-red label", async () => {
-    const rows = [{ id: "dr", name: "DR", park_name: null, lat: 42, lon: -86, nws_zone: null, osm_id: "way/9" }];
+  it("collapses double-red to the red keyword", async () => {
+    const rows = [{ id: "dr", name: "DR", park_name: null, lat: 42, lon: -86 }];
     const { env } = makeEnv(rows, flagsFrom({ "official:dr": { color: "double-red" } }));
-    const body = await (await bbox(env)).json();
-    expect(body.beaches[0].iconClass).toBe("flag-icon-red");
-    expect(body.beaches[0].label).toBe("Double red flags");
+    const body = await (await geojson(env)).json();
+    expect(body.features[0].properties.flag).toBe("red");
   });
 
-  it("maps a beach with no cached flag to the honest unknown marker", async () => {
-    const rows = [{ id: "b3", name: "Three", park_name: null, lat: 42, lon: -86, nws_zone: null, osm_id: "way/3" }];
+  it("maps a beach with no cached flag to the honest unknown keyword", async () => {
+    const rows = [{ id: "b3", name: "Three", park_name: null, lat: 42, lon: -86 }];
     const { env } = makeEnv(rows, nullFlags());
-    const body = await (await bbox(env)).json();
-    expect(body.beaches[0].iconClass).toBe("flag-icon-unknown");
-    expect(body.beaches[0].label).toBe("Flag status unknown");
+    const body = await (await geojson(env)).json();
+    expect(body.features[0].properties.flag).toBe("unknown");
+  });
+
+  it("normalizes a garbage official color to the unknown keyword", async () => {
+    const rows = [{ id: "b4", name: "Four", park_name: null, lat: 42, lon: -86 }];
+    const { env } = makeEnv(rows, flagsFrom({ "official:b4": { color: "magenta" } }));
+    const body = await (await geojson(env)).json();
+    expect(body.features[0].properties.flag).toBe("unknown");
+  });
+
+  it("chunks KV bulk-gets to <=100 keys and maps colors across chunk boundaries", async () => {
+    // 250 rows force multiple chunks per key family (flag:/official:), each
+    // capped at the 100-key bulk-get ceiling. Distinct official colors on rows
+    // that straddle chunk edges (b99->b100 crosses the first edge; b201 is deep
+    // in the third chunk) prove the per-chunk index math lands each color on the
+    // right feature.
+    const rows = [];
+    for (let i = 0; i < 250; i = i + 1) {
+      rows.push({ id: "b" + i, name: "B" + i, park_name: null, lat: 42, lon: -86 });
+    }
+    const colors = {
+      "official:b0": { color: "green" },
+      "official:b99": { color: "yellow" },
+      "official:b100": { color: "red" },
+      "official:b201": { color: "double-red" }
+    };
+    const keyLengths = [];
+    const flags = {
+      get: function (key) {
+        if (Array.isArray(key)) {
+          keyLengths.push(key.length);
+          return Promise.resolve(new Map(key.map(function (k) {
+            return [k, colors[k] || null];
+          })));
+        }
+        return Promise.resolve(null);
+      }
+    };
+    const { env } = makeEnv(rows, flags);
+    const body = await (await geojson(env)).json();
+    // Every bulk-get key array stayed within the 100-key ceiling (and the
+    // endpoint did use the bulk array form, not per-beach single gets).
+    expect(keyLengths.length).toBeGreaterThan(0);
+    keyLengths.forEach(function (len) { expect(len).toBeLessThanOrEqual(100); });
+    // All 250 finite-coord rows became features, one per row.
+    expect(body.features.length).toBe(250);
+    const byId = {};
+    body.features.forEach(function (f) { byId[f.properties.id] = f.properties.flag; });
+    // Colors land on the correct rows across chunk boundaries; double-red
+    // collapses to red; rows with no cached flag stay the honest unknown.
+    expect(byId.b0).toBe("green");
+    expect(byId.b99).toBe("yellow");
+    expect(byId.b100).toBe("red");
+    expect(byId.b201).toBe("red");
+    expect(byId.b1).toBe("unknown");
+    expect(byId.b249).toBe("unknown");
   });
 });
 
@@ -1273,17 +1362,6 @@ describe("unrecognized flag colors normalize to unknown (corrupt-KV guard)", () 
     expect(card).toContain("flag-icon-unknown");
     expect(card).toContain(">UNKNOWN</span>");
     expect(card).not.toContain("flag-icon-green");
-  });
-
-  it("normalizes a garbage official color in the home-map marker JSON", () => {
-    const html = renderListPage({
-      entries: [{ beach: OVAL, estimate: null, official: { color: "magenta" }, distanceMi: null }],
-      nowIso: NOW_ISO
-    });
-    const markerJson = sliceBetween(html,
-      "<script type=\"application/json\" id=\"home-map-data\">", "</script>");
-    expect(markerJson).toContain("\"iconClass\":\"flag-icon-unknown\"");
-    expect(markerJson).toContain("\"label\":\"Flag status unknown\"");
   });
 });
 

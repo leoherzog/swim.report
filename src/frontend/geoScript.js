@@ -9,14 +9,15 @@
 // swap in the server-rendered pieces the location changes — the beach rows
 // (the nearest-100 SET can differ, not just its order, so the server must
 // re-select), the empty-state block, the "clear search" link, and the home-map
-// marker JSON + center attributes — then rewrite the URL with
+// container's data-center attribute — then rewrite the URL with
 // history.replaceState so refreshes, copied links, and search submits keep the
 // proximity sort. A hidden "near" input is appended to the search form for the
 // same reason. After the swap a "swimreport:nearupdate" CustomEvent tells the
-// already-running map script (mapScript.js) to re-center and rebuild its
-// markers, and a polite aria-live region announces the reorder to screen
-// readers. All rendering stays server-side (render.js string builders); this
-// script only moves finished HTML.
+// already-running map script (mapScript.js) to re-read the updated data-center
+// and ease over — a pure re-center, since its GeoJSON source already holds every
+// beach (nothing is refetched or rebuilt) — and a polite aria-live region
+// announces the reorder to screen readers. All rendering stays server-side
+// (render.js string builders); this script only moves finished HTML.
 //
 // Everything degrades silently to the existing IP-based ordering: no
 // geolocation API, an insecure context, a denied prompt, or a timeout leave the
@@ -82,15 +83,11 @@ const SCRIPT_LINES = [
   "        hidden.value = params.get('near');",
   "        form.appendChild(hidden);",
   "      }",
-  // Refresh the map's data in place: new marker JSON into the (same, cached-
-  // by-reference) #home-map-data tag, new center onto the container, then the
-  // CustomEvent below tells mapScript.js to re-read both. The #home-map node
-  // itself is never replaced — that would destroy the live MapLibre instance.
-  "      const nextMapData = doc.getElementById('home-map-data');",
-  "      const currentMapData = document.getElementById('home-map-data');",
-  "      if (nextMapData && currentMapData) {",
-  "        currentMapData.textContent = nextMapData.textContent;",
-  "      }",
+  // Refresh the map's center in place: copy the new data-center onto the (same,
+  // never-replaced) #home-map container, then the CustomEvent below tells
+  // mapScript.js to re-read it and ease over. The #home-map node itself is never
+  // replaced — that would destroy the live MapLibre instance — and the source
+  // already holds every beach, so nothing is refetched or rebuilt.
   "      const nextMap = doc.getElementById('home-map');",
   "      const currentMap = document.getElementById('home-map');",
   "      if (nextMap && currentMap) {",

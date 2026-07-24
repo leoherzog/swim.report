@@ -278,7 +278,7 @@ Written by the hourly cron (runFlagRecompute, section 7 step 6) with { expiratio
 ONLY when a src/wqFloor source resolved an ACTIVE advisory for the beach — a clean/absent
 reading writes NOTHING (the key expires naturally, exactly like "official:"). This is a
 RAISE-ONLY floor baked INTO the estimate (rules.js step 7, official:false); it is NEVER an
-official override and NEVER feeds render.js markerFlagFields / titleColor. The request path
+official override and NEVER feeds render.js markerFlagColor / titleColor. The request path
 reads it to render a distinct water-quality callout. See section 6 (src/wqFloor registry) and
 section 4 (estimateFlag's waterQualityAdvisory input + step 7).
 
@@ -419,7 +419,9 @@ migrations/0009_water_class.sql:
   feature. No index: every gate query already range-scans on other predicates,
   and the classification-cron selection is a small LIMITed scan.
 
-- idx_beaches_lon_lat serves the bbox query (range scan on lon, filter lat).
+- idx_beaches_lon_lat is retained for discovery/reconciliation spatial scans;
+  the removed bbox map endpoint no longer range-scans on it (the GeoJSON map
+  endpoint does a full flag-worthy-gated scan with no lon/lat predicate).
 - sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
   key "last_overpass_count" (value = String(count)).
 - Beach id derivation (done in the sync code in src/index.js):
@@ -1774,7 +1776,7 @@ ANY failure, and ambiguous / stale / unrecognized-status sites OMITTED (never a
 guessed color). Full color semantics are in README.md's official-sources table.
 
 REGISTRY SCOPE — hazard/flag/closure sources only. An official color OVERRIDES
-the estimate everywhere it is shown (render.js markerFlagFields / titleColor), so
+the estimate everywhere it is shown (render.js markerFlagColor / titleColor), so
 water-quality (E. coli / bacteria) monitoring sources are NOT registered: a
 clean-water "green" is a different axis from surf hazard and would mask a genuine
 hazard estimate (e.g. a gale-driven red). Six such water-quality scrapers were
@@ -2052,7 +2054,7 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    env.FLAGS.put("wqfloor:" + beach.id, JSON.stringify(waterQualityAdvisory),
    { expirationTtl: 7200 }) for the request path's water-quality callout (WqFloorAdvisory,
    section 1/3) — a clean reading writes nothing, so the key expires naturally. This is NOT
-   an official override (never feeds markerFlagFields / titleColor).
+   an official override (never feeds markerFlagColor / titleColor).
    The "waves:" WaveSeries is NOT written here — the wave cron owns it (see runWaveRefresh).
 8. Officials: group beaches by findScraper(beach) id; call each distinct scraper's
    scrape(nowIso) ONCE per run; for every matched beach resolve the shared result via
@@ -2583,7 +2585,7 @@ confirmed keepers PLUS still-pending unclassified rows and hides confirmed inlan
 parked-unresolved. During backfill a still-pending NULL row stays visible so the live
 site is never blanked; post-backfill no pending NULLs remain and the clause collapses to
 the pure "water_class IN ('ocean','great_lake')" state with no second code change. Applied
-at: buildHomeStatement (home list, both branches + ?q=), handleApiBeaches (map bbox),
+at: buildHomeStatement (home list, both branches + ?q=), handleBeachesGeojson (map directory),
 runFlagRecompute, runWaveRefresh, runNwsEnrichment, runEcccEnrichment, runWebcamSync
 (AND-ed into each SELECT); handleDetail and handleApiFlag use the JS mirror
 isFlagWorthyWater to 404 a non-flag-worthy row. The enrichers gate ONLY drops confirmed
@@ -2635,29 +2637,36 @@ Routing table (method GET only; anything else → 405):
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: ONE bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — 2 KV reads per page regardless of row count; HOME_LIST_LIMIT (100) is load-bearing here, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null); 404 HTML if no row |
-| GET /api/beaches?bbox=a,b,c,d | handleApiBeaches | D1: SELECT id,name,park_name,lat,lon,nws_zone,osm_id FROM beaches WHERE lon >= ?1 AND lon <= ?3 AND lat >= ?2 AND lat <= ?4 [+ flag-worthy gate] LIMIT 500. Then attachMarkerFlags: bulk KV read of flag:/official: for the returned ids (chunked to the 100-key bulk-get cap → ≤5 chunks × 2 families, read in parallel) stamps map-marker iconClass + label (markerFlagFields, same best-color rule as the embedded homepage markers; missing/expired KV → "unknown"). Powers the homepage map's viewport pan-to-load. | JSON { "beaches": [BeachRow + iconClass + label ...] } |
+| GET /api/beaches.geojson  | handleBeachesGeojson | D1: SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] — NO bbox predicate, NO LIMIT (the full flag-worthy directory, ~613 today). Then attachFeatureFlags: bulk KV read of flag:/official: for every id (chunked to the 100-key bulk-get cap → ~7 chunks × 2 families at present, read in parallel; scales linearly with row count) stamps a per-feature `flag` KEYWORD via markerFlagColor — best-color official>estimate>unknown with double-red collapsed to red, missing/expired KV → "unknown". Rows with non-finite lat/lon are skipped (no NaN coordinate). Location-independent (no request.cf, no bbox) so fully cacheable; the homepage map fetches it ONCE on load and feeds it to a native clustered GeoJSON source. Scaling beyond ~5–10k features needs server clustering / paging (see section 9 / TODO). | GeoJSON { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
 
-- bbox validation: exactly 4 comma-separated finite numbers, minLon < maxLon,
-  minLat < maxLat, else 400 JSON { "error": "invalid bbox" }. bbox param is REQUIRED.
+- /api/beaches.geojson: no query params are read (the response is the entire
+  flag-worthy set); it is not personalized and takes no bbox. The old bbox
+  viewport endpoint (handleApiBeaches / parseBbox / API_BEACHES_LIMIT) and its
+  invalid-bbox 400 were removed with the clustered-map migration.
 - /api/flag/:beachId: unknown beachId → 404 JSON { "error": "beach not found" }.
 - KV reads: env.FLAGS.get(key, { type: "json" }); null passes through as null.
-  The KV binding's bulk form is also used (handleHome only): passing an ARRAY of
-  up to 100 keys returns a Map<key, value|null>; missing keys map to null (the
+  The KV binding's bulk form is also used (handleHome and handleBeachesGeojson):
+  passing an ARRAY of up to 100 keys returns a Map<key, value|null>;
+  handleBeachesGeojson chunks the full directory into 100-key batches read in
+  parallel (attachFeatureFlags); missing keys map to null (the
   router additionally applies || null so an absent Map entry's undefined
   normalizes to null, preserving the single-get shape). Any FLAGS test double
   must implement get() for both forms: string key -> value|null, array of keys
   -> Map. handleDetail and handleApiFlag still use single-key gets
   (readFlagAndOfficial).
 - Headers: HTML "content-type": "text/html; charset=utf-8"; JSON
-  "content-type": "application/json". Every response carries an EXPLICIT
+  "content-type": "application/json" — EXCEPT /api/beaches.geojson, which sends the
+  RFC 7946 GeoJSON media type "content-type": "application/geo+json; charset=utf-8"
+  (built as a hand-rolled Response so the media type is set while keeping the same
+  cacheable policy). Every response carries an EXPLICIT
   cache-control for the Workers Cache layer ([cache] enabled in wrangler.toml —
   responses without cacheable directives are never stored, but the policy is
   spelled out anyway):
   - CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600"
-    on detail-page 200s, /api/beaches 200s, /api/flag 200s. stale-if-error is
+    on detail-page 200s, /api/beaches.geojson 200s, /api/flag 200s. stale-if-error is
     explicit because Cloudflare's default on Worker error is serve-stale-
     INDEFINITELY, which would freeze the HTML's embedded nowIso-based staleness
     warnings without bound; 600 s caps the total stale window at ~11 min.
@@ -2665,8 +2674,8 @@ Routing table (method GET only; anything else → 405):
     must stop 404ing within a minute, not linger for the SWR window.
   - "no-store" on the home page (personalized by request.cf geolocation, which is
     not in the cache key and not expressible via Vary — caching it would serve one
-    visitor's proximity sort to everyone), /health, invalid-bbox 400s, and all
-    other 404s/error pages.
+    visitor's proximity sort to everyone), /health, and all other 404s/error
+    pages.
 - last_viewed demand stamp (touchLastViewed): on a found beach, handleDetail and
   handleApiFlag issue UPDATE beaches SET last_viewed = nowIso WHERE id = ? inside
   ctx.waitUntil, only when the row's last_viewed is NULL/invalid or older than
@@ -2756,12 +2765,13 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // the server-rendered pieces in place — #beach-list-items innerHTML, the
       // #beach-list-empty block (updated IN PLACE, never replaced: the search
       // script holds it by reference), the .clear-search href, a hidden "near"
-      // input appended to #beach-search-form, and the #home-map-data JSON +
-      // #home-map data-center/data-center-precise attributes (the #home-map node
-      // itself is never replaced — the MapLibre instance stays alive) — then
-      // rewrites the URL via history.replaceState and dispatches a
-      // "swimreport:nearupdate" CustomEvent on document so LIST_MAP_SCRIPT
-      // re-centers/rebuilds, and announces the reorder into the #geo-live-region
+      // input appended to #beach-search-form, and the #home-map
+      // data-center/data-center-precise attributes (the #home-map node itself is
+      // never replaced — the MapLibre instance stays alive) — then rewrites the
+      // URL via history.replaceState and dispatches a "swimreport:nearupdate"
+      // CustomEvent on document so LIST_MAP_SCRIPT re-centers (the clustered
+      // source already holds every beach, so it is a pure re-center — no refetch,
+      // no rebuild), and announces the reorder into the #geo-live-region
       // aria-live element (rendered empty, class visually-hidden, role=status,
       // aria-live=polite, placed before the list section). The server still owns
       // the sort: the nearest-100 SET can differ from the rendered rows, so the
@@ -2771,35 +2781,42 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // (location.replace of the same URL); an existing "near" param
       // short-circuits the script, so the upgrade happens at most once and can
       // never loop.
-      // Between the intro and the search form the page embeds a home-page map:
+      // Between the intro and the search form the page embeds a home-page map
+      // MOUNT (no per-beach data — that ships from /api/beaches.geojson):
       // <section class="home-map-section"><div id="home-map"
-      // class="home-map framed-embed wa-border-radius-m"
-      // data-center="lat,lon"? data-center-precise="1|0"?></div>
-      // <script type="application/json"
-      // id="home-map-data">[{id,name,lat,lon,iconClass,label}, ...]</script>
+      // class="home-map framed-embed wa-border-radius-m" aria-hidden="true"
+      // tabindex="-1" data-center="lat,lon"? data-center-precise="1|0"?></div>
       // </section> (the container reuses the shared .framed-embed border +
       // wa-border-radius-m utility, same as the detail-page wave map / webcam).
-      // The marker JSON is entries filtered to finite lat/lon; best color =
-      // official.color else estimate.color else "unknown". iconClass is that
-      // color's tint class via the shared flagIconColorClass (double-red -> the
-      // red class) and label is FLAG_ICON_LABELS[color], both computed server-
-      // side so mapScript.js builds a <wa-icon name="flag"> marker (the same
-      // icon component the UI uses) with no icon path or color logic of its own.
+      // The map is a PURELY VISUAL supplement — the search box + results list is
+      // the complete accessible path (it covers the full flag-worthy table
+      // server-side) — so the mount is aria-hidden and out of the tab order, and
+      // there is NO landmark aria-label advertising a hidden map.
       // data-center is the router's resolved location (data.location, the same
       // {lat,lon} that sorts the list — browser "near" fix or Cloudflare IP estimate,
       // 3 dp); data-center-precise is "1" for a browser fix, "0" for the IP estimate.
       // Home-page-only (never in renderDocument's shared head): MapLibre GL JS
       // 5.24.0 + its CSS (unpkg, pinned) plus the browser-side LIST_MAP_SCRIPT
       // (src/frontend/mapScript.js) render an OpenFreeMap positron map
-      // (https://tiles.openfreemap.org/styles/positron), centered on data-center
-      // (zoom 10 when precise, else 9) else fitBounds over the markers else a
-      // Great Lakes default ([-84, 44], zoom 5), with one clickable flag
-      // <a href="/beach/<id>"> marker per beach. The script also listens for the
-      // "swimreport:nearupdate" CustomEvent on document (dispatched by
-      // LIST_GEO_SCRIPT after its in-place swap): it re-reads #home-map-data and
-      // data-center, removes the previously added markers, adds the new set, and
-      // map.easeTo()s the new center/zoom. All browser-only — the Worker
-      // request path fetches nothing upstream (section "two-path rule").
+      // (https://tiles.openfreemap.org/styles/positron) with keyboard:false and no
+      // NavigationControl (the canvas/controls are swept to tabindex -1
+      // SYNCHRONOUSLY right after the map is constructed — not on the load event —
+      // so the aria-hidden subtree never holds a focusable node, even before tiles
+      // load or if they never do). On load it fetches /api/beaches.geojson ONCE and hands the
+      // FeatureCollection to a native clustered GeoJSON source: neutral count
+      // bubbles that expand on click (getClusterExpansionZoom + easeTo) when
+      // zoomed out, and individual rasterized fa-flag icons at high zoom, each
+      // tinted by its feature `flag` keyword to the EXACT flag-icon-* palette (the
+      // WA tokens --wa-color-{green-50,yellow-70,red-50,gray-50} resolved at
+      // runtime via getComputedStyle, with the mild hexes as fallback; double-red
+      // rides in as "red"). Clicking a flag navigates to /beach/<id>. Centering:
+      // data-center (zoom 10 when precise, else 9) else fitBounds over all fetched
+      // features else a Great Lakes default ([-84, 44], zoom 5). The script also
+      // listens for the "swimreport:nearupdate" CustomEvent on document
+      // (dispatched by LIST_GEO_SCRIPT after its in-place swap): it re-reads
+      // data-center and map.easeTo()s the new center/zoom — a pure re-center,
+      // since the clustered source already holds every beach. All browser-only —
+      // the Worker request path fetches nothing upstream (section "two-path rule").
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
@@ -3186,5 +3203,5 @@ legacy defaults).
   beach inside a stubbed GeoMet polygon → ECCC red + "Environment Canada Alerts" source, no
   caveat; outside every polygon → checked-but-clear, no caveat; failed ECCC fetch behaves
   like a transient NWS alerts failure).
-- test/router.test.js — asserts handleDetail reads the "waves:" key (plus routing/bbox/
-  cache-control behavior).
+- test/router.test.js — asserts handleDetail reads the "waves:" key (plus routing, the
+  /api/beaches.geojson clustered-map endpoint, and cache-control behavior).
