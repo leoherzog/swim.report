@@ -59,7 +59,7 @@
 // floorColorForStatus, parseLakeCountyOhBeaches, and isInLakeCountyBeachSeason
 // are pure and exported for unit tests (no network).
 
-import { fetchText } from "../officialSources/util.js";
+import { fetchText, perBeachResult, matchesAnyAlias } from "../officialSources/util.js";
 
 export const LAKE_COUNTY_BEACHES_URL = "https://www.lcghd.org/beaches/";
 export const LAKE_COUNTY_LABEL = "Lake County General Health District Beach Water Quality Program";
@@ -176,14 +176,7 @@ export function parseLakeCountyOhBeaches(html, nowIso) {
   const sites = [];
   for (let i = 0; i < SITE_DEFS.length; i++) {
     const def = SITE_DEFS[i];
-    let nameFound = false;
-    for (let j = 0; j < def.names.length; j++) {
-      if (lower.indexOf(def.names[j]) !== -1) {
-        nameFound = true;
-        break;
-      }
-    }
-    if (!nameFound) {
+    if (!matchesAnyAlias(lower, def.names)) {
       continue;
     }
     recognizedAny = true;
@@ -293,13 +286,7 @@ export const lakeCountyOhBeaches = {
   // report at all.
   scrape: async function(nowIso) {
     if (!isInLakeCountyBeachSeason(nowIso)) {
-      return {
-        perBeach: true,
-        sites: [],
-        source: LAKE_COUNTY_LABEL,
-        sources: [LAKE_COUNTY_LABEL],
-        updated: nowIso
-      };
+      return perBeachResult([], LAKE_COUNTY_LABEL, nowIso);
     }
     const html = await fetchText(LAKE_COUNTY_BEACHES_URL, {
       logPrefix: "lakeCountyOhBeaches: fetch failed"
@@ -312,13 +299,7 @@ export const lakeCountyOhBeaches = {
       if (sites === null) {
         return null;
       }
-      return {
-        perBeach: true,
-        sites: sites,
-        source: LAKE_COUNTY_LABEL,
-        sources: [LAKE_COUNTY_LABEL],
-        updated: nowIso
-      };
+      return perBeachResult(sites, LAKE_COUNTY_LABEL, nowIso);
     } catch (err) {
       console.log("lakeCountyOhBeaches: parse failed: " + err.message);
       return null;

@@ -141,7 +141,9 @@ describe("handleHome ?q= search over the full table", () => {
     const stmt = statements[0];
     expect(stmt.sql).toContain("LIKE ?1 ESCAPE '\\'");
     expect(stmt.sql).toContain("LIMIT 500");
-    expect(stmt.sql).not.toContain("ORDER BY");
+    // The proximity ORDER BY makes the LIMIT slice by distance, not scan order.
+    expect(stmt.sql).toContain("ORDER BY (lat - (42.4)) * (lat - (42.4)) + ");
+    expect(stmt.sql).toContain("(lon - (-86.28)) * (lon - (-86.28)) * ");
     expect(stmt.params).toEqual(["%oval%"]);
     const html = await res.text();
     // The near param rides along in a hidden input so proximity survives submit.
@@ -404,7 +406,7 @@ describe("renderListPage geolocation script", () => {
       nowIso: "2026-07-05T12:00:00.000Z"
     });
     expect(html).toContain(
-      "<p id=\"geo-live-region\" class=\"visually-hidden\" role=\"status\" aria-live=\"polite\"></p>"
+      "<p id=\"geo-live-region\" class=\"wa-visually-hidden\" role=\"status\" aria-live=\"polite\"></p>"
     );
   });
 });
@@ -1123,7 +1125,7 @@ describe("handleHome proximity branch: in-memory distance sort", () => {
     return { id: id, name: name, park_name: null, lat: lat, lon: lon };
   }
 
-  it("fetches LIMIT 500 with no ORDER BY, then sorts rows by distance in JS", async () => {
+  it("fetches LIMIT 500 ordered by planar distance, then sorts rows by distance in JS", async () => {
     // DB order is deliberately farthest-first: only the in-memory sort can put
     // Near Beach ahead of Far Beach in the rendered page.
     const rows = [
@@ -1134,7 +1136,10 @@ describe("handleHome proximity branch: in-memory distance sort", () => {
     const res = await handleRequest(homeRequest("?near=42.4,-86.28"), env);
     expect(res.status).toBe(200);
     expect(statements[0].sql).toContain("LIMIT 500");
-    expect(statements[0].sql).not.toContain("ORDER BY");
+    // SQL narrows to the 500 NEAREST candidates; JS still decides the top-100.
+    expect(statements[0].sql).toContain(
+      "ORDER BY (lat - (42.4)) * (lat - (42.4)) + (lon - (-86.28)) * (lon - (-86.28)) * "
+    );
     const html = await res.text();
     const nearAt = html.indexOf("Near Beach");
     const farAt = html.indexOf("Far Beach");
@@ -1152,6 +1157,20 @@ describe("handleHome proximity branch: in-memory distance sort", () => {
     const res = await handleRequest(homeRequest("?near=42.4,-86.28"), env);
     const html = await res.text();
     expect(html.split("<li class=\"beach-row\"").length - 1).toBe(100);
+  });
+
+  it("never interpolates raw near text into the ORDER BY (injection guard)", async () => {
+    const hostile = "42.4);DROP TABLE beaches;--,-86.28";
+    const { env, statements } = makeEnv([rowNamed("b-1", "Oval Beach", 42.41, -86.28)]);
+    const res = await handleRequest(
+      homeRequest("?near=" + encodeURIComponent(hostile)), env
+    );
+    expect(res.status).toBe(200);
+    // resolveUserLocation rejects the value outright, so the page falls back to
+    // the alphabetical branch and no fragment of the raw text reaches SQL.
+    expect(statements[0].sql).not.toContain("DROP TABLE");
+    expect(statements[0].sql).not.toContain(";");
+    expect(statements[0].sql).toContain("ORDER BY COALESCE(park_name, name), name");
   });
 });
 

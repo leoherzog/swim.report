@@ -64,7 +64,13 @@
 // (hazard-override) — a clean/"Pass" reading here says nothing about surf
 // hazard and must never be able to produce or mask a color on its own.
 
-import { fetchText, perBeachResult } from "../officialSources/util.js";
+import {
+  fetchText,
+  perBeachResult,
+  decodeCellText,
+  extractTableRowsRaw,
+  matchesAnyAlias
+} from "../officialSources/util.js";
 
 export const GREY_BRUCE_REC_WATER_URL =
   "https://www.publichealthgreybruce.on.ca/Your-Environment/Safe-Water/Recreational-Water";
@@ -94,35 +100,13 @@ export const LAKE_HURON_SITES = [
   { siteId: "amberley-beach", names: ["amberley beach"], tableNames: ["amberley beach"] }
 ];
 
-// Pure. Decode the small set of HTML entities that commonly appear in table
-// cell text (ampersand-encoded names like "Gobles Grove", non-breaking
-// spaces used for blank cells) and strip any residual tags. Never throws.
-function decodeCellText(raw) {
-  if (typeof raw !== "string") {
-    return "";
-  }
-  return raw
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, "\"")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Pure. Extracts <td>...</td> cell texts from one <tr>...</tr> block, in
-// document order. Returns [] if no <td> cells are present (e.g. a <th>
-// header row).
-function extractCells(rowHtml) {
+// Pure. Decodes one <tr>'s raw <td> inner-HTML strings (as produced by the
+// shared extractTableRowsRaw) into cell texts, in document order. Returns []
+// for a row with no <td> cells (e.g. a <th> header row).
+function decodeCells(rawCells) {
   const cells = [];
-  const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-  let match = cellRe.exec(rowHtml);
-  while (match !== null) {
-    cells.push(decodeCellText(match[1]));
-    match = cellRe.exec(rowHtml);
+  for (let c = 0; c < rawCells.length; c++) {
+    cells.push(decodeCellText(rawCells[c]));
   }
   return cells;
 }
@@ -158,10 +142,9 @@ export function parseGreyBruceRecWaterTable(html) {
     : html.slice(tableStart, tableEndTagIdx + "</table>".length);
 
   const rows = [];
-  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let match = rowRe.exec(tableHtml);
-  while (match !== null) {
-    const cells = extractCells(match[1]);
+  const rawRows = extractTableRowsRaw(tableHtml);
+  for (let i = 0; i < rawRows.length; i++) {
+    const cells = decodeCells(rawRows[i]);
     // Header row (and any decorative rows) use <th> or have no <td> cells at
     // all; skip those without failing the whole parse.
     if (cells.length >= 5) {
@@ -182,7 +165,6 @@ export function parseGreyBruceRecWaterTable(html) {
         });
       }
     }
-    match = rowRe.exec(tableHtml);
   }
 
   if (rows.length === 0) {
@@ -229,14 +211,8 @@ export function buildGreyBruceSites(rows) {
     const curated = LAKE_HURON_SITES[i];
     let matchedRow = null;
     for (let r = 0; r < rows.length; r++) {
-      const haystack = (rows[r].beach || "").toLowerCase();
-      for (let n = 0; n < curated.tableNames.length; n++) {
-        if (haystack.indexOf(curated.tableNames[n]) !== -1) {
-          matchedRow = rows[r];
-          break;
-        }
-      }
-      if (matchedRow !== null) {
+      if (matchesAnyAlias(rows[r].beach || "", curated.tableNames)) {
+        matchedRow = rows[r];
         break;
       }
     }
@@ -278,11 +254,8 @@ export function matchesGreyBruceCoverage(beach) {
   }
   const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
   for (let i = 0; i < LAKE_HURON_SITES.length; i++) {
-    const names = LAKE_HURON_SITES[i].names;
-    for (let n = 0; n < names.length; n++) {
-      if (haystack.indexOf(names[n]) !== -1) {
-        return true;
-      }
+    if (matchesAnyAlias(haystack, LAKE_HURON_SITES[i].names)) {
+      return true;
     }
   }
   return false;

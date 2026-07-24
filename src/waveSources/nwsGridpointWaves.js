@@ -239,8 +239,3 @@ export const nwsGridpointWaveSource = {
   keyOf: keyOf,
   waveFt: waveFt
 };
-
-// Aliases so the integrator can import under either spelling used in the
-// scaffolding notes without rework.
-export { nwsGridpointWaveSource as gridpointWaveSource };
-export { nwsGridpointWaveSource as gridpointSource };

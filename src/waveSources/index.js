@@ -141,8 +141,9 @@ async function resolveSourceWaveFt(source, beach, nowIso, env, memo) {
 // wins, never additive): the memo only skips duplicate upstream fetches, since a
 // source's keyOf fully determines its waveFt result. Never throws — a source
 // that throws is isolated and treated as "no reading" so one bad upstream never
-// starves the beach or the run. With the empty registry this always returns
-// null, so runWaveRefresh behavior is unchanged.
+// starves the beach or the run. The registry holds five sources today, so this
+// walks up to five matching sources per wave-null beach; it returns null only
+// when none matched or none produced a finite reading.
 export async function resolveSupplementalWaveFt(beach, nowIso, env, memo) {
   for (let i = 0; i < waveSources.length; i++) {
     const source = waveSources[i];

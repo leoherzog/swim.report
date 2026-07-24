@@ -103,16 +103,24 @@ jobs:
       # provides the node/npx runtime.)
 
       - name: Snapshot current beaches from D1
-        # The batch job needs the current table for reconciliation deletes and to
-        # skip already-classified rows. Read-only. Guarded against a silently
+        # The batch job needs the current table for reconciliation deletes and for
+        # the offline marine_zone pass. Read-only. Guarded against a silently
         # truncated snapshot (D1's --json response is size-capped) by comparing
         # the row count to SELECT COUNT(*).
+        #
+        # Columns are the exact union of what this --no-classify run reads:
+        # reconcileStaleRows (id, name, lat, lon, park_name) + marineZoneSql
+        # (id, lat, lon, nws_zone, marine_zone). The water_class* / osm_id columns
+        # are read only by buildClassifyQueue, which is gated behind
+        # "if (args.classify)" and therefore never runs here — selecting them just
+        # inflates the response and raises the truncation risk on the ONLY
+        # delete-bearing run. classify.yml selects its own (different) column set.
         run: |
           # --json writes API errors (bad token, missing DB) to STDOUT, so a
           # naive `> snapshot.json` swallows them and the step fails with a blank
           # log. Capture the exit code and surface the file on failure.
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts, nws_zone, marine_zone FROM beaches" \
+            --command "SELECT id, name, lat, lon, park_name, nws_zone, marine_zone FROM beaches" \
             > snapshot.json; then
             echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
             cat snapshot.json

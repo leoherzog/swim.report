@@ -7,8 +7,10 @@ import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 export { distanceMi };
 
 const HOME_LIST_LIMIT = 100;
-// When sorting by proximity we need every candidate row before slicing to
-// HOME_LIST_LIMIT, so the fetch bound is wider than the display bound.
+// When sorting by proximity the fetch bound is wider than the display bound:
+// SQL orders by an approximate planar distance and this cap keeps the nearest
+// 500 of those, then the JS haversine re-sorts them and slices to
+// HOME_LIST_LIMIT. Purely a safety cap on an already-ordered read.
 const HOME_GEO_FETCH_LIMIT = 500;
 
 // Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
@@ -139,6 +141,35 @@ function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
   return hasQuery ? stmt.bind(pattern) : stmt;
 }
 
+// ORDER BY expression that puts the geographically nearest rows first so the
+// HOME_GEO_FETCH_LIMIT cap slices by DISTANCE, not by table scan order (without
+// it a visitor at the far end of the table gets a "nearest beaches" list with no
+// nearby beach in it). Planar squared distance in degrees with the longitude
+// axis scaled by cos(lat) — monotonic in true distance at this scale and cheap
+// enough for SQLite to compute per row; the JS haversine still decides the
+// rendered top-100 ordering. The three interpolated values are ALWAYS finite
+// Numbers rendered via String() (never raw request text), which is what keeps
+// this injection-safe: resolveUserLocation only ever returns Number.isFinite
+// coordinates, and the guard below re-checks before building the clause.
+// Returns null when the location is unusable, which keeps the old unordered
+// shape rather than emitting anything unsafe.
+function proximityOrderByClause(location) {
+  const lat = Number(location.lat);
+  const lon = Number(location.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  const lonScale = cosLat * cosLat;
+  if (!Number.isFinite(lonScale)) {
+    return null;
+  }
+  const dLat = "(lat - (" + String(lat) + "))";
+  const dLon = "(lon - (" + String(lon) + "))";
+  return dLat + " * " + dLat + " + " +
+    dLon + " * " + dLon + " * " + String(lonScale);
+}
+
 async function handleHome(env, location, rawQuery, nearParam) {
   const query = (typeof rawQuery === "string") ? rawQuery.trim() : "";
   const hasQuery = query.length > 0;
@@ -146,7 +177,12 @@ async function handleHome(env, location, rawQuery, nearParam) {
   let rows;
   let hasMore = false;
   if (location) {
-    const stmt = buildHomeStatement(env, hasQuery, pattern, null, HOME_GEO_FETCH_LIMIT);
+    // LIMIT stays a pure safety cap: with the proximity ORDER BY in front of it
+    // the 500 rows it keeps are the 500 NEAREST candidates, so the JS haversine
+    // below re-sorts an already-relevant set.
+    const stmt = buildHomeStatement(
+      env, hasQuery, pattern, proximityOrderByClause(location), HOME_GEO_FETCH_LIMIT
+    );
     const result = await stmt.all();
     rows = result.results || [];
     for (const beach of rows) {

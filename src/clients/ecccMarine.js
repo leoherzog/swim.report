@@ -24,9 +24,11 @@
 //   scope to Great Lakes marine warnings only (area.region.en == "Great Lakes",
 //   event category.en == "marine").
 //
-// COLOR / FLOOR MAPPING the rules layer will use (exported here as
-// MARINE_EVENT_COLOR_MAP / marineEventColor for the integrator + tests; this
-// module NEVER applies it — src/rules.js is the single source of color):
+// COLOR / FLOOR MAPPING the rules layer applies (in src/rules.js, the single
+// source of color — ECCC_ALERT_PRECEDENCE + ECCC_ALERT_COLOR_MAP for the
+// short-circuit lane and ECCC_FLOOR_PRECEDENCE for the yellow floor). Recorded
+// here only as provenance for what this collection's event names mean; this
+// module NEVER decides or exports a color:
 //     storm warning            -> double-red   (marine >=48kt; DISTINCT from the
 //                                                land "storm surge warning")
 //     gale warning             -> red
@@ -54,7 +56,8 @@
 // data-or-null and NEVER throws across the module boundary.
 
 import { fetchJson } from "./http.js";
-import { pointInGeometry } from "../geo.js";
+import { matchedAlerts } from "./alertMatch.js";
+import { pointInGeometry, minEdgeDistanceKm } from "../geo.js";
 import { ECCC_API_BASE, ECCC_USER_AGENT } from "./eccc.js";
 
 // The marine-realtime collection carrying per-zone Gale/Storm/Strong-wind
@@ -86,37 +89,6 @@ const ECCC_MARINE_FETCH_LIMIT = 2000;
 // missing, an unrecognized future status) is dropped, so a stale/ended warning
 // can never be surfaced as a live one. Compared upper-cased.
 const ACTIVE_STATUSES = { "IN EFFECT": true, "CONTINUED": true };
-
-// The rules-layer color mapping (see header). Exported for the integrator and
-// tests; NOT applied in this module. Keys are lowercase to match rules.js.
-export const MARINE_EVENT_COLOR_MAP = {
-  "storm warning": "double-red",
-  "gale warning": "red",
-  "squall warning": "red",
-  "waterspout warning": "red",
-  "strong wind warning": "yellow",
-  "marine weather advisory": "yellow"
-};
-
-// The two events that map to a YELLOW FLOOR (raise-only), as opposed to a
-// hazard-lane short-circuit. Exported so the integrator can fold them into
-// rules.js ECCC_FLOOR_PRECEDENCE without re-deriving the split.
-export const MARINE_FLOOR_EVENTS = ["strong wind warning", "marine weather advisory"];
-
-// Pure. Maps a marine event name to its intended flag color, or null when the
-// event is deliberately UNMAPPED (all watches, "special ice warning", unknown).
-// Uses an explicit allowlist (own-property lookup), never a prototype-chain
-// membership test, and lowercases defensively. Never throws.
-export function marineEventColor(name) {
-  if (typeof name !== "string" || name.length === 0) {
-    return null;
-  }
-  const key = name.toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(MARINE_EVENT_COLOR_MAP, key)) {
-    return MARINE_EVENT_COLOR_MAP[key];
-  }
-  return null;
-}
 
 // First non-empty string, else null.
 function nonEmptyString(value) {
@@ -253,80 +225,6 @@ export async function fetchActiveEcccMarineAlerts(nowIso) {
   }
 }
 
-// GeoJSON Polygon/MultiPolygon -> array of polygons (each an array of rings).
-// Anything else (malformed, other types) -> [] so callers skip it. Local
-// defensive copy — the same shape as eccc.js's private helper, kept here
-// because GeoMet responses are upstream input (unlike the repo-committed marine
-// file that fails loudly by design in src/marineZones.js).
-function geometryPolygons(geometry) {
-  if (geometry === null || typeof geometry !== "object" || !Array.isArray(geometry.coordinates)) {
-    return [];
-  }
-  if (geometry.type === "Polygon") {
-    return [geometry.coordinates];
-  }
-  if (geometry.type === "MultiPolygon") {
-    return geometry.coordinates;
-  }
-  return [];
-}
-
-// Kilometres per degree of latitude on the spherical earth used across
-// src/geo.js: 2 * pi * 6371 / 360.
-const KM_PER_DEG = 111.195;
-
-// Distance (km) from the origin (the beach point, projected to 0,0 in a local
-// equirectangular projection) to the segment a-b. Same approach as eccc.js /
-// marineZones.js; error is negligible at <= 15 km.
-function pointToSegmentKm(ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  let t = 0;
-  if (len2 > 0) {
-    t = -(ax * dx + ay * dy) / len2;
-    if (t < 0) { t = 0; }
-    if (t > 1) { t = 1; }
-  }
-  const px = ax + t * dx;
-  const py = ay + t * dy;
-  return Math.sqrt(px * px + py * py);
-}
-
-// Minimum distance (km) from (lat, lon) to any ring edge of the geometry —
-// outer rings and holes alike. Malformed rings/points are skipped, never
-// thrown on (GeoMet data is upstream input).
-function minEdgeDistanceKm(geometry, lat, lon) {
-  const cosLat = Math.cos(lat * Math.PI / 180);
-  let best = Infinity;
-  for (const polygon of geometryPolygons(geometry)) {
-    if (!Array.isArray(polygon)) {
-      continue;
-    }
-    for (const ring of polygon) {
-      if (!Array.isArray(ring)) {
-        continue;
-      }
-      for (let i = 0; i < ring.length - 1; i = i + 1) {
-        const a = ring[i];
-        const b = ring[i + 1];
-        if (!Array.isArray(a) || !Array.isArray(b) ||
-            typeof a[0] !== "number" || typeof a[1] !== "number" ||
-            typeof b[0] !== "number" || typeof b[1] !== "number") {
-          continue;
-        }
-        const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
-        const ay = (a[1] - lat) * KM_PER_DEG;
-        const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
-        const by = (b[1] - lat) * KM_PER_DEG;
-        const d = pointToSegmentKm(ax, ay, bx, by);
-        if (d < best) { best = d; }
-      }
-    }
-  }
-  return best;
-}
-
 // Pure. Filters a fetchActiveEcccMarineAlerts result's alerts down to those
 // whose marine zone covers the beach point, in the SAME shape as
 // ecccAlertsForPoint:
@@ -336,42 +234,23 @@ function minEdgeDistanceKm(geometry, lat, lon) {
 // whose centroid sits just inland of its adjacent marine zone still matches.
 // details dedupe only on exact (event, onset, ends) repeats. Malformed input,
 // or a non-finite lat/lon -> { events: [], details: [] } (never throws).
+//
+// The accumulate/dedupe walk lives in ./alertMatch.js; only the coverage test
+// is local. The try/catch stays INSIDE this predicate on purpose: this client
+// alone runs the ring math over raw GeoMet geometry, so this client alone
+// swallows a throw there — the land/NWS matchers must keep propagating one.
 export function ecccMarineAlertsForPoint(alerts, lat, lon) {
-  const events = [];
-  const seen = {};
-  const details = [];
-  const seenDetails = {};
   if (typeof lat !== "number" || !isFinite(lat) ||
       typeof lon !== "number" || !isFinite(lon)) {
-    return { events: events, details: details };
+    return { events: [], details: [] };
   }
-  const list = Array.isArray(alerts) ? alerts : [];
-  for (const alert of list) {
-    if (alert === null || typeof alert !== "object" || typeof alert.event !== "string") {
-      continue;
-    }
-    let covers = false;
+  return matchedAlerts(alerts, function (alert) {
     try {
-      covers = pointInGeometry(alert.geometry, lat, lon) ||
+      return pointInGeometry(alert.geometry, lat, lon) ||
         minEdgeDistanceKm(alert.geometry, lat, lon) <= ECCC_MARINE_MAX_EDGE_KM;
     } catch (err) {
       console.log("ecccMarine: point match failed for " + alert.event + ": " + err.message);
-      covers = false;
+      return false;
     }
-    if (!covers) {
-      continue;
-    }
-    if (!seen[alert.event]) {
-      seen[alert.event] = true;
-      events.push(alert.event);
-    }
-    const onset = typeof alert.onset === "string" ? alert.onset : null;
-    const ends = typeof alert.ends === "string" ? alert.ends : null;
-    const detailKey = alert.event + "|" + String(onset) + "|" + String(ends);
-    if (!seenDetails[detailKey]) {
-      seenDetails[detailKey] = true;
-      details.push({ event: alert.event, onset: onset, ends: ends });
-    }
-  }
-  return { events: events, details: details };
+  });
 }

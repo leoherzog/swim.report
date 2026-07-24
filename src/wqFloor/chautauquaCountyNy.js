@@ -65,15 +65,24 @@
 // not surveyed precision — the name-substring match is the primary path.
 //
 // INTEGRATOR / DEDUP NOTE: register in src/wqFloor/index.js "wqFloorSources"
-// (append; no ordering conflict with existing NY sources — nyOprhpBeachStatus
-// covers NYS OPRHP *state park* beaches, which does not include any of these
-// four county/municipal beaches). Do NOT add this to
+// ABOVE usgsGreatLakesNowcast — do NOT append. matches() is first-match-wins
+// and the cron resolves exactly ONE source per beach, so appending would put
+// this below NowCast, whose region box (lat 41.2-44.1, lon -83.6..-75.8)
+// contains all four beaches below and would shadow this source entirely.
+// There is no ordering conflict with nyOprhpBeachStatus, which covers NYS
+// OPRHP *state park* beaches and none of these four county/municipal ones.
+// Do NOT add this to
 // src/officialSources/index.js — water quality is a raise-only floor axis,
 // disjoint from every hazard source (wave / rip / NWS alerts); no dedup
 // concern. MUST confirm CHAUTAUQUA_BEACH_STATUS_URL (see above) before
 // registering live.
 
-import { fetchText, perBeachResult } from "../officialSources/util.js";
+import {
+  fetchText,
+  perBeachResult,
+  containsAny,
+  matchesAnyAlias
+} from "../officialSources/util.js";
 
 // **UNCONFIRMED** live status URL. Left EMPTY on purpose so scrape() fails
 // closed (returns null, no fetch, no floor) until an integrator confirms the
@@ -216,16 +225,6 @@ export function htmlToPlainText(html) {
     .trim();
 }
 
-// Pure. True if any needle in needles is a substring of hay.
-function containsAny(hay, needles) {
-  for (let i = 0; i < needles.length; i++) {
-    if (hay.indexOf(needles[i]) !== -1) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Pure, exported for tests. Classifies a status-window snippet (already
 // lowercased plain text) into "hab" | "closure-advisory" | "clear" | "none".
 // An explicit clear/negated reading is checked FIRST — otherwise a phrase
@@ -341,11 +340,8 @@ export function parseChautauquaBeachStatus(html, nowIso) {
 function isChautauquaBeach(beach) {
   const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
   for (let s = 0; s < CHAUTAUQUA_SITES.length; s++) {
-    const site = CHAUTAUQUA_SITES[s];
-    for (let a = 0; a < site.names.length; a++) {
-      if (haystack.indexOf(site.names[a]) !== -1) {
-        return true;
-      }
+    if (matchesAnyAlias(haystack, CHAUTAUQUA_SITES[s].names)) {
+      return true;
     }
   }
   // No coordinate-proximity fallback in matches(): "Irving"/"Sunset Bay" are

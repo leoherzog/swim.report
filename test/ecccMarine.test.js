@@ -10,9 +10,6 @@ import {
   parseEcccMarineAlerts,
   ecccMarineAlertsForPoint,
   fetchActiveEcccMarineAlerts,
-  marineEventColor,
-  MARINE_EVENT_COLOR_MAP,
-  MARINE_FLOOR_EVENTS,
   ECCC_MARINE_MAX_EDGE_KM,
   ECCC_MARINE_GREAT_LAKES_REGION
 } from "../src/clients/ecccMarine.js";
@@ -87,44 +84,10 @@ function okJson(body) {
   });
 }
 
-describe("marineEventColor", function () {
-  it("maps warnings to their intended flag colors", function () {
-    expect(marineEventColor("Storm warning")).toBe("double-red");
-    expect(marineEventColor("gale warning")).toBe("red");
-    expect(marineEventColor("Squall warning")).toBe("red");
-    expect(marineEventColor("Waterspout warning")).toBe("red");
-    expect(marineEventColor("Strong wind warning")).toBe("yellow");
-    expect(marineEventColor("Marine weather advisory")).toBe("yellow");
-  });
-
-  it("leaves watches, ice warnings, and unknowns UNMAPPED (null)", function () {
-    expect(marineEventColor("Gale watch")).toBe(null);
-    expect(marineEventColor("Storm watch")).toBe(null);
-    expect(marineEventColor("Special ice warning")).toBe(null);
-    expect(marineEventColor("some brand new warning")).toBe(null);
-  });
-
-  it("does not confuse marine 'storm warning' with land 'storm surge warning'", function () {
-    expect(marineEventColor("storm warning")).toBe("double-red");
-    // land storm-surge is NOT this collection's concern -> unmapped here
-    expect(marineEventColor("storm surge warning")).toBe(null);
-  });
-
-  it("returns null (does not throw) on non-string / empty input", function () {
-    expect(marineEventColor(null)).toBe(null);
-    expect(marineEventColor(undefined)).toBe(null);
-    expect(marineEventColor("")).toBe(null);
-    expect(marineEventColor(42)).toBe(null);
-  });
-
-  it("exports the floor events and never maps a floor event above yellow", function () {
-    expect(MARINE_FLOOR_EVENTS).toEqual(["strong wind warning", "marine weather advisory"]);
-    for (let i = 0; i < MARINE_FLOOR_EVENTS.length; i = i + 1) {
-      expect(MARINE_EVENT_COLOR_MAP[MARINE_FLOOR_EVENTS[i]]).toBe("yellow");
-    }
-  });
-});
-
+// The marine event -> color mapping lives in src/rules.js
+// (ECCC_ALERT_PRECEDENCE / ECCC_ALERT_COLOR_MAP for the short-circuit lane,
+// ECCC_FLOOR_PRECEDENCE for the yellow floor) and is covered by
+// test/rules.test.js; this client no longer carries a second copy of it.
 describe("parseEcccMarineAlerts", function () {
   it("extracts active Great Lakes marine warnings (Lake Erie: strong wind + gale)", function () {
     const json = collection([

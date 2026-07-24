@@ -48,7 +48,7 @@
 // color effect is entirely inside the estimate (official:false).
 
 import { fetchJson } from "../clients/http.js";
-import { perBeachResult, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
+import { perBeachResult, matchesAnyAlias, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
 import { distanceMi } from "../geo.js";
 
 export const NY_OPRHP_QUERY_URL =
@@ -171,17 +171,6 @@ function buildReason(attrs) {
   return text;
 }
 
-// Pure. Does a curated site's aliases appear in a (lowercased) StateParkBeach
-// field?
-function siteMatchesFeatureName(site, loweredName) {
-  for (let i = 0; i < site.aliases.length; i++) {
-    if (loweredName.indexOf(site.aliases[i]) !== -1) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Pure, exported for tests. (json, nowIso) -> Site[] | null.
 // "json" may be the parsed FeatureServer object or its raw text. Returns null on
 // a total shape change (non-object / missing features array / empty features) so
@@ -223,7 +212,7 @@ export function parseNyOprhpBeachStatus(json, nowIso) {
     }
     let site = null;
     for (let s = 0; s < GREAT_LAKES_SITES.length; s++) {
-      if (siteMatchesFeatureName(GREAT_LAKES_SITES[s], loweredName)) {
+      if (matchesAnyAlias(loweredName, GREAT_LAKES_SITES[s].aliases)) {
         site = GREAT_LAKES_SITES[s];
         break;
       }
@@ -275,10 +264,8 @@ function inGreatLakesNyParks(beach) {
   const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
   for (let s = 0; s < GREAT_LAKES_SITES.length; s++) {
     const site = GREAT_LAKES_SITES[s];
-    for (let a = 0; a < site.aliases.length; a++) {
-      if (haystack.indexOf(site.aliases[a]) !== -1) {
-        return true;
-      }
+    if (matchesAnyAlias(haystack, site.aliases)) {
+      return true;
     }
     if (typeof beach.lat === "number" && typeof beach.lon === "number") {
       if (distanceMi(beach.lat, beach.lon, site.lat, site.lon) <= MATCH_RADIUS_MI) {

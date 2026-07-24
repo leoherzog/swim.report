@@ -203,17 +203,22 @@ function wtmpCelsius(token) {
   return v;
 }
 
-// Pure, exported for tests. (realtime2 body text, nowIso) ->
-// { tempF, tempC, observedIso } | null. Structurally mirrors parseNdbcWaveFt:
-// walks data rows newest-first and returns the FIRST row whose WTMP is a finite
-// non-"MM" Celsius value inside the sanity band AND whose UTC timestamp is within
-// NDBC_WATER_TEMP_MAX_OBS_AGE_MS of nowIso (not more than NDBC_MAX_OBS_FUTURE_MS
-// in the future). Because rows are newest-first, once the freshest usable-WTMP
-// row is itself too old every row below it is older too, so we stop and return
-// null. Any parse issue, masked column, or stale/missing reading degrades to
-// null — never a wrong temperature. Comment lines ("#...") and blank lines are
-// skipped. DISPLAY-ONLY: this value never reaches src/rules.js.
-export function parseNdbcWaterTempF(text, nowIso) {
+// Pure. The shared row-walker behind BOTH exported parsers below. Walks data
+// rows newest-first and returns { value, tsMs } for the FIRST row whose column
+// at columnIndex parses (via parseToken) to a non-null value AND whose UTC
+// timestamp is fresh — within maxAgeMs of nowIso and not more than
+// NDBC_MAX_OBS_FUTURE_MS in the future. Because rows are newest-first, once the
+// freshest row carrying a real value is itself too old, every row below it is
+// older too, so we stop and return null. Comment lines ("#...") and blank lines
+// are skipped; every guard/parse failure degrades to null — never a wrong
+// reading.
+//
+// NOTE: this helper now serves TWO consumers with different blast radii —
+// parseNdbcWaveFt on the COLOR path (its feet feed the wave-height rule in
+// src/rules.js) and parseNdbcWaterTempF, which is DISPLAY-ONLY and never reaches
+// src/rules.js. It deliberately carries no color/flag knowledge of its own, so
+// that split stays true and a water-temp change can never move a flag.
+function freshestRow(text, nowIso, columnIndex, parseToken, maxAgeMs) {
   if (typeof text !== "string" || text.length === 0) {
     return null;
   }
@@ -231,67 +236,12 @@ export function parseNdbcWaterTempF(text, nowIso) {
       continue;
     }
     const fields = line.split(/\s+/);
-    if (fields.length <= WTMP_INDEX) {
+    if (fields.length <= columnIndex) {
       continue;
     }
-    const tempC = wtmpCelsius(fields[WTMP_INDEX]);
-    if (tempC === null) {
-      // Newer row with a masked/invalid WTMP — keep scanning older rows.
-      continue;
-    }
-    const tsMs = rowTimestampMs(fields);
-    if (tsMs === null) {
-      continue;
-    }
-    // Reject readings too far in the future (clock skew tolerance) or older than
-    // the freshness window. Rows are newest-first, so the first row carrying a
-    // real WTMP is the freshest such reading; if it is already stale, every row
-    // below it is older too, so we stop and return null.
-    if (tsMs - nowMs > NDBC_MAX_OBS_FUTURE_MS) {
-      continue;
-    }
-    if (nowMs - tsMs > NDBC_WATER_TEMP_MAX_OBS_AGE_MS) {
-      return null;
-    }
-    const tempF = celsiusToFahrenheit(tempC);
-    if (typeof tempF === "number" && isFinite(tempF)) {
-      return { tempF: tempF, tempC: tempC, observedIso: new Date(tsMs).toISOString() };
-    }
-    return null;
-  }
-  return null;
-}
-
-// Pure, exported for tests. (realtime2 body text, nowIso) -> finite feet | null.
-// Walks data rows newest-first and returns the FIRST row whose WVHT is a finite
-// non-"MM" metres value AND whose UTC timestamp is within NDBC_MAX_OBS_AGE_MS of
-// nowIso (not more than NDBC_MAX_OBS_FUTURE_MS in the future). Any parse issue,
-// masked column, or stale/missing reading degrades to null — never a wrong
-// height. Comment lines ("#...") and blank lines are skipped.
-export function parseNdbcWaveFt(text, nowIso) {
-  if (typeof text !== "string" || text.length === 0) {
-    return null;
-  }
-  if (typeof nowIso !== "string" || nowIso.length === 0) {
-    return null;
-  }
-  const nowMs = Date.parse(nowIso);
-  if (!isFinite(nowMs)) {
-    return null;
-  }
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line.length === 0 || line.charAt(0) === "#") {
-      continue;
-    }
-    const fields = line.split(/\s+/);
-    if (fields.length <= WVHT_INDEX) {
-      continue;
-    }
-    const meters = wvhtMeters(fields[WVHT_INDEX]);
-    if (meters === null) {
-      // Newer row with a masked/invalid WVHT — keep scanning older rows.
+    const value = parseToken(fields[columnIndex]);
+    if (value === null) {
+      // Newer row with a masked/invalid column — keep scanning older rows.
       continue;
     }
     const tsMs = rowTimestampMs(fields);
@@ -300,19 +250,52 @@ export function parseNdbcWaveFt(text, nowIso) {
     }
     // Reject readings too far in the future (clock skew tolerance) or older
     // than the freshness window. Because rows are newest-first, the first row
-    // carrying a real WVHT is the freshest such reading; if it is already
+    // carrying a real value is the freshest such reading; if it is already
     // stale, every row below it is older too, so we stop and return null.
     if (tsMs - nowMs > NDBC_MAX_OBS_FUTURE_MS) {
       continue;
     }
-    if (nowMs - tsMs > NDBC_MAX_OBS_AGE_MS) {
+    if (nowMs - tsMs > maxAgeMs) {
       return null;
     }
-    const ft = metersToFeet(meters);
-    if (typeof ft === "number" && isFinite(ft)) {
-      return ft;
-    }
+    return { value: value, tsMs: tsMs };
+  }
+  return null;
+}
+
+// Pure, exported for tests. (realtime2 body text, nowIso) ->
+// { tempF, tempC, observedIso } | null. Thin wrapper over freshestRow on the
+// WTMP column: the freshest row whose WTMP is a finite non-"MM" Celsius value
+// inside the sanity band AND whose UTC timestamp is within
+// NDBC_WATER_TEMP_MAX_OBS_AGE_MS of nowIso. Any parse issue, masked column, or
+// stale/missing reading degrades to null — never a wrong temperature.
+// DISPLAY-ONLY: this value never reaches src/rules.js.
+export function parseNdbcWaterTempF(text, nowIso) {
+  const row = freshestRow(text, nowIso, WTMP_INDEX, wtmpCelsius, NDBC_WATER_TEMP_MAX_OBS_AGE_MS);
+  if (row === null) {
     return null;
+  }
+  const tempF = celsiusToFahrenheit(row.value);
+  if (typeof tempF === "number" && isFinite(tempF)) {
+    return { tempF: tempF, tempC: row.value, observedIso: new Date(row.tsMs).toISOString() };
+  }
+  return null;
+}
+
+// Pure, exported for tests. (realtime2 body text, nowIso) -> finite feet | null.
+// Thin wrapper over freshestRow on the WVHT column: the freshest row whose WVHT
+// is a finite non-"MM" metres value AND whose UTC timestamp is within
+// NDBC_MAX_OBS_AGE_MS of nowIso. Any parse issue, masked column, or stale/
+// missing reading degrades to null — never a wrong height. Returns a BARE finite
+// number, so a calm 0 ft stays a valid reading (never conflated with null).
+export function parseNdbcWaveFt(text, nowIso) {
+  const row = freshestRow(text, nowIso, WVHT_INDEX, wvhtMeters, NDBC_MAX_OBS_AGE_MS);
+  if (row === null) {
+    return null;
+  }
+  const ft = metersToFeet(row.value);
+  if (typeof ft === "number" && isFinite(ft)) {
+    return ft;
   }
   return null;
 }

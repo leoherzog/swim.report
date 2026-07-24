@@ -63,7 +63,7 @@
 // const/let only; console.log logging.
 
 import { fetchJson } from "../clients/http.js";
-import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI, MS_PER_DAY } from "../officialSources/util.js";
+import { resolveSiteForBeach, MS_PER_DAY } from "../officialSources/util.js";
 
 export const TORONTO_MODEL = "toronto_beach_obs";
 export const TORONTO_LABEL = "Toronto Beaches Observations";
@@ -368,12 +368,3 @@ export const torontoBeachObsSource = {
 
 // Alias so the integrator can import under either spelling.
 export { torontoBeachObsSource as torontoWaveSource };
-
-// Test-only: reset the per-run memo between cases. Never called in production.
-export function _resetCacheForTest() {
-  _recordsCache = { key: null, records: null };
-}
-
-// Re-export shared resolver bits for the integrator/tests, mirroring other
-// supplemental sources.
-export { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI };

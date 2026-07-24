@@ -88,7 +88,12 @@
 // clean/not-posted reading here says nothing about surf hazard and must
 // never be able to produce or mask a color on its own.
 
-import { fetchText } from "../officialSources/util.js";
+import {
+  fetchText,
+  decodeCellText,
+  extractTableRowsRaw,
+  matchesAnyAlias
+} from "../officialSources/util.js";
 
 // Ontario Parks does not publish one canonical cross-park beach-postings
 // page -- each park has its own /alerts page (see PARK_PAGES below). This is
@@ -154,24 +159,6 @@ export const SITE_DEFS = [
   }
 ];
 
-// Pure. Decode the small set of HTML entities/whitespace noise that appear
-// in table cell text and strip any residual tags. Never throws.
-function decodeCellText(raw) {
-  if (typeof raw !== "string") {
-    return "";
-  }
-  return raw
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, "\"")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 // Pure, exported for tests. One "Posted" table cell's raw inner HTML (the
 // <td>...</td> contents, containing the status <img>) -> true (posted),
 // false (confirmed not posted), or null (unrecognized icon filename --
@@ -222,17 +209,11 @@ export function parseOntarioParksBeachPostings(html) {
     : html.slice(tableIdx, tableEndTagIdx + "</table>".length);
 
   const rows = [];
-  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let match = rowRe.exec(tableHtml);
-  while (match !== null) {
-    const rowHtml = match[1];
-    const cells = [];
-    const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    let cellMatch = cellRe.exec(rowHtml);
-    while (cellMatch !== null) {
-      cells.push(cellMatch[1]);
-      cellMatch = cellRe.exec(rowHtml);
-    }
+  // Raw (undecoded) cells: the Posted cell must keep its markup so
+  // isPostedFromCell can read the status <img>'s src filename.
+  const rawRows = extractTableRowsRaw(tableHtml);
+  for (let i = 0; i < rawRows.length; i++) {
+    const cells = rawRows[i];
     if (cells.length >= 3) {
       const beachName = decodeCellText(cells[0]);
       const sampleDate = decodeCellText(cells[1]);
@@ -241,7 +222,6 @@ export function parseOntarioParksBeachPostings(html) {
         rows.push({ beach: beachName, sampleDate: sampleDate, posted: posted });
       }
     }
-    match = rowRe.exec(tableHtml);
   }
 
   if (rows.length === 0) {
@@ -266,14 +246,8 @@ export function buildOntarioParksSites(rows) {
     const def = SITE_DEFS[i];
     let matchedRow = null;
     for (let r = 0; r < rows.length; r++) {
-      const haystack = (rows[r].beach || "").toLowerCase();
-      for (let n = 0; n < def.tableNames.length; n++) {
-        if (haystack.indexOf(def.tableNames[n]) !== -1) {
-          matchedRow = rows[r];
-          break;
-        }
-      }
-      if (matchedRow !== null) {
+      if (matchesAnyAlias(rows[r].beach || "", def.tableNames)) {
+        matchedRow = rows[r];
         break;
       }
     }
@@ -298,21 +272,18 @@ export function buildOntarioParksSites(rows) {
 
 // Pure. Does this beach fall inside the curated Ontario Parks coverage list,
 // by the same names-or-proximity convention resolveSiteForBeach uses
-// downstream? Reimplemented locally (rather than importing
-// resolveSiteForBeach) to keep this module's only import cron-fetch-side
-// (fetchText) and avoid pulling the distance helper in for a pure gate; the
-// logic intentionally mirrors resolveSiteForBeach's own PASS 1 / PASS 2.
+// downstream? The name pass is the shared matchesAnyAlias; the proximity pass
+// is kept local (a cheap planar box, see below) rather than calling
+// resolveSiteForBeach, so this pure gate never pulls the haversine helper in.
+// The logic intentionally mirrors resolveSiteForBeach's own PASS 1 / PASS 2.
 export function matchesOntarioParksCoverage(beach) {
   if (!beach) {
     return false;
   }
   const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
   for (let i = 0; i < SITE_DEFS.length; i++) {
-    const names = SITE_DEFS[i].names;
-    for (let n = 0; n < names.length; n++) {
-      if (haystack.indexOf(names[n]) !== -1) {
-        return true;
-      }
+    if (matchesAnyAlias(haystack, SITE_DEFS[i].names)) {
+      return true;
     }
   }
   if (typeof beach.lat !== "number" || typeof beach.lon !== "number") {

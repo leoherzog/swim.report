@@ -703,9 +703,12 @@ export function renderListPage(data) {
   // Polite live region for the browser-geolocation upgrade: geoScript.js swaps
   // the list in place (no navigation), so the reorder would otherwise be
   // invisible to screen-reader users. Empty at render; the script fills it
-  // after a successful swap.
+  // after a successful swap. Hidden with the kit's wa-visually-hidden utility
+  // (utilities.css) rather than a hand-rolled clip rule — the region has no
+  // focusable descendant, so the utility's reveal-on-focus-within behavior is a
+  // no-op here.
   const geoLiveHtml =
-    "<p id=\"geo-live-region\" class=\"visually-hidden\" role=\"status\" aria-live=\"polite\"></p>";
+    "<p id=\"geo-live-region\" class=\"wa-visually-hidden\" role=\"status\" aria-live=\"polite\"></p>";
 
   // data-complete signals that the rendered rows ARE the whole flag-worthy
   // table (the default listing was not capped), so the client's instant local
@@ -1086,9 +1089,15 @@ export function renderErrorPage(data) {
   const status = (data && data.status) ? data.status : 500;
   const message = (data && data.message) ? data.message : "Something went wrong.";
 
+  // The status code IS this page's title, so it must be a real heading, not a
+  // styled <strong> — the error page is otherwise the only page with no h1
+  // (renderBrandHeader is an <a>, renderFooter a <p><small>). Sized down with
+  // wa-font-size-xl so a heading element does not read as louder than the two
+  // sibling pages' own titles; the block-start margin is zeroed in styles.js
+  // (the "wa-callout h1" rule) so the callout keeps its own top padding.
   const mainHtml = "<wa-callout variant=\"danger\">" +
     "<wa-icon slot=\"icon\" name=\"triangle-exclamation\"></wa-icon>" +
-    "<strong>" + escapeHtml(String(status)) + "</strong><br>" +
+    "<h1 class=\"wa-font-size-xl\">" + escapeHtml(String(status)) + "</h1>" +
     escapeHtml(message) + "<br>" +
     "<a href=\"/\">Return to the beach list</a>" +
     "</wa-callout>";

@@ -9,7 +9,6 @@
 //       resolved to at most one site via resolveSiteForBeach; beaches that
 //       resolve to no site get no OfficialFlag (null).
 
-import { distanceMi } from "../geo.js";
 import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
 import { southHaven } from "./southHaven.js";
 import { metroparks } from "./metroparks.js";
@@ -58,10 +57,6 @@ export function findScraper(beach) {
   }
   return null;
 }
-
-// Great-circle distance in statute miles. Re-exported from the dependency-free
-// src/geo.js (a cycle is impossible through that module).
-export { distanceMi };
 
 // Per-beach site resolution (names win over proximity) lives in ./util.js so
 // scrapers can reuse it without importing this registry; re-exported here for

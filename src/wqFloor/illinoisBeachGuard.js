@@ -49,13 +49,17 @@
 //
 // INTEGRATOR DEDUP NOTE: this is a NEW axis (water quality / bacteria), not a
 // hazard source — it must be registered in src/wqFloor/index.js's
-// wqFloorSources array, never in src/officialSources/index.js's scrapers
+// wqFloorSources array, ABOVE both usgsGreatLakesNowcast and
+// kenoshaBeachConditions (matches() is first-match-wins and this module's box,
+// lat 42.0-42.55 / lon -87.9..-87.7, overlaps Kenosha's coverage around
+// lat 42.517-42.55 — registering below either one would shadow this source);
+// never in src/officialSources/index.js's scrapers
 // array (which is a hazard-axis OVERRIDE registry; a clean "no advisory"
 // reading here must never be able to mask a wave/rip/alert hazard estimate).
 // No overlap with existing hazard sources (SRF rip, NWS/ECCC alerts, wave
 // height) — this floor can only ever raise a color, never decide/lower one.
 
-import { fetchText, resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
+import { fetchText, perBeachResult, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
 
 export const ILLINOIS_BEACHGUARD_LABEL = "Illinois BeachGuard (IDPH)";
 export const ILLINOIS_BEACHGUARD_INFO_URL =
@@ -303,15 +307,6 @@ export const illinoisBeachGuard = {
       return null;
     }
 
-    return {
-      perBeach: true,
-      sites: sites,
-      source: ILLINOIS_BEACHGUARD_LABEL,
-      updated: nowIso
-    };
+    return perBeachResult(sites, ILLINOIS_BEACHGUARD_LABEL, nowIso);
   }
 };
-
-// Re-exported for tests / potential downstream reuse (mirrors the
-// officialSources util re-export pattern).
-export { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI };

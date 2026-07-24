@@ -56,7 +56,11 @@ export function celsiusToFahrenheit(c) {
 // Ray-casting point-in-ring test on a GeoJSON linear ring ([[lon, lat], ...]).
 // Planar math is fine at forecast-region scale; boundary points are accepted
 // or rejected by the crossing parity like any ray cast (no special casing).
-function pointInRing(lon, lat, ring) {
+// Exported for scripts/build-marine-zones.js, whose hole-grouping pass needs
+// the same planar ray cast (Deno resolves this relative ESM import directly —
+// the generator's "dependency-free" rule is about npm packages, not local
+// modules).
+export function pointInRing(lon, lat, ring) {
   let inside = false;
   let j = ring.length - 1;
   for (let i = 0; i < ring.length; i++) {
@@ -113,4 +117,83 @@ export function pointInGeometry(geometry, lat, lon) {
     }
   }
   return false;
+}
+
+// Kilometres per degree of latitude (and of longitude at the equator) on the
+// spherical earth used above: 2 * pi * 6371 / 360. Shared by every nearest-edge
+// consumer (src/clients/eccc.js, src/clients/ecccMarine.js, src/marineZones.js)
+// so the three copies can never drift apart.
+export const KM_PER_DEG = 111.195;
+
+// GeoJSON Polygon/MultiPolygon -> array of polygons (each an array of rings).
+// Anything else (malformed, other types) -> [] so callers skip it.
+export function geometryPolygons(geometry) {
+  if (geometry === null || typeof geometry !== "object" || !Array.isArray(geometry.coordinates)) {
+    return [];
+  }
+  if (geometry.type === "Polygon") {
+    return [geometry.coordinates];
+  }
+  if (geometry.type === "MultiPolygon") {
+    return geometry.coordinates;
+  }
+  return [];
+}
+
+// Distance (km) from the origin (the point, already projected to 0,0 in a local
+// equirectangular projection) to the segment a-b. The projection error is
+// negligible at the <= 15 km leniency caps the callers apply.
+export function pointToSegmentKm(ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  let t = 0;
+  if (len2 > 0) {
+    // Project the origin onto the segment, clamped to [0, 1].
+    t = -(ax * dx + ay * dy) / len2;
+    if (t < 0) { t = 0; }
+    if (t > 1) { t = 1; }
+  }
+  const px = ax + t * dx;
+  const py = ay + t * dy;
+  return Math.sqrt(px * px + py * py);
+}
+
+// Minimum distance (km) from (lat, lon) to any ring edge of the geometry —
+// OUTER RINGS AND HOLES ALIKE (an island beach sits inside a HOLE of a marine
+// polygon and correctly resolves via the nearest hole edge). Malformed
+// rings/points are SKIPPED, never thrown on: GeoMet responses are upstream
+// input, and the repo-committed marine file is already validated up front by
+// buildMarineZoneIndex, so nothing malformed can reach here from that path.
+// Returns Infinity when no usable edge exists. The per-caller distance CAP
+// stays at the call site — this returns a raw distance and applies no cap.
+export function minEdgeDistanceKm(geometry, lat, lon) {
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  let best = Infinity;
+  for (const polygon of geometryPolygons(geometry)) {
+    if (!Array.isArray(polygon)) {
+      continue;
+    }
+    for (const ring of polygon) {
+      if (!Array.isArray(ring)) {
+        continue;
+      }
+      for (let i = 0; i < ring.length - 1; i = i + 1) {
+        const a = ring[i];
+        const b = ring[i + 1];
+        if (!Array.isArray(a) || !Array.isArray(b) ||
+            typeof a[0] !== "number" || typeof a[1] !== "number" ||
+            typeof b[0] !== "number" || typeof b[1] !== "number") {
+          continue;
+        }
+        const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
+        const ay = (a[1] - lat) * KM_PER_DEG;
+        const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
+        const by = (b[1] - lat) * KM_PER_DEG;
+        const d = pointToSegmentKm(ax, ay, bx, by);
+        if (d < best) { best = d; }
+      }
+    }
+  }
+  return best;
 }

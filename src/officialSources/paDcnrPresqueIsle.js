@@ -37,7 +37,7 @@
 // no header is sent (a 403 would degrade to null — the safe direction). If it
 // is later found to 403, add a probed User-Agent to the fetchText call.
 
-import { fetchText, perBeachResult } from "./util.js";
+import { fetchText, perBeachResult, containsAny } from "./util.js";
 
 // Presque Isle State Park id in the DCNR ParkAdvisory API.
 export const PRESQUE_ISLE_URL =
@@ -104,16 +104,6 @@ const HAZARD_KEYWORDS = [
   "high water",
   "high surf"
 ];
-
-// Pure. Returns true if any needle in needles is a substring of hay.
-function containsAny(hay, needles) {
-  for (let i = 0; i < needles.length; i++) {
-    if (hay.indexOf(needles[i]) !== -1) {
-      return true;
-    }
-  }
-  return false;
-}
 
 // Pure, exported for tests. Strips HTML tags and a few common entities from a
 // Message, collapses whitespace, and trims. Preserves original case (for the

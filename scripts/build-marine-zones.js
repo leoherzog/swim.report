@@ -17,7 +17,10 @@
 // The script is dependency-free (no npm shapefile/zip packages, matching the
 // batch's ethos): it reads the zip central directory itself, inflates entries
 // with the built-in DecompressionStream, and parses the DBF + SHP binary
-// layouts directly (both are simple fixed-offset formats).
+// layouts directly (both are simple fixed-offset formats). That rule is about
+// npm packages — it does not bar a relative import of a pure local module, so
+// the hole-grouping ray cast comes from src/geo.js (the same pointInRing the
+// runtime resolver uses) rather than a fourth private copy.
 //
 // Output shape (see docs/offline-discovery.md):
 //   {
@@ -30,6 +33,8 @@
 //
 // Project style: ES modules, const/let only, string concatenation with +
 // (never template literals), console for logging.
+
+import { pointInRing } from "../src/geo.js";
 
 // Current release: mz16ap26.zip, 569 records, valid/effective 2026-04-16.
 // Update BOTH constants when a new release lands.
@@ -253,22 +258,6 @@ export function ringSignedArea(ring) {
   return sum / 2;
 }
 
-function pointInRingPlanar(lon, lat, ring) {
-  let inside = false;
-  let j = ring.length - 1;
-  for (let i = 0; i < ring.length; i = i + 1) {
-    const xi = ring[i][0];
-    const yi = ring[i][1];
-    const xj = ring[j][0];
-    const yj = ring[j][1];
-    const crosses = (yi > lat) !== (yj > lat) &&
-      lon < (xj - xi) * (lat - yi) / (yj - yi) + xi;
-    if (crosses) { inside = !inside; }
-    j = i;
-  }
-  return inside;
-}
-
 export function groupRingsToPolygons(rings) {
   const outers = [];
   const holes = [];
@@ -283,7 +272,7 @@ export function groupRingsToPolygons(rings) {
   for (const hole of holes) {
     let placed = false;
     for (const poly of outers) {
-      if (pointInRingPlanar(hole[0][0], hole[0][1], poly[0])) {
+      if (pointInRing(hole[0][0], hole[0][1], poly[0])) {
         poly.push(hole);
         placed = true;
         break;

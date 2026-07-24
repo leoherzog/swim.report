@@ -46,7 +46,7 @@
 // scrape() runs cron-side only; parseTowerBeachStatus is pure and exported
 // for tests. Contract v2 (perBeach / sites[] with "color", not "floorColor").
 
-import { fetchText, perBeachResult } from "./util.js";
+import { fetchText, perBeachResult, containsAny } from "./util.js";
 
 export const TOWER_BEACH_URL =
   "https://rainoutline.com/search/extension/8475633131/9";
@@ -81,16 +81,6 @@ const WATER_QUALITY_KEYWORDS = [
   "water quality",
   "advisory"
 ];
-
-// Pure. True if any needle (already lowercase) is a substring of haystack.
-function containsAny(haystack, needles) {
-  for (let i = 0; i < needles.length; i++) {
-    if (haystack.indexOf(needles[i]) !== -1) {
-      return true;
-    }
-  }
-  return false;
-}
 
 // Pure. Best-effort conversion of "7/21/26 4:43 pm" (America/Chicago local,
 // no explicit offset on the page) into an ISO timestamp. Never throws;

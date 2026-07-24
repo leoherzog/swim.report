@@ -5,6 +5,7 @@
 // function resolves to null.
 
 import { fetchJson } from "./http.js";
+import { matchedAlerts, pickIsoString } from "./alertMatch.js";
 
 export const NWS_USER_AGENT = "swim.report (hello@swim.report)";
 
@@ -105,45 +106,12 @@ export async function fetchAllActiveAlerts() {
 // include zoneId, in the per-zone result shape the rules engine and hazard
 // lane consume: { events: [deduped names], details: [{ event, onset, ends }] }
 // (details deduped only on exact (event, onset, ends) repeats). Malformed
-// input -> { events: [], details: [] }.
+// input -> { events: [], details: [] }. The accumulate/dedupe walk lives in
+// ./alertMatch.js; only the zone-membership test is local.
 export function nwsAlertsForZone(alerts, zoneId) {
-  const events = [];
-  const seen = {};
-  const details = [];
-  const seenDetails = {};
-  const list = Array.isArray(alerts) ? alerts : [];
-  for (const alert of list) {
-    if (alert === null || typeof alert !== "object" || typeof alert.event !== "string") {
-      continue;
-    }
-    if (!Array.isArray(alert.zones) || alert.zones.indexOf(zoneId) === -1) {
-      continue;
-    }
-    if (!seen[alert.event]) {
-      seen[alert.event] = true;
-      events.push(alert.event);
-    }
-    const onset = typeof alert.onset === "string" ? alert.onset : null;
-    const ends = typeof alert.ends === "string" ? alert.ends : null;
-    const detailKey = alert.event + "|" + String(onset) + "|" + String(ends);
-    if (!seenDetails[detailKey]) {
-      seenDetails[detailKey] = true;
-      details.push({ event: alert.event, onset: onset, ends: ends });
-    }
-  }
-  return { events: events, details: details };
-}
-
-// First non-empty string of the two candidates, else null (alert features
-// commonly carry effective/expires but leave onset/ends null).
-function pickIsoString(primary, fallback) {
-  if (typeof primary === "string" && primary.length > 0) {
-    return primary;
-  }
-  if (typeof fallback === "string" && fallback.length > 0) {
-    return fallback;
-  }
-  return null;
+  return matchedAlerts(alerts, function (alert) {
+    return Array.isArray(alert.zones) && alert.zones.indexOf(zoneId) !== -1;
+  });
 }
 
 export function wfoFromGridUrl(nwsGridUrl) {

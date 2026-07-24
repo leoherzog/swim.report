@@ -789,11 +789,20 @@ and return null.
 
 Not an upstream client — a pure, dependency-free module (no fetch, no Date, no I/O)
 that imports nothing from the rest of src/, so importing it can never create a
-circular dependency. It is the single home for the distance/units math shared by the
-wave clients, the cron, the official-source scrapers, and the router; other modules
-re-export from here rather than copy-pasting a haversine (see glerl.js, windyWebcams.js,
-officialSources/index.js, officialSources/util.js, router.js). Safe on both the request
-and cron paths.
+circular dependency. It is the single home for BOTH (a) the distance/units math shared
+by the wave clients, the cron, the official-source scrapers and the router, and (b) the
+polygon containment + NEAREST-EDGE math shared by src/clients/eccc.js,
+src/clients/ecccMarine.js, src/marineZones.js and scripts/build-marine-zones.js — three
+byte-identical private copies of the nearest-edge helpers were deleted from those
+modules in favour of the exports below, so they can never drift apart again. Other
+modules import from here rather than copy-pasting a haversine or a ray cast (current
+importers: clients/eccc.js, clients/ecccMarine.js, clients/glerl.js, clients/openMeteo.js,
+discovery.js, marineZones.js, officialSources/util.js, officialSources/metroparks.js,
+router.js, waveSources/ndbcBuoys.js, waveSources/nwsGridpointWaves.js,
+waveSources/seaCavesWaves.js, wqFloor/kenoshaBeachConditions.js,
+wqFloor/nyOprhpBeachStatus.js, and scripts/build-marine-zones.js — note
+officialSources/index.js is NO LONGER one of them). Safe on both the request and cron
+paths.
 
     export function distanceKm(lat1, lon1, lat2, lon2)
       // Pure. Great-circle (haversine) distance in kilometres. Spherical earth,
@@ -818,6 +827,37 @@ and cron paths.
       // non-areal geometry (null, Point, missing coordinates) -> false, never
       // a throw. Used by the ECCC client to match beaches to alert-region
       // polygons.
+
+    export function pointInRing(lon, lat, ring)
+      // Pure planar ray cast over ONE GeoJSON linear ring ([[lon, lat], ...]).
+      // Note the (lon, lat) argument order. Was a private helper; exported so
+      // scripts/build-marine-zones.js can drop its pointInRingPlanar copy (Deno
+      // resolves the relative ESM import — the generator's "dependency-free"
+      // claim is about npm packages, not local modules).
+
+    export const KM_PER_DEG = 111.195
+      // Kilometres per degree of latitude on the same spherical earth
+      // (2 * pi * 6371 / 360). Replaces private copies in clients/eccc.js,
+      // clients/ecccMarine.js and marineZones.js.
+
+    export function geometryPolygons(geometry)
+      // Pure. GeoJSON Polygon/MultiPolygon -> array of polygons (each an array
+      // of rings). Malformed or non-areal input -> [], never a throw.
+
+    export function pointToSegmentKm(ax, ay, bx, by)
+      // Pure. Distance in km from the ORIGIN (the query point, already projected
+      // to 0,0 in a local equirectangular projection) to the segment a-b. The
+      // projection error is negligible at the <= 15 km caps the callers apply.
+
+    export function minEdgeDistanceKm(geometry, lat, lon)
+      // Pure. Minimum distance in km from the point to ANY ring edge of the
+      // geometry — OUTER RINGS AND HOLES ALIKE (an island beach sits inside a
+      // HOLE of a marine polygon and correctly resolves via the nearest hole
+      // edge). Malformed rings/points are SKIPPED, never thrown on; returns
+      // Infinity when no usable edge exists. Applies NO distance cap — each
+      // caller keeps its own at the call site: ECCC_ZONE_MAX_EDGE_KM = 2
+      // (clients/eccc.js), ECCC_MARINE_MAX_EDGE_KM = 15 (clients/ecccMarine.js),
+      // MARINE_ZONE_MAX_DISTANCE_KM = 15 (marineZones.js).
 
 ### src/regions.js (discovery expansion rail — pure data + one predicate, no imports)
 
@@ -855,6 +895,33 @@ bottom of the file, NOT in the live array) and everything downstream picks them 
       // shrinking or removing a box can only REMOVE rows from the delete-candidate set
       // (fail-safe — an editing mistake under-deletes, never mass-deletes enriched
       // rows).
+
+### src/clients/alertMatch.js (pure alert match/dedupe, no fetch)
+
+The accumulate/dedupe walk that used to be copy-pasted into nwsAlertsForZone
+(clients/nws.js), ecccAlertsForPoint (clients/eccc.js) and ecccMarineAlertsForPoint
+(clients/ecccMarine.js). No fetch, no Date, no I/O — nothing here can violate the
+two-path rule on its own. Filed under src/clients/ because the shapes it walks are the
+clients' wire shapes, not general geography.
+
+    export function pickIsoString(primary, fallback)
+      // Pure. First non-empty string of the two, else null (alert features
+      // commonly carry effective/expires but leave onset/ends null). Was a
+      // byte-identical private copy in nws.js and eccc.js.
+
+    export function matchedAlerts(alerts, matches)
+      // Pure. Filters an alerts array to the entries the caller's matches(alert)
+      // predicate accepts, in the shape the rules engine and hazard lane consume:
+      //   { events: [deduped event names], details: [{ event, onset, ends }] }
+      // A non-array `alerts`, or an entry that is not an object with a STRING
+      // .event, is skipped -> malformed input degrades to { events: [], details: [] }.
+      // events dedupe on the event name; details dedupe on the exact key
+      // event + "|" + String(onset) + "|" + String(ends), with onset/ends coerced
+      // typeof-string-else-null.
+      // DELIBERATELY does NOT wrap matches(alert) in a try/catch: the ecccMarine
+      // caller keeps its catch INSIDE its own predicate closure, so nws.js and
+      // eccc.js continue to PROPAGATE a genuine throw rather than silently
+      // dropping alerts. Hoisting the catch here would change that.
 
 ### src/clients/nws.js
 
@@ -901,6 +968,9 @@ bottom of the file, NOT in the live array) and everything downstream picks them 
       // (details deduped only on exact (event, onset, ends) repeats). Feeds the
       // FlagEstimate's alertDetails echo (sections 1, 4) for the detail page's
       // hazard lane. Malformed input -> { events: [], details: [] }.
+      // Contract and return shape UNCHANGED, but the body is now a thin wrapper
+      // over matchedAlerts (src/clients/alertMatch.js): the only logic left local
+      // is the zones.indexOf(zoneId) membership test.
 
     export function wfoFromGridUrl(nwsGridUrl)
       // "https://api.weather.gov/gridpoints/GRR/33,33" -> "GRR"
@@ -969,6 +1039,10 @@ and matches beaches locally via pointInGeometry (src/geo.js).
       // result shape: { events: [deduped names], details: [{ event, onset,
       // ends }] } (details deduped on exact (event, onset, ends) repeats,
       // matching nwsAlertsForZone). Malformed input -> empty result.
+      // Contract UNCHANGED, but it is now a matchedAlerts wrapper
+      // (src/clients/alertMatch.js) whose only local logic is the pointInGeometry
+      // containment test — pure PIP, NO nearest-edge leniency (that is the marine
+      // client only).
 
     export async function fetchEcccForecastZones()
       // The ENTIRE ECCC public forecast-region set in ONE fetch, WITH geometry
@@ -985,20 +1059,29 @@ and matches beaches locally via pointInGeometry (src/geo.js).
       // Failure -> null (the caller parks the whole run, bumping no per-beach
       //   attempt).
 
+    export const ECCC_ZONE_MAX_EDGE_KM = 2;
+      // Nearest-edge leniency cap for ecccZoneNameForPoint's fallback. A strict
+      // superset of the retired per-point GeoMet lookup's +/-0.01 deg (~1.1 km)
+      // bbox-INTERSECTS reach, so no beach the old lookup could resolve becomes
+      // unresolvable.
+
     export function ecccZoneNameForPoint(zones, lat, lon)
       // Pure, exported for tests. Resolves a beach point to its forecast-region
-      // NAME against a fetchEcccForecastZones result via exact point-in-polygon
-      // (pointInGeometry) — the first zone whose polygon contains the point,
-      // else null. Conservative by design: a point just OUTSIDE its region
-      // polygon (a shoreline centroid nudged offshore) resolves to null and the
-      // caller parks it, exactly as a US point (no containing Canadian region)
-      // does. Malformed input -> null.
+      // NAME against a fetchEcccForecastZones result: exact point-in-polygon
+      // (pointInGeometry) first — the first zone whose polygon contains the
+      // point wins — then a NEAREST-EDGE fallback (minEdgeDistanceKm from
+      // src/geo.js, section 5) to the closest region within
+      // ECCC_ZONE_MAX_EDGE_KM, so a shoreline centroid nudged just offshore of
+      // its land region still resolves. Conservative beyond that: a point
+      // farther than the cap from every region (a genuinely US point) resolves
+      // to null and the caller parks it. Malformed input -> null.
 
 ### src/clients/ecccMarine.js (ECCC GeoMet marine-warnings client, cron-side)
 
 The marine-weather counterpart to src/clients/eccc.js, for the Canadian-shore Great
-Lakes beaches api.weather.gov 404s. Fetch + pure defensive parse ONLY — it NEVER
-decides a flag color (rules.js does). Verified DISJOINT from fetchActiveEcccAlerts
+Lakes beaches api.weather.gov 404s. Fetch + pure defensive parse + point matching ONLY —
+it NEVER decides a flag color (rules.js does), and that is now literally true of its
+EXPORT SURFACE too: it exports no color map of any kind. Verified DISJOINT from fetchActiveEcccAlerts
 (the land weather-alerts collection carries ZERO marine warnings), so it adds NEW
 signal for Canadian beaches, not duplicates. Wired into the Canadian-beach alert path:
 its matches CONCAT onto the land ECCC matches in the same alerts[] input, exactly as
@@ -1009,18 +1092,12 @@ the US branch concats marine onto land (section 7 step 3b/7).
     export const ECCC_MARINE_GREAT_LAKES_REGION = "Great Lakes";
     export const ECCC_MARINE_MAX_EDGE_KM = 15;
 
-    export const MARINE_EVENT_COLOR_MAP    // { "storm warning": "double-red",
-                                           //   "gale warning"/"squall warning"/
-                                           //   "waterspout warning": "red",
-                                           //   "strong wind warning"/"marine weather
-                                           //   advisory": "yellow" } — the FLOOR events
-                                           //   are the two yellows (see ECCC_FLOOR_PRECEDENCE,
-                                           //   section 4). Exported for the integrator/tests;
-                                           //   rules.js is the single home of color.
-    export const MARINE_FLOOR_EVENTS = ["strong wind warning", "marine weather advisory"];
-
-    export function marineEventColor(name)
-      // Pure. Lowercased event name -> its MARINE_EVENT_COLOR_MAP color, else null.
+    // This module exports NO color mapping. MARINE_EVENT_COLOR_MAP,
+    // MARINE_FLOOR_EVENTS and marineEventColor were REMOVED — they were dead
+    // (read only by their own test) and duplicated the live mapping, which lives
+    // in src/rules.js: ECCC_ALERT_PRECEDENCE + ECCC_ALERT_COLOR_MAP for the
+    // short-circuit lane and ECCC_FLOOR_PRECEDENCE for the yellow floor (section 4).
+    // Read the color story there.
 
     export function parseEcccMarineAlerts(json, nowIso)
       // Pure, exported for tests. Raw GeoMet FeatureCollection -> { alerts: [...] } | null.
@@ -1041,6 +1118,13 @@ the US branch concats marine onto land (section 7 step 3b/7).
       // as a fallback for shoreline points just outside the water polygon). onset =
       // feature lastUpdated; ends = null (no per-event end). The Canadian-beach branch
       // (section 7) concats these events/details onto the land ECCC matches.
+      // Contract UNCHANGED, but it is now a matchedAlerts wrapper
+      // (src/clients/alertMatch.js) that KEEPS (a) its non-finite lat/lon early
+      // return AHEAD of the walk and (b) its try/catch INSIDE the predicate
+      // closure around the PIP-or-nearest-edge test — so this is the ONLY alert
+      // client that swallows a geometry throw. The nearest-edge math itself is
+      // minEdgeDistanceKm from src/geo.js (section 5); ECCC_MARINE_MAX_EDGE_KM
+      // stays applied here, at the call site.
 
 ### src/waveSources/ (supplemental fallback wave-height registry, cron-side)
 
@@ -1535,6 +1619,37 @@ wrapper). No Date.now(), no ambient clock.
       // slow-endpoint override was used by the now-removed wisconsin-dnr
       // scraper; the timeoutMs option itself remains part of fetchText.)
 
+    export function decodeCellText(raw)
+      // Pure. Strips residual tags and decodes the CONSERVATIVE table-cell entity
+      // set (&nbsp; &amp; &#39; &quot; &lt; &gt;), collapses whitespace, trims.
+      // Non-string -> "". DELIBERATELY NOT a union of every entity chain in the
+      // project: several scrapers strip FULL-PAGE HTML into a bounded window that
+      // GATES a floor color, so adding an entity here would change whether a floor
+      // is raised (e.g. "prediction&mdash;poor"). Those scrapers keep their own
+      // local strippers — see the deferred consolidation note in TODO.md.
+
+    export function extractTableRowsRaw(html)
+      // Pure. Raw HTML -> one entry per <tr>, each an array of that row's <td>
+      // INNER-HTML strings in document order. NO decoding and NO minimum-cell
+      // filter — a <th>-only header row yields an EMPTY array rather than being
+      // dropped — so the caller owns both the normalization (some need the raw
+      // markup, e.g. an <img> status icon) and the "is this a data row?" decision.
+      // Uses \b-anchored /<tr\b[^>]*>/ and /<td\b[^>]*>/. Non-string/empty -> [].
+      // src/wqFloor/kenoshaBeachConditions.js still exports extractTableRows as its
+      // own filtering wrapper over this (its test suite pins that name).
+
+    export function containsAny(hay, needles)
+      // Pure. True if any needle is a substring of hay. Compares EXACTLY as given,
+      // NO case folding — callers needing case-insensitivity lowercase both sides.
+
+    export function matchesAnyAlias(haystack, aliases)
+      // Pure. True when any alias appears as a substring of haystack. Lowercases
+      // ONLY the haystack, because every curated alias array in this project is
+      // already lowercase by convention (folding the aliases too would quietly hide
+      // a mis-cased curation entry). Non-string haystack or non-array aliases ->
+      // false. This is the "does any curated alias appear in this parsed row name"
+      // rule that used to be written out ~12 times across the two registries.
+
     export function perBeachResult(sites, source, updated)
       // Pure. The standard multi-site (contract shape (b)) result for the common
       // single-source case: { perBeach: true, sites, source, sources: [source],
@@ -1558,7 +1673,6 @@ wrapper). No Date.now(), no ambient clock.
 
 ### src/officialSources/index.js
 
-    import { distanceMi } from "../geo.js";
     import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
     import { southHaven } from "./southHaven.js";
     // ...one import per registered scraper module (see the registry list below)
@@ -1590,12 +1704,13 @@ wrapper). No Date.now(), no ambient clock.
       // BeachRow -> scraper object | null; first scraper whose matches(beach) is true.
 
     // Re-exports (defined elsewhere, surfaced here for the cron and tests):
-    export { distanceMi }                              // from ../geo.js (section 5)
     export { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } // from ./util.js (above)
-      // distanceMi is the dependency-free src/geo.js haversine (statute miles);
       // resolveSiteForBeach + DEFAULT_SITE_RADIUS_MI (= 1.5) live in ./util.js so
       // scrapers can reuse the name-or-proximity rule without importing this
-      // registry. index.js no longer DEFINES any of these three.
+      // registry; index.js no longer DEFINES either.
+      // distanceMi is NO LONGER re-exported here — index.js does not import
+      // src/geo.js at all any more. Consumers import distanceMi directly from
+      // src/geo.js (src/router.js:7 still re-exports it, and that one IS live).
 
     export function scrapeOfficialFlagFromResult(beach, scraper, result)
       // Pure (no fetch) -> OfficialFlag | null. Resolves an ALREADY-FETCHED
@@ -1703,6 +1818,16 @@ wrapper). No Date.now(), no ambient clock.
       //   honest `updated` stamping, NEVER a substitute for it: papering a
       //   days-old reading over with nowIso plus a long staleMs is exactly the
       //   failure this rule exists to prevent.
+      //
+      //   CONSTRUCTION: shape (b) is now built through
+      //   officialSources/util.js#perBeachResult(sites, source, updated) by EVERY
+      //   registered official scraper except southHaven (whose sources array carries
+      //   two entries) and, on the wqFloor side, by every source except
+      //   ontarioParksBeachPostings (computed succeededUrls). One consequence to know:
+      //   four wqFloor sources (erie-county-pa-kml, illinois-beachguard, mn-beaches,
+      //   usgs-great-lakes-nowcast) now emit a `sources: [source]` key they previously
+      //   omitted. scrapeWqFloorFromResult does NOT read result.sources, so the
+      //   resolved advisory and the "wqfloor:" KV payload are unchanged.
     }
 
 ### src/officialSources/southHaven.js
@@ -1820,8 +1945,15 @@ would downgrade a hazard flag.
   the neutral reading note carries the honesty instead, rather than the false "stale"
   the default would show for ~22 of every 24 hours. The OMR product text itself warns
   the morning observations "may not be representative of conditions later in the day".
-  Name + tight (2 mi) proximity matches(); disjoint from South Haven / Metroparks /
-  Chicago.
+  matches() IS resolveSiteForBeach(beach, SITE_DEFS) !== null — the SAME
+  name-then-nearest-within-radiusMi rule used to RESOLVE a scrape result, with every
+  SITE_DEF carrying radiusMi = OMR_MATCH_RADIUS_MI (2 mi), so the claim reach and the
+  resolve reach cannot drift apart. (With a uniform radius, "nearest within radius" and
+  "any within radius" are boolean-identical.) Kept tight so a namesake beach elsewhere
+  never resolves onto a west-Michigan state-park flag; disjoint from South Haven /
+  Metroparks / Chicago. CAVEAT: a CLAIMED beach can still resolve to null when the day's
+  product reports no flag for its site — "nothing to report" is not "no coverage" (tested
+  at test/nwsOmr.test.js:322-331).
 - src/officialSources/winnetkaTowerBeach.js (winnetka-tower-beach) — Winnetka Park
   District, single Tower Road Beach (Lake Michigan, IL) via a rainoutline.com
   server-rendered status page. DANGEROUS-CONDITIONS CLOSURE, hazard axis only:
@@ -1889,10 +2021,7 @@ clean reading must never appear as a green floor, and its absence IS the "no flo
                                     // first-match-wins), curated single-region sources
                                     // before the coarse NowCast bbox:
       // ny-oprhp-beach-status         — NY State Parks (OPRHP) beach status
-      // chautauqua-county-ny          — Chautauqua County NY (bacteria/HAB)
       // lake-county-oh-beaches        — Lake County (OH) GHD water-quality program
-      // erie-county-pa-kml            — Erie County (PA) DoH  [KML URL UNCONFIRMED — see below]
-      // illinois-beachguard           — Illinois BeachGuard (IDPH) per-beach detail
       // kenosha-beach-conditions      — Kenosha County (WI) beach conditions (E. coli)
       // mn-beaches                    — Minnesota DoH monitoring (mnbeaches.org), ~6 Duluth sites
       // grey-bruce-rec-water          — Grey Bruce Health Unit (ON, Lake Huron) [low confidence]
@@ -1901,11 +2030,31 @@ clean reading must never appear as a green floor, and its absence IS the "no flo
       // usgs-great-lakes-nowcast      — USGS Great Lakes NowCast predicted E. coli (LAST;
       //                                 coarse Lake Erie/Ontario US-shore bbox — only beaches
       //                                 no curated source claims fall through to it)
+      //
+      // DELIBERATELY NOT REGISTERED (modules on disk, fully tested, ready to re-insert):
+      //   chautauqua-county-ny, erie-county-pa-kml (fetch URL still "") and
+      //   illinois-beachguard (ILLINOIS_BEACHGUARD_CONFIRMED === false, placeholder
+      //   BeachIDs). All three fail closed before fetching, i.e. they are PERMANENTLY
+      //   INERT — and under first-match-wins (the cron resolves exactly ONE source per
+      //   beach) an inert source registered ahead of a working one SUPPRESSES it:
+      //   erie-county-pa-kml's ERIE_BOX is strictly inside usgs-great-lakes-nowcast's
+      //   region bbox, and illinois-beachguard's box overlaps kenosha-beach-conditions
+      //   coverage around lat 42.517-42.55. Re-insert each ABOVE usgs-great-lakes-nowcast
+      //   (and, for illinois-beachguard, ALSO above kenosha-beach-conditions) once its
+      //   URL / BeachID gate is confirmed — never below.
+      //
       // Each source object: { id, label, infoUrl?, matches(beach),
-      //   scrape(nowIso) -> { perBeach: true, sites: Site[], source, updated } | null }
+      //   scrape(nowIso) -> { perBeach: true, sites: Site[], source, updated,
+      //                       sources? } | null }
       // Site: { siteId, floorColor: "yellow"|"red", names?, lat?, lon?, radiusMi?, reason?,
       //   updated? }. scrape() is called ONCE per source per run (not per beach); null on ANY
       //   failure/empty, never a wrong color (error-isolation).
+      //   The optional `sources` array is provenance only: every source except
+      //   ontario-parks-beach-postings (which computes succeededUrls across its per-park
+      //   fetches) now builds its result through officialSources/util.js#perBeachResult,
+      //   which emits `sources: [source]` alongside `source`. scrapeWqFloorFromResult does
+      //   NOT read result.sources, so the resolved advisory and the "wqfloor:" KV payload
+      //   are byte-unchanged by its presence.
 
     export function findWqFloorSource(beach)     // -> source | null (first match).
     export function scrapeWqFloorFromResult(beach, source, result)
@@ -1917,10 +2066,20 @@ clean reading must never appear as a green floor, and its absence IS the "no flo
 
 The cron gathers these once per run and folds the result into the per-beach estimate BEFORE
 computing it (section 7 step 5b/6), and persists a WqFloorAdvisory to "wqfloor:" + beachId
-only when an advisory is active. FOLLOW-UPS (human to verify): the erie-county-pa-kml source
-ships with its KML URL EMPTY/unconfirmed (it resolves to null until a real URL is supplied);
-grey-bruce-rec-water is flagged low-confidence; several source URLs across the registry are
-best-effort and should be re-verified live before relying on their coverage.
+only when an advisory is active. FOLLOW-UPS (human to verify): three authored+tested sources
+are UNREGISTERED and therefore never consulted on a run — erie-county-pa-kml and
+chautauqua-county-ny (fetch URL still EMPTY/unconfirmed) and illinois-beachguard
+(ILLINOIS_BEACHGUARD_CONFIRMED === false, placeholder BeachIDs); see the re-insertion rule
+in the wqFloorSources listing above (ABOVE usgs-great-lakes-nowcast, and for Illinois also
+above kenosha-beach-conditions) before putting any of them back. grey-bruce-rec-water is
+flagged low-confidence; several source URLs across the registry are best-effort and should
+be re-verified live before relying on their coverage.
+
+`src/wqFloor/` contains ZERO raw fetch() calls: every source fetches through
+officialSources/util.js#fetchText or clients/http.js#fetchJson. mn-beaches was the last
+holdout and now uses fetchJson (label "mnBeaches: results.json", timeoutMs 30000, its
+descriptive User-Agent header retained), so its failure log lines read
+"mnBeaches: results.json fetch failed: ..." rather than "mnBeaches: fetch failed: ...".
 
 ## 7. Cron design (src/index.js)
 
@@ -1978,8 +2137,15 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run);
    const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
-2. SELECT * FROM beaches ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
-   recompute_updated ASC, id ASC LIMIT 1000, bound with hotCutoffIso as ?1
+2. SELECT * FROM beaches WHERE <FLAG_WORTHY_WATER_SQL>
+   ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
+   recompute_updated ASC, id ASC LIMIT 1000, bound with hotCutoffIso as ?1.
+   Both beach-walking crons emit this statement from ONE shared helper,
+   selectRunBeaches(env, columns, hotCutoffIso) in src/index.js (precedent:
+   buildHomeStatement in src/router.js) — the WHERE / ORDER BY / LIMIT / bind live
+   there once and the SQL is byte-identical for both callers; only the column list
+   ("*" here, the explicit list in step 1 of runWaveRefresh below) and the caller's
+   clock source differ. The helper returns the BOUND statement; the caller runs it.
    (recompute_updated is migration 0004; NULLs sort first within each tier, so
    never-recomputed rows and the longest-waiting rows always go first inside the hot
    tier and again inside the cold tier — a fair rotation within each tier if the table
@@ -2016,9 +2182,13 @@ still needs a longer cold-tier KV TTL and real pagination (TODO.md).
    estimate degrades to the wind fallback or "unknown", never a wrong flag.
 6. (Wind is not fetched here — the wind fallback the estimate uses is carried on the
    waveinput payload, recorded by runWaveRefresh only for beaches still wave-null there.)
-6b. Water-quality floor gather: group beaches by findWqFloorSource(beach) id (mirrors the
-   step-8 official-scraper grouping) and call each distinct wqFloor source's scrape(nowIso)
-   ONCE per run into a wqResultsBySource Map. This MUST happen BEFORE the per-beach estimate
+6b. Water-quality floor gather: ONE findWqFloorSource(beach) pass over the run's beaches
+   builds two maps — wqSourceByBeach (beach.id -> source, reused verbatim by step 7 so the
+   resolver runs ONCE per beach, not twice) and wqDistinctSources (source.id -> source, the
+   fetch list). Then each distinct wqFloor source's scrape(nowIso) is called ONCE per run
+   into wqResultsBySource (source.id -> the BARE scrape result; it used to hold a
+   { source, result } wrapper whose .source was never read). Mirrors the step-8
+   official-scraper grouping. This MUST happen BEFORE the per-beach estimate
    below, because the resolved advisory feeds estimateFlag's waterQualityAdvisory input (a
    raise-only floor — section 4 step 7) — the step-8 official gather is too late. A scrape
    failure is isolated (result null -> no floor for that source's beaches).
@@ -2140,9 +2310,15 @@ strip showing slightly-older-but-still-model-current data instead of blanking it
    its UTC hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries;
    const hotCutoffIso = new Date(Date.parse(nowIso) - HOT_VIEW_WINDOW_MS).toISOString()
    (the same 7-day hot/cold split runFlagRecompute uses, computed from this run's own
-   nowIso). SELECT id, lat, lon, last_viewed FROM beaches ORDER BY (last_viewed IS NOT
+   nowIso). SELECT id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed FROM
+   beaches WHERE <FLAG_WORTHY_WATER_SQL> ORDER BY (last_viewed IS NOT
    NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT 1000, bound with
-   hotCutoffIso as ?1. This shares the flag cron's recompute_updated cursor (both crons
+   hotCutoffIso as ?1 — emitted by the SAME shared selectRunBeaches(env, columns,
+   hotCutoffIso) helper the hourly cron uses (section 7, runFlagRecompute step 2), so the
+   ORDER BY / LIMIT / bind exist in exactly one place; only this caller's column list and
+   clock source differ. The three extra columns beyond id/lat/lon/last_viewed
+   (nws_grid_url, nws_zone, marine_zone) key the step-2b supplemental wave sources.
+   This shares the flag cron's recompute_updated cursor (both crons
    read and advance the same column) WITHOUT stamping it itself — recompute_updated is
    written only by runFlagRecompute's own step 9; runWaveRefresh reads the column purely
    to order its rotation, so the two crons' rotations stay coupled without either owning
@@ -2268,7 +2444,10 @@ reconciliationAllowed or the delete path — it only ever appends change-only UP
   geometry generated by `scripts/build-marine-zones.js` from the NWS coastal marine-zone
   shapefile (https://www.weather.gov/gis/MarineZones, refreshed ~biannually; see
   docs/offline-discovery.md for the file format and refresh procedure).
-- `src/marineZones.js`:
+- `src/marineZones.js` (edge-distance math imported from src/geo.js — `minEdgeDistanceKm`
+  and `KM_PER_DEG`, section 5; this module no longer carries a private copy. Validation,
+  and therefore the loud-throw contract, still lives in `buildMarineZoneIndex`, which runs
+  BEFORE any distance math):
   - `buildMarineZoneIndex(zonesData)` — builds the spatial lookup index; THROWS on
     malformed input (the batch surfaces a bad committed file rather than silently
     deriving nothing).
@@ -2286,9 +2465,17 @@ reconciliationAllowed or the delete path — it only ever appends change-only UP
     AND (marine_zone IS NULL OR marine_zone <> '<zone>');`
 - sync_meta stamps: `last_marine_zone_pass` (nowIso) and `last_marine_zone_count`
   (updates emitted this run).
-- discovery.yml snapshot columns now include `nws_zone` and `marine_zone` (full list:
-  id, osm_id, name, lat, lon, park_name, water_class, water_class_version,
-  water_class_attempts, nws_zone, marine_zone).
+- discovery.yml snapshot columns are exactly `id, name, lat, lon, park_name, nws_zone,
+  marine_zone` — the union of what `reconcileStaleRows` (id, name, lat, lon, park_name)
+  and `marineZoneSql` (id, lat, lon, nws_zone, marine_zone) read, and nothing else. It
+  does NOT select `osm_id` / `water_class` / `water_class_version` /
+  `water_class_attempts`: those are read only by `buildClassifyQueue`, gated behind
+  `if (args.classify)` and therefore unreachable on this hardcoded `--no-classify` run.
+  This matters on the delete rail — the snapshot step aborts the ONLY delete-bearing run
+  if D1's `--json` response truncates, and the trimmed list is ~35-40% smaller.
+  classify.yml's snapshot SELECT is a DIFFERENT, wider set (`id, osm_id, name, lat, lon,
+  park_name, water_class, water_class_version, water_class_attempts`) and is unchanged —
+  the asymmetry is deliberate, do not sync them.
 
 Locally, `npm run seed` runs the batch against local D1 in discovery-only mode
 (`deno run ... scripts/discovery-batch.js --out ./.seed.sql --no-classify` then
@@ -2371,9 +2558,12 @@ below).
    fetchParkBeaches pass only begins after fetchBeaches has fully resolved — and tiles run
    one at a time with a polite inter-tile gap, since overpass-api.de allows only 2 slots
    per IP and 429s beyond that.
-3. mergeBeachRows(namedRows, parkBeaches) — pure; lives in src/discovery.js and
-   is re-exported from src/index.js (so the offline batch job imports the same
-   merge without pulling the Worker graph):
+3. mergeBeachRows(namedRows, parkBeaches) — pure; lives in src/discovery.js and is
+   imported DIRECTLY by scripts/discovery-batch.js and test/parkContainment.test.js.
+   src/index.js no longer imports or re-exports it, so the Worker bundle no longer
+   ships src/discovery.js at all — dropping that re-export is precisely what keeps
+   the offline merge out of the Worker graph (the old re-export existed only to give
+   a test an import path, and had the opposite effect):
    - named beach also found inside a park -> parkName attached;
    - unnamed beach kept ONLY when park-associated. The LARGEST (by bbox area)
      unnamed beach per park ELEMENT (parkKey, so two same-named parks in different
@@ -2452,7 +2642,11 @@ SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts 
 ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 75; for each,
 fetchPointMetadata(lat, lon) sequentially; on success UPDATE beaches SET nws_zone = ?,
 nws_grid_url = ? WHERE id = ?; on failure (fetchPointMetadata returns null, or throws)
-UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?. Ordering:
+UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ? — issued via
+bumpAttempts(env, beachId, NWS_ATTEMPTS_BUMP_SQL, "nws"), the one helper both authorities
+share (the ECCC side passes ECCC_ATTEMPTS_BUMP_SQL / "eccc"). Both UPDATE strings stay
+module-level literals in src/index.js precisely so the SQL remains greppable after the
+merge. Ordering:
 fewest failed attempts first (fresh rows before retries, attempts key stays first so the
 parking behavior below is unchanged), then last_viewed DESC NULLS LAST as a demand
 tiebreak (a beach visitors are actively hitting drains its NWS-zone gap before an
@@ -2488,7 +2682,9 @@ GeoMet outage never burns the attempts budget of resolvable rows. Per resolved b
 on success UPDATE beaches SET eccc_zone = ? WHERE id = ?; a beach no Canadian region
 contains (a US point, or a shoreline centroid nudged just offshore) bumps an attempt
 (UPDATE beaches SET eccc_attempts = eccc_attempts + 1 WHERE id = ?, per-beach isolation
-via bumpEcccAttempts, mirroring the NWS side). A row with eccc_zone set is Canadian:
+via the SHARED helper bumpAttempts(env, beachId, sql, label) called with
+ECCC_ATTEMPTS_BUMP_SQL and label "eccc" — the same helper the NWS side uses; there is no
+separate bumpEcccAttempts any more). A row with eccc_zone set is Canadian:
 the hourly recompute checks Environment Canada alerts for it and it stops
 carrying the alerts-unavailable caveat. Rows no Canadian region matches (a US
 point that somehow exhausted NWS attempts, a mid-lake centroid) park at the cap
@@ -2555,7 +2751,7 @@ calls — respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach)
   water_class_version = ?, water_class_attempts = 0 WHERE id = ? (reset attempts on a
   decision so a later version re-drain has a fresh budget);
 - cls === null (CLEAN but empty) → bumpWaterClassAttempts (self-isolating, like
-  bumpAttempts / bumpEcccAttempts).
+  bumpAttempts).
 The whole attempts semantics: bump ONLY on a clean-but-empty classification, never on
 the ~1/3 Overpass flake rate. Summary log reports attempted / classified / ocean /
 great_lake / inland / bumped / parked (water_class IS NULL AND attempts >= 5) /
@@ -2635,7 +2831,7 @@ Routing table (method GET only; anything else → 405):
 
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
-| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] LIMIT 500, sort by distanceMi ascending, slice 100. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: ONE bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — 2 KV reads per page regardless of row count; HOME_LIST_LIMIT (100) is load-bearing here, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
+| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate PLANAR squared-distance ordering (cheap, monotone in true distance at this scale) so the LIMIT is a pure safety cap on an ALREADY-ordered read: it keeps the 500 NEAREST candidates, not the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is load-bearing correctness, not an optimization — without it the cap truncated in scan order, so a visitor at the far end of the table got a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null (falling back to the unordered shape) if any value is non-finite; NO request text is ever interpolated. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: ONE bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — 2 KV reads per page regardless of row count; HOME_LIST_LIMIT (100) is load-bearing here, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null); 404 HTML if no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | D1: SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] — NO bbox predicate, NO LIMIT (the full flag-worthy directory, ~613 today). Then attachFeatureFlags: bulk KV read of flag:/official: for every id (chunked to the 100-key bulk-get cap → ~7 chunks × 2 families at present, read in parallel; scales linearly with row count) stamps a per-feature `flag` KEYWORD via markerFlagColor — best-color official>estimate>unknown with double-red collapsed to red, missing/expired KV → "unknown". Rows with non-finite lat/lon are skipped (no NaN coordinate). Location-independent (no request.cf, no bbox) so fully cacheable; the homepage map fetches it ONCE on load and feeds it to a native clustered GeoJSON source. Scaling beyond ~5–10k features needs server clustering / paging (see section 9 / TODO). | GeoJSON { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
@@ -2772,7 +2968,12 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // CustomEvent on document so LIST_MAP_SCRIPT re-centers (the clustered
       // source already holds every beach, so it is a pure re-center — no refetch,
       // no rebuild), and announces the reorder into the #geo-live-region
-      // aria-live element (rendered empty, class visually-hidden, role=status,
+      // aria-live element (rendered empty, class wa-visually-hidden — the kit's
+      // utilities.css utility, the same spelling the wave-strip summary uses
+      // below; the hand-rolled .visually-hidden rule is gone from
+      // src/frontend/styles.js. Accepted delta: if the pinned CDN is unreachable
+      // the string "Beaches sorted by distance from your location." becomes
+      // visible, the same exposure noted for the wave-strip summary) — role=status,
       // aria-live=polite, placed before the list section). The server still owns
       // the sort: the nearest-100 SET can differ from the rendered rows, so the
       // client swaps whole fragments and never re-sorts locally. No geolocation
@@ -2825,6 +3026,14 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
 
     export function renderErrorPage(data)
       // data = { status: 404, message: "Beach not found" } -> full HTML document string.
+      // The status code is the page's TITLE and is emitted as a real
+      // <h1 class="wa-font-size-xl"> inside the danger <wa-callout> (it used to be a
+      // styled <strong> followed by a <br>, which left the error page as the only page
+      // with no heading at all — renderBrandHeader is an <a>, renderFooter a <p><small>).
+      // All three page types now carry exactly ONE h1. wa-font-size-xl keeps it from
+      // reading louder than the list/detail titles; styles.js carries a
+      // "wa-callout h1 { margin-block-start: 0; }" reset so the slotted heading does not
+      // stack its own block-start margin on the callout's padding.
 
 Additional helper files are allowed under src/frontend/ only (e.g. src/frontend/styles.js
 exporting a CSS string); render.js is the sole module the router imports.
@@ -3072,14 +3281,15 @@ exporting a CSS string); render.js is the sole module the router imports.
   same <div class="wa-frame:landscape wa-border-radius-m framed-embed"> as the wave map
   (its title attribute is the webcam title, or "Nearby webcam" when untitled), 16:9
   responsive, fetched by the BROWSER. Heading "Nearby webcam" — the caption must stay honest
-  that the cam is NEARBY, not necessarily the beach itself: it shows beach.webcam_title (when
-  non-empty) plus an attribution link to https://www.windy.com/webcams naming
-  Windy.com (free-tier attribution requirement). This per-webcam caption link is IN
-  ADDITION to (not a substitute for) the site-wide Windy Terms credit now carried in the
-  shared footer (section 9's page-skeleton bullet): the footer satisfies Windy's Terms
-  credit obligation on every page, and this caption remains a page-local supplementary
-  link (intentionally left unchanged by the footer fix). All dynamic values escape through
-  escapeHtml, including attribute positions.
+  that the cam is NEARBY, not necessarily the beach itself: it shows beach.webcam_title
+  (when non-empty) and NOTHING ELSE. The caption used to carry its own attribution link to
+  https://www.windy.com/webcams; that anchor was deliberately REMOVED once the site-wide
+  Windy Terms credit landed in the shared footer (section 9's page-skeleton bullet), which
+  is now the single place the credit obligation is satisfied. Consequence to know:
+  beaches.webcam_detail_url (migration 0011) is written every night by the webcam cron and
+  read by NOTHING — see TODO.md's open decision (restore a per-cam deep link vs. stop
+  writing the column). All dynamic values escape through escapeHtml, including attribute
+  positions.
 
 ## 10. Test plan (Vitest, node environment — default; vitest.config.js only if needed)
 
@@ -3154,7 +3364,13 @@ legacy defaults).
   bbox, ECCC_USER_AGENT header, null on failure); ecccAlertsForPoint (containment, dedupe,
   malformed→empty); fetchEcccForecastZones (one items request WITH geometry, limit=2000,
   ECCC_USER_AGENT, keeps only NAME+geometry features, null on failure); ecccZoneNameForPoint
-  (point-in-polygon region NAME, outside-all→null, malformed→null).
+  (point-in-polygon region NAME, the ECCC_ZONE_MAX_EDGE_KM nearest-edge fallback,
+  outside-all→null, malformed geometry degrades to null). Those last cases are also the
+  de-facto coverage of src/geo.js's nearest-edge exports (minEdgeDistanceKm,
+  geometryPolygons, pointToSegmentKm, KM_PER_DEG), alongside test/marineZones.test.js
+  (lexicographic tie-break, 15 km cap, island-in-a-hole) and test/buildMarineZones.test.js's
+  groupRingsToPolygons cases for pointInRing. test/geo.test.js itself covers only the
+  distance/units math and was not changed by the consolidation.
 - test/ecccEnrichment.test.js — runEcccEnrichment via runScheduledCron with a recording DB
   stub: ONE bulk fetchEcccForecastZones then local resolution; success stamps eccc_zone (no
   bump); an unresolved point bumps eccc_attempts; a failed bulk fetch parks the whole run

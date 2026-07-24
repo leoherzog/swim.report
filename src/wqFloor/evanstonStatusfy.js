@@ -48,7 +48,7 @@
 // parseStatusfyStatus / normalizeStatusfyTimestamp are pure and exported for
 // unit tests (no network).
 
-import { fetchText } from "../officialSources/util.js";
+import { fetchText, perBeachResult } from "../officialSources/util.js";
 
 export const STATUSFY_BASE = "https://statusfy.com/8474480034/";
 export const EVANSTON_LABEL = "City of Evanston Beach Status";
@@ -277,12 +277,6 @@ export const evanstonStatusfy = {
       // clean run.
       return null;
     }
-    return {
-      perBeach: true,
-      sites: sites,
-      source: EVANSTON_LABEL,
-      sources: [EVANSTON_LABEL],
-      updated: nowIso
-    };
+    return perBeachResult(sites, EVANSTON_LABEL, nowIso);
   }
 };

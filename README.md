@@ -169,6 +169,10 @@ rough mileage label; the page says so explicitly. Without geolocation the list f
 back to alphabetical order. `GET /?near=lat,lon` overrides the detected location
 (useful in local dev, where `request.cf` has no coordinates); an invalid `near` value
 falls back to alphabetical order. Nothing about the visitor's location is stored.
+The located list really is the nearest beaches to the resolved location no matter
+where the visitor sits relative to the table: the server narrows to the 500 nearest
+candidates **in SQL** (an approximate planar-distance `ORDER BY` ahead of the 500-row
+safety cap), then re-sorts those with the exact haversine before slicing to 100.
 
 `GET /?q=term` runs a case-insensitive substring search over the **entire** beach
 directory server-side (not just the ~100 rows the page renders), matching both the
@@ -212,9 +216,10 @@ Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `rules_version` is `1.5.0`. Given the same inputs it always returns the same output.
 
 Precedence is strict: the first matching rule (steps 1–5) wins, evaluated top to
-bottom. Step 6 is the sole exception — an NWS severe-weather **watch** acts as a
-yellow *floor*, raising a green/unknown result to yellow but never downgrading a
-higher color (see the notes below).
+bottom. Steps 6, 6b and 7 are the exceptions — they are raise-only *floors*
+applied after a color is decided: an NWS severe-weather watch/advisory (6), an
+ECCC below-gale marine product (6b), and an active water-quality advisory (7)
+each raise a lower result but never downgrade a higher color (see the notes below).
 
 | # | Signal | Source | Condition | Color | Reason |
 |---|--------|--------|-----------|-------|--------|
@@ -382,11 +387,12 @@ blocking inline script (`src/frontend/colorSchemeScript.js`).
 
 ### Cron jobs
 
-Six scheduled triggers run in production (see `wrangler.toml`). They are separate
-crons on purpose: each upstream's rate-limit posture is independent, and a failure
-in one job never starves another. Beach discovery and water-body classification are
-**not** in this list — they run offline (see [Discovery and classification
-(offline)](#discovery-and-classification-offline)).
+Five scheduled triggers run in production (see `wrangler.toml`'s `crons` array).
+They are separate crons on purpose: each upstream's rate-limit posture is
+independent, and a failure in one job never starves another. Beach discovery and
+water-body classification are **not** in this list — they run offline (see
+[Discovery and classification (offline)](#discovery-and-classification-offline)),
+and neither is `marine_zone` (the sixth bullet below records the retired probe).
 
 - `7 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
   `MAX_BEACHES_PER_RUN = 1000`), ordered hot-first then oldest-`recompute_updated`-first:
@@ -684,16 +690,24 @@ bbox is consulted last, only for beaches no curated source claims):
 | Source (id) | Coverage |
 |---|---|
 | NY State Parks (`ny-oprhp-beach-status`) | OPRHP Lake Erie/Ontario state-park beaches |
-| Chautauqua County NY (`chautauqua-county-ny`) | Chautauqua County bacteria/HAB postings |
 | Lake County OH (`lake-county-oh-beaches`) | Lake County (OH) GHD water-quality program |
-| Erie County PA (`erie-county-pa-kml`) | Erie County (PA) DoH KML — **URL unconfirmed** (see follow-ups) |
-| Illinois BeachGuard (`illinois-beachguard`) | IDPH per-beach detail |
 | Kenosha County WI (`kenosha-beach-conditions`) | Kenosha County beach conditions |
 | Minnesota DoH (`mn-beaches`) | mnbeaches.org (~6 Duluth-area sites) |
 | Grey Bruce ON (`grey-bruce-rec-water`) | Grey Bruce Health Unit (Lake Huron) — low confidence |
 | Ontario Parks (`ontario-parks-beach-postings`) | Ontario Parks per-park Alerts |
 | Evanston IL (`evanston-statusfy`) | City of Evanston beach status |
 | USGS Great Lakes NowCast (`usgs-great-lakes-nowcast`) | Predicted E. coli, coarse US-shore bbox (fallback) |
+
+Three further sources are **authored and tested but held out of the registry** until
+their gates are confirmed: `chautauqua-county-ny` and `erie-county-pa-kml` (fetch URL
+still empty) and `illinois-beachguard` (placeholder BeachIDs). Each fails closed before
+fetching, and because the registry is first-match-wins with exactly one source resolved
+per beach, a permanently-inert source registered ahead of a working one *shadows* it — so
+they are unregistered rather than inert-but-listed. Re-registering one must place it
+**above** `usgs-great-lakes-nowcast` (and, for Illinois, above `kenosha-beach-conditions`).
+See TODO.md for the confirmation checklist. Practical effect: Erie County PA / Presque
+Isle beaches now get NowCast coverage, and beaches around lat 42.517–42.55 near
+lon −87.79 now get Kenosha County WI — both were previously suppressed.
 
 Each wqFloor source obeys the same never-a-wrong-color rule (a schema change
 degrades to `null`, i.e. no floor) and reports only `yellow` or `red` — green and
@@ -759,16 +773,35 @@ nothing to report must never return null, or it would raise a false alert.
        };
 
    With shape (b), each matched beach is resolved to a site by
-   `resolveSiteForBeach` in `src/officialSources/index.js`: name substrings
+   `resolveSiteForBeach`, which is **defined in `src/officialSources/util.js`** and
+   only re-exported by `src/officialSources/index.js`: name substrings
    win over proximity, then nearest site within its `radiusMi` (default
    1.5 mi). A beach that resolves to no site gets no official flag — that is
    the correct outcome, not an error. Sites without a confirmed
-   green/yellow/red/double-red color must be omitted from `sites`.
+   green/yellow/red/double-red color must be omitted from `sites`. (Distance math
+   lives in `src/geo.js` — import `distanceMi` from there; `officialSources/index.js`
+   no longer re-exports it.) Build the shape-(b) object with
+   `perBeachResult(sites, source, updated)` from `util.js` rather than by hand.
 
    Keep parsing logic in separate, pure, exported functions (see
    `parseSouthHavenCsv` in `src/officialSources/southHaven.js`) so they can be
    unit tested with fixture strings and no network access. `scrape(nowIso)`
    receives its timestamp — never call `Date.now()` or `new Date()`.
+
+   **Shared helpers in `src/officialSources/util.js`** a new scraper should reuse
+   instead of hand-rolling: `fetchText` (cron-side fetch → text or `null`; for a JSON
+   endpoint use `fetchJson` from `src/clients/http.js`), `perBeachResult`,
+   `resolveSiteForBeach` /
+   `DEFAULT_SITE_RADIUS_MI`, `ageDays` / `MS_PER_DAY`, `FLAG_SEVERITY`,
+   `decodeCellText` (strip tags + decode the conservative table-cell entity set,
+   collapse whitespace), `extractTableRowsRaw` (raw HTML → per-`<tr>` arrays of `<td>`
+   inner HTML, no decoding and no minimum-cell filter), `containsAny` (exact,
+   no case folding) and `matchesAnyAlias` (lowercases only the haystack, because every
+   curated alias array in this repo is already lowercase). **Caution:**
+   `decodeCellText` is deliberately the *conservative* table-cell chain. A scraper that
+   strips full-page HTML into a bounded window which **gates a floor color** must keep
+   its own local stripper — widening the entity set there changes whether a floor is
+   raised (e.g. `prediction&mdash;poor`), which is a behavior change, not a cleanup.
 
    **Staleness horizons (`staleMs` / `readingNote`).** The UI's stale-data
    warning defaults to 2 hours, a threshold calibrated to the hourly *estimate*

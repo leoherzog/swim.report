@@ -16,7 +16,6 @@
     "seed:flags": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=7+*+*+*+*\"",
     "seed:classify": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js --out ./.seed.sql && node scripts/apply-local-sql.js ./.seed.sql",
     "deploy": "wrangler deploy",
-    "batch:discovery": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js",
     "test": "vitest run"
   },
   "devDependencies": {

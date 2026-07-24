@@ -48,6 +48,9 @@
 // any unrecognized/malformed shape degrades to null (or, for a single
 // station, to "no site"), never a guessed color.
 
+import { fetchJson } from "../clients/http.js";
+import { perBeachResult, matchesAnyAlias } from "../officialSources/util.js";
+
 const MN_BEACHES_URL = "https://mnbeaches.org/map/data/results.json";
 const MN_BEACHES_LABEL = "Minnesota Department of Health Beach Monitoring (mnbeaches.org)";
 
@@ -181,10 +184,8 @@ function stationDefForEntry(entry) {
   const haystack = entry.Name.toLowerCase();
   for (let i = 0; i < STATION_DEFS.length; i++) {
     const def = STATION_DEFS[i];
-    for (let j = 0; j < def.names.length; j++) {
-      if (haystack.indexOf(def.names[j]) !== -1) {
-        return def;
-      }
+    if (matchesAnyAlias(haystack, def.names)) {
+      return def;
     }
   }
   return null;
@@ -269,11 +270,8 @@ export const mnBeaches = {
     }
     const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
     for (let i = 0; i < STATION_DEFS.length; i++) {
-      const def = STATION_DEFS[i];
-      for (let j = 0; j < def.names.length; j++) {
-        if (haystack.indexOf(def.names[j]) !== -1) {
-          return true;
-        }
+      if (matchesAnyAlias(haystack, STATION_DEFS[i].names)) {
+        return true;
       }
     }
     if (typeof beach.lat !== "number" || typeof beach.lon !== "number") {
@@ -282,25 +280,12 @@ export const mnBeaches = {
     return inMnBeachesBox(beach);
   },
   scrape: async function(nowIso) {
-    let response;
-    try {
-      response = await fetch(MN_BEACHES_URL, {
-        headers: { "User-Agent": MN_BEACHES_USER_AGENT },
-        signal: AbortSignal.timeout(30000)
-      });
-    } catch (err) {
-      console.log("mnBeaches: fetch failed: " + err.message);
-      return null;
-    }
-    if (!response.ok) {
-      console.log("mnBeaches: fetch failed: HTTP " + response.status);
-      return null;
-    }
-    let data;
-    try {
-      data = await response.json();
-    } catch (err) {
-      console.log("mnBeaches: response was not valid JSON: " + err.message);
+    const data = await fetchJson(MN_BEACHES_URL, {
+      headers: { "User-Agent": MN_BEACHES_USER_AGENT },
+      timeoutMs: 30000,
+      label: "mnBeaches: results.json"
+    });
+    if (data === null) {
       return null;
     }
     try {
@@ -310,12 +295,7 @@ export const mnBeaches = {
       }
       // An empty array is a legitimate clean run (every curated station
       // acceptable) — still a valid perBeach result, just with no sites.
-      return {
-        perBeach: true,
-        sites: sites,
-        source: MN_BEACHES_LABEL,
-        updated: nowIso
-      };
+      return perBeachResult(sites, MN_BEACHES_LABEL, nowIso);
     } catch (err) {
       console.log("mnBeaches: parse failed: " + err.message);
       return null;

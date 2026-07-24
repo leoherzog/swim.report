@@ -72,10 +72,25 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   beach keeps a stored player URL up to 14 days after its cam dies (the player
   page itself degrades gracefully). (5) The site-wide footer now carries Windy's
   required Terms credit and same-grid-cell due beaches share one bbox `/webcams`
-  request (F14 clustering landed). Still open (F13 secondary, deliberately not done —
-  scoped to the maintainer's `render.js`-only pass): request `include=...,urls` and
-  deep-link each per-webcam caption to that cam's own detail page (`webcam.urls`)
-  rather than the generic Windy webcams hub.
+  request (F14 clustering landed). (6) The F13-secondary **data** half is DONE, not
+  open: both `/webcams` queries request `&include=player,location,urls`,
+  `src/clients/windyWebcams.js` returns `detailUrl` (`urls.detail`, null when absent),
+  migration 0011 added `beaches.webcam_detail_url`, and the daily cron writes it
+  (`src/index.js` — set on a hit, NULLed on a miss).
+  **OPEN DECISION (not pending work):** nothing READS `webcam_detail_url`. The
+  render-side per-cam anchor shipped in `42c6a07` and was deliberately removed in
+  `26e9051` when Windy attribution moved to the site-wide footer, so the column is
+  written every night and never displayed. Two coherent resolutions — pick one, do
+  not leave it as-is: (a) restore the per-caption deep link in `render.js` so each
+  cam links its OWN Windy detail page, or (b) stop writing the column (drop it from
+  the cron write and from the client's return shape) and let the footer credit stand
+  alone. Note that migration `0011_webcam_detail_url.sql`'s stated rationale — the
+  Windy Terms line "Link every image with either our webcam page or timelapse player
+  for full view", to be satisfied by `renderWebcam`'s caption — is **currently unmet**:
+  that caption link no longer exists. `src/clients/windyWebcams.js`'s header comment
+  and migration 0011's comment both still describe the removed `renderWebcam`
+  fallback. Whoever decides should confirm with Windy's current Terms whether the
+  footer credit alone suffices.
 - **Threshold calibration against real flag history.** The `flag_history` table
   (migration 0006, PLAN.md sections 2 and 7) accumulates estimated-vs-official
   pairs for beaches with a scraped official flag (South Haven, Chicago, the NWS
@@ -250,6 +265,22 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   `null` when they parse fine but no site survives their gates — rare in season,
   but off-season or stale-only data would log a false failure streak. Migrate
   them the same way.
+- **Deferred: tier-2 HTML entity-decoder consolidation.** `decodeCellText` now lives
+  in `src/officialSources/util.js` and the two byte-identical copies
+  (`greyBruceRecWater.js`, `ontarioParksBeachPostings.js`) were folded into it. Five
+  near-variants were deliberately LEFT ALONE: `kenoshaBeachConditions.js` `htmlToText`,
+  `paDcnrPresqueIsle.js` `htmlToText`, `chautauquaCountyNy.js` `htmlToPlainText`,
+  `evanstonStatusfy.js` `stripTags` and `lakeCountyOhBeaches.js` `stripTags`. Folding
+  them into a union decoder is **behavior-changing**, not a cleanup: evanston and
+  lakeCountyOh strip *full-page* HTML into a bounded character window (400 / 600 chars)
+  that GATES a red and a yellow floor, and decoding one more entity demonstrably changes
+  whether a floor is raised (`prediction&mdash;poor` currently fails
+  `lakeCountyOhBeaches`'s regex and raises NO floor; under a union decoder it would match
+  and raise yellow). Both test suites use entity-free synthetic fixtures, so a green run
+  proves nothing — this needs real captured page samples and its own reviewed commit.
+  `erieCountyPaKml.js` `decodeAndStrip` is PERMANENTLY excluded from any such
+  consolidation: it decodes `&amp;` LAST on purpose (decoding it first would
+  double-decode) and it unwraps CDATA.
 
 ## Official-source coverage
 
@@ -266,24 +297,50 @@ A batch of new data sources landed across three registries. **Official HAZARD
 scrapers** (`src/officialSources/`, may override the estimate): `nws-omr-grr`,
 `winnetka-tower-beach`, `pa-dcnr-presque-isle`, `nws-marine-beach-forecast`.
 **Raise-only water-quality FLOOR sources** (`src/wqFloor/`, may only lift a flag,
-never lower it — see README "Water-quality advisory floor"): `ny-oprhp-beach-status`,
-`chautauqua-county-ny`, `lake-county-oh-beaches`, `erie-county-pa-kml`,
-`illinois-beachguard`, `kenosha-beach-conditions`, `mn-beaches`, `grey-bruce-rec-water`,
-`ontario-parks-beach-postings`, `evanston-statusfy`, `usgs-great-lakes-nowcast`.
+never lower it — see README "Water-quality advisory floor"). Registered:
+`ny-oprhp-beach-status`, `lake-county-oh-beaches`, `kenosha-beach-conditions`,
+`mn-beaches`, `grey-bruce-rec-water`, `ontario-parks-beach-postings`,
+`evanston-statusfy`, `usgs-great-lakes-nowcast`. Authored and tested but
+**deliberately NOT registered** (see the follow-up below): `chautauqua-county-ny`,
+`erie-county-pa-kml`, `illinois-beachguard`.
 **Supplemental fallback wave sources** (`src/waveSources/`, wave-height only, used
 only where Open-Meteo + GLOS are null): `nws-gridpoint-waves`, `nws-nsh-nearshore`,
 `uw-sea-caves-watch`, `toronto-beach-obs`, `ndbc-buoys`. **ECCC marine warnings**
 (`src/clients/ecccMarine.js`) are wired into the Canadian alert path (rules step
-1b/6b). Nothing was punted — every surveyed source above is registered.
+1b/6b). Nothing was punted — every surveyed source above is authored; three wqFloor
+sources are held OUT of the registry pending gate confirmation (see the follow-up
+below).
 
 Follow-ups a human must verify (parsers fail safe to `null`/no-effect, so these are
 coverage gaps, not wrong-color risks):
 
-- **`erie-county-pa-kml` KML URL is UNCONFIRMED** — it ships with an empty
-  `ERIE_COUNTY_PA_KML_URL`, so the source resolves to null (no floor) until a real
-  KML endpoint is supplied. Several other wqFloor source URLs are best-effort and
-  should be re-verified live before their coverage is relied on; `grey-bruce-rec-water`
-  is flagged low-confidence in its own header.
+- **`erie-county-pa-kml` KML URL is UNCONFIRMED** — the module ships with an empty
+  `ERIE_COUNTY_PA_KML_URL`, so it fails closed (resolves to null, no floor) before
+  fetching. It is therefore **unregistered** pending URL confirmation and is not
+  consulted at all on a run — see the next bullet for why, and for how to re-insert
+  it safely. Several other wqFloor source URLs are best-effort and should be
+  re-verified live before their coverage is relied on; `grey-bruce-rec-water` is
+  flagged low-confidence in its own header.
+- **Three wqFloor sources are authored, tested, and DELIBERATELY UNREGISTERED** —
+  `chautauqua-county-ny` and `erie-county-pa-kml` (fetch URL still `""`) and
+  `illinois-beachguard` (`ILLINOIS_BEACHGUARD_CONFIRMED === false`, placeholder
+  BeachIDs). All three fail closed before fetching, so they stayed permanently inert
+  while sitting AHEAD of working sources in the first-match-wins `wqFloorSources`
+  registry — and because the cron resolves exactly ONE source per beach, an inert
+  source silently SUPPRESSED the working source behind it: `erie-county-pa-kml`'s
+  `ERIE_BOX` is strictly inside `usgs-great-lakes-nowcast`'s region bbox, and
+  `illinois-beachguard`'s box overlaps `kenosha-beach-conditions` coverage around
+  lat 42.517–42.55. The modules remain on disk with their full test suites.
+  **WHEN A GATE IS CONFIRMED**, re-insert that source into `wqFloorSources` in
+  `src/wqFloor/index.js` **ABOVE** `usgsGreatLakesNowcast` — and, for
+  `illinois-beachguard`, also ABOVE `kenoshaBeachConditions` — never below, or it
+  will shadow nothing and be shadowed itself. Unregistering them restored real
+  coverage: Erie County PA / Presque Isle beaches now reach USGS Great Lakes
+  NowCast, beaches around lat 42.517–42.55 near lon −87.79 now reach Kenosha
+  County WI, and the four curated Chautauqua County NY named beaches now fall
+  through to whichever registered source claims them (NY OPRHP first, else
+  NowCast's coarse Lake Erie/Ontario bbox). If any doc still says these areas
+  have no water-quality coverage, it is out of date.
 - **`nws-marine-beach-forecast` ArcGIS layer enumeration** — only layers verified
   live (CLE = 19, BUF = 7, Lake Erie/Ontario) are enabled. Enumerate the MapServer
   for additional Great Lakes Day-1 layers (e.g. other WFOs) and enable each ONLY
@@ -384,8 +441,10 @@ whose "clean" reading would downgrade a hazard flag. Caveats for the survivors:
   raise-only floor anticipated here is now BUILT (`src/wqFloor/` + rules step 7): a
   water-quality source may RAISE a flag but never lower one, so bacteria/HAB feeds
   (Illinois BeachGuard, Lake County OH, and the rest of the wqFloor registry) are
-  now admissible on that basis. Illinois BeachGuard shipped as `illinois-beachguard`;
-  a reworked Ohio/Wisconsin floor source could be added the same way.
+  now admissible on that basis. Illinois BeachGuard shipped as `illinois-beachguard`
+  — authored and tested, but currently held OUT of the registry pending BeachID
+  confirmation (see the unregistered-sources follow-up above); a reworked
+  Ohio/Wisconsin floor source could be added the same way.
 
 ### Dead ends (verified — don't re-investigate without new info)
 

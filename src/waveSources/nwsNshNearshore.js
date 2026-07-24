@@ -305,8 +305,3 @@ export const nwsNshNearshoreSource = {
   keyOf: keyOf,
   waveFt: waveFt
 };
-
-// Aliases so the integrator can import under either spelling used in the
-// scaffolding notes without rework.
-export { nwsNshNearshoreSource as nshSource };
-export { nwsNshNearshoreSource as nshWaveSource };

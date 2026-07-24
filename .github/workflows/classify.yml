@@ -101,7 +101,9 @@ jobs:
 
       - name: Snapshot current beaches from D1
         # Read-only. Classification reads water_class/version/attempts to build its
-        # queue; the same SELECT + truncation guard as discovery.yml is used.
+        # queue, so this SELECT carries them; discovery.yml selects a DIFFERENT,
+        # narrower column set (no water_class*, no osm_id — it never classifies).
+        # The truncation guard below is the same one discovery.yml uses.
         run: |
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
             --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
@@ -129,7 +131,7 @@ jobs:
             --out classify-delta.sql \
             --no-discovery \
             --classify-limit "${CLASSIFY_LIMIT:-150}" \
-            --classify-budget-ms $(( ${CLASSIFY_BUDGET_MIN:-70} * 60000 ))
+            --classify-budget-ms $(( ${CLASSIFY_BUDGET_MIN:-60} * 60000 ))
           echo "---- delta summary ----"
           # `grep -c` exits 1 on zero matches and this shell is `bash -eo
           # pipefail`, so a fully-drained queue (header-only delta, zero

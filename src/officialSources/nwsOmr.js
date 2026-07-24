@@ -39,7 +39,7 @@
 
 import { fetchJson } from "../clients/http.js";
 import { NWS_USER_AGENT } from "../clients/nws.js";
-import { distanceMi } from "../geo.js";
+import { resolveSiteForBeach, perBeachResult } from "./util.js";
 
 // Product-type list for the OMR product issued by WFO Grand Rapids (GRR).
 export const OMR_LIST_URL =
@@ -54,8 +54,10 @@ export const OMR_LABEL = "NWS Grand Rapids Lake Michigan Beach Report";
 // is not the beach report (or the format changed) and we degrade to null.
 const OMR_TABLE_HEADER = "Lake Michigan Beach Reports";
 
-// Proximity fallback radius (statute miles) for matches() and for
-// resolveSiteForBeach when a beach name does not substring-match a site.
+// Proximity fallback radius (statute miles) used by resolveSiteForBeach for
+// BOTH matches() (run over SITE_DEFS below) and per-beach resolution of a
+// scrape result (run over the emitted sites), when a beach name does not
+// substring-match a site.
 const OMR_MATCH_RADIUS_MI = 2;
 
 // The named beaches this product reports, in table order. names[] are LOWERCASE
@@ -64,9 +66,13 @@ const OMR_MATCH_RADIUS_MI = 2;
 // (park_name + " " + name). Keep them tight and distinctive so a row is never
 // attributed to a namesake/sibling beach. lat/lon are approximate positions
 // along the Lake Michigan shore, used only for the proximity fallback.
-// radiusMi is carried onto each emitted site so resolveSiteForBeach's proximity
-// pass uses the SAME reach as matchesOmr's claim — otherwise a beach 1.5-2.0 mi
-// from a centroid (no name match) would be CLAIMED here yet resolve to null.
+// radiusMi is carried onto each emitted site so the resolution pass uses the
+// SAME reach matches() claims with — otherwise a beach 1.5-2.0 mi from a
+// centroid (no name match) would be CLAIMED here yet resolve to null. matches()
+// is itself resolveSiteForBeach(beach, SITE_DEFS) !== null, so the claim reach
+// and the resolve reach cannot drift apart as this table is edited. (A CLAIMED
+// beach may still resolve to null when the day's product reports no flag for
+// its site — that is correct: nothing to report is not the same as no coverage.)
 const SITE_DEFS = [
   {
     siteId: "ludington-state-park",
@@ -304,31 +310,6 @@ export function newestOmrProductId(json) {
   return bestId !== null ? bestId : firstId;
 }
 
-// Pure. Does this beach belong to one of the curated OMR sites? True if any
-// site's names[] substring-matches the beach's (park_name + " " + name), or the
-// beach sits within OMR_MATCH_RADIUS_MI of a site. Kept tight so a namesake
-// beach elsewhere never resolves onto a west-Michigan state-park flag.
-function matchesOmr(beach) {
-  const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
-  for (let i = 0; i < SITE_DEFS.length; i++) {
-    const def = SITE_DEFS[i];
-    for (let j = 0; j < def.names.length; j++) {
-      if (haystack.indexOf(def.names[j]) !== -1) {
-        return true;
-      }
-    }
-  }
-  if (typeof beach.lat === "number" && typeof beach.lon === "number") {
-    for (let i = 0; i < SITE_DEFS.length; i++) {
-      const def = SITE_DEFS[i];
-      if (distanceMi(beach.lat, beach.lon, def.lat, def.lon) <= OMR_MATCH_RADIUS_MI) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 function nwsHeaders() {
   return {
     "User-Agent": NWS_USER_AGENT,
@@ -359,8 +340,14 @@ export const nwsOmr = {
   // callout with the age appended: "Morning reading — conditions may have
   // changed since it was posted 11 hours ago."
   readingNote: "Morning reading — conditions may have changed since it was posted",
+  // Does this beach belong to one of the curated OMR sites? Exactly the shared
+  // resolver run over SITE_DEFS: any site's names[] substring-matching the
+  // beach's (park_name + " " + name), or the nearest site within its radiusMi
+  // (all seven carry OMR_MATCH_RADIUS_MI, so "nearest within radius" and "any
+  // within radius" are the same boolean here). Kept tight so a namesake beach
+  // elsewhere never resolves onto a west-Michigan state-park flag.
   matches: function(beach) {
-    return matchesOmr(beach);
+    return resolveSiteForBeach(beach, SITE_DEFS) !== null;
   },
   scrape: async function(nowIso) {
     // Leg 1: list the OMR products for GRR and pick the newest id.
@@ -403,13 +390,7 @@ export const nwsOmr = {
       // A clean run with no reportable flags (every beach None / off-season) is
       // a SUCCESSFUL scrape with an empty site list — a health success, not a
       // null failure. It resolves to no official flag for every beach.
-      return {
-        perBeach: true,
-        sites: sites,
-        source: OMR_URL,
-        sources: [OMR_URL],
-        updated: updated
-      };
+      return perBeachResult(sites, OMR_URL, updated);
     } catch (err) {
       console.log("nwsOmr: parse failed: " + err.message);
       return null;

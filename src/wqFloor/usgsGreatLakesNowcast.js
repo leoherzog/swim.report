@@ -48,7 +48,7 @@
 // shape when probed with a normal HTTP client; a bot-filtered fetcher may see
 // 403, so scrape() sends a benign User-Agent and fails CLOSED to null.
 
-import { fetchText, ageDays } from "../officialSources/util.js";
+import { fetchText, ageDays, perBeachResult } from "../officialSources/util.js";
 
 export const NOWCAST_BEACHES_URL =
   "https://pa.water.usgs.gov/apps/nowcast/getbeaches.php";
@@ -354,12 +354,7 @@ export const usgsGreatLakesNowcast = {
       // return the perBeach result (empty sites resolve to null per beach -> no
       // floor, no KV write), reserving null strictly for real fetch/parse
       // failures.
-      return {
-        perBeach: true,
-        sites: sites,
-        source: NOWCAST_LABEL,
-        updated: nowIso
-      };
+      return perBeachResult(sites, NOWCAST_LABEL, nowIso);
     } catch (err) {
       console.log("usgsGreatLakesNowcast: build failed: " + err.message);
       return null;

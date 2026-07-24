@@ -514,16 +514,11 @@ export function reconcileStaleRows(snapshotRows, producedIds, producedParkRowCou
   return stale;
 }
 
-export function reconciliationSql(snapshotRows, producedIds, producedParkRowCount) {
-  return reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount)
-    .map(function (r) { return deleteBeachSql(r.id); });
-}
-
 // --- Offline marine_zone derivation ------------------------------------------
 // Replaces the retired in-Worker runMarineEnrichment cron (up to 17 live NWS
 // probes per beach, 4x daily) with pure local math against the repo-committed
 // data/marine-zones-greatlakes.json (see src/marineZones.js and
-// scripts/build-marine-zones.js). Pure builder, mirrors reconciliationSql:
+// scripts/build-marine-zones.js). Pure builder, mirrors reconcileStaleRows:
 //   - operates ONLY on snapshot rows (a beach discovered THIS run resolves on
 //     the next daily run, after the in-Worker NWS enrichment stamps nws_zone);
 //   - skips rows in this run's reconciliation delete set;

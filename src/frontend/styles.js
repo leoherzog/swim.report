@@ -368,34 +368,13 @@ const RULES = [
   "  overflow: hidden;",
   "}",
 
-  // Screen-reader-only content (the geolocation live region): visually removed
-  // via the standard clip pattern but still announced by assistive tech.
-  ".visually-hidden {",
-  "  position: absolute;",
-  "  width: 1px;",
-  "  height: 1px;",
-  "  margin: -1px;",
-  "  padding: 0;",
-  "  border: 0;",
-  "  overflow: hidden;",
-  "  clip: rect(0 0 0 0);",
-  "  clip-path: inset(50%);",
-  "  white-space: nowrap;",
-  "}",
-
-  // MapLibre's default (compact) attribution control is a native <details> whose
-  // toggle is a <summary class=\"maplibregl-ctrl-attrib-button\"> — the round \"i\"
-  // info button. Web Awesome's native-element styling themes every bare <summary>
-  // with `& summary { padding: var(--wa-space-m) }` (16px), which has no idea this
-  // <details> belongs to the map. That padding exceeds MapLibre's declared 24px
-  // (border-box) button width, forcing it to a 32px minimum; MapLibre's icon uses
-  // the default `background-repeat: repeat` with no background-size, so the 24px
-  // \"i\" tiles and a partial second copy bleeds in — the stray glyph below the
-  // icon. Resetting the padding restores the native 24x24 button so the collapsed
-  // control matches the standard openfreemap.org rendering. The single class
-  // (0,1,0) outranks Web Awesome's `& summary` (0,0,2).
-  ".maplibregl-ctrl-attrib-button {",
-  "  padding: 0;",
+  // The error page's status heading is slotted (light DOM) into a <wa-callout>,
+  // directly above the message line. Web Awesome's native-element styling gives
+  // headings a block-start margin, which would stack on top of the callout's own
+  // padding and push the heading away from the icon; zero it so the callout keeps
+  // its intended internal spacing.
+  "wa-callout h1 {",
+  "  margin-block-start: 0;",
   "}"
 ];
 

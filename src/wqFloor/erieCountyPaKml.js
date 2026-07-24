@@ -46,7 +46,7 @@
 // defensive regex/string work: any markup or schema change degrades to null (or
 // omits the affected placemark), NEVER a wrong color.
 
-import { fetchText } from "../officialSources/util.js";
+import { fetchText, perBeachResult } from "../officialSources/util.js";
 
 // Human label for the estimate card and the advisory reason.
 export const ERIE_COUNTY_PA_LABEL = "Erie County (PA) Department of Health";
@@ -403,12 +403,7 @@ export const erieCountyPaKml = {
       }
       // sites may be [] (map parsed cleanly, every beach open) — a clean run
       // with nothing to report. It resolves to no floor for every beach.
-      return {
-        perBeach: true,
-        sites: sites,
-        source: ERIE_COUNTY_PA_LABEL,
-        updated: nowIso
-      };
+      return perBeachResult(sites, ERIE_COUNTY_PA_LABEL, nowIso);
     } catch (err) {
       console.log("erieCountyPaKml: parse failed: " + err.message);
       return null;

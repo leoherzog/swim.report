@@ -1,10 +1,6 @@
 import { handleRequest } from "./router.js";
 import { renderErrorPage } from "./frontend/render.js";
 import { estimateFlag } from "./rules.js";
-// mergeBeachRows (and its park-association / unnamed-suffix helpers) moved to
-// src/discovery.js so the offline batch discovery job can reuse it verbatim.
-// Re-exported below so test/parkContainment.test.js keeps importing it from here.
-import { mergeBeachRows } from "./discovery.js";
 import {
   fetchAllActiveAlerts,
   nwsAlertsForZone,
@@ -42,14 +38,10 @@ import {
   WEBCAM_FETCH_LIMIT
 } from "./clients/windyWebcams.js";
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
-import { wqFloorSources, findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
+import { findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
 import { waveSources, resolveSupplementalWaveFt } from "./waveSources/index.js";
 import { nearestStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
 import { updateScraperHealth } from "./scraperHealth.js";
-
-// Re-export the discovery merge helper from its new home (src/discovery.js) so
-// existing importers (test/parkContainment.test.js) keep resolving it here.
-export { mergeBeachRows };
 
 // Must cover the whole beaches table in ONE run: the recompute rotation
 // (ORDER BY recompute_updated) combined with the 2 h KV TTL means any beach
@@ -183,7 +175,8 @@ WAVE_MODEL_LABELS[GLCFS_WAVE_MODEL] = "GLOS Buoy Observations";
 // truth for their own model label + provenance url. Registering them here (once,
 // at module load) keeps the flag source badge and the detail strip labeling a
 // supplemental reading correctly instead of the generic "Wave Forecast" /
-// Open-Meteo fallback. With the empty registry this loop is a no-op.
+// Open-Meteo fallback. The registry holds five sources today, so this loop
+// registers five model labels + provenance urls at module load.
 const SUPPLEMENTAL_WAVE_URLS = {};
 for (let i = 0; i < waveSources.length; i++) {
   const s = waveSources[i];
@@ -244,17 +237,13 @@ function batchTiming(env) {
 // doubles that batch's cost, so counting per-attempt batch.length is the exact
 // weighted estimate.
 async function fetchBatchWithRetry(batch, fetchFn, retryMs, onAttempt) {
-  if (onAttempt) {
-    onAttempt(batch.length);
-  }
+  onAttempt(batch.length);
   const first = await fetchFn(batch);
   if (first !== null) {
     return first;
   }
   await sleep(retryMs);
-  if (onAttempt) {
-    onAttempt(batch.length);
-  }
+  onAttempt(batch.length);
   return fetchFn(batch);
 }
 
@@ -270,17 +259,16 @@ async function fetchBatchWithRetry(batch, fetchFn, retryMs, onAttempt) {
 // estimate (sum of batch.length over every attempt including retries) so the
 // wave cron can log it against the free-tier daily ceiling (U1).
 async function batchByBeach(points, fetchFn, onEntry, onBatchFail, timing) {
-  const t = timing || { gapMs: OPEN_METEO_BATCH_GAP_MS, retryMs: OPEN_METEO_RETRY_MS, concurrency: OPEN_METEO_CONCURRENCY };
   const batches = chunk(points, OPEN_METEO_BATCH);
   let weightedCalls = 0;
   const onAttempt = function (n) { weightedCalls = weightedCalls + n; };
-  for (let start = 0; start < batches.length; start = start + t.concurrency) {
+  for (let start = 0; start < batches.length; start = start + timing.concurrency) {
     if (start > 0) {
-      await sleep(t.gapMs);
+      await sleep(timing.gapMs);
     }
-    const wave = batches.slice(start, start + t.concurrency);
+    const wave = batches.slice(start, start + timing.concurrency);
     const settled = await Promise.allSettled(
-      wave.map(function (batch) { return fetchBatchWithRetry(batch, fetchFn, t.retryMs, onAttempt); })
+      wave.map(function (batch) { return fetchBatchWithRetry(batch, fetchFn, timing.retryMs, onAttempt); })
     );
     for (let k = 0; k < settled.length; k = k + 1) {
       const s = settled[k];
@@ -316,6 +304,21 @@ function waveNullPoints(beaches, waveResults) {
     });
 }
 
+// The run queue shared by both beach-walking crons (hourly recompute, 6-hourly
+// wave refresh): flag-worthy rows ordered hot-first (a last_viewed demand stamp
+// inside the hot window) ahead of the oldest-recompute_updated rotation, capped
+// at MAX_BEACHES_PER_RUN. Only the column list and the caller's clock source
+// differ, so the ORDER BY / LIMIT live here once and the emitted SQL stays
+// byte-identical to the two hand-written queries this replaces (precedent:
+// buildHomeStatement in src/router.js). Returns the BOUND statement; the caller
+// runs it.
+function selectRunBeaches(env, columns, hotCutoffIso) {
+  return env.DB.prepare(
+    "SELECT " + columns + " FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+    " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+  ).bind(hotCutoffIso);
+}
+
 // Hourly estimate recompute. Reads the freshest alerts / rip-current risk every
 // hour (the fast-changing safety signals) but takes wave height and the wind
 // fallback from KV that the 6-hourly wave cron (runWaveRefresh) wrote — the
@@ -339,10 +342,7 @@ async function runFlagRecompute(env) {
   const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString();
 
   try {
-    const beachesResult = await env.DB.prepare(
-      "SELECT * FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
-    ).bind(hotCutoffIso).all();
+    const beachesResult = await selectRunBeaches(env, "*", hotCutoffIso).all();
     const beaches = beachesResult.results || [];
 
     // Step 3: alerts — ONE national fetch, matched to the run's distinct zone
@@ -473,28 +473,34 @@ async function runFlagRecompute(env) {
     // costs one fetch. The resolved advisory feeds estimateFlag's
     // waterQualityAdvisory input (rules.js step 7) as a RAISE-ONLY floor, so it
     // must be in hand BEFORE the per-beach estimate below — the step-8 official
-    // gather is too late. With the empty wqFloorSources registry this whole
-    // block is a no-op (no groups, no fetches, advisory stays null).
-    const wqGroups = new Map();
+    // gather is too late. The registry holds eight sources today, so a run
+    // covering all of them issues up to eight scrape() calls (one each, never
+    // per beach); a run whose beaches match none issues zero and every advisory
+    // stays null.
+    // wqSourceByBeach caches each beach's resolved source so the step-6 loop
+    // reuses it instead of re-running findWqFloorSource per beach;
+    // wqDistinctSources is the fetch list (one entry per matched source id).
+    const wqSourceByBeach = new Map();
+    const wqDistinctSources = new Map();
     for (const beach of beaches) {
       const wqs = findWqFloorSource(beach);
       if (wqs) {
-        if (!wqGroups.has(wqs.id)) {
-          wqGroups.set(wqs.id, { source: wqs, beaches: [] });
+        wqSourceByBeach.set(beach.id, wqs);
+        if (!wqDistinctSources.has(wqs.id)) {
+          wqDistinctSources.set(wqs.id, wqs);
         }
-        wqGroups.get(wqs.id).beaches.push(beach);
       }
     }
     const wqResultsBySource = new Map();
-    for (const group of wqGroups.values()) {
+    for (const wqSource of wqDistinctSources.values()) {
       let wqResult = null;
       try {
-        wqResult = await group.source.scrape(nowIso);
+        wqResult = await wqSource.scrape(nowIso);
       } catch (err) {
-        console.log("index: wqFloor scrape threw for " + group.source.id + ": " + err.message);
+        console.log("index: wqFloor scrape threw for " + wqSource.id + ": " + err.message);
         wqResult = null;
       }
-      wqResultsBySource.set(group.source.id, { source: group.source, result: wqResult });
+      wqResultsBySource.set(wqSource.id, wqResult);
     }
 
     // Step 6: per-beach estimate, isolated failures.
@@ -600,11 +606,11 @@ async function runFlagRecompute(env) {
         // present, cite the WQ source on the estimate card so the reason's
         // "Water-quality advisory (...)" attribution is visible.
         let waterQualityAdvisory = null;
-        const wqSourceForBeach = findWqFloorSource(beach);
+        const wqSourceForBeach = wqSourceByBeach.get(beach.id);
         if (wqSourceForBeach) {
-          const wr = wqResultsBySource.get(wqSourceForBeach.id);
-          if (wr && wr.result) {
-            waterQualityAdvisory = scrapeWqFloorFromResult(beach, wqSourceForBeach, wr.result);
+          const wqResult = wqResultsBySource.get(wqSourceForBeach.id);
+          if (wqResult) {
+            waterQualityAdvisory = scrapeWqFloorFromResult(beach, wqSourceForBeach, wqResult);
           }
         }
         if (waterQualityAdvisory !== null) {
@@ -856,10 +862,11 @@ async function runWaveRefresh(env) {
     // wave sources (step 2b) can key off them (gridpoint by nws_grid_url, NSH
     // by marine_zone) — the primary Open-Meteo/GLOS passes need only lat/lon,
     // but the fallback registry resolves per full beach row.
-    const beachesResult = await env.DB.prepare(
-      "SELECT id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
-      " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
-    ).bind(hotCutoffIso).all();
+    const beachesResult = await selectRunBeaches(
+      env,
+      "id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed",
+      hotCutoffIso
+    ).all();
     const beaches = beachesResult.results || [];
 
     // Step 1: waves (marine), paced.
@@ -961,8 +968,11 @@ async function runWaveRefresh(env) {
     // hoursFt/models/byModel preserved — single-point fallbacks write no
     // "waves:" strip). MUST run BEFORE step 3 so wind stays the true last
     // resort. The full beach row is needed (gridpoint/NSH keys), so build a
-    // beachById map — waveNullPoints only carries {beachId,lat,lon}. With the
-    // empty waveSources registry this is a no-op.
+    // beachById map — waveNullPoints only carries {beachId,lat,lon}. The
+    // registry holds five sources today (gridpoint, NSH, Sea Caves, Toronto,
+    // NDBC), so this block does real upstream work on every wave-null beach;
+    // the length guard below only short-circuits the empty-registry case the
+    // wave-source tests construct.
     const supPoints = waveNullPoints(beaches, waveResults);
     if (supPoints.length > 0 && waveSources.length > 0) {
       const beachById = new Map();
@@ -1197,6 +1207,24 @@ export function sleep(ms) {
   });
 }
 
+// Increment a beach's attempts counter (enrichment_attempts for NWS,
+// eccc_attempts for ECCC) so permanently-failing points (e.g. non-US shoreline
+// api.weather.gov 404s, or a point no Canadian region contains) eventually park
+// out of their queue. Both authorities run the identical nine lines, so they
+// share this helper and pass their own UPDATE — kept as whole literals at the
+// call sites so each statement stays greppable. Self-isolating: a D1 write
+// failure here is logged and swallowed so it never aborts the enrichment loop.
+async function bumpAttempts(env, beachId, sql, label) {
+  try {
+    await env.DB.prepare(sql).bind(beachId).run();
+  } catch (updateErr) {
+    console.log("index: " + label + " enrichment attempt bump failed for " + beachId + ": " + updateErr.message);
+  }
+}
+
+const NWS_ATTEMPTS_BUMP_SQL = "UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?1";
+const ECCC_ATTEMPTS_BUMP_SQL = "UPDATE beaches SET eccc_attempts = eccc_attempts + 1 WHERE id = ?1";
+
 // NWS point enrichment (own cron, 4x daily): beaches with nws_zone NULL get
 // their forecast zone + gridpoint URL from api.weather.gov/points. A beach
 // without nws_zone skips rules steps 1-2 (alerts, SRF rip risk) in
@@ -1207,20 +1235,6 @@ export function sleep(ms) {
 // RANDOM() — the old ORDER BY id drained every osm-node-* row before any
 // osm-way-* row, which left way-based beaches (Holland State Park) blind to
 // active alerts for weeks (TODO.md).
-// Increment a beach's enrichment_attempts counter so permanently-failing
-// points (e.g. non-US shoreline api.weather.gov 404s) eventually park out of
-// the queue. Self-isolating: a D1 write failure here is logged and swallowed
-// so it never aborts the enrichment loop.
-async function bumpAttempts(env, beachId) {
-  try {
-    await env.DB.prepare(
-      "UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?1"
-    ).bind(beachId).run();
-  } catch (updateErr) {
-    console.log("index: nws enrichment attempt bump failed for " + beachId + ": " + updateErr.message);
-  }
-}
-
 async function runNwsEnrichment(env) {
   let enriched = 0;
   let enrichmentFailures = 0;
@@ -1251,12 +1265,12 @@ async function runNwsEnrichment(env) {
           // non-US point) rather than throwing — count that as an attempt so
           // permanent failures eventually stop being requeued.
           enrichmentFailures = enrichmentFailures + 1;
-          await bumpAttempts(env, beach.id);
+          await bumpAttempts(env, beach.id, NWS_ATTEMPTS_BUMP_SQL, "nws");
         }
       } catch (err) {
         enrichmentFailures = enrichmentFailures + 1;
         console.log("index: nws enrichment failed for " + beach.id + ": " + err.message);
-        await bumpAttempts(env, beach.id);
+        await bumpAttempts(env, beach.id, NWS_ATTEMPTS_BUMP_SQL, "nws");
       }
     }
 
@@ -1288,16 +1302,6 @@ async function runNwsEnrichment(env) {
 // alerts-unavailable caveat. Genuinely un-resolvable points (no Canadian
 // region contains them) park at ECCC_ENRICHMENT_MAX_ATTEMPTS exactly like
 // the NWS side.
-async function bumpEcccAttempts(env, beachId) {
-  try {
-    await env.DB.prepare(
-      "UPDATE beaches SET eccc_attempts = eccc_attempts + 1 WHERE id = ?1"
-    ).bind(beachId).run();
-  } catch (updateErr) {
-    console.log("index: eccc enrichment attempt bump failed for " + beachId + ": " + updateErr.message);
-  }
-}
-
 async function runEcccEnrichment(env) {
   let enriched = 0;
   let enrichmentFailures = 0;
@@ -1338,9 +1342,9 @@ async function runEcccEnrichment(env) {
         zones = fetched;
       }
     }
-    if (zones === null) {
-      // Nothing to enrich, or the run is parked (logged above).
-    } else {
+    // zones stays null when there is nothing to enrich or the run is parked
+    // (both logged above), so the per-beach loop only runs on a good fetch.
+    if (zones !== null) {
       for (const beach of toEnrich) {
         try {
           const zoneName = ecccZoneNameForPoint(zones, beach.lat, beach.lon);
@@ -1355,12 +1359,12 @@ async function runEcccEnrichment(env) {
             // Count an attempt so unresolvable rows eventually park, exactly
             // like the old per-point null.
             enrichmentFailures = enrichmentFailures + 1;
-            await bumpEcccAttempts(env, beach.id);
+            await bumpAttempts(env, beach.id, ECCC_ATTEMPTS_BUMP_SQL, "eccc");
           }
         } catch (err) {
           enrichmentFailures = enrichmentFailures + 1;
           console.log("index: eccc enrichment failed for " + beach.id + ": " + err.message);
-          await bumpEcccAttempts(env, beach.id);
+          await bumpAttempts(env, beach.id, ECCC_ATTEMPTS_BUMP_SQL, "eccc");
         }
       }
     }
@@ -1501,9 +1505,7 @@ async function runWebcamSync(env) {
       if (bboxJson === null) {
         // Bbox fetch failed: every beach in the bucket is a failure, left
         // untouched to retry next run (no request amplification).
-        for (const beach of bucket) {
-          webcamFailures = webcamFailures + 1;
-        }
+        webcamFailures = webcamFailures + bucket.length;
         continue;
       }
       if (truncated) {

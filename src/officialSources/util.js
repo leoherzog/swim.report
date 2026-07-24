@@ -63,6 +63,93 @@ export async function fetchText(url, options) {
   }
 }
 
+// Pure. Decode the small set of HTML entities that commonly appear in table
+// cell text (ampersand-encoded names like "Gobles Grove", non-breaking spaces
+// used for blank cells) and strip any residual tags, collapsing whitespace.
+// Never throws; a non-string yields "".
+//
+// This is the CONSERVATIVE table-cell chain shared verbatim by the scrapers
+// that parse a server-rendered <td> grid. It is deliberately NOT a union of
+// every entity chain in this project: several scrapers strip FULL-PAGE HTML
+// into a bounded character window that gates a floor color, and adding an
+// entity to their decode step demonstrably changes whether a floor is raised
+// (e.g. "prediction&mdash;poor"). Those scrapers keep their own local
+// stripper; only add an entity here when every caller wants it.
+export function decodeCellText(raw) {
+  if (typeof raw !== "string") {
+    return "";
+  }
+  return raw
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, "\"")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Pure. Raw HTML -> one entry per <tr>, each an array of that row's <td>
+// inner-HTML strings in document order. No decoding and NO minimum-cell
+// filter: a <th>-only header row yields an empty array rather than being
+// dropped, so the caller owns both the cell-text normalization (some callers
+// need the raw markup — e.g. an <img> status icon) and the "is this a data
+// row?" decision. Never throws; a non-string / empty input yields [].
+export function extractTableRowsRaw(html) {
+  if (typeof html !== "string" || html.length === 0) {
+    return [];
+  }
+  const rows = [];
+  const rowRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch = rowRegex.exec(html);
+  while (rowMatch !== null) {
+    const rowHtml = rowMatch[1];
+    const cells = [];
+    const cellRegex = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+    let cellMatch = cellRegex.exec(rowHtml);
+    while (cellMatch !== null) {
+      cells.push(cellMatch[1]);
+      cellMatch = cellRegex.exec(rowHtml);
+    }
+    rows.push(cells);
+    rowMatch = rowRegex.exec(html);
+  }
+  return rows;
+}
+
+// Pure. True if any needle in needles is a substring of hay. Compares the
+// strings EXACTLY as given (no case folding) — callers that need
+// case-insensitivity lowercase both sides themselves. Use matchesAnyAlias
+// below when the needles are a curated all-lowercase alias list.
+export function containsAny(hay, needles) {
+  for (let i = 0; i < needles.length; i++) {
+    if (hay.indexOf(needles[i]) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Pure. True when any alias appears as a substring of haystack. Lowercases
+// ONLY the haystack: every curated alias array in this project is already
+// lowercase by convention, so folding the aliases too would be wasted work
+// and would quietly hide a mis-cased curation entry. A non-string haystack or
+// a non-array aliases list yields false.
+export function matchesAnyAlias(haystack, aliases) {
+  if (typeof haystack !== "string" || !Array.isArray(aliases)) {
+    return false;
+  }
+  const hay = haystack.toLowerCase();
+  for (let i = 0; i < aliases.length; i++) {
+    if (hay.indexOf(aliases[i]) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Pure. The standard multi-site (contract shape (b)) scrape result for the
 // common single-source case where sources is exactly [source]. updated is the
 // result-level fallback timestamp: real-time scrapers pass nowIso; periodic

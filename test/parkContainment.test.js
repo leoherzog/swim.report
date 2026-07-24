@@ -1,15 +1,15 @@
 // test/parkContainment.test.js
 // Pure-function coverage for the park-containment discovery path:
 // element parsing and bbox association in src/clients/overpass.js, the sync
-// merge policy in src/index.js, and the park-name-first display treatment in
-// src/frontend/render.js.
+// merge policy in src/discovery.js, and the park-name-first display treatment
+// in src/frontend/render.js.
 
 import { describe, it, expect } from "vitest";
 import {
   parseParkBeachElements, associateParkForBeach, isPondBeach, WATER_MIN_AREA_DEG2,
   pondWaterSeeds, buildPondWaterQuery, POND_TEST_MAX_BEACH_AREA_DEG2
 } from "../src/clients/overpass.js";
-import { mergeBeachRows } from "../src/index.js";
+import { mergeBeachRows } from "../src/discovery.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
 import { distanceKm } from "../src/geo.js";
 

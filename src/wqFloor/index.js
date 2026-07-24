@@ -20,10 +20,7 @@
 
 import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
 import { nyOprhpBeachStatus } from "./nyOprhpBeachStatus.js";
-import { chautauquaCountyNy } from "./chautauquaCountyNy.js";
 import { lakeCountyOhBeaches } from "./lakeCountyOhBeaches.js";
-import { erieCountyPaKml } from "./erieCountyPaKml.js";
-import { illinoisBeachGuard } from "./illinoisBeachGuard.js";
 import { kenoshaBeachConditions } from "./kenoshaBeachConditions.js";
 import { mnBeaches } from "./mnBeaches.js";
 import { greyBruceRecWater } from "./greyBruceRecWater.js";
@@ -59,18 +56,27 @@ const WQ_FLOOR_COLORS = ["yellow", "red"];
 // Per-beach resolution reuses resolveSiteForBeach (names win over proximity),
 // exactly like the official scrapers.
 // Ordered most-specific-first (findWqFloorSource is first-match-wins). The
-// curated single-region sources (NY OPRHP state parks, Chautauqua County, Lake
-// County OH, Presque Isle PA, IL BeachGuard, Kenosha WI, Duluth MN, Grey Bruce
-// ON, Ontario Parks, Evanston IL) come before usgsGreatLakesNowcast, whose
-// matches() is a COARSE Lake Erie/Ontario US-shore bbox — placing it last means
-// a beach that a curated source covers is resolved by that curated source, and
-// only beaches no curated source claims fall through to the NowCast prediction.
+// curated single-region sources (NY OPRHP state parks, Lake County OH, Kenosha
+// WI, Duluth MN, Grey Bruce ON, Ontario Parks, Evanston IL) come before
+// usgsGreatLakesNowcast, whose matches() is a COARSE Lake Erie/Ontario US-shore
+// bbox — placing it last means a beach that a curated source covers is resolved
+// by that curated source, and only beaches no curated source claims fall
+// through to the NowCast prediction.
+//
+// DELIBERATELY NOT REGISTERED (the modules stay on disk, fully tested and ready
+// to re-insert): chautauquaCountyNy and erieCountyPaKml (fetch URL still "" —
+// they fail closed before fetching) and illinoisBeachGuard
+// (ILLINOIS_BEACHGUARD_CONFIRMED === false — its BeachIDs are placeholders).
+// Because matches() runs first-match-wins and the cron resolves exactly ONE
+// source per beach, registering a permanently-inert source SUPPRESSES the
+// working source behind it: erieCountyPaKml's ERIE_BOX sits strictly inside
+// usgsGreatLakesNowcast's region box, and illinoisBeachGuard's box overlaps
+// kenoshaBeachConditions coverage around lat 42.517-42.55. Re-insert each one
+// ABOVE usgsGreatLakesNowcast (and, for Illinois, ABOVE kenoshaBeachConditions)
+// once its URL / BeachID gate is confirmed — never below.
 export const wqFloorSources = [
   nyOprhpBeachStatus,
-  chautauquaCountyNy,
   lakeCountyOhBeaches,
-  erieCountyPaKml,
-  illinoisBeachGuard,
   kenoshaBeachConditions,
   mnBeaches,
   greyBruceRecWater,

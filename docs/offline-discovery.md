@@ -115,9 +115,13 @@ the Worker.
   behaved the same) and the budget is a strict improvement over the old
   cancel-everything-persist-nothing behavior, but operators should know a stuck head
   can stall drain until Overpass recovers.
-- **`src/discovery.js`** — the extracted pure merge logic, imported by BOTH the
-  Worker (`src/index.js`, which re-exports `mergeBeachRows` for tests) and the
-  batch script. Its only dependency is `src/geo.js`.
+- **`src/discovery.js`** — the extracted pure merge logic, imported by the batch
+  script (`scripts/discovery-batch.js`) and directly by the tests
+  (`test/parkContainment.test.js`). **Not** imported by the Worker: `src/index.js`
+  used to re-export `mergeBeachRows` for the test import path, which meant the
+  deployed Worker bundle shipped all of `src/discovery.js` for no runtime reason;
+  that re-export is gone, so the merge is now offline-only in fact as well as in
+  design. Its only dependency is `src/geo.js`.
 - **`src/regions.js`** — the discovery region set: `REGIONS` (a curated array of
   coastal bounding boxes tracing the entire Great Lakes shoreline, US and
   Canadian) plus the pure predicate `pointInAnyRegion(lat, lon)`. Pure data + one
@@ -253,11 +257,22 @@ Locally (dry run — produce the SQL, don't apply; needs Deno + a snapshot):
     # inspect discovery-delta.sql, then apply when satisfied:
     npx wrangler d1 execute swim-report --remote --file discovery-delta.sql
 
-Flags: `--no-classify` (discovery only), `--no-discovery` (classify only; the two
-are mutually exclusive halves and passing both is a guarded error),
-`--classify-limit N` (cap per run; 0 = all), `--classify-delay-ms N`
+That snapshot `SELECT` deliberately carries `osm_id` + the `water_class*` columns
+even though `discovery.yml`'s does not: the `deno run` above omits `--no-classify`,
+so it DOES build the classify queue and DOES need them. Do not "sync" it to the
+workflow's narrower column list.
+
+Flags: `--no-classify` (discovery only), `--no-discovery` (classify only),
+`--marine-zones <path>` (the offline `marine_zone` pass over the snapshot —
+`discovery.yml` passes `data/marine-zones-greatlakes.json`; either mode may also
+carry it), `--classify-limit N` (cap per run; 0 = all), `--classify-delay-ms N`
 (default 300), `--classify-budget-ms N` (self-imposed wall-clock cap on the
 classify loop; 0 = disabled/full drain), `--now <iso>`.
+
+`--no-classify --no-discovery` together is **not** an error as long as
+`--marine-zones` is also passed — that is exactly what `npm run seed:marine`
+runs (marine pass only, zero upstream requests). The `nothingToDo` guard errors
+only when discovery, classify, AND the marine pass are all off.
 
 For **local dev**, `npm run seed` is now this same offline batch pointed at the
 local D1: it runs `scripts/discovery-batch.js --out ./.seed.sql --no-classify`
@@ -272,11 +287,15 @@ is unaffected (it uploads through the D1 import API and ingests server-side).
 `water_class` updates. Both replace the old "trigger the discovery cron" seed
 path, which no longer exists in the Worker.
 
-In CI: `discovery.yml` runs daily and `classify.yml` runs 4× daily (in their own
-concurrency groups, so they may overlap — they touch disjoint columns); each has a
-manual `workflow_dispatch` that lets you choose `apply` (false = artifact-only dry
-run) and a `classify_limit`. Every run uploads `discovery-delta.sql` as an
-artifact for inspection.
+In CI: `discovery.yml` runs **daily** (`47 8 * * *`) and `classify.yml` runs
+**hourly** (`23 * * * *`), in their own concurrency groups, so they may overlap —
+they touch disjoint columns. Both have a manual `workflow_dispatch` with an
+`apply` input (false = artifact-only dry run); `classify_limit` (default 150 for
+bulk drains) and `budget_min` (default 60) are `classify.yml` inputs **only** —
+`discovery.yml` takes `apply` alone. Every run uploads its delta as an artifact
+for inspection: `discovery-delta.sql` (artifact `discovery-delta-sql`) from
+discovery, `classify-delta.sql` (artifact `classify-delta-sql`, uploaded with
+`if-no-files-found: ignore`) from classify.
 
 ## Cutover (complete)
 
@@ -293,7 +312,9 @@ classification. The two in-Worker triggers were retired:
    classification) — and deployed. `runOverpassSync` / `runWaterClassification`
    (and `PILOT_BBOX`) are gone from `src/index.js`; the merge logic survives only
    as `mergeBeachRows` in `src/discovery.js`, imported by both the batch and the
-   tests.
+   tests. The last Worker-side reference — `src/index.js`'s `mergeBeachRows`
+   re-export, kept only so a test could import it through the Worker — has since
+   been removed too, so `src/discovery.js` is out of the Worker bundle entirely.
 
 The Worker's remaining cron path is: hourly flag recompute (`"7 * * * *"`, offset off
 the congested `:00` slot),
@@ -314,7 +335,7 @@ run now derives `marine_zone` with **pure local math and zero upstream requests*
 `--marine-zones data/marine-zones-greatlakes.json` to `discovery-batch.js`.
 
 **The pass** (`marineZoneSql` in `discovery-batch.js`, geometry in `src/marineZones.js`)
-mirrors `reconciliationSql`: it operates ONLY on the snapshot rows, skips rows in this
+mirrors `reconcileStaleRows`: it operates ONLY on the snapshot rows, skips rows in this
 run's reconciliation delete set, and for every row with `nws_zone` set derives the nearest
 marine zone via `nearestMarineZone(index, lat, lon)` — point-in-polygon first, else nearest
 polygon edge within `MARINE_ZONE_MAX_DISTANCE_KM = 15` km, else null (a `<1e-9` km tie
@@ -326,8 +347,18 @@ derived-null NEVER NULLs an existing value (an old probe result beats nothing). 
 never affects `reconciliationAllowed` or the delete path (it only appends change-only
 UPDATEs), and it stamps `sync_meta` keys `last_marine_zone_pass` / `last_marine_zone_count`.
 A beach discovered THIS run resolves on the NEXT daily run, once the in-Worker NWS
-enrichment has stamped its `nws_zone`. `discovery.yml`'s snapshot `SELECT` now includes
-`nws_zone` and `marine_zone`. `beaches.marine_attempts` is vestigial (column retained, no
+enrichment has stamped its `nws_zone`. `discovery.yml`'s snapshot `SELECT` is
+`SELECT id, name, lat, lon, park_name, nws_zone, marine_zone FROM beaches` — the exact
+union of what `reconcileStaleRows` (id, name, lat, lon, park_name) and `marineZoneSql`
+(id, lat, lon, nws_zone, marine_zone) read. It deliberately does **not** select `osm_id`
+or the `water_class` / `water_class_version` / `water_class_attempts` columns: those are
+read only by `buildClassifyQueue`, which is gated behind `if (args.classify)` and can
+never run on this hardcoded `--no-classify` job. Dropping them shrinks the snapshot
+~35-40%, which matters because this is the ONLY delete-bearing run and its truncation
+guard aborts the whole pass if D1's `--json` response is size-capped. `classify.yml`
+selects its own, wider set (`id, osm_id, name, lat, lon, park_name, water_class,
+water_class_version, water_class_attempts`) — the two are intentionally asymmetric and
+must not be synced. `beaches.marine_attempts` is vestigial (column retained, no
 writers).
 
 **The committed data file** — `data/marine-zones-greatlakes.json`, generated by
@@ -363,8 +394,12 @@ the MarineZones page):
    the new release (the zip filename changes each release, e.g. `mz18mr25.zip` →
    `mz16ap26.zip`).
 2. Run `deno run --allow-net --allow-read --allow-write scripts/build-marine-zones.js` (the
-   script is dependency-free — it reads the zip central directory, inflates with
-   `DecompressionStream`, and parses the DBF + SHP binary layouts directly).
+   script is dependency-free in the sense that matters here — **no npm packages**: it reads
+   the zip central directory, inflates with `DecompressionStream`, and parses the DBF + SHP
+   binary layouts directly. It does import one local ESM module, `pointInRing` from
+   `src/geo.js`, for the hole-grouping ray cast, in place of the private
+   `pointInRingPlanar` copy it used to carry; `deno check scripts/build-marine-zones.js`
+   resolves it and exits 0).
 3. Review the logged per-prefix zone counts against the previous release and eyeball the
    JSON diff.
 4. Run `npm test` (`test/marineZones.test.js` sanity-checks the committed file) and commit.

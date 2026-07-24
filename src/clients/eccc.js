@@ -17,7 +17,8 @@
 // across the module boundary.
 
 import { fetchJson } from "./http.js";
-import { pointInGeometry } from "../geo.js";
+import { matchedAlerts, pickIsoString } from "./alertMatch.js";
+import { pointInGeometry, minEdgeDistanceKm } from "../geo.js";
 
 export const ECCC_API_BASE = "https://api.weather.gc.ca";
 // MSC usage policy asks for a meaningful, self-identifying User-Agent so ECCC
@@ -34,18 +35,6 @@ const ECCC_ALERTS_FETCH_LIMIT = 2000;
 // request WITH geometry returns the whole set (pygeoapi clamps an over-max
 // limit rather than erroring); 2000 leaves ample headroom.
 const ECCC_ZONES_FETCH_LIMIT = 2000;
-
-// First non-empty string of the two candidates, else null (mirrors the NWS
-// client's onset/ends fallback handling).
-function pickIsoString(primary, fallback) {
-  if (typeof primary === "string" && primary.length > 0) {
-    return primary;
-  }
-  if (typeof fallback === "string" && fallback.length > 0) {
-    return fallback;
-  }
-  return null;
-}
 
 // Every active public alert nationwide in ONE fetch (no bbox — the hourly
 // cron calls this once per run and matches beaches locally via
@@ -112,33 +101,14 @@ export async function fetchActiveEcccAlerts(nowIso) {
 // region polygon contains the beach point, in the NWS-alert result shape:
 //   { events: [deduped event names], details: [{ event, onset, ends }] }
 // details dedupe only on exact (event, onset, ends) repeats, matching
-// fetchActiveAlertEvents. Malformed input -> { events: [], details: [] }.
+// fetchActiveAlertEvents. Malformed input -> { events: [], details: [] }. The
+// accumulate/dedupe walk lives in ./alertMatch.js; only the containment test is
+// local — land alert polygons cover the beach itself, so this is pure PIP with
+// no nearest-edge leniency (unlike the marine client).
 export function ecccAlertsForPoint(alerts, lat, lon) {
-  const events = [];
-  const seen = {};
-  const details = [];
-  const seenDetails = {};
-  const list = Array.isArray(alerts) ? alerts : [];
-  for (const alert of list) {
-    if (alert === null || typeof alert !== "object" || typeof alert.event !== "string") {
-      continue;
-    }
-    if (!pointInGeometry(alert.geometry, lat, lon)) {
-      continue;
-    }
-    if (!seen[alert.event]) {
-      seen[alert.event] = true;
-      events.push(alert.event);
-    }
-    const onset = typeof alert.onset === "string" ? alert.onset : null;
-    const ends = typeof alert.ends === "string" ? alert.ends : null;
-    const detailKey = alert.event + "|" + String(onset) + "|" + String(ends);
-    if (!seenDetails[detailKey]) {
-      seenDetails[detailKey] = true;
-      details.push({ event: alert.event, onset: onset, ends: ends });
-    }
-  }
-  return { events: events, details: details };
+  return matchedAlerts(alerts, function (alert) {
+    return pointInGeometry(alert.geometry, lat, lon);
+  });
 }
 
 // The ENTIRE ECCC public forecast-region set in ONE fetch, WITH geometry, so
@@ -190,79 +160,6 @@ export async function fetchEcccForecastZones() {
 // unresolvable, while a genuinely-US point (many km from any Canadian region)
 // still falls through to null and parks.
 export const ECCC_ZONE_MAX_EDGE_KM = 2;
-
-// Kilometres per degree of latitude (and of longitude at the equator) on the
-// spherical earth used across src/geo.js: 2 * pi * 6371 / 360. Mirrors
-// src/marineZones.js (which stays offline-only, hence the local copy).
-const KM_PER_DEG = 111.195;
-
-// Distance (km) from the origin (the point, already projected to 0,0 in a
-// local equirectangular projection) to the segment a-b. Same local-projection
-// approach as src/marineZones.js; error is negligible at <= 2 km.
-function pointToSegmentKm(ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  let t = 0;
-  if (len2 > 0) {
-    t = -(ax * dx + ay * dy) / len2;
-    if (t < 0) { t = 0; }
-    if (t > 1) { t = 1; }
-  }
-  const px = ax + t * dx;
-  const py = ay + t * dy;
-  return Math.sqrt(px * px + py * py);
-}
-
-// GeoJSON Polygon/MultiPolygon -> array of polygons (each an array of rings).
-// Anything else (malformed, other types) -> [] so callers skip it.
-function geometryPolygons(geometry) {
-  if (geometry === null || typeof geometry !== "object" || !Array.isArray(geometry.coordinates)) {
-    return [];
-  }
-  if (geometry.type === "Polygon") {
-    return [geometry.coordinates];
-  }
-  if (geometry.type === "MultiPolygon") {
-    return geometry.coordinates;
-  }
-  return [];
-}
-
-// Minimum distance (km) from (lat, lon) to any ring edge of the geometry —
-// outer rings and holes alike. Malformed rings/points are skipped, never
-// thrown on (GeoMet data is upstream input, unlike the repo-committed marine
-// file that fails loudly by design).
-function minEdgeDistanceKm(geometry, lat, lon) {
-  const cosLat = Math.cos(lat * Math.PI / 180);
-  let best = Infinity;
-  for (const polygon of geometryPolygons(geometry)) {
-    if (!Array.isArray(polygon)) {
-      continue;
-    }
-    for (const ring of polygon) {
-      if (!Array.isArray(ring)) {
-        continue;
-      }
-      for (let i = 0; i < ring.length - 1; i = i + 1) {
-        const a = ring[i];
-        const b = ring[i + 1];
-        if (!Array.isArray(a) || !Array.isArray(b) ||
-            typeof a[0] !== "number" || typeof a[1] !== "number" ||
-            typeof b[0] !== "number" || typeof b[1] !== "number") {
-          continue;
-        }
-        const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
-        const ay = (a[1] - lat) * KM_PER_DEG;
-        const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
-        const by = (b[1] - lat) * KM_PER_DEG;
-        const d = pointToSegmentKm(ax, ay, bx, by);
-        if (d < best) { best = d; }
-      }
-    }
-  }
-  return best;
-}
 
 // Pure. Resolves a beach point to its forecast-region NAME against a
 // fetchEcccForecastZones result: exact point-in-polygon first (the first zone

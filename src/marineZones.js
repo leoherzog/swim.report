@@ -31,13 +31,9 @@
 // resolution + change-only SQL in the batch means steady-state runs emit zero
 // marine statements.
 
-import { pointInGeometry } from "./geo.js";
+import { pointInGeometry, minEdgeDistanceKm, KM_PER_DEG } from "./geo.js";
 
 export const MARINE_ZONE_MAX_DISTANCE_KM = 15;
-
-// Kilometres per degree of latitude (and of longitude at the equator) on the
-// spherical earth used across src/geo.js: 2 * pi * 6371 / 360.
-const KM_PER_DEG = 111.195;
 
 // Exact-tie epsilon for the deterministic tie-break (kilometres).
 const TIE_EPSILON_KM = 1e-9;
@@ -107,44 +103,6 @@ export function buildMarineZoneIndex(zonesData) {
   return { zones: zones };
 }
 
-// Squared distance (km^2 avoided — plain km) from the origin (the beach point,
-// already projected to 0,0) to the segment a-b in the local projection.
-function pointToSegmentKm(ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  let t = 0;
-  if (len2 > 0) {
-    // Project the origin onto the segment, clamped to [0, 1].
-    t = -(ax * dx + ay * dy) / len2;
-    if (t < 0) { t = 0; }
-    if (t > 1) { t = 1; }
-  }
-  const px = ax + t * dx;
-  const py = ay + t * dy;
-  return Math.sqrt(px * px + py * py);
-}
-
-// Minimum distance (km) from (lat, lon) to any ring edge of the zone —
-// OUTER RINGS AND HOLES ALIKE (see the island-in-a-hole note above).
-function minEdgeDistanceKm(zone, lat, lon) {
-  const cosLat = Math.cos(lat * Math.PI / 180);
-  let best = Infinity;
-  for (const polygon of zone.geometry.coordinates) {
-    for (const ring of polygon) {
-      for (let i = 0; i < ring.length - 1; i = i + 1) {
-        const ax = (ring[i][0] - lon) * cosLat * KM_PER_DEG;
-        const ay = (ring[i][1] - lat) * KM_PER_DEG;
-        const bx = (ring[i + 1][0] - lon) * cosLat * KM_PER_DEG;
-        const by = (ring[i + 1][1] - lat) * KM_PER_DEG;
-        const d = pointToSegmentKm(ax, ay, bx, by);
-        if (d < best) { best = d; }
-      }
-    }
-  }
-  return best;
-}
-
 // Resolve the marine zone for a beach point: the zone containing the point
 // (distance 0), else the zone with the nearest edge within
 // MARINE_ZONE_MAX_DISTANCE_KM, else null. Non-finite/non-number lat/lon -> null.
@@ -164,7 +122,10 @@ export function nearestMarineZone(index, lat, lon) {
     if (pointInGeometry(zone.geometry, lat, lon)) {
       dist = 0;
     } else {
-      dist = minEdgeDistanceKm(zone, lat, lon);
+      // Shared with the ECCC clients (src/geo.js). buildMarineZoneIndex has
+      // already validated every ring/point, so the shared helper's defensive
+      // skips can never fire on this path — malformed data still throws there.
+      dist = minEdgeDistanceKm(zone.geometry, lat, lon);
     }
     if (bestId === null ||
       dist < bestDist - TIE_EPSILON_KM ||

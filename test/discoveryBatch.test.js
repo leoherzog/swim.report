@@ -14,7 +14,6 @@ import {
   parseArgs,
   upsertSql,
   syncMetaSql,
-  reconciliationSql,
   reconcileStaleRows,
   reconciliationAllowed,
   shouldFastDefer,
@@ -311,16 +310,29 @@ describe("shouldFastDefer is the early total-outage circuit breaker", function (
   });
 });
 
+// The delete rail has no single exported SQL builder: main() composes it inline
+// (reconcileStaleRows -> deleteBeachSql, scripts/discovery-batch.js:832-835).
+// This test-local helper mirrors that composition verbatim so the emitted DELETE
+// text below still exercises exactly what production emits.
+function reconciliationDeletes(snapshotRows, producedIds, producedParkRowCount) {
+  const out = [];
+  const staleRows = reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount);
+  for (let i = 0; i < staleRows.length; i = i + 1) {
+    out.push(deleteBeachSql(staleRows[i].id));
+  }
+  return out;
+}
+
 describe("reconcileStaleRows / deleteBeachSql single-source the delete set", function () {
   function parkRow(id, extra) {
     return Object.assign({ id: id, name: "P", park_name: "P", lat: 43.0, lon: -86.0 }, extra || {});
   }
-  it("reconciliationSql is exactly reconcileStaleRows mapped through deleteBeachSql", function () {
+  it("the emitted DELETEs are exactly reconcileStaleRows mapped through deleteBeachSql", function () {
     const snap = [parkRow("osm-way-1"), parkRow("osm-way-2")];
     const produced = new Set(["osm-way-1"]);
     const stale = reconcileStaleRows(snap, produced, 1);
     expect(stale.map(function (r) { return r.id; })).toEqual(["osm-way-2"]);
-    expect(reconciliationSql(snap, produced, 1)).toEqual(stale.map(function (r) { return deleteBeachSql(r.id); }));
+    expect(reconciliationDeletes(snap, produced, 1)).toEqual(stale.map(function (r) { return deleteBeachSql(r.id); }));
   });
   it("an out-of-region stale row is NOT in the delete set (so it also stays in the classify universe)", function () {
     // Regression: deletedIds must equal the actually-deleted set. An out-of-region
@@ -349,7 +361,7 @@ describe("syncMetaSql", function () {
   });
 });
 
-describe("reconciliationSql safety rails", function () {
+describe("reconciliation safety rails", function () {
   // Candidate = unnamed-origin park row (name === park_name) inside any REGION
   // (pointInAnyRegion). (43.0, -86.0) sits in the Lake Michigan box.
   function parkRow(id, extra) {
@@ -359,31 +371,31 @@ describe("reconciliationSql safety rails", function () {
   }
   it("skips entirely when the run produced 0 park rows", function () {
     const snap = [parkRow("osm-way-1")];
-    expect(reconciliationSql(snap, new Set(), 0)).toEqual([]);
+    expect(reconciliationDeletes(snap, new Set(), 0)).toEqual([]);
   });
   it("deletes a stale candidate not produced this run", function () {
     const snap = [parkRow("osm-way-1"), parkRow("osm-way-2")];
     const produced = new Set(["osm-way-1"]);
-    const deletes = reconciliationSql(snap, produced, 1);
+    const deletes = reconciliationDeletes(snap, produced, 1);
     expect(deletes).toEqual(["DELETE FROM beaches WHERE id = 'osm-way-2';"]);
   });
   it("never deletes a named beach inside a park (name !== park_name)", function () {
     const snap = [{ id: "osm-way-9", name: "Real Beach", park_name: "Some Park", lat: 43, lon: -86 }];
-    const deletes = reconciliationSql(snap, new Set(["osm-way-1"]), 1);
+    const deletes = reconciliationDeletes(snap, new Set(["osm-way-1"]), 1);
     expect(deletes).toEqual([]);
   });
   it("refuses a mass-delete beyond the proportional allowance", function () {
     // 100 candidates, none produced -> 100 stale > allowance max(10, 25) = 25.
     const snap = [];
     for (let i = 0; i < 100; i = i + 1) { snap.push(parkRow("osm-way-" + i)); }
-    const deletes = reconciliationSql(snap, new Set(), 1);
+    const deletes = reconciliationDeletes(snap, new Set(), 1);
     expect(deletes).toEqual([]);
   });
   it("ignores candidates outside all regions", function () {
     // (10.0, 10.0) is far outside every REGION box -> pointInAnyRegion false, so
     // it is never a delete candidate.
     const snap = [parkRow("osm-way-1", { lat: 10.0, lon: 10.0 })];
-    const deletes = reconciliationSql(snap, new Set(), 1);
+    const deletes = reconciliationDeletes(snap, new Set(), 1);
     expect(deletes).toEqual([]);
   });
 });

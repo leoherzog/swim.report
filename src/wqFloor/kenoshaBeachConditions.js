@@ -55,7 +55,13 @@
 // scrape() runs cron-side only. parseKenoshaBeachConditions, extractTableRows,
 // and htmlToText are pure and exported for tests.
 
-import { fetchText, perBeachResult, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
+import {
+  fetchText,
+  perBeachResult,
+  extractTableRowsRaw,
+  matchesAnyAlias,
+  DEFAULT_SITE_RADIUS_MI
+} from "../officialSources/util.js";
 import { distanceMi } from "../geo.js";
 
 export const KENOSHA_BEACH_CONDITIONS_URL =
@@ -107,25 +113,22 @@ export function htmlToText(html) {
 // are collected (NOT <th>), so a standard header row built from <th> cells
 // naturally yields zero cells and is dropped; a data row with fewer than 3
 // <td> cells is also dropped silently — both simply never contribute a row.
-// Never throws.
+// Never throws. The <tr>/<td> walk itself lives in the shared
+// extractTableRowsRaw; this wrapper adds only the htmlToText decode and the
+// >= 3 cell filter (kept exported — several tests exercise it directly).
 export function extractTableRows(html) {
-  if (typeof html !== "string" || html.length === 0) {
-    return [];
-  }
+  const rawRows = extractTableRowsRaw(html);
   const rows = [];
-  const rowRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
-  while ((rowMatch = rowRegex.exec(html)) !== null) {
-    const rowHtml = rowMatch[1];
+  for (let i = 0; i < rawRows.length; i++) {
+    const rawCells = rawRows[i];
+    if (rawCells.length < 3) {
+      continue;
+    }
     const cells = [];
-    const cellRegex = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
-    let cellMatch;
-    while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
-      cells.push(htmlToText(cellMatch[1]));
+    for (let c = 0; c < rawCells.length; c++) {
+      cells.push(htmlToText(rawCells[c]));
     }
-    if (cells.length >= 3) {
-      rows.push(cells);
-    }
+    rows.push(cells);
   }
   return rows;
 }
@@ -150,10 +153,8 @@ function findCuratedSite(nameCellText) {
   const lowered = (nameCellText || "").toLowerCase();
   for (let i = 0; i < LAKE_MICHIGAN_SITES.length; i++) {
     const site = LAKE_MICHIGAN_SITES[i];
-    for (let a = 0; a < site.aliases.length; a++) {
-      if (lowered.indexOf(site.aliases[a]) !== -1) {
-        return site;
-      }
+    if (matchesAnyAlias(lowered, site.aliases)) {
+      return site;
     }
   }
   return null;
@@ -255,10 +256,8 @@ function inKenoshaLakeMichiganSites(beach) {
   const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
   for (let s = 0; s < LAKE_MICHIGAN_SITES.length; s++) {
     const site = LAKE_MICHIGAN_SITES[s];
-    for (let a = 0; a < site.aliases.length; a++) {
-      if (haystack.indexOf(site.aliases[a]) !== -1) {
-        return true;
-      }
+    if (matchesAnyAlias(haystack, site.aliases)) {
+      return true;
     }
     if (typeof beach.lat === "number" && typeof beach.lon === "number") {
       if (distanceMi(beach.lat, beach.lon, site.lat, site.lon) <= MATCH_RADIUS_MI) {

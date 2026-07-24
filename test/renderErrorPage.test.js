@@ -14,7 +14,7 @@ describe("renderErrorPage — 404 shape", () => {
 
   it("renders a danger callout with the status and message", () => {
     expect(html).toContain("<wa-callout variant=\"danger\">");
-    expect(html).toContain("<strong>404</strong>");
+    expect(html).toContain("<h1 class=\"wa-font-size-xl\">404</h1>");
     expect(html).toContain("Beach not found");
   });
 
@@ -30,20 +30,20 @@ describe("renderErrorPage — 404 shape", () => {
 describe("renderErrorPage — defaults", () => {
   it("falls back to 500 / generic message when data is null", () => {
     const html = renderErrorPage(null);
-    expect(html).toContain("<strong>500</strong>");
+    expect(html).toContain("<h1 class=\"wa-font-size-xl\">500</h1>");
     expect(html).toContain("Something went wrong.");
     expect(html).toContain("<title>Swim Report — 500</title>");
   });
 
   it("falls back to 500 / generic message when data is an empty object", () => {
     const html = renderErrorPage({});
-    expect(html).toContain("<strong>500</strong>");
+    expect(html).toContain("<h1 class=\"wa-font-size-xl\">500</h1>");
     expect(html).toContain("Something went wrong.");
   });
 
   it("falls back per-field: a status without a message still gets the generic message", () => {
     const html = renderErrorPage({ status: 404 });
-    expect(html).toContain("<strong>404</strong>");
+    expect(html).toContain("<h1 class=\"wa-font-size-xl\">404</h1>");
     expect(html).toContain("Something went wrong.");
   });
 });
