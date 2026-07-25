@@ -144,4 +144,34 @@ describe("renderListPage home map", () => {
     expect(html).toContain("document.addEventListener('swimreport:nearupdate'");
     expect(html).toContain("map.easeTo({ center: updated.center, zoom: updated.zoom })");
   });
+
+  it("re-centers the map on the browser fix immediately, not after the list fetch", () => {
+    const html = renderListPage({ entries: [] });
+    // The map needs nothing from the "/?near=" response (its GeoJSON source
+    // already holds every beach), so the re-center must fire in the position
+    // callback — before the round-trip, and surviving a fetch failure. Leaving
+    // it downstream of the fetch parks the map on the coarse Cloudflare IP
+    // estimate for the whole request.
+    expect(html).toContain("applyMapCenter(params.get('near'));");
+    // The attribute is set BEFORE the event so a map script that has not run yet
+    // (maplibre-gl.js still loading) still reads the fix at construction.
+    const helper = html.indexOf("const applyMapCenter = function (center) {");
+    expect(helper).toBeGreaterThan(-1);
+    const setAttr = html.indexOf("mapEl.setAttribute('data-center', center);", helper);
+    const dispatch = html.indexOf("dispatchEvent(new CustomEvent('swimreport:nearupdate'))", helper);
+    expect(setAttr).toBeGreaterThan(-1);
+    expect(dispatch).toBeGreaterThan(setAttr);
+    // The immediate re-center precedes the fetch it used to depend on.
+    expect(html.indexOf("applyMapCenter(params.get('near'));"))
+      .toBeLessThan(html.indexOf("fetch(nextUrl)"));
+  });
+
+  it("logs a geolocation failure instead of swallowing it", () => {
+    const html = renderListPage({ entries: [] });
+    // An already-granted permission that still fails (no location provider, a
+    // killed platform service) was indistinguishable from a fix landing near the
+    // IP estimate while the error callback was an empty function.
+    expect(html).not.toContain("}, function () {}, { maximumAge:");
+    expect(html).toContain("console.log('geolocation unavailable (code '");
+  });
 });

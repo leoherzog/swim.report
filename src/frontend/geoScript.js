@@ -12,12 +12,24 @@
 // container's data-center attribute — then rewrite the URL with
 // history.replaceState so refreshes, copied links, and search submits keep the
 // proximity sort. A hidden "near" input is appended to the search form for the
-// same reason. After the swap a "swimreport:nearupdate" CustomEvent tells the
-// already-running map script (mapScript.js) to re-read the updated data-center
-// and ease over — a pure re-center, since its GeoJSON source already holds every
-// beach (nothing is refetched or rebuilt) — and a polite aria-live region
-// announces the reorder to screen readers. All rendering stays server-side
-// (render.js string builders); this script only moves finished HTML.
+// same reason. A polite aria-live region announces the reorder to screen
+// readers. All rendering stays server-side (render.js string builders); this
+// script only moves finished HTML.
+//
+// The MAP re-center is deliberately DECOUPLED from that list fetch. The browser
+// fix is authoritative for the center the moment it arrives, and the fix itself
+// is all the map needs (mapScript.js's GeoJSON source already holds every beach,
+// so a re-center refetches and rebuilds nothing). So applyMapCenter() writes the
+// rounded fix onto #home-map's data-center and dispatches the
+// "swimreport:nearupdate" CustomEvent IMMEDIATELY in the position callback —
+// before the "/?near=" round-trip — and again after the swap with the
+// server-rendered value (identical, since both round to 3 dp). Waiting for the
+// fetch would leave the map sitting on the coarse Cloudflare IP estimate for the
+// whole request, and a fetch failure (which falls back to a full navigation)
+// would leave it there until the reload painted. Writing the attribute before
+// dispatching also covers the load-order race where maplibre-gl.js has not
+// finished loading yet: mapScript.js reads data-center at construction, so it
+// picks up the fix even when it missed the event.
 //
 // Everything degrades silently to the existing IP-based ordering: no
 // geolocation API, an insecure context, a denied prompt, or a timeout leave the
@@ -37,6 +49,18 @@ const SCRIPT_LINES = [
   "  if (new URLSearchParams(window.location.search).get('near')) {",
   "    return;",
   "  }",
+  // Point the live map at a "lat,lon" center and tell mapScript.js to ease over.
+  // The attribute is written BEFORE the event so a map script that has not run
+  // yet (maplibre-gl.js still loading) still reads the fix at construction.
+  "  const applyMapCenter = function (center) {",
+  "    const mapEl = document.getElementById('home-map');",
+  "    if (!mapEl || !center) {",
+  "      return;",
+  "    }",
+  "    mapEl.setAttribute('data-center', center);",
+  "    mapEl.setAttribute('data-center-precise', '1');",
+  "    document.dispatchEvent(new CustomEvent('swimreport:nearupdate'));",
+  "  };",
   "  navigator.geolocation.getCurrentPosition(function (pos) {",
   "    const lat = pos.coords.latitude;",
   "    const lon = pos.coords.longitude;",
@@ -58,6 +82,9 @@ const SCRIPT_LINES = [
   "      params.delete('q');",
   "    }",
   "    const nextUrl = '/?' + params.toString();",
+  // Re-center NOW, on the fix itself — the map needs nothing from the list
+  // response, so it must not wait on (or be lost to a failure of) the fetch.
+  "    applyMapCenter(params.get('near'));",
   "    const fallbackReload = function () {",
   "      window.location.replace(nextUrl);",
   "    };",
@@ -83,22 +110,17 @@ const SCRIPT_LINES = [
   "        hidden.value = params.get('near');",
   "        form.appendChild(hidden);",
   "      }",
-  // Refresh the map's center in place: copy the new data-center onto the (same,
-  // never-replaced) #home-map container, then the CustomEvent below tells
-  // mapScript.js to re-read it and ease over. The #home-map node itself is never
-  // replaced — that would destroy the live MapLibre instance — and the source
-  // already holds every beach, so nothing is refetched or rebuilt.
+  // Re-apply the server's own data-center for the same fix. This is normally a
+  // no-op re-center (both values are the same 3 dp rounding of the same
+  // coordinates); it stands as the authoritative reconcile if the server ever
+  // resolves a center differently than the raw fix. The #home-map node itself is
+  // never replaced — that would destroy the live MapLibre instance — and the
+  // source already holds every beach, so nothing is refetched or rebuilt.
   "      const nextMap = doc.getElementById('home-map');",
-  "      const currentMap = document.getElementById('home-map');",
-  "      if (nextMap && currentMap) {",
-  "        const center = nextMap.getAttribute('data-center');",
-  "        if (center) {",
-  "          currentMap.setAttribute('data-center', center);",
-  "          currentMap.setAttribute('data-center-precise', '1');",
-  "        }",
+  "      if (nextMap) {",
+  "        applyMapCenter(nextMap.getAttribute('data-center'));",
   "      }",
   "      window.history.replaceState(null, '', nextUrl);",
-  "      document.dispatchEvent(new CustomEvent('swimreport:nearupdate'));",
   "      const live = document.getElementById('geo-live-region');",
   "      if (live) {",
   "        live.textContent = 'Beaches sorted by distance from your location.';",
@@ -107,7 +129,15 @@ const SCRIPT_LINES = [
   "      console.log('geo upgrade failed, falling back to reload: ' + err.message);",
   "      fallbackReload();",
   "    });",
-  "  }, function () {}, { maximumAge: 300000, timeout: 10000 });",
+  // A denied prompt, an unavailable position provider, or a timeout all leave
+  // the page on its IP-ordered rendering — the documented degradation. It is
+  // LOGGED rather than swallowed: an already-granted permission that still fails
+  // (no location provider, a killed platform service) is otherwise
+  // indistinguishable from a fix that simply lands near the IP estimate.
+  "  }, function (err) {",
+  "    console.log('geolocation unavailable (code ' + (err && err.code) + '): ' +",
+  "      ((err && err.message) || 'no detail') + ' — keeping IP-based ordering');",
+  "  }, { maximumAge: 300000, timeout: 10000 });",
   "})();"
 ];
 
