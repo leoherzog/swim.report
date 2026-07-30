@@ -21,6 +21,7 @@ import {
   classifyUpdateSql,
   bumpAttemptsSql,
   buildClassifyQueue,
+  classifyCoverageCounts,
   tileBbox,
   backoffDelayMs,
   budgetExhausted,
@@ -351,6 +352,85 @@ describe("reconcileStaleRows / deleteBeachSql single-source the delete set", fun
     const q = buildClassifyQueue(snapForClassify, [], deletedIds);
     expect(q.map(function (b) { return b.id; })).toEqual(["osm-way-out"]);
   });
+
+  it("re-drains rows parked unclassified by the pre-decisive classifier (version IS NULL at the cap)", function () {
+    // The ~409 production rows left NULL at attempts=5 by the old clean-but-empty
+    // null path. A version bump can NEVER reach them (the version clause is ANDed
+    // with attempts < cap), so the version-IS-NULL legacy marker admits them.
+    const row = function (id, extra) {
+      return Object.assign({
+        id: id, osm_id: "way/" + id, lat: 42.6, lon: -83.4,
+        water_class: null, water_class_version: null, water_class_attempts: 0
+      }, extra || {});
+    };
+    const snap = [
+      row("parked-legacy", { water_class_attempts: WATER_CLASS_MAX_ATTEMPTS }),
+      row("pending-fresh", { water_class_attempts: 0 })
+    ];
+    const ids = buildClassifyQueue(snap, [], new Set()).map(function (b) { return b.id; });
+    expect(ids).toContain("parked-legacy");
+    // Fresh rows sort AHEAD of the legacy backlog (attempts ASC), so newly
+    // discovered beaches — the ones visible under the fail-open — decide first.
+    expect(ids).toEqual(["pending-fresh", "parked-legacy"]);
+  });
+
+  it("does NOT re-drain a row that reached a decision, and never re-queues a decided inland row", function () {
+    // A stamped version is the proof a row was decided; only unversioned parks
+    // are legacy. This is what makes the re-drain one-time rather than a loop.
+    const decided = [
+      {
+        id: "decided-inland", osm_id: "way/1", lat: 42.6, lon: -83.4,
+        water_class: "inland", water_class_version: WATER_CLASS_VERSION, water_class_attempts: 0
+      },
+      {
+        id: "parked-versioned", osm_id: "way/2", lat: 42.6, lon: -83.4,
+        water_class: null, water_class_version: WATER_CLASS_VERSION,
+        water_class_attempts: WATER_CLASS_MAX_ATTEMPTS
+      }
+    ];
+    expect(buildClassifyQueue(decided, [], new Set())).toEqual([]);
+  });
+});
+
+describe("classifyCoverageCounts (required visibility for NULL-hides)", function () {
+  const row = function (id, wc, attempts) {
+    return { id: id, water_class: wc, water_class_attempts: attempts };
+  };
+
+  it("splits the table into parked / hidden_inland / pending_visible / flag_worthy", function () {
+    const snap = [
+      row("gl", "great_lake", 0),
+      row("oc", "ocean", 0),
+      row("in", "inland", 0),
+      row("parked", null, WATER_CLASS_MAX_ATTEMPTS),
+      row("pending", null, 0)
+    ];
+    expect(classifyCoverageCounts(snap, new Set())).toEqual({
+      parked: 1,
+      hidden_inland: 1,
+      // Pending rows are FAIL-OPEN: counted as flag_worthy because the live gate
+      // serves them, which is exactly the exposure this metric exists to surface.
+      pending_visible: 1,
+      flag_worthy: 3
+    });
+  });
+
+  it("excludes reconcile-deleted rows and treats a missing attempts column as 0 (pending, not parked)", function () {
+    const snap = [
+      row("gone", null, 0),
+      { id: "stub", water_class: null },
+      { id: "stub2" }
+    ];
+    const c = classifyCoverageCounts(snap, new Set(["gone"]));
+    expect(c.pending_visible).toBe(2);
+    expect(c.parked).toBe(0);
+  });
+
+  it("never throws on an empty table", function () {
+    expect(classifyCoverageCounts([], new Set())).toEqual({
+      parked: 0, hidden_inland: 0, pending_visible: 0, flag_worthy: 0
+    });
+  });
 });
 
 describe("syncMetaSql", function () {
@@ -672,10 +752,15 @@ describe("buildClassifyQueue", function () {
     const q = buildClassifyQueue(snap, merged, new Set());
     expect(q.map(function (b) { return b.id; })).toEqual(["osm-node-new"]);
   });
-  it("skips a parked row at the attempts cap", function () {
+  it("skips a parked row at the attempts cap once it has been through the decisive classifier", function () {
+    // The attempts cap still parks rows for good — but the proof a row was
+    // actually decided-on is a STAMPED version. An unversioned park predates the
+    // clean-but-empty -> inland change and is re-drained exactly once (covered in
+    // the legacy re-drain tests above).
     const snap = [{
       id: "osm-node-p", osm_id: "node/p", lat: 43.0, lon: -86.0,
-      water_class: null, water_class_version: null, water_class_attempts: WATER_CLASS_MAX_ATTEMPTS
+      water_class: null, water_class_version: WATER_CLASS_VERSION,
+      water_class_attempts: WATER_CLASS_MAX_ATTEMPTS
     }];
     expect(buildClassifyQueue(snap, [], new Set())).toEqual([]);
   });

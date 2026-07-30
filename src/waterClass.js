@@ -9,11 +9,23 @@
 // inland. The classification is stored on the beach row (migration 0009) and
 // gates every consumer down to flag-worthy water.
 
-// Bump when the allowlist OR the predicate changes. Rows with
-// water_class_version < WATER_CLASS_VERSION are re-drained by the
-// classification cron (like RULES_VERSION-stamped KV). This is INDEPENDENT of
-// src/rules.js RULES_VERSION — it governs water-body classification, NOT flag
-// color, so RULES_VERSION does NOT bump for this feature.
+// Bump when the allowlist OR the predicate changes IN A WAY THAT COULD CHANGE AN
+// ALREADY-STORED DECISION. Rows with water_class_version < WATER_CLASS_VERSION are
+// re-drained by the classification cron (like RULES_VERSION-stamped KV). This is
+// INDEPENDENT of src/rules.js RULES_VERSION — it governs water-body
+// classification, NOT flag color, so RULES_VERSION does NOT bump for this feature.
+//
+// Deliberately NOT bumped for the clean-but-empty -> 'inland' change in
+// classifyWaterBody below, because that change is confined to the path that
+// previously returned null: every stored 'ocean'/'great_lake'/'inland' decision
+// came from a POSITIVE signal whose branch is untouched, so no stored answer can
+// differ. Bumping would re-probe every already-decided row for a provably
+// identical result (~1240 rows at 25/run = ~50 h of Overpass) AND would still not
+// reach the rows that actually need re-draining: buildClassifyQueue in
+// scripts/discovery-batch.js ANDs the version clause with
+// attempts < WATER_CLASS_MAX_ATTEMPTS, so rows parked AT the cap are excluded no
+// matter how high the version goes. Those are re-drained by the version-IS-NULL
+// legacy marker there instead.
 export const WATER_CLASS_VERSION = 1;
 
 // Data-driven allowlist: wikidata QID -> lake name. Editing this table (adding
@@ -84,10 +96,12 @@ export function isFlagWorthyWater(beach) {
 //     nearbyLakeQids: [string],    // wikidata QIDs of water=lake RELATIONS in range
 //     nearbyWayWater: boolean      // real inland water WAY (>= WATER_MIN_AREA_DEG2) in range
 //   }
-// Returns 'ocean' | 'great_lake' | 'inland' | null. null == "saw nothing
-// usable" -> the caller bumps water_class_attempts; a null is NEVER returned
-// for a transient upstream failure (that path never reaches here — see
-// fetchWaterClassSignals in src/clients/overpass.js).
+// Returns 'ocean' | 'great_lake' | 'inland'; null ONLY for a missing signals
+// object. A transient upstream failure never reaches here (fetchWaterClassSignals
+// in src/clients/overpass.js returns null before this call), so ANY signals
+// object we are handed is a COMPLETE, non-truncated probe result — the runQuery
+// remark guard rejects partial bodies. That is what makes the all-empty case
+// decidable rather than pending.
 export function classifyWaterBody(signals) {
   if (!signals) {
     return null;
@@ -105,5 +119,24 @@ export function classifyWaterBody(signals) {
   if (signals.nearbyWayWater === true) {
     return "inland";
   }
-  return null;
+  // Clean-but-empty: a complete probe found no coastline, no allowlisted lake
+  // relation, and no qualifying water way within the radii. This used to return
+  // null ("saw nothing usable"), which bumped water_class_attempts and left the
+  // row unclassified — so the row stayed VISIBLE under the FLAG_WORTHY_WATER_SQL
+  // fail-open for all WATER_CLASS_MAX_ATTEMPTS rounds while the site showed it an
+  // estimated flag card. But the probe is DETERMINISTIC: re-running the identical
+  // query returns the identical empty answer, so those retries could only ever
+  // reach the same conclusion, 5x the Overpass cost and 5x the exposure window.
+  // A beach set back from its water (real case: Locklin Pines Beach Park, Oakland
+  // County MI — nearest water way ~150 m out and pond-sized, Cross Lake ~300 m)
+  // is not flag-worthy, and saying so once is both cheaper and more honest than
+  // parking it unresolved.
+  //
+  // Worst case this mislabels a genuine ocean/Great Lake beach whose polygon sits
+  // beyond OCEAN_RADIUS_M/GREAT_LAKE_RADIUS_M from any mapped shoreline, or whose
+  // shoreline is unmapped in OSM. That row's END STATE is unchanged — it parked
+  // hidden at the attempts cap before and reads inland-hidden now — so this trades
+  // no new false negatives, only 4 fewer chances for OSM to be edited in between.
+  // Widening the radii is the fix for that class, not keeping the row pending.
+  return "inland";
 }

@@ -554,6 +554,18 @@ code verbatim (`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js
 emits one idempotent `.sql` delta, and bulk-loads it into D1 with
 `wrangler d1 execute --remote --file`.
 
+A **complete** Overpass probe always reaches a decision: finding no coastline, no
+allowlisted Great Lake relation, and no qualifying water way within the probe radii
+classifies the beach `inland`, rather than leaving it unclassified and retrying. Only
+a transient Overpass failure leaves a row pending. This matters for what the site
+serves, because still-unclassified rows stay **visible** (the gate is fail-open for
+them, as noted under [`GET /api/beaches.geojson`](#get-apibeachesgeojson)) — a newly
+discovered beach is listed and served an estimated flag until its first classification,
+so a beach set back from its water used to be published for all five attempts before
+parking. The probe is deterministic, so those
+retries could only ever reach the same answer. Newly discovered beaches are therefore
+visible for at most one classify cycle (~1 h) rather than ~5 h.
+
 Overpass is fetched defensively: the named query carries a 90 s server-side timeout
 and each per-tile fetch retries with bounded exponential backoff + jitter (3
 attempts) to ride out public-Overpass 504 overload bursts. A tile that still fails is

@@ -568,6 +568,54 @@ export function marineZoneSql(snapshotRows, deletedIds, index) {
 // synchronous discovery delta into one offline pass, respecting the same
 // (water_class NULL OR version < WATER_CLASS_VERSION) AND attempts <
 // WATER_CLASS_MAX_ATTEMPTS gate. New and moved rows enter as unclassified.
+//
+// PLUS a one-time legacy re-drain: rows left unclassified AT/ABOVE the attempts
+// cap by the pre-decisive classifier (see the clean-but-empty note in
+// src/waterClass.js) are admitted despite the cap, identified by
+// water_class_version IS NULL — a row that ever reached a decision carries a
+// stamped version, so the marker only ever matches pre-change parks. Their
+// attempts are deliberately NOT reset: at the cap they stay hidden by
+// FLAG_WORTHY_WATER_SQL, so ~409 confirmed-inland beaches re-decide quietly
+// instead of all reappearing on the live site with estimated flag cards while
+// they drain. The set drains to empty and cannot refill — the decisive
+// classifier never returns null for a complete probe, so nothing bumps attempts
+// to the cap again.
+// Pure; exported for tests. Whole-table classification visibility, logged every
+// classify run because a NULL-hide with no metric is silent product loss (PLAN.md
+// section 7 requires these counts):
+//   parked        - water_class IS NULL at/above the attempts cap: hidden, and
+//                   under the decisive classifier this can only SHRINK. A rising
+//                   parked count means the classifier regressed to a pending state.
+//   hidden_inland - decided inland: hidden on purpose, the product working.
+//   pending_visible - water_class IS NULL under the cap. These are FAIL-OPEN: the
+//                   site lists them and serves them estimated flag cards before
+//                   they are known to be flag-worthy water. This is the count that
+//                   went undiagnosed when an inland-lake beach was published for
+//                   five attempts; it should stay near the size of one discovery
+//                   delta and drain to ~0 after each classify run.
+export function classifyCoverageCounts(snapshotRows, deletedIds) {
+  const skip = deletedIds || new Set();
+  const counts = { parked: 0, hidden_inland: 0, pending_visible: 0, flag_worthy: 0 };
+  for (const r of snapshotRows) {
+    if (skip.has(r.id)) {
+      continue;
+    }
+    const wc = r.water_class === undefined ? null : r.water_class;
+    const attempts = typeof r.water_class_attempts === "number" ? r.water_class_attempts : 0;
+    if (wc === "ocean" || wc === "great_lake") {
+      counts.flag_worthy = counts.flag_worthy + 1;
+    } else if (wc === "inland") {
+      counts.hidden_inland = counts.hidden_inland + 1;
+    } else if (attempts >= WATER_CLASS_MAX_ATTEMPTS) {
+      counts.parked = counts.parked + 1;
+    } else {
+      counts.pending_visible = counts.pending_visible + 1;
+      counts.flag_worthy = counts.flag_worthy + 1;
+    }
+  }
+  return counts;
+}
+
 export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
   const byId = new Map();
   for (const r of snapshotRows) {
@@ -610,9 +658,14 @@ export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
     if (deletedIds.has(b.id)) {
       continue;
     }
-    const needs = (b.water_class === null || b.water_class === undefined ||
-      (typeof b.water_class_version === "number" && b.water_class_version < WATER_CLASS_VERSION)) &&
-      b.water_class_attempts < WATER_CLASS_MAX_ATTEMPTS;
+    const unclassified = b.water_class === null || b.water_class === undefined;
+    const staleVersion = typeof b.water_class_version === "number" &&
+      b.water_class_version < WATER_CLASS_VERSION;
+    const underCap = b.water_class_attempts < WATER_CLASS_MAX_ATTEMPTS;
+    // Legacy park marker: unclassified, at/above the cap, and never versioned.
+    const parkedPreDecisive = unclassified && !underCap &&
+      (b.water_class_version === null || b.water_class_version === undefined);
+    const needs = ((unclassified || staleVersion) && underCap) || parkedPreDecisive;
     if (needs) {
       queue.push(b);
     }
@@ -663,7 +716,16 @@ export async function classifyQueue(queue, options) {
   const classify = opts.classify || classifyWaterBody;
   const flush = opts.flush || null;
   const statements = [];
-  const counts = { attempted: 0, classified: 0, ocean: 0, great_lake: 0, inland: 0, bumped: 0, transient: 0 };
+  // inland_no_water is a SUBSET of inland (not a separate class): the rows decided
+  // by the clean-but-empty branch — no water found at all — rather than by a real
+  // adjacent water way. Both are non-flag-worthy and both store 'inland', but the
+  // split is the only way to tell "confirmed on an inland lake" from "nothing
+  // mapped within the probe radii" in a run log, which is what made the old parked
+  // pool undiagnosable.
+  const counts = {
+    attempted: 0, classified: 0, ocean: 0, great_lake: 0, inland: 0,
+    inland_no_water: 0, bumped: 0, transient: 0
+  };
   const total = limit > 0 ? Math.min(limit, queue.length) : queue.length;
   // buildClassifyQueue returns a deterministic order (attempts ASC, id) — right
   // for the scheduled full drain (limit 0). But under a PARTIAL --classify-limit
@@ -716,6 +778,9 @@ export async function classifyQueue(queue, options) {
         await emit(classifyUpdateSql(beach.id, cls));
         counts.classified = counts.classified + 1;
         counts[cls] = counts[cls] + 1;
+        if (cls === "inland" && signals.nearbyWayWater !== true) {
+          counts.inland_no_water = counts.inland_no_water + 1;
+        }
       } else {
         await emit(bumpAttemptsSql(beach.id));
         counts.bumped = counts.bumped + 1;
@@ -932,8 +997,16 @@ async function main() {
     const c = result.counts;
     log("classification done attempted=" + String(c.attempted) + " classified=" + String(c.classified) +
       " ocean=" + String(c.ocean) + " great_lake=" + String(c.great_lake) + " inland=" + String(c.inland) +
+      " (no_water=" + String(c.inland_no_water) + ")" +
       " bumped=" + String(c.bumped) + " transient=" + String(c.transient));
     log("stopped_on_budget=" + String(result.stopped) + " processed=" + String(result.processed));
+    // Whole-table visibility AS OF THE SNAPSHOT (this run's UPDATEs are not applied
+    // to D1 yet), so pending_visible is the exposure the run STARTED with.
+    const cov = classifyCoverageCounts(snapshotRows, deletedIds);
+    log("classification coverage parked=" + String(cov.parked) +
+      " hidden_inland=" + String(cov.hidden_inland) +
+      " pending_visible=" + String(cov.pending_visible) +
+      " flag_worthy=" + String(cov.flag_worthy) + " (pre-apply snapshot)");
     flushed = true;
   } else {
     log("classification skipped (--no-classify)");

@@ -23,26 +23,59 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   Deno). Each beach's adjacent water body is probed via Overpass (vertex
   recurse-down anchor at 150 m / 120 m, `out ids tags bb`) and classified
   ocean / great_lake / inland by the pure `classifyWaterBody` (Great Lakes
-  matched by wikidata QID, never by name). Inland + parked rows are hidden by
+  matched by wikidata QID, never by name). A complete probe ALWAYS decides — a
+  clean-but-empty result classifies `inland`, so only a transient failure leaves a
+  row unclassified. Inland + parked rows are hidden by
   the shared `FLAG_WORTHY_WATER_SQL` gate on every consumer (never deleted);
-  still-unclassified NULL rows stay visible during backfill. The offline
+  still-unclassified NULL rows stay visible (fail-open), which is why deciding on
+  the first complete probe matters — a pending row is a published row. The offline
   discovery batch classifies its own new-beach delta synchronously and NULLs
   `water_class` when a re-discovered centroid moves > ~100 m. Open residuals:
   - **Node-only beaches** (`osm_id` = "node/N") have no polygon geometry, so
-    only the point can be probed; a node set back from shore can miss (classify
-    as parked/hidden). Accepted residual — most set-back beaches are
+    only the point can be probed; a node set back from shore can miss (now
+    classified inland/hidden rather than parked/hidden — same end state, one
+    attempt instead of five). Accepted residual — most set-back beaches are
     ways/relations, which the vertex probe handles.
+  - **Probe radii are the remaining lever for set-back beaches.** Now that a
+    complete-but-empty probe DECIDES `inland` (instead of leaving the row pending
+    and visible), a genuine Great Lakes beach whose polygon sits beyond
+    `GREAT_LAKE_RADIUS_M` from any mapped shoreline is labeled inland on the first
+    attempt. Its end state is unchanged (it parked hidden at the cap before), so
+    this added no false negatives — but the fix for that whole class is widening
+    the radii, NOT restoring a pending state. Note the asymmetry: ocean/great_lake
+    probe at 150 m while inland probes at 120 m, so a beach whose only water sits
+    in the 120–150 m band can be confirmed flag-worthy but never confirmed on
+    inland water. Widening `INLAND_RADIUS_M` to 150 m would close it; unmeasured,
+    and it WOULD change stored decisions, so it needs a `WATER_CLASS_VERSION` bump
+    (unlike the clean-but-empty change, which provably could not).
+  - **The fail-open window is now ~1 h, not eliminated.** `FLAG_WORTHY_WATER_SQL`
+    still shows unclassified rows, and `src/waterClass.js`'s claim that
+    "post-backfill no pending NULLs remain" is structurally unreachable: daily
+    discovery injects new NULL rows (and the centroid-move reset re-NULLs existing
+    ones) forever, so there is a permanent trickle of beaches served an estimated
+    flag card between discovery and their next hourly classify run. Decisive
+    classification cut the exposure from ~5 h to ~1 h per beach; closing it
+    entirely means hiding NULL rows, which trades this for new legit beaches being
+    invisible for up to an hour. Not obviously the right trade — left open.
   - **Per-beach relation-`around` cost.** The lake-relation probe is scoped to
     one beach's vertices at 150 m with `[timeout:60]` at a small N/run; if it
     proves slow, the documented fallback is a recurse-**up** probe
     (`way[natural=water](around.a:150)` → `rel(bw)` → read their `wikidata`),
     which never loads full multipolygon geometry.
   - **Parked rows** sit at `WATER_CLASS_MAX_ATTEMPTS = 5` (matches the
-    enrichment caps); revisit if parked counts climb. A version bump does NOT
-    un-park empty-parked rows (adding a lake QID cannot rescue a beach that had
-    no nearby water at all); if ever needed,
-    `UPDATE beaches SET water_class_attempts = 0 WHERE water_class IS NULL`
-    re-opens them.
+    enrichment caps). A version bump does NOT un-park them — `buildClassifyQueue`
+    ANDs the version clause with `attempts < cap`, so no version value can reach a
+    parked row (this bit an earlier diagnosis; the cap, not the version, is the
+    gate). The ~409 rows the pre-decisive classifier parked are re-drained once by
+    the `water_class_version IS NULL` legacy marker in `buildClassifyQueue`,
+    deliberately WITHOUT resetting attempts so they stay hidden while they
+    re-decide. Do NOT reach for
+    `UPDATE beaches SET water_class_attempts = 0 WHERE water_class IS NULL` —
+    it un-parks them into the fail-open gate and republishes every one as a
+    visible beach with an estimated flag card until it drains. Under the decisive
+    classifier nothing can newly reach the cap (only transient failures leave a row
+    unclassified, and those never bump), so a rising parked count now means the
+    classifier regressed to a pending state.
   - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches
     linger in D1 (their KV flags self-expire at the 7200 s TTL). Harmless and
     cheap — left in place.

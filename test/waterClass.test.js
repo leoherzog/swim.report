@@ -2,8 +2,9 @@
 // Pure-function coverage for the water-body classifier (src/waterClass.js) and
 // the Overpass water-class element parser + query/anchor builders
 // (src/clients/overpass.js). Matched by QID, never by name; precedence
-// ocean > great_lake > inland; a clean-but-empty answer is null (bumps
-// attempts), a transient failure never reaches classifyWaterBody.
+// ocean > great_lake > inland; a clean-but-empty answer DECIDES inland (a
+// complete probe that finds no water is a real negative), and only a transient
+// failure — which never reaches classifyWaterBody — leaves a row pending.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
@@ -59,12 +60,33 @@ describe("classifyWaterBody", () => {
     expect(classifyWaterBody({ nearbyLakeQids: ["Q99999999"], nearbyWayWater: true })).toBe("inland");
   });
 
-  it("all-empty signals -> null (the caller bumps attempts)", () => {
-    expect(classifyWaterBody({})).toBeNull();
-    expect(classifyWaterBody({ coastlinePresent: false, nearbyLakeQids: [], nearbyWayWater: false })).toBeNull();
+  it("all-empty signals -> inland: a COMPLETE probe finding no water is a decision, not a pending row", () => {
+    // Regression (Locklin Pines Beach Park, way/1545732724): nearest water way
+    // ~150 m out and pond-sized, Cross Lake ~300 m, so all three probes come back
+    // empty. This used to return null, which bumped attempts and left the row
+    // unclassified — and therefore VISIBLE under the FLAG_WORTHY_WATER_SQL
+    // fail-open, showing an estimated flag card for an inland lake beach across
+    // all 5 attempts. The probe is deterministic, so those retries could only
+    // reach the same answer; decide it once.
+    expect(classifyWaterBody({})).toBe("inland");
+    expect(classifyWaterBody({ coastlinePresent: false, nearbyLakeQids: [], nearbyWayWater: false })).toBe("inland");
   });
 
-  it("null signals -> null (never throws)", () => {
+  it("a non-allowlisted lake QID with NO qualifying way-water still classifies inland", () => {
+    // Great Lakes allowlist miss + nothing else usable: still a decision.
+    expect(classifyWaterBody({
+      coastlinePresent: false, nearbyLakeQids: ["Q99999999"], nearbyWayWater: false
+    })).toBe("inland");
+  });
+
+  it("a positive signal always beats the empty-case default", () => {
+    // Guards the ordering: the clean-but-empty 'inland' fallthrough must never
+    // shadow a real ocean/great_lake decision.
+    expect(classifyWaterBody({ coastlinePresent: true, nearbyLakeQids: [], nearbyWayWater: false })).toBe("ocean");
+    expect(classifyWaterBody({ coastlinePresent: false, nearbyLakeQids: ["Q1066"], nearbyWayWater: false })).toBe("great_lake");
+  });
+
+  it("only a MISSING signals object is null — the transient path the caller must not bump on", () => {
     expect(classifyWaterBody(null)).toBeNull();
     expect(classifyWaterBody(undefined)).toBeNull();
   });
@@ -208,8 +230,10 @@ describe("buildWaterClassAnchor / buildWaterClassQuery", () => {
 
 describe("fetchWaterClassSignals (transient null vs clean signals contract)", () => {
   // null = TRANSIENT (caller must NOT bump water_class_attempts, row stays
-  // queued); a signals object = a CLEAN answer, the ONLY path that bumps
-  // attempts (via classifyWaterBody returning null on all-empty signals).
+  // queued); a signals object = a CLEAN, complete answer, which now always
+  // DECIDES (all-empty signals classify inland). This boundary is what makes the
+  // empty case safe to decide on: partial/truncated bodies are rejected upstream
+  // and surface as null here, never as an empty signals object.
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -245,7 +269,7 @@ describe("fetchWaterClassSignals (transient null vs clean signals contract)", ()
   });
 
   it("a clean HTTP-200 body with elements: [] -> the all-empty signals OBJECT, not null", async () => {
-    // The whole contract: clean-but-empty is a real answer (bumps attempts
+    // The whole contract: clean-but-empty is a real answer (decides inland
     // downstream), distinct from the transient-null no-bump path.
     const calls = installFetch(() => {
       return Promise.resolve(jsonResponse({ elements: [] }));
@@ -255,9 +279,9 @@ describe("fetchWaterClassSignals (transient null vs clean signals contract)", ()
     expect(result).not.toBeNull();
     // First mirror answered cleanly, so no failover happened.
     expect(calls.length).toBe(1);
-    // And the clean-but-empty answer is exactly what makes classifyWaterBody
-    // return null — the only attempts-bumping path.
-    expect(classifyWaterBody(result)).toBeNull();
+    // And the clean-but-empty answer is exactly what classifyWaterBody now
+    // DECIDES as inland — no attempts bump, no lingering visible pending row.
+    expect(classifyWaterBody(result)).toBe("inland");
   });
 
   it("a truncation remark on every mirror -> null (partial data reads as transient)", async () => {

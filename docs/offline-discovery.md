@@ -225,9 +225,20 @@ The emitted SQL mirrors what the retired `runOverpassSync` cron did
   `runWaterClassification` with `runOverpassSync`'s synchronous discovery-delta:
   every beach (snapshot ∪ newly discovered, minus reconcile-deletes) where
   `water_class IS NULL OR water_class_version < WATER_CLASS_VERSION` and
-  `water_class_attempts < WATER_CLASS_MAX_ATTEMPTS`. Decisions reset attempts to
-  0; clean-but-empty probes bump attempts; transient Overpass failures are
-  skipped (no bump) — identical to `classifyBeaches`.
+  `water_class_attempts < WATER_CLASS_MAX_ATTEMPTS`, PLUS a one-time legacy
+  re-drain of rows left unclassified at/above the cap by the pre-decisive
+  classifier (`water_class_version IS NULL`, see below). Decisions reset attempts
+  to 0; transient Overpass failures are skipped (no bump).
+- **A complete probe always decides.** `classifyWaterBody` no longer returns null
+  for a clean-but-empty result — it classifies `inland`. Only a transient failure
+  leaves a row unclassified, so `bumped` should read 0 in every run log and a
+  nonzero value means the classifier regressed to a pending state. The old
+  behavior left away-from-water beaches NULL for all 5 attempts, and since
+  `FLAG_WORTHY_WATER_SQL` is fail-open for NULL under the cap, those beaches were
+  served live with estimated flag cards the whole time (the Locklin Pines
+  regression). The probe is deterministic, so the retries could only ever reach
+  the same answer. The `inland=N (no_water=M)` summary count splits the rows
+  decided by the empty branch from those with a real adjacent water way.
 - **`flag_history` prune moves here.** The 90-day retention sweep that lived in
   `runOverpassSync` is emitted by the batch job, so it survives the cutover.
 

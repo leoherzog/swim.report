@@ -409,12 +409,22 @@ migrations/0009_water_class.sql:
   adjacent water body is probed (Overpass vertex recurse-down anchor) and
   classified by classifyWaterBody (src/waterClass.js); inland rows are hidden
   (never deleted) by the FLAG_WORTHY_WATER_SQL gate (section 7). water_class:
-  NULL (unclassified) | 'ocean' | 'great_lake' | 'inland'. water_class_attempts
-  mirrors enrichment_attempts: a successful-but-empty probe (no flag-worthy
-  water found) bumps it and rows at WATER_CLASS_MAX_ATTEMPTS (5) park; a
-  transient Overpass failure never bumps it. water_class_version is the
-  WATER_CLASS_VERSION under which the row was decided; bumping the constant
-  re-drains rows below it. INDEPENDENT of RULES_VERSION — this governs water-body
+  NULL (unclassified) | 'ocean' | 'great_lake' | 'inland'. Any COMPLETE probe now
+  DECIDES: a clean-but-empty result (no coastline, no allowlisted lake relation,
+  no qualifying water way in range) classifies 'inland' rather than leaving the
+  row NULL, so an unclassified row means "not probed yet / transient failure",
+  never "probed and inconclusive". water_class_attempts is therefore now only
+  vestigially reachable — a transient Overpass failure never bumps it, and the
+  decisive classifier has no clean-but-empty null path left to bump on — but the
+  cap stays in the gate for rows parked before the change. water_class_version is
+  the WATER_CLASS_VERSION under which the row was decided; bumping the constant
+  re-drains rows below it, BUT NOTE the version clause is ANDed with
+  attempts < WATER_CLASS_MAX_ATTEMPTS in buildClassifyQueue, so a bump can never
+  reach rows parked AT the cap — those re-drain via the version-IS-NULL legacy
+  marker (see "Water classification (offline batch classify-only mode)" in
+  section 7). Bump the version only when an already-STORED decision
+  could change; a predicate change confined to the old null path does not qualify.
+  INDEPENDENT of RULES_VERSION — this governs water-body
   classification, not flag color, so RULES_VERSION does NOT bump for this
   feature. No index: every gate query already range-scans on other predicates,
   and the classification-cron selection is a small LIMITed scan.
@@ -1580,9 +1590,19 @@ entirely when it is unset.
     export function classifyWaterBody(signals)
       // Pure, never throws. Precedence ocean > great_lake > inland. signals =
       // { coastlinePresent: bool, nearbyLakeQids: [string], nearbyWayWater: bool }.
-      // Returns 'ocean' | 'great_lake' | 'inland' | null. null == "saw nothing
-      // usable" -> caller bumps attempts; NEVER returned for a transient failure
-      // (that path stops at fetchWaterClassSignals returning null).
+      // Returns 'ocean' | 'great_lake' | 'inland'; null ONLY for a missing signals
+      // object. Any signals object is a COMPLETE probe (truncated bodies and
+      // transient failures both stop at fetchWaterClassSignals returning null), so
+      // the clean-but-empty case DECIDES 'inland' instead of returning null: the
+      // probe is deterministic, so re-running it could only reach the same answer,
+      // and leaving the row NULL kept it VISIBLE under FLAG_WORTHY_WATER_SQL's
+      // fail-open for all 5 attempts (the Locklin Pines regression — an inland-lake
+      // beach served an estimated flag card because its nearest water way was
+      // ~150 m out and pond-sized). Worst case this labels a genuine ocean/Great
+      // Lake beach beyond the probe radii as inland, but that row parked hidden at
+      // the attempts cap before and reads inland-hidden now — same end state, so no
+      // new false negatives. Widen the radii to fix that class, do not re-add a
+      // pending state.
 
 ## 6. Official sources
 
@@ -2744,20 +2764,34 @@ drained-queue run emits zero UPDATEs and applies as a no-op).
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
 water_class_attempts ASC, RANDOM() LIMIT <--classify-limit N> (fresh-first then random;
-re-drain on a version bump; skip parked). Per beach SEQUENTIALLY (never overlap Overpass
-calls — respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
+re-drain on a version bump; skip parked), UNION the LEGACY RE-DRAIN set: rows left
+unclassified AT/ABOVE the cap by the pre-decisive classifier, identified by
+water_class_version IS NULL AND water_class IS NULL AND water_class_attempts >= 5. A row
+that ever reached a decision carries a stamped version, so the marker matches only
+pre-change parks; their attempts are deliberately NOT reset, because at the cap they stay
+hidden by FLAG_WORTHY_WATER_SQL and so re-decide quietly instead of ~409 confirmed-inland
+beaches all reappearing on the live site while they drain. Attempts-ASC ordering puts
+them BEHIND fresh rows (the ones visible under the fail-open), and the set drains to
+empty and cannot refill — the decisive classifier never returns null for a complete
+probe, so nothing bumps attempts to the cap again. Per beach SEQUENTIALLY (never overlap
+Overpass calls — respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
 - signals === null (TRANSIENT) → log, continue, NO bump (row stays queued);
 - cls = classifyWaterBody(signals); cls !== null → UPDATE beaches SET water_class = ?,
   water_class_version = ?, water_class_attempts = 0 WHERE id = ? (reset attempts on a
   decision so a later version re-drain has a fresh budget);
-- cls === null (CLEAN but empty) → bumpWaterClassAttempts (self-isolating, like
-  bumpAttempts).
-The whole attempts semantics: bump ONLY on a clean-but-empty classification, never on
-the ~1/3 Overpass flake rate. Summary log reports attempted / classified / ocean /
-great_lake / inland / bumped / parked (water_class IS NULL AND attempts >= 5) /
-hidden_inland (water_class = 'inland') — a NULL-hide with no metric is silent product
-loss, so these two counts are the required visibility. RULES_VERSION is UNAFFECTED by
-classification (water_class has its own WATER_CLASS_VERSION).
+- cls === null → bumpWaterClassAttempts (self-isolating, like bumpAttempts). Now
+  DEFENSIVE ONLY: a complete probe always decides, so this branch is unreachable from
+  classifyQueue and `bumped` should read 0 in every run log. A nonzero bumped means the
+  classifier regressed to a pending state.
+The whole attempts semantics: never bump on the ~1/3 Overpass flake rate. Summary log
+reports attempted / classified / ocean / great_lake / inland (with a no_water=N subset
+count — the rows decided by the clean-but-empty branch rather than a real adjacent water
+way, which is the ONLY way to distinguish "confirmed on an inland lake" from "nothing
+mapped within the probe radii" and what made the old parked pool undiagnosable) / bumped /
+parked (water_class IS NULL AND attempts >= 5) / hidden_inland (water_class = 'inland') —
+a NULL-hide with no metric is silent product loss, so these counts are the required
+visibility. RULES_VERSION is UNAFFECTED by classification (water_class has its own
+WATER_CLASS_VERSION).
 
 No in-line classification runs during discovery: the two modes are separate (see the
 offline-pipeline note above), so DISCOVERY-ONLY emits zero water_class UPDATEs and newly
