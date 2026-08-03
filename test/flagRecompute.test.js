@@ -8,7 +8,7 @@
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
-import { HOT_VIEW_WINDOW_MS } from "../src/index.js";
+import { HOT_VIEW_WINDOW_MS } from "../src/demandWindow.js";
 import { runScheduledCron } from "./helpers/cron.js";
 
 function makeBeachRow(overrides) {
@@ -57,6 +57,11 @@ function makeEnv(beachRows, kvSeed) {
   // the returned statement supports BOTH .all() (the candidate SELECT) and
   // .run() (the per-beach UPDATEs), since the same stub backs both call sites.
   const preparedBinds = [];
+  // Every env.DB.batch(...) call, in the order D1 received it. The wave cron
+  // flushes its wave_updated rotation cursor through batch() INCREMENTALLY as
+  // the write pool advances, so the cursor tests need the individual flushes,
+  // not just a final tally.
+  const batchCalls = [];
   const env = {
     OPEN_METEO_BATCH_GAP_MS: 0,
     OPEN_METEO_RETRY_MS: 0,
@@ -84,6 +89,7 @@ function makeEnv(beachRows, kvSeed) {
         };
       },
       batch: function (statements) {
+        batchCalls.push(statements);
         return Promise.resolve(statements.map(function () { return { success: true }; }));
       }
     },
@@ -97,7 +103,13 @@ function makeEnv(beachRows, kvSeed) {
       }
     }
   };
-  return { env: env, kvPuts: kvPuts, kvGets: kvGets, preparedBinds: preparedBinds };
+  return {
+    env: env,
+    kvPuts: kvPuts,
+    kvGets: kvGets,
+    preparedBinds: preparedBinds,
+    batchCalls: batchCalls
+  };
 }
 
 function runHourlyCron(env) {
@@ -1611,17 +1623,23 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
   });
 });
 
-// The 6-hourly wave-refresh cron shares the exact same hybrid ORDER BY (F8):
+// The 6-hourly wave-refresh cron keeps the SAME hot-first demand guard (F8) —
 // a beach's wave inputs matter most when someone is actually about to look at
-// it, so the hot-first guard fronts the same recompute_updated/id rotation
-// here too, sharing the identical hotCutoffIso derivation.
+// it — but rotates on its OWN cursor column (migration 0012, wave_updated)
+// instead of recompute_updated. The two crons cannot share one cursor:
+// runFlagRecompute rewrites recompute_updated to a single shared nowIso for the
+// whole run every hour, flattening the column to ~2 distinct values, so the wave
+// cron's cold-tier sort collapsed to id ASC permanently and a fixed tail of the
+// table starved forever. Everything else about the clause — the hot guard, the
+// id ASC tiebreak, the single bound cutoff, the hotCutoffIso derivation — is
+// still shared, and this test asserts each of those unchanged.
 describe("runWaveRefresh demand-aware ordering (last_viewed)", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
-  it("SELECT includes last_viewed, ORDERs hot-first via the same hybrid clause, and binds ONE ISO cutoff arg", async function () {
+  it("SELECT includes last_viewed, ORDERs hot-first ahead of wave_updated/id, and binds ONE ISO cutoff arg", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -1639,10 +1657,16 @@ describe("runWaveRefresh demand-aware ordering (last_viewed)", function () {
     expect(selectBinds.length).toBe(1);
     const sql = selectBinds[0].sql;
     const hotIdx = sql.indexOf("(last_viewed IS NOT NULL AND last_viewed >= ?1) DESC");
-    const recomputeIdx = sql.indexOf("recompute_updated ASC, id ASC");
+    const rotationIdx = sql.indexOf("wave_updated ASC, id ASC");
     expect(hotIdx).toBeGreaterThan(-1);
-    expect(recomputeIdx).toBeGreaterThan(hotIdx);
+    expect(rotationIdx).toBeGreaterThan(hotIdx);
+    // The wave cron must NOT rotate on the hourly cron's cursor: recompute_updated
+    // is flattened to one shared nowIso every hour, so reading it here reinstates
+    // the permanent id-ASC collapse this column exists to fix.
+    expect(sql.indexOf("recompute_updated")).toBe(-1);
 
+    // The rotation column is a whitelisted SQL literal, never a bind parameter,
+    // so the hot cutoff is still the SELECT's ONLY bound argument.
     expect(selectBinds[0].args.length).toBe(1);
     const boundIso = selectBinds[0].args[0];
     const boundMs = Date.parse(boundIso);
@@ -1909,5 +1933,1034 @@ describe("runFlagRecompute - registered-source integration", function () {
       // A single-point fallback writes NO 24h strip.
       expect(made.kvPuts.get("waves:osm-node-grid-1")).toBeUndefined();
     })();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bounded-concurrency write pool, wall-clock budgets, and the wave_updated
+// rotation cursor.
+//
+// These lock the behavior that replaced the production failure mode: the wave
+// cron wrote ~1450 KV keys with a SEQUENTIAL await env.FLAGS.put per beach, had
+// no budget of any kind, and was SIGKILLed at 899.989 s of workerd's 900 s
+// scheduled ceiling — mid-loop, so its post-loop cursor batch never ran, the
+// step that writes "watertemp:" was never reached at all, and the invocation
+// left three log lines and no completion record. Everything below is an
+// assertion about what a truncated run must still deliver.
+// ---------------------------------------------------------------------------
+
+// Number of coordinates in an Open-Meteo multi-point request, read back off the
+// URL so a stub can return exactly as many locations as the batch asked for.
+// The client maps locations to points BY INDEX, so a short array would silently
+// blank the tail of every batch and quietly weaken these tests.
+function openMeteoPointCount(url) {
+  const match = /latitude=([^&]*)/.exec(url);
+  if (match === null) {
+    return 0;
+  }
+  return match[1].split(",").length;
+}
+
+// A marine payload whose per-location wave height is chosen by index, so one
+// beach inside a full pool window can be masked while its neighbours are not.
+// metersForIndex returns metres, or null for a fully masked model.
+function marinePayloadByIndex(count, metersForIndex) {
+  const locations = [];
+  for (let i = 0; i < count; i++) {
+    locations.push({ hourly: { wave_height_ecmwf_wam025: waveSeries48(metersForIndex(i)) } });
+  }
+  return locations;
+}
+
+// n beach rows on the Alpena, MI shoreline: deliberately >40 km from every
+// curated NDBC station (so the water-temp pass stays quiet unless a test opts
+// into it) and outside every official-scraper bbox.
+function alpenaBeaches(n) {
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    rows.push(makeBeachRow({
+      id: "osm-node-" + String(i),
+      name: "Beach " + String(i),
+      lat: 44.8 + i * 0.001,
+      lon: -83.3
+    }));
+  }
+  return rows;
+}
+
+// Every "UPDATE beaches SET wave_updated" statement the run batched, in the
+// order D1 received them. Anchored with indexOf(...) === 0 exactly like
+// findRecomputeUpdates above, so the two crons' cursor stamps can never be
+// mistaken for one another — that separation is the entire point of migration
+// 0012.
+function findWaveStamps(batchCalls) {
+  const updates = [];
+  for (const statements of batchCalls) {
+    for (const statement of statements) {
+      if (statement.sql &&
+          statement.sql.indexOf("UPDATE beaches SET wave_updated") === 0) {
+        updates.push(statement);
+      }
+    }
+  }
+  return updates;
+}
+
+function loggedLines(logSpy) {
+  return logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n");
+}
+
+describe("runWaveRefresh bounded-concurrency write pool", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("writes EVERY beach across pool and Open-Meteo batch boundaries", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // 120 beaches: deliberately not a multiple of KV_WRITE_CONCURRENCY (12) and
+    // straddling the 100-point Open-Meteo batch size, so both the pool's
+    // pull-boundary bookkeeping and the batch seam are exercised.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(120));
+    await runWaveCron(made.env);
+
+    let inputs = 0;
+    let series = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("waveinput:") === 0) {
+        inputs = inputs + 1;
+      }
+      if (key.indexOf("waves:") === 0) {
+        series = series + 1;
+      }
+    }
+    expect(inputs).toBe(120);
+    expect(series).toBe(120);
+
+    // Spot-check the seams rather than all 120: the first beach, the beach on
+    // the first pool-width boundary, both sides of the 100-point batch seam,
+    // and the last beach.
+    const seams = ["osm-node-0", "osm-node-11", "osm-node-99", "osm-node-100", "osm-node-119"];
+    for (const id of seams) {
+      const put = made.kvPuts.get("waveinput:" + id);
+      expect(put).toBeDefined();
+      expect(put.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
+      expect(made.kvPuts.get("waves:" + id).opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
+    }
+
+    // Full coverage is reported as such: nothing truncated, every beach stamped.
+    expect(loggedLines(logSpy)).toContain(
+      "index: wave refresh complete, beaches=120 stamped=120 reached=120 unattempted=0 " +
+      "failures=0 inputs=120 series=120 watertemp=0 truncated=no"
+    );
+  });
+
+  it("a graceful-degradation skip inside a FULL pool window still skips only that beach", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // Beach 7 fetches cleanly but fully masked, and neither the buoy gap-fill
+    // nor the wind pass can serve it — the "nothing usable" guard. Under the old
+    // sequential loop that was a plain continue; under the pool it is a return
+    // from writeWaveKvForBeach, and this asserts the two are equivalent while 11
+    // other beaches are in flight around it.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(marinePayloadByIndex(
+          openMeteoPointCount(target),
+          function (i) { return i === 7 ? null : 0.5; }
+        ));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(alpenaBeaches(60));
+    await runWaveCron(made.env);
+
+    expect(made.kvPuts.get("waveinput:osm-node-7")).toBeUndefined();
+    expect(made.kvPuts.get("waves:osm-node-7")).toBeUndefined();
+    expect(made.kvPuts.get("waveinput:osm-node-6")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-8")).toBeDefined();
+
+    let inputs = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("waveinput:") === 0) {
+        inputs = inputs + 1;
+      }
+    }
+    expect(inputs).toBe(59);
+
+    // ...and the skipped beach is STILL stamped: it reached a write DECISION.
+    // See the anti-inverted-starvation test below for why that matters.
+    const stampedIds = findWaveStamps(made.batchCalls).map(function (u) { return u.args[1]; });
+    expect(stampedIds.length).toBe(60);
+    expect(stampedIds.indexOf("osm-node-7")).toBeGreaterThan(-1);
+  });
+
+  it("one rejecting KV put costs that beach only — never the pool or the run", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(60));
+    const recordingPut = made.env.FLAGS.put;
+    made.env.FLAGS.put = function (key, value, opts) {
+      if (key === "waveinput:osm-node-30") {
+        return Promise.reject(new Error("kv put rejected"));
+      }
+      return recordingPut(key, value, opts);
+    };
+    await runWaveCron(made.env);
+
+    expect(made.kvPuts.get("waveinput:osm-node-30")).toBeUndefined();
+    let inputs = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("waveinput:") === 0) {
+        inputs = inputs + 1;
+      }
+    }
+    expect(inputs).toBe(59);
+
+    const logged = loggedLines(logSpy);
+    // The per-beach message survived the loop-to-pool conversion, which is how
+    // we know the try/catch is INSIDE the pool worker: runPool's own backstop
+    // would have logged "pool: worker threw" instead.
+    expect(logged).toContain(
+      "index: wave input write failed for beach osm-node-30: kv put rejected"
+    );
+    expect(logged.indexOf("pool: worker threw")).toBe(-1);
+    // The failed beach is NOT stamped: it persisted nothing, so advancing its
+    // wave_updated cursor would send a beach with no data to the BACK of the
+    // rotation. Unstamped means NULL, which sorts first next run.
+    // But the RUN is still reported complete — failures= carries the single bad
+    // put, and truncated= stays "no" because the pool reached every beach. One
+    // flaky put must not trip the truncation alarm; a systemic write outage
+    // shows up instead as failures= near beaches= with stamped=0.
+    expect(logged).toContain(
+      "index: wave refresh complete, beaches=60 stamped=59 reached=60 unattempted=0 " +
+      "failures=1 inputs=59 series=59 watertemp=0 truncated=no"
+    );
+    const stampedAfterFailure = findWaveStamps(made.batchCalls).map(function (u) { return u.args[1]; });
+    expect(stampedAfterFailure.length).toBe(59);
+    expect(stampedAfterFailure.indexOf("osm-node-30")).toBe(-1);
+  });
+});
+
+// The NDBC water-temperature pass (DISPLAY-ONLY: it colors no flag and never
+// reaches src/rules.js). It used to run AFTER the sequential write loop, which
+// is why not one "watertemp:" key has ever existed in production — the loop
+// consumed the whole invocation and this code was never reached. Its fetch half
+// is now step 3b (before the writes) and its put rides the same per-beach write
+// pool, INDEPENDENTLY of the two wave skip guards.
+const NDBC_CLEVELAND_URL = "https://www.ndbc.noaa.gov/data/realtime2/45164.txt";
+
+const NDBC_HEADER = [
+  "#YY  MM DD hh mm WDIR WSPD GST  WVHT   DPD   APD MWD   PRES  ATMP  WTMP  DEWP  VIS PTDY  TIDE",
+  "#yr  mo dy hr mn degT m/s  m/s     m   sec   sec degT   hPa  degC  degC  degC  nmi  hPa    ft"
+];
+
+// One realtime2 data row: ts is "YYYY MM DD hh mm", wvht the WVHT token (metres
+// or "MM", column 8) and wtmp the WTMP token (Celsius or "MM", column 14).
+function ndbcRow(ts, wvht, wtmp) {
+  return ts + " 280  5.0  6.0   " + wvht + "     5    MM  MM 1016.2  18.3  " + wtmp +
+    "    MM   MM   MM    MM";
+}
+
+function ndbcFile(rows) {
+  return NDBC_HEADER.concat(rows).join("\n") + "\n";
+}
+
+function ndbcTextResponse(body) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    text: function () { return Promise.resolve(body); }
+  });
+}
+
+// n beach rows sitting on NDBC station 45164 (Cleveland, OH), so nearestStation
+// resolves the SAME station for every one of them and the pass must dedup down
+// to a single realtime2 fetch.
+function clevelandBeaches(n) {
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    rows.push(makeBeachRow({
+      id: "osm-node-" + String(i),
+      name: "Beach " + String(i),
+      lat: 41.748 + i * 0.0005,
+      lon: -81.698
+    }));
+  }
+  return rows;
+}
+
+describe("runWaveRefresh water temperature (watertemp: KV)", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("dedups by station: 60 beaches under one buoy cost ONE fetch and write 60 keys", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    let ndbcCalls = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        // A real wave height for every beach, so none is wave-null and the
+        // step-2b NDBC WAVE source never runs — the only realtime2 request in
+        // this run is the water-temp pass's.
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      if (target === NDBC_CLEVELAND_URL) {
+        ndbcCalls = ndbcCalls + 1;
+        return ndbcTextResponse(ndbcFile([ndbcRow("2026 07 15 15 50", "1.2", "24.6")]));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(clevelandBeaches(60));
+    await runWaveCron(made.env);
+
+    expect(ndbcCalls).toBe(1);
+
+    let temps = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("watertemp:") === 0) {
+        temps = temps + 1;
+      }
+    }
+    expect(temps).toBe(60);
+
+    const put = made.kvPuts.get("watertemp:osm-node-0");
+    expect(put.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
+    const reading = JSON.parse(put.value);
+    expect(reading.beachId).toBe("osm-node-0");
+    expect(reading.tempC).toBeCloseTo(24.6, 5);
+    expect(reading.tempF).toBeCloseTo(76.28, 5);
+    expect(reading.station.id).toBe("45164");
+    expect(reading.observedIso).toBe("2026-07-15T15:50:00.000Z");
+    expect(reading.updated).toBe("2026-07-15T16:00:00.000Z");
+
+    const logged = loggedLines(logSpy);
+    expect(logged).toContain("index: water temp writes this run=60");
+    expect(logged).toContain("watertemp=60");
+  });
+
+  it("REGRESSION: water temp is written even when the marine fetch failed and NO waveinput was", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // The exact coupling that must not exist: a failed marine fetch says nothing
+    // about an NDBC buoy reading. WVHT is "MM" so the step-2b NDBC WAVE source
+    // also comes back null and the beach stays wave-null with no wind — the
+    // "preserve last-good KV" guard fires and writes NO waveinput. The buoy's
+    // water temperature is still perfectly good and must still be published.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target === NDBC_CLEVELAND_URL) {
+        return ndbcTextResponse(ndbcFile([ndbcRow("2026 07 15 15 50", "MM", "18.0")]));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(clevelandBeaches(1));
+    await runWaveCron(made.env);
+
+    expect(made.kvPuts.get("waveinput:osm-node-0")).toBeUndefined();
+    expect(made.kvPuts.get("waves:osm-node-0")).toBeUndefined();
+
+    const put = made.kvPuts.get("watertemp:osm-node-0");
+    expect(put).toBeDefined();
+    expect(put.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
+    expect(JSON.parse(put.value).tempC).toBeCloseTo(18.0, 5);
+  });
+
+  it("a null station reading writes nothing, and never blocks the wave writes", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      if (target === NDBC_CLEVELAND_URL) {
+        // The winter/outage case: the station file is gone. stationWaterTemp
+        // degrades to null and every beach's old key expires on its own.
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(clevelandBeaches(3));
+    await runWaveCron(made.env);
+
+    for (const key of made.kvPuts.keys()) {
+      expect(key.indexOf("watertemp:")).toBe(-1);
+    }
+    // The wave writes are untouched by the water-temp miss — isolation in the
+    // other direction.
+    expect(made.kvPuts.get("waveinput:osm-node-0")).toBeDefined();
+    expect(loggedLines(logSpy)).toContain("index: water temp writes this run=0");
+  });
+});
+
+describe("runWaveRefresh wall-clock budgets", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // Regression: step 2 (the GLOS Seagull buoy gap-fill) was the ONE gather step
+  // with no deadline gate. Because an expired gather deadline leaves every beach
+  // wave-null, it fed step 2 the WHOLE table and let it start a fresh catalog
+  // download plus per-platform obs fetches AFTER the budget was spent — hundreds
+  // of seconds of new upstream work whose results were then discarded anyway,
+  // since those beaches are already unattempted and the write pool skips them.
+  it("starts NO GLOS gap-fill work once the gather deadline has expired", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    const calls = { marine: 0, seagull: 0 };
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        calls.marine = calls.marine + 1;
+      }
+      if (target.indexOf("seagull-api.glos.org") !== -1) {
+        calls.seagull = calls.seagull + 1;
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(2));
+    made.env.WAVE_GATHER_DEADLINE_MS = 0;
+    await runWaveCron(made.env);
+
+    // Both beaches are wave-null (the marine pass never ran), which is exactly
+    // the state that used to hand the whole table to the gap-fill.
+    expect(calls.marine).toBe(0);
+    expect(calls.seagull).toBe(0);
+    const logged = loggedLines(logSpy);
+    expect(logged).toContain(
+      "index: glcfs gap-fill skipped, gather deadline reached (2 wave-null beaches)"
+    );
+  });
+
+  it("WAVE_GATHER_DEADLINE_MS = 0 starts no upstream work, writes nothing, and STILL logs completion", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // A zero budget is the only way to reach the deadline branch under the
+    // suite's frozen clock — makeDeadline's >= is what makes it fire.
+    const calls = { marine: 0, wind: 0, gridpoint: 0, ndbc: 0 };
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        calls.marine = calls.marine + 1;
+      }
+      if (target.indexOf("api.open-meteo.com/v1/forecast") !== -1) {
+        calls.wind = calls.wind + 1;
+      }
+      if (target.indexOf("api.weather.gov/gridpoints") !== -1) {
+        calls.gridpoint = calls.gridpoint + 1;
+      }
+      if (target.indexOf("ndbc.noaa.gov") !== -1) {
+        calls.ndbc = calls.ndbc + 1;
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(2));
+    made.env.WAVE_GATHER_DEADLINE_MS = 0;
+    await runWaveCron(made.env);
+
+    expect(calls.marine).toBe(0);
+    expect(calls.wind).toBe(0);
+    expect(calls.gridpoint).toBe(0);
+    expect(calls.ndbc).toBe(0);
+    expect(made.kvPuts.size).toBe(0);
+    // Nothing was attempted, so nothing may be stamped: the cursor must never
+    // advance past work the run never did.
+    expect(findWaveStamps(made.batchCalls).length).toBe(0);
+
+    const logged = loggedLines(logSpy);
+    expect(logged).toContain("index: batch pacing deadline reached, 1 batches unattempted");
+    expect(logged).toContain(
+      "index: wave refresh complete, beaches=2 stamped=0 reached=2 unattempted=2 " +
+      "failures=0 inputs=0 series=0 watertemp=0 truncated=yes"
+    );
+  });
+
+  it("WAVE_SUPPLEMENTAL_BUDGET_MS = 0 caps step 2b WITHOUT starving the wind pass", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // The whole point of giving step 2b its OWN sub-budget: in a fully wave-null
+    // run its sequential fetches would otherwise eat the entire gather deadline
+    // and leave every beach with no wind fallback and an "unknown" flag.
+    let gridpointCalls = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(marinePayload(1, { ecmwf_wam025: null }));
+      }
+      if (target.indexOf("api.weather.gov/gridpoints") !== -1) {
+        gridpointCalls = gridpointCalls + 1;
+        return Promise.reject(new Error("should never be reached"));
+      }
+      if (target.indexOf("api.open-meteo.com/v1/forecast") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({ current: { wind_speed_10m: 30, wind_gusts_10m: 45 } });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-grid-1",
+        lat: 44.8,
+        lon: -83.3,
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33"
+      })
+    ]);
+    made.env.WAVE_SUPPLEMENTAL_BUDGET_MS = 0;
+    await runWaveCron(made.env);
+
+    expect(gridpointCalls).toBe(0);
+    expect(loggedLines(logSpy)).toContain(
+      "index: supplemental wave deadline reached after 0 of 1 beaches"
+    );
+
+    // The wind fallback — the input that decides this beach's color — still ran.
+    const input = JSON.parse(made.kvPuts.get("waveinput:osm-node-grid-1").value);
+    expect(input.waveHeightFt).toBe(null);
+    expect(input.windSpeedMph).toBe(30);
+    expect(input.windGustMph).toBe(45);
+  });
+
+  it("WAVE_WRITE_DEADLINE_MS makes the write pool YIELD mid-table with its progress persisted", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // The gate whose ABSENCE was the fatal flaw in the first design: an
+    // unbounded write phase is exactly what workerd SIGKILLed at 899.989 s,
+    // taking the cursor and the completion log with it. The pool must instead
+    // hand back control while the invocation is still alive.
+    //
+    // Each KV put advances the frozen clock by 1000 ms against a 5000 ms write
+    // budget. runPool checks the deadline BEFORE claiming each item, and its
+    // runners are spawned in sequence — each one issues its waveinput put
+    // synchronously, so by the time the 6th runner starts the budget is already
+    // spent and it claims nothing. Five beaches are written; the pool yields
+    // with 55 untouched instead of running the invocation into the ceiling.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(60));
+    made.env.WAVE_WRITE_DEADLINE_MS = 5000;
+    const recordingPut = made.env.FLAGS.put;
+    made.env.FLAGS.put = function (key, value, opts) {
+      vi.setSystemTime(Date.now() + 1000);
+      return recordingPut(key, value, opts);
+    };
+    await runWaveCron(made.env);
+
+    let inputs = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("waveinput:") === 0) {
+        inputs = inputs + 1;
+      }
+    }
+    expect(inputs).toBe(5);
+    expect(made.kvPuts.get("waveinput:osm-node-0")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-4")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-5")).toBeUndefined();
+    expect(made.kvPuts.get("waveinput:osm-node-59")).toBeUndefined();
+
+    // Only the beaches the pool actually reached advance the cursor, so the
+    // other 55 carry NULL wave_updated and sort first next run.
+    const stampedIds = findWaveStamps(made.batchCalls).map(function (u) { return u.args[1]; });
+    expect(stampedIds.length).toBe(5);
+    expect(stampedIds.indexOf("osm-node-5")).toBe(-1);
+
+    // And the operator can SEE it happened, which the killed run could not.
+    expect(loggedLines(logSpy)).toContain(
+      "index: wave refresh complete, beaches=60 stamped=5 reached=5 unattempted=0 " +
+      "failures=0 inputs=5 series=5 watertemp=0 truncated=yes"
+    );
+  });
+
+  it("a mid-run gather deadline persists the PREFIX and leaves the tail for next run", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // The whole design in one test. 250 beaches at concurrency 1 = three
+    // 100-point batches. The SECOND batch burns past the 5 s gather budget
+    // before resolving, so the third is never started — and the 50 beaches in it
+    // must end the run with NO KV keys and NO cursor stamp, while the 200
+    // already gathered are fully persisted.
+    let marineCalls = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        marineCalls = marineCalls + 1;
+        if (marineCalls === 2) {
+          vi.setSystemTime(Date.now() + 10000);
+        }
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(250));
+    made.env.OPEN_METEO_CONCURRENCY = 1;
+    made.env.WAVE_GATHER_DEADLINE_MS = 5000;
+    await runWaveCron(made.env);
+
+    expect(marineCalls).toBe(2);
+
+    // Prefix: written AND stamped.
+    expect(made.kvPuts.get("waveinput:osm-node-0")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-199")).toBeDefined();
+    // Tail: neither.
+    expect(made.kvPuts.get("waveinput:osm-node-200")).toBeUndefined();
+    expect(made.kvPuts.get("waveinput:osm-node-249")).toBeUndefined();
+
+    const stampedIds = findWaveStamps(made.batchCalls).map(function (u) { return u.args[1]; });
+    expect(stampedIds.length).toBe(200);
+    expect(stampedIds.indexOf("osm-node-0")).toBeGreaterThan(-1);
+    expect(stampedIds.indexOf("osm-node-199")).toBeGreaterThan(-1);
+    expect(stampedIds.indexOf("osm-node-200")).toBe(-1);
+    expect(stampedIds.indexOf("osm-node-249")).toBe(-1);
+
+    // An unstamped beach carries NULL wave_updated, which sorts first under the
+    // rotation's ASC cursor — that is how the tail gets served next run.
+    expect(loggedLines(logSpy)).toContain(
+      "index: wave refresh complete, beaches=250 stamped=200 reached=250 unattempted=50 " +
+      "failures=0 inputs=200 series=200 watertemp=0 truncated=yes"
+    );
+  });
+
+  it("isolates a throwing gather step: the run still writes and still completes", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // Before per-step try/catch, ONE unexpected throw anywhere in the gather
+    // skipped the entire write pass and the run persisted nothing at all — the
+    // most expensive possible failure for a 6-hourly cron. Simulated with a
+    // throwing accessor armed only after the marine pass has read the row, so
+    // the throw lands in the water-temp step (nearestStation(beach.lat, ...))
+    // with a full set of wave results already gathered.
+    let armed = false;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        armed = true;
+        return marineOkResponse(marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 }));
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const row = makeBeachRow({ id: "osm-node-1", lon: -83.3 });
+    Object.defineProperty(row, "lat", {
+      get: function () {
+        if (armed) {
+          throw new Error("simulated gather-step failure");
+        }
+        return 44.8;
+      }
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv([row]);
+    await runWaveCron(made.env);
+
+    const logged = loggedLines(logSpy);
+    expect(logged).toContain("index: water temp pass threw: simulated gather-step failure");
+    // The step that threw contributed nothing...
+    expect(made.kvPuts.get("watertemp:osm-node-1")).toBeUndefined();
+    // ...and everything gathered before it was still persisted and stamped.
+    expect(made.kvPuts.get("waveinput:osm-node-1")).toBeDefined();
+    expect(findWaveStamps(made.batchCalls).length).toBe(1);
+    expect(logged).toContain("index: wave refresh complete, beaches=1 stamped=1");
+  });
+});
+
+// The wave_updated rotation cursor (migration 0012). It exists because
+// runFlagRecompute rewrites recompute_updated to one shared nowIso for the whole
+// table every hour, so the wave cron's cold-tier sort collapsed to id ASC
+// permanently and a fixed tail of the table starved forever. The column is only
+// half the fix — the INCREMENTAL flush is the other half, because the shape it
+// replaced (one D1 batch after the loop) is exactly what a mid-loop SIGKILL
+// throws away.
+describe("runWaveRefresh wave_updated cursor stamping", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("stamps once per processed beach with [nowIso, beachId], identical across the run", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(alpenaBeaches(3));
+    await runWaveCron(made.env);
+
+    const updates = findWaveStamps(made.batchCalls);
+    expect(updates.length).toBe(3);
+    const stampedIds = updates.map(function (u) { return u.args[1]; }).sort();
+    expect(stampedIds).toEqual(["osm-node-0", "osm-node-1", "osm-node-2"]);
+    for (const update of updates) {
+      expect(update.sql).toBe("UPDATE beaches SET wave_updated = ?1 WHERE id = ?2");
+      expect(update.args.length).toBe(2);
+      expect(update.args[0]).toBe("2026-07-15T16:00:00.000Z");
+    }
+  });
+
+  it("ANTI-INVERTED-STARVATION: a beach the marine fetch FAILED for writes nothing but IS stamped", async function () {
+    // Attempted-and-failed is not the same as never-attempted. Open-Meteo
+    // masking on the Great Lakes is documented as NORMAL, so a permanently
+    // wave-null beach writes nothing on every single run; stamping only on a
+    // successful write would pin it to the head of the queue forever and invert
+    // the very starvation this cursor exists to fix.
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(alpenaBeaches(2));
+    await runWaveCron(made.env);
+
+    expect(made.kvPuts.size).toBe(0);
+    const stampedIds = findWaveStamps(made.batchCalls).map(function (u) { return u.args[1]; }).sort();
+    expect(stampedIds).toEqual(["osm-node-0", "osm-node-1"]);
+  });
+
+  it("flushes INCREMENTALLY as the pool advances, not once after the loop", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    // The column is only half the fix; this is the other half. Copying the
+    // hourly cron's shape — collect ids, batch ONCE after the loop — reproduces
+    // the production bug exactly: the invocation is SIGKILLed mid-loop, the
+    // trailing batch never runs, the cursor never advances, and every later run
+    // reprocesses the same prefix while the tail starves indefinitely. A
+    // truncated run must persist the progress it made, which requires the
+    // flushes to land WHILE beaches are still being written.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(alpenaBeaches(250));
+    let inputsWritten = 0;
+    const recordingPut = made.env.FLAGS.put;
+    made.env.FLAGS.put = function (key, value, opts) {
+      if (key.indexOf("waveinput:") === 0) {
+        inputsWritten = inputsWritten + 1;
+      }
+      return recordingPut(key, value, opts);
+    };
+    // Snapshot how much of the table had been written at the instant D1 received
+    // each cursor flush.
+    const flushes = [];
+    const recordingBatch = made.env.DB.batch;
+    made.env.DB.batch = function (statements) {
+      if (statements.length > 0 && statements[0].sql &&
+          statements[0].sql.indexOf("UPDATE beaches SET wave_updated") === 0) {
+        flushes.push({ size: statements.length, inputsSoFar: inputsWritten });
+      }
+      return recordingBatch(statements);
+    };
+    await runWaveCron(made.env);
+
+    // More than one flush, and the first one landed with the table only
+    // partially written — the property a post-loop batch cannot have.
+    expect(flushes.length).toBeGreaterThan(1);
+    expect(flushes[0].inputsSoFar).toBeLessThan(250);
+    let stamped = 0;
+    for (const flush of flushes) {
+      stamped = stamped + flush.size;
+    }
+    expect(stamped).toBe(250);
+  });
+
+  it("a rejected cursor flush is swallowed — the KV writes already made survive", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        return marineOkResponse(
+          marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 })
+        );
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv(alpenaBeaches(3));
+    made.env.DB.batch = function (statements) {
+      made.batchCalls.push(statements);
+      return Promise.reject(new Error("d1 batch down"));
+    };
+    await runWaveCron(made.env);
+
+    // The flush WAS attempted...
+    expect(findWaveStamps(made.batchCalls).length).toBe(3);
+    const logged = loggedLines(logSpy);
+    expect(logged).toContain("index: wave cursor flush failed for 3 beaches: d1 batch down");
+    // ...and its failure cost only next run's rotation position, never the KV
+    // writes that already succeeded.
+    expect(made.kvPuts.get("waveinput:osm-node-0")).toBeDefined();
+    expect(made.kvPuts.get("waveinput:osm-node-2")).toBeDefined();
+    expect(logged).toContain("index: wave refresh complete, beaches=3 stamped=3");
+  });
+});
+
+// Open-Meteo's free tier documents 600 calls/min. At OPEN_METEO_CONCURRENCY = 2
+// the cron dispatched 200 locations per ~14 s wave = ~857/min = 143% of that
+// ceiling, which is the most plausible cause of the exactly-two-429s-per-run
+// signature (each 429 costing 60 s of a 900 s budget). Concurrency 1 puts the
+// peak at ~400/min = 67%.
+describe("runWaveRefresh Open-Meteo pacing at concurrency 1", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("issues exactly one 100-point batch at a time", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+
+    let marineCalls = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const batchSizes = [];
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf(MARINE_HOST) !== -1) {
+        marineCalls = marineCalls + 1;
+        batchSizes.push(openMeteoPointCount(target));
+        inFlight = inFlight + 1;
+        if (inFlight > maxInFlight) {
+          maxInFlight = inFlight;
+        }
+        const payload = marinePayload(openMeteoPointCount(target), { ecmwf_wam025: 0.5 });
+        return (async function () {
+          // One microtask turn of overlap is all a concurrency>1 wave needs to
+          // show up here: Promise.allSettled dispatches its whole wave before
+          // any of them resolves.
+          await Promise.resolve();
+          inFlight = inFlight - 1;
+          return { ok: true, status: 200, json: function () { return Promise.resolve(payload); } };
+        })();
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv(alpenaBeaches(250));
+    // Drop the suite's blanket OPEN_METEO_CONCURRENCY override so the MODULE
+    // DEFAULT is what is under test here. That constant is the whole rate fix —
+    // an env-overridden 1 would pass this test even if the default regressed to
+    // 2 and the cron went back to 143% of the documented per-minute ceiling.
+    // Only the pacing GAP stays zeroed, so the run does not sleep 24 s.
+    delete made.env.OPEN_METEO_CONCURRENCY;
+    await runWaveCron(made.env);
+
+    expect(marineCalls).toBe(3);
+    expect(batchSizes).toEqual([100, 100, 50]);
+    expect(maxInFlight).toBe(1);
+    // Every beach still got its wave input — pacing changes latency, not coverage.
+    let inputs = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("waveinput:") === 0) {
+        inputs = inputs + 1;
+      }
+    }
+    expect(inputs).toBe(250);
+  });
+});
+
+// The hourly cron's step 6 (estimate + flag: put) and step 8's INNER per-beach
+// official: put loop are pooled at the same width. The outer scraper-group loop
+// stays sequential — it mutates shared "scraperhealth:" state across a KV
+// read-modify-write.
+describe("runFlagRecompute pooled per-beach writes", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // n beach rows inside the South Haven bbox, all named "North Beach" so the
+  // scraper's site resolution gives every one of them an official color and the
+  // flag_history pairing is exercised at pool scale.
+  function southHavenBeaches(n) {
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      rows.push(makeBeachRow({
+        id: "osm-node-" + String(i),
+        name: "North Beach",
+        lat: 42.40 + i * 0.0004,
+        lon: -86.28
+      }));
+    }
+    return rows;
+  }
+
+  function southHavenFetch() {
+    return function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("southhavenmi.gov") !== -1) {
+        return Promise.resolve({ ok: false, status: 500 });
+      }
+      if (target.indexOf("docs.google.com") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: function () { return Promise.resolve("Flag #6 North Beach is Red"); }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    };
+  }
+
+  it("writes flag: and official: for every beach, and keeps flag_history in beaches order", async function () {
+    // Inside South Haven's monitored season/hours so the scraper does not gate
+    // itself off.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+    vi.stubGlobal("fetch", southHavenFetch());
+
+    const rows = southHavenBeaches(120);
+    const made = makeBatchRecordingEnv(rows);
+    await runHourlyCron(made.env);
+
+    let flags = 0;
+    let officials = 0;
+    for (const key of made.kvPuts.keys()) {
+      if (key.indexOf("flag:") === 0) {
+        flags = flags + 1;
+      }
+      if (key.indexOf("official:") === 0) {
+        officials = officials + 1;
+      }
+    }
+    expect(flags).toBe(120);
+    expect(officials).toBe(120);
+    expect(made.kvPuts.get("flag:osm-node-0").opts).toEqual({ expirationTtl: 7200 });
+    expect(made.kvPuts.get("flag:osm-node-119").opts).toEqual({ expirationTtl: 7200 });
+
+    // The history step iterates the beaches array, not the estimate/official Maps, so a
+    // pooled (nondeterministic) write order must remain invisible here.
+    const historyRows = findHistoryStatements(made.batchCalls);
+    expect(historyRows.length).toBe(120);
+    const historyIds = historyRows.map(function (h) { return h.args[0]; });
+    const expectedIds = rows.map(function (b) { return b.id; });
+    expect(historyIds).toEqual(expectedIds);
+  });
+
+  it("a beach whose flag: put REJECTS records NO flag_history row", async function () {
+    // Pins the ordering both pooling rewrites of this loop got wrong:
+    // estimatesByBeach.set must stay AFTER the successful put, inside the same
+    // try, so no calibration row can ever claim an estimate that was never
+    // published.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+    vi.stubGlobal("fetch", southHavenFetch());
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeBatchRecordingEnv(southHavenBeaches(5));
+    const recordingPut = made.env.FLAGS.put;
+    made.env.FLAGS.put = function (key, value, opts) {
+      if (key === "flag:osm-node-3") {
+        return Promise.reject(new Error("kv put rejected"));
+      }
+      return recordingPut(key, value, opts);
+    };
+    await runHourlyCron(made.env);
+
+    expect(made.kvPuts.get("flag:osm-node-3")).toBeUndefined();
+    // Its official: put still succeeded — an official with no estimate is
+    // simply not a PAIR, so it logs no calibration row.
+    expect(made.kvPuts.get("official:osm-node-3")).toBeDefined();
+
+    const historyIds = findHistoryStatements(made.batchCalls).map(function (h) { return h.args[0]; });
+    expect(historyIds).toEqual(["osm-node-0", "osm-node-1", "osm-node-2", "osm-node-4"]);
+    expect(loggedLines(logSpy)).toContain(
+      "index: flag estimate failed for beach osm-node-3: kv put rejected"
+    );
   });
 });

@@ -3,7 +3,7 @@
 // every fixture is built inline. Project style: ES modules, NO template
 // literals (string concat with +), function () {} callbacks.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseGridpointWaveFt,
   iso8601DurationMs,
@@ -11,6 +11,7 @@ import {
   nwsGridpointWaveSource,
   GRIDPOINT_MODEL
 } from "../src/waveSources/nwsGridpointWaves.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 const METERS_TO_FEET = 3.28084;
 
@@ -196,5 +197,27 @@ describe("matches / source object", function () {
     expect(typeof nwsGridpointWaveSource.url).toBe("string");
     expect(typeof nwsGridpointWaveSource.matches).toBe("function");
     expect(typeof nwsGridpointWaveSource.waveFt).toBe("function");
+  });
+});
+
+// The wave cron's supplemental pass is SEQUENTIAL and its wall-clock budget is
+// checked between beaches, never inside a request — so an api.weather.gov socket
+// that never settles runs the invocation into the platform's 900 s SIGKILL.
+// fetchJson only arms its AbortController when timeoutMs > 0, so this pins that
+// the gridpoint fetch (the largest single contributor to that pass) is capped.
+describe("gridpoint transport timeout", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on the gridpoint fetch", async function () {
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse(gridpoint(series("m", sixHourValues(0.6)))));
+    });
+    const beach = { id: "b1", nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33" };
+    await nwsGridpointWaveSource.waveFt(beach, NOW, {});
+    expect(calls.length).toBe(1);
+    expect(calls[0].init.signal).toBeDefined();
+    expect(calls[0].init.signal.aborted).toBe(false);
   });
 });

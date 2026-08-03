@@ -63,8 +63,33 @@ describe("renderListPage home map", () => {
 
   it("wires the pinned MapLibre JS and CSS assets", () => {
     const html = renderListPage({ entries: [] });
-    expect(html).toContain("maplibre-gl@5.24.0/dist/maplibre-gl.js");
-    expect(html).toContain("maplibre-gl@5.24.0/dist/maplibre-gl.css");
+    // MapLibre 6 is ESM-only — the pinned bundle is the .mjs module, pulled in
+    // by the inline script's dynamic import, and both pins share one version.
+    expect(html).toContain("maplibre-gl@6.1.0/dist/maplibre-gl.mjs");
+    expect(html).toContain("maplibre-gl@6.1.0/dist/maplibre-gl.css");
+    expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap)");
+    // The retired UMD bundle must not come back as a <script src>: it is no
+    // longer published, so the tag would 404 and the map would never load.
+    expect(html).not.toContain("<script src=\"https://unpkg.com/maplibre-gl");
+    expect(html).not.toContain("/dist/maplibre-gl.js");
+  });
+
+  it("registers the missing-icon net as a resolver, not the notify-only event", () => {
+    const html = renderListPage({ entries: [] });
+    // MapLibre 6 demoted styleimagemissing to notify-only — a listener can no
+    // longer supply the image it is told about, so the placeholder net has to
+    // be a resolver or unregistered icons would render as nothing.
+    expect(html).toContain("map.setMissingStyleImageResolver(function (id)");
+    expect(html).not.toContain("'styleimagemissing'");
+  });
+
+  it("logs a GPU/WebGL failure instead of letting it surface unhandled", () => {
+    const html = renderListPage({ entries: [] });
+    // MapLibre 6 reports a failed WebGL2 context through the map's 'error'
+    // event rather than throwing out of the constructor, so the construction
+    // try/catch no longer covers it.
+    expect(html).toContain("map.on('error', function (e)");
+    expect(html).toContain("console.log('map error: '");
   });
 
   it("centers precisely on a browser location (near + resolved location)", () => {
@@ -153,8 +178,9 @@ describe("renderListPage home map", () => {
     // it downstream of the fetch parks the map on the coarse Cloudflare IP
     // estimate for the whole request.
     expect(html).toContain("applyMapCenter(params.get('near'));");
-    // The attribute is set BEFORE the event so a map script that has not run yet
-    // (maplibre-gl.js still loading) still reads the fix at construction.
+    // The attribute is set BEFORE the event so a map script that has not built
+    // its map yet (the maplibre-gl.mjs import still in flight) still reads the
+    // fix at construction.
     const helper = html.indexOf("const applyMapCenter = function (center) {");
     expect(helper).toBeGreaterThan(-1);
     const setAttr = html.indexOf("mapEl.setAttribute('data-center', center);", helper);

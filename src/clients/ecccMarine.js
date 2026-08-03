@@ -58,7 +58,7 @@
 import { fetchJson } from "./http.js";
 import { matchedAlerts } from "./alertMatch.js";
 import { pointInGeometry, minEdgeDistanceKm } from "../geo.js";
-import { ECCC_API_BASE, ECCC_USER_AGENT } from "./eccc.js";
+import { ECCC_API_BASE, ECCC_USER_AGENT, ECCC_TIMEOUT_MS } from "./eccc.js";
 
 // The marine-realtime collection carrying per-zone Gale/Storm/Strong-wind
 // warning Polygons. Confirmed live 2026-07 against the GeoMet catalog.
@@ -208,7 +208,8 @@ export async function fetchActiveEcccMarineAlerts(nowIso) {
     "/items?f=json&limit=" + String(ECCC_MARINE_FETCH_LIMIT);
   const json = await fetchJson(url, {
     headers: { "User-Agent": ECCC_USER_AGENT },
-    label: "ecccMarine: active marine alerts"
+    label: "ecccMarine: active marine alerts",
+    timeoutMs: ECCC_TIMEOUT_MS
   });
   if (json === null) {
     return null;

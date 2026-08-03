@@ -397,3 +397,35 @@ describe("fetchWinds", function() {
     expect(out).toBe(null);
   });
 });
+
+// The wave cron's wall-clock deadlines are checked BETWEEN units of work, never
+// inside one, so a request that never settles cannot be rescued by any budget —
+// it runs the invocation into the platform's 900 s SIGKILL. fetchJson only arms
+// its AbortController when timeoutMs > 0, so these assert the transport cap is
+// actually armed on both Open-Meteo endpoints (they share one fetch wrapper,
+// and this pins that both keep the cap if the wrapper is ever split).
+describe("Open-Meteo transport timeout", function() {
+  afterEach(function() {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on the marine wave request", async function() {
+    const calls = installFetch(function() {
+      const hourly = {};
+      hourly[ECMWF] = series(1);
+      return Promise.resolve(jsonResponse({ hourly: hourly }));
+    });
+    await fetchWaveHeightsFt([{ beachId: "b1", lat: 42.4, lon: -86.29 }], NOW);
+    expect(calls[0].init.signal).toBeDefined();
+    expect(calls[0].init.signal.aborted).toBe(false);
+  });
+
+  it("arms an abort signal on the wind forecast request", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve(jsonResponse({ current: { wind_speed_10m: 1, wind_gusts_10m: 2 } }));
+    });
+    await fetchWinds([{ beachId: "b1", lat: 42.4, lon: -86.29 }]);
+    expect(calls[0].init.signal).toBeDefined();
+    expect(calls[0].init.signal.aborted).toBe(false);
+  });
+});

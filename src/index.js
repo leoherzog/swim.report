@@ -42,18 +42,26 @@ import { findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
 import { waveSources, resolveSupplementalWaveFt } from "./waveSources/index.js";
 import { nearestStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
 import { updateScraperHealth } from "./scraperHealth.js";
+import { HOT_VIEW_WINDOW_MS } from "./demandWindow.js";
+import { makeDeadline, runPool } from "./pool.js";
 
 // Must cover the whole beaches table in ONE run: the recompute rotation
-// (ORDER BY recompute_updated) combined with the 2 h KV TTL means any beach
-// not reached every other run shows "no data" until its next turn. The pilot
-// region holds ~613 rows; at 1000 the full table recomputes hourly (~900
-// subrequests worst case, well under the paid plan's 10,000/invocation).
-// Real pagination is still required for nationwide scale-out (TODO.md).
-const MAX_BEACHES_PER_RUN = 1000;
-// 7-day hot/cold demand window; >> the 2h flag KV TTL so hotness never flaps
-// with the flag lifecycle; spans weekly visit periodicity. Consumed by
-// runFlagRecompute/runWaveRefresh.
-export const HOT_VIEW_WINDOW_MS = 7 * 86400000;
+// (ORDER BY the caller's rotation cursor) combined with the 2 h KV TTL means
+// any beach not reached every other run shows "no data" until its next turn.
+// Raised 1000 -> 1200 because the flag-worthy table had already grown to 1001
+// rows: at LIMIT 1000 the SELECT silently EXCLUDED a row every run (not
+// truncated by a timeout — never selected at all), and offline discovery adds
+// rows daily, so that dead zone grew invisibly. 1200 clears today's count with
+// headroom. Bounded above by Open-Meteo's free-tier DAILY weighted ceiling, not
+// by wall clock: a fully wave-null winter run costs ~1200 wave + ~1200 wind
+// weighted calls, x4 runs = ~9,600 of 10,000/day (and that counter is a known
+// over-count — see the weighted-call note below). Real pagination is still
+// required for nationwide scale-out (TODO.md).
+const MAX_BEACHES_PER_RUN = 1200;
+// HOT_VIEW_WINDOW_MS (the 7-day hot/cold demand window consumed by
+// runFlagRecompute/runWaveRefresh) is imported from ./demandWindow.js above and
+// deliberately NOT re-exported: workerd rejects any non-function named export
+// on the entry module and fails the Worker at startup. See demandWindow.js.
 // Open-Meteo's keyless API applies a per-minute WEIGHTED rate limit (cost scales
 // with locations x variables x models x days) plus per-hour/day caps, and it
 // throttles per source IP — which for a Cloudflare Worker is a shared egress
@@ -76,14 +84,27 @@ export const HOT_VIEW_WINDOW_MS = 7 * 86400000;
 // the ceiling is 10,000 weighted calls/day. Today a full run stays well under it
 // (each location's marine request is 1 variable over 2 days -> fractional
 // per-location weight, and the wind fallback only fires for wave-null beaches),
-// but once nationwide pagination lands (removing the LIMIT 1000 cap) the daily
+// but once nationwide pagination lands (removing the MAX_BEACHES_PER_RUN cap) the daily
 // ceiling binds first — well before the Workers subrequest limit. runWaveRefresh
 // logs a per-run weighted-call estimate (locations + retries) against that
 // 10,000/day ceiling so the constraint is visible before pagination ships; no
 // behavioral throttling on the daily budget yet (TODO.md).
 const OPEN_METEO_DAILY_WEIGHTED_CEILING = 10000;
 const OPEN_METEO_BATCH = 100;
-const OPEN_METEO_CONCURRENCY = 2;
+// The per-minute rate the pacing actually produces is
+//   OPEN_METEO_BATCH x concurrency x 60000 / (gap + fetch)
+// against Open-Meteo's documented 600 calls/min free-tier ceiling. At the old
+// concurrency of 2 that was 200 locations per ~14 s = ~857/min = 143% of the
+// ceiling — a marginal sustained overshoot, which is the most plausible cause of
+// the exactly-two-HTTP-429s-per-run signature the wave cron logged (each 429
+// costs a 60 s backoff out of a 900 s invocation budget). At 1 it is 100
+// locations per ~15 s = ~400/min = 67% of the ceiling. Do NOT "optimize" the gap
+// away without redoing that arithmetic: total gap time is roughly invariant under
+// the concurrency/gap trade anyway (gaps = ceil(nBatches / concurrency) - 1), so
+// dropping the concurrency cost this run ~0 s of extra wall clock. Leaving the
+// backoff at 60 s is deliberate — the post-429 wait is the one number that must
+// not shrink.
+const OPEN_METEO_CONCURRENCY = 1;
 const OPEN_METEO_BATCH_GAP_MS = 12000;
 const OPEN_METEO_RETRY_MS = 60000;
 const KV_TTL_SECONDS = 7200;
@@ -93,6 +114,54 @@ const KV_TTL_SECONDS = 7200;
 // the next refresh, so a transient upstream 429 leaves the strip showing
 // slightly older — but still model-current — data instead of blanking it.
 const WAVE_DATA_TTL_SECONDS = 25200;
+// Requested width for every fan-out KV write in the cron path (both crons).
+// Cloudflare caps an invocation at SIX SIMULTANEOUS OPEN CONNECTIONS and KV
+// get/put count toward that cap, so a requested width of 12 yields ~6 in flight
+// with the remainder queued by the platform — 12 is a deliberate modest
+// oversubscription that keeps the pipe saturated across the long tail of put
+// latencies, NOT a claim of 12x throughput. Every wall-clock estimate for these
+// write passes is computed at 6 (~13.3 puts/s at the ~0.45 s/put observed in
+// production), never at 12. Raising this number does not buy more throughput;
+// the platform simply queues the excess.
+const KV_WRITE_CONCURRENCY = 12;
+// Wall-clock budgets for runWaveRefresh, measured from the top of the
+// invocation. The scheduled ceiling is 900 s and the run that motivated these
+// was SIGKILLed at 899.989 s mid-write-loop, with no cursor, no partial-progress
+// record and no completion log — the whole invocation's work was lost and the
+// failure was invisible in the logs.
+//
+// WAVE_GATHER_DEADLINE_MS: no NEW upstream work starts after T+480 s. Checked at
+// the batchByBeach wave boundary, the step-2b beach boundary and the step-3b
+// station boundary — BETWEEN units of work, never inside one, so the transport
+// timeouts in the clients (not this deadline) are what bound a single hung
+// request.
+// WAVE_SUPPLEMENTAL_BUDGET_MS: step 2b's own sub-budget. In a fully wave-null
+// winter run step 2b wants ~660 SEQUENTIAL fetches (~500 s); without a
+// sub-budget it would eat the entire gather deadline and starve the step-3 wind
+// pass, which is the last input that keeps those beaches out of "unknown".
+// WAVE_WRITE_DEADLINE_MS: the write pool YIELDS here instead of being killed at
+// 900 s. Beaches it never reached are neither written nor stamped, so they sort
+// first next run — a truncated run persists a prefix rather than losing
+// everything.
+const WAVE_GATHER_DEADLINE_MS = 480000;
+const WAVE_SUPPLEMENTAL_BUDGET_MS = 120000;
+const WAVE_WRITE_DEADLINE_MS = 840000;
+// Ids per wave_updated D1 batch. The INCREMENTAL flush is the fix, not the
+// column: the hourly cron's shape (one batch AFTER the loop) is exactly what
+// failed — killed mid-loop, the post-loop batch never ran, the cursor never
+// moved, and the same prefix of beaches was reprocessed every run forever.
+const WAVE_CURSOR_FLUSH_SIZE = 100;
+// Rotation cursor per cron. A column name cannot be a bind parameter, so the
+// value is concatenated into the SQL as a literal — it MUST stay a lookup in
+// this two-entry whitelist and must NEVER be caller-derived text.
+//
+// The two crons cannot share one cursor: runFlagRecompute rewrites
+// recompute_updated to a single shared nowIso for the ENTIRE run's beach set
+// every hour, which flattens the column to ~2 distinct values across the table.
+// A cursor a different cron flattens hourly is not a cursor — the wave cron's
+// cold-tier sort collapsed to id ASC permanently, so a fixed tail of the table
+// starved forever. Each cron is now single-writer of its own column.
+const ROTATION_COLUMNS = { flag: "recompute_updated", wave: "wave_updated" };
 // The two GLOS Seagull catalogs (~5.5 MB combined) are semi-static reference
 // data (buoy deployments change on week-plus timescales), so the wave cron
 // caches the two SMALL derived structures parsed from them — the wave
@@ -215,15 +284,42 @@ function chunk(items, size) {
 
 // Pacing knobs for batchByBeach, read from env with a fallback to the module
 // constants so a run can be tuned (or, in tests, zeroed to run instantly)
-// without a code change. Numeric env overrides only.
-function batchTiming(env) {
+// without a code change. Numeric env overrides only. deadline is the wave
+// cron's gather deadline (its only caller passes one); batchByBeach checks it at
+// the wave boundary and stops starting new batches.
+function batchTiming(env, deadline) {
   const gap = env && typeof env.OPEN_METEO_BATCH_GAP_MS === "number"
     ? env.OPEN_METEO_BATCH_GAP_MS : OPEN_METEO_BATCH_GAP_MS;
   const retry = env && typeof env.OPEN_METEO_RETRY_MS === "number"
     ? env.OPEN_METEO_RETRY_MS : OPEN_METEO_RETRY_MS;
   const concurrency = env && typeof env.OPEN_METEO_CONCURRENCY === "number"
     ? env.OPEN_METEO_CONCURRENCY : OPEN_METEO_CONCURRENCY;
-  return { gapMs: gap, retryMs: retry, concurrency: Math.max(1, concurrency) };
+  return {
+    gapMs: gap,
+    retryMs: retry,
+    concurrency: Math.max(1, concurrency),
+    deadline: deadline || null
+  };
+}
+
+// Wall-clock budgets for runWaveRefresh, same numeric-env-override shape as
+// batchTiming. The override is a plain NUMBER on env, deliberately not a
+// callable clock: a function smuggled through the binding object would be a
+// namespace hazard on a real Worker env, and a numeric budget is enough to make
+// every deadline branch reachable in a test — makeDeadline's expired() uses >=,
+// so a 0 override trips immediately even under the suite's frozen Date.
+function runBudget(env) {
+  const gather = env && typeof env.WAVE_GATHER_DEADLINE_MS === "number"
+    ? env.WAVE_GATHER_DEADLINE_MS : WAVE_GATHER_DEADLINE_MS;
+  const supplemental = env && typeof env.WAVE_SUPPLEMENTAL_BUDGET_MS === "number"
+    ? env.WAVE_SUPPLEMENTAL_BUDGET_MS : WAVE_SUPPLEMENTAL_BUDGET_MS;
+  const write = env && typeof env.WAVE_WRITE_DEADLINE_MS === "number"
+    ? env.WAVE_WRITE_DEADLINE_MS : WAVE_WRITE_DEADLINE_MS;
+  return {
+    gatherDeadlineMs: gather,
+    supplementalBudgetMs: supplemental,
+    writeDeadlineMs: write
+  };
 }
 
 // Fetch one batch, retrying once after a backoff when the first attempt returns
@@ -255,14 +351,38 @@ async function fetchBatchWithRetry(batch, fetchFn, retryMs, onAttempt) {
 // onEntry(point, entry) fires for each point with a result row; a still-null or
 // rejected batch fires onBatchFail(batch) once. The wave-null sentinel handling
 // and failure logging live in the callbacks, so this helper carries no
-// upstream-specific behavior. Returns the run's Open-Meteo weighted-call
-// estimate (sum of batch.length over every attempt including retries) so the
-// wave cron can log it against the free-tier daily ceiling (U1).
+// upstream-specific behavior. Returns { weightedCalls, unattempted }:
+// weightedCalls is the run's Open-Meteo weighted-call estimate (sum of
+// batch.length over every attempt including retries) so the wave cron can log it
+// against the free-tier daily ceiling (U1); unattempted is the list of points
+// the gather deadline stopped this call from ever fetching.
+//
+// Deadline-skipped batches are deliberately NOT routed through onBatchFail: a
+// failed batch is a beach the run TRIED and got nothing for (its last-good KV is
+// preserved and its cursor still advances), whereas an unattempted beach is one
+// the run never touched at all — it must be neither written nor stamped, so it
+// sorts to the front of the queue next run. Collapsing the two would advance the
+// cursor past work that never happened.
 async function batchByBeach(points, fetchFn, onEntry, onBatchFail, timing) {
   const batches = chunk(points, OPEN_METEO_BATCH);
   let weightedCalls = 0;
+  const unattempted = [];
   const onAttempt = function (n) { weightedCalls = weightedCalls + n; };
   for (let start = 0; start < batches.length; start = start + timing.concurrency) {
+    // Checked BEFORE the gap sleep on purpose: a run that has already blown its
+    // gather budget must not also burn a 12 s pacing sleep on its way out.
+    if (timing.deadline && timing.deadline.expired()) {
+      const remaining = batches.slice(start);
+      for (const batch of remaining) {
+        for (const point of batch) {
+          unattempted.push(point);
+        }
+      }
+      console.log(
+        "index: batch pacing deadline reached, " + String(remaining.length) + " batches unattempted"
+      );
+      break;
+    }
     if (start > 0) {
       await sleep(timing.gapMs);
     }
@@ -286,7 +406,7 @@ async function batchByBeach(points, fetchFn, onEntry, onBatchFail, timing) {
       }
     }
   }
-  return weightedCalls;
+  return { weightedCalls: weightedCalls, unattempted: unattempted };
 }
 
 // Beaches whose current wave height is still null (either no wave entry at all
@@ -306,17 +426,85 @@ function waveNullPoints(beaches, waveResults) {
 
 // The run queue shared by both beach-walking crons (hourly recompute, 6-hourly
 // wave refresh): flag-worthy rows ordered hot-first (a last_viewed demand stamp
-// inside the hot window) ahead of the oldest-recompute_updated rotation, capped
-// at MAX_BEACHES_PER_RUN. Only the column list and the caller's clock source
-// differ, so the ORDER BY / LIMIT live here once and the emitted SQL stays
-// byte-identical to the two hand-written queries this replaces (precedent:
+// inside the hot window) ahead of the oldest-cursor rotation, capped at
+// MAX_BEACHES_PER_RUN. Only the column list, the caller's clock source and the
+// ROTATION CURSOR COLUMN differ, so the WHERE, the hot-first guard, the id ASC
+// tiebreak, the LIMIT and the single bind all live here once (precedent:
 // buildHomeStatement in src/router.js). Returns the BOUND statement; the caller
 // runs it.
-function selectRunBeaches(env, columns, hotCutoffIso) {
+//
+// The hot-first demand term is preserved for BOTH callers: dropping it from the
+// wave cron would let a beach in active demand lose its wave data to the
+// rotation the moment the table outgrows one run, which is the exact contract
+// PLAN.md section 7 makes. rotation selects the cursor column from the
+// ROTATION_COLUMNS whitelist — a column name cannot be a bind parameter, so it
+// is concatenated as a literal and the lookup is own-property-checked rather
+// than trusting an arbitrary string to index the map.
+function selectRunBeaches(env, columns, hotCutoffIso, rotation) {
+  const cursorColumn = Object.prototype.hasOwnProperty.call(ROTATION_COLUMNS, rotation)
+    ? ROTATION_COLUMNS[rotation]
+    : ROTATION_COLUMNS.flag;
   return env.DB.prepare(
     "SELECT " + columns + " FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
-    " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, recompute_updated ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+    " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, " + cursorColumn +
+    " ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
   ).bind(hotCutoffIso);
+}
+
+// Incremental wave_updated stamper (migration 0012). Flushes ids in batches of
+// flushSize AS THE WRITE POOL REACHES THEM, not once after the loop: the hourly
+// cron's post-loop-batch shape is precisely what failed in production — the
+// invocation was SIGKILLed mid-loop, the single trailing D1 batch never ran, the
+// cursor never advanced, and every subsequent run reprocessed the same prefix
+// while the tail starved indefinitely. A truncated run must still persist the
+// progress it made.
+//
+// A D1 failure here is logged and swallowed. It must never poison KV writes that
+// already succeeded; the only consequence of a lost flush is that those beaches
+// repeat next run.
+function makeWaveCursorStamper(env, nowIso, flushSize) {
+  const pending = [];
+  let flushing = false;
+
+  async function flush(ids) {
+    if (ids.length === 0) {
+      return;
+    }
+    try {
+      await env.DB.batch(ids.map(function (id) {
+        return env.DB.prepare(
+          "UPDATE beaches SET wave_updated = ?1 WHERE id = ?2"
+        ).bind(nowIso, id);
+      }));
+    } catch (err) {
+      console.log(
+        "index: wave cursor flush failed for " + String(ids.length) + " beaches: " + err.message
+      );
+    }
+  }
+
+  return {
+    // Called from inside the write pool, so several runners can be adding
+    // concurrently. The flushing guard keeps at most ONE D1 batch in flight —
+    // splicing the whole pending array out in a single synchronous step means no
+    // id can be flushed twice or dropped, and ids added while a flush is in
+    // flight simply ride the next one.
+    add: async function (id) {
+      pending.push(id);
+      if (pending.length >= flushSize && !flushing) {
+        flushing = true;
+        const ids = pending.splice(0, pending.length);
+        await flush(ids);
+        flushing = false;
+      }
+    },
+    // Called after the pool has fully settled, so nothing is in flight and
+    // nothing can be added behind it.
+    drain: async function () {
+      const ids = pending.splice(0, pending.length);
+      await flush(ids);
+    }
+  };
 }
 
 // Hourly estimate recompute. Reads the freshest alerts / rip-current risk every
@@ -342,7 +530,7 @@ async function runFlagRecompute(env) {
   const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString();
 
   try {
-    const beachesResult = await selectRunBeaches(env, "*", hotCutoffIso).all();
+    const beachesResult = await selectRunBeaches(env, "*", hotCutoffIso, "flag").all();
     const beaches = beachesResult.results || [];
 
     // Step 3: alerts — ONE national fetch, matched to the run's distinct zone
@@ -503,8 +691,15 @@ async function runFlagRecompute(env) {
       wqResultsBySource.set(wqSource.id, wqResult);
     }
 
-    // Step 6: per-beach estimate, isolated failures.
-    for (const beach of beaches) {
+    // Step 6: per-beach estimate, isolated failures. Bounded-concurrency rather
+    // than sequential: at ~0.45 s per KV put a sequential walk of ~1000 beaches
+    // was ~450 s of a 900 s invocation, which is what put this cron at 78-83% of
+    // its ceiling. The body is UNCHANGED — nothing in it depends on the previous
+    // iteration, and it contains no continue/break whose meaning a callback
+    // conversion would silently invert. estimateCount / failureCount are
+    // incremented with a single synchronous statement (no await between read and
+    // write), so concurrent runners cannot lose a count.
+    await runPool(beaches, KV_WRITE_CONCURRENCY, async function (beach) {
       try {
         const sources = [];
 
@@ -664,6 +859,13 @@ async function runFlagRecompute(env) {
 
         // The detail-page WaveSeries ("waves:" + id) is written by the wave
         // cron, not here — this loop only reads wave inputs.
+        //
+        // This set MUST stay AFTER the successful flag: put, inside the same
+        // try: a failed write is caught, counted as a failure, and records no
+        // estimate, so no flag_history row can ever claim an estimate that was
+        // never published. Do not refactor this into a
+        // collect-descriptors-then-flush shape — that silently inverts the
+        // guarantee.
         estimatesByBeach.set(beach.id, {
           color: estimate.color,
           rulesVersion: estimate.rules_version
@@ -673,7 +875,7 @@ async function runFlagRecompute(env) {
         failureCount = failureCount + 1;
         console.log("index: flag estimate failed for beach " + beach.id + ": " + err.message);
       }
-    }
+    });
 
     // Step 8: officials, one scrape call per distinct matched scraper, then
     // per-beach resolution of the shared result (contract v2). A beach that
@@ -741,7 +943,12 @@ async function runFlagRecompute(env) {
         if (result === null) {
           continue;
         }
-        for (const beach of group.beaches) {
+        // Only the INNER per-beach put loop is pooled. The OUTER
+        // scraperGroups loop stays strictly sequential: it mutates shared
+        // per-scraper "scraperhealth:" state (read-modify-write across a KV get
+        // and put) and carries the continue above, neither of which survives a
+        // callback conversion intact.
+        await runPool(group.beaches, KV_WRITE_CONCURRENCY, async function (beach) {
           const flag = scrapeOfficialFlagFromResult(beach, group.scraper, result);
           if (flag !== null) {
             // A scraper may opt into a longer official-KV TTL (scraper.
@@ -756,13 +963,16 @@ async function runFlagRecompute(env) {
               JSON.stringify(flag),
               { expirationTtl: officialTtl }
             );
+            // Same ordering rule as the estimate above: recorded only AFTER the
+            // put resolved, so flag_history never pairs against an official
+            // color that was never published.
             officialsByBeach.set(beach.id, {
               color: flag.color,
               source: flag.scraperId || group.scraper.id
             });
             officialCount = officialCount + 1;
           }
-        }
+        });
       } catch (err) {
         console.log("index: official scrape failed: " + err.message);
       }
@@ -833,6 +1043,76 @@ async function runFlagRecompute(env) {
   }
 }
 
+// The wave cron's per-beach KV write, lifted out of what used to be a sequential
+// for-loop body so it can run inside a bounded-concurrency pool. Pure plumbing:
+// the two graceful-degradation guards, both payload shapes and both
+// { expirationTtl: WAVE_DATA_TTL_SECONDS } TTLs are unchanged — the old
+// continue is now a return, which is the only behavioral difference and is
+// exactly equivalent under the pool (the beach is skipped, its neighbours are
+// not). Returns { input, series } as 0/1 counters so the caller can tally
+// without sharing mutable state with this function.
+async function writeWaveKvForBeach(env, beach, waveEntry, windEntry, wavesStartIso, nowIso) {
+  const waveHeightFt = waveEntry ? waveEntry.waveHeightFt : null;
+  const windSpeedMph = windEntry && typeof windEntry.windSpeedMph === "number"
+    ? windEntry.windSpeedMph : null;
+  const windGustMph = windEntry && typeof windEntry.windGustMph === "number"
+    ? windEntry.windGustMph : null;
+
+  // hoursFt === null is the batch-failure sentinel (vs. an array of nulls for a
+  // fetched-but-masked cell). A failed marine fetch with no buoy reading has
+  // nothing trustworthy to record — leave the old KV alone so it rides its TTL.
+  const marineFetchFailed = !waveEntry || waveEntry.hoursFt === null;
+  if (waveHeightFt === null && marineFetchFailed) {
+    return { input: 0, series: 0 };
+  }
+  // Fetched cleanly but nothing usable (masked, no buoy, no wind) — also skip;
+  // the old key expires on its own.
+  if (waveHeightFt === null && windSpeedMph === null && windGustMph === null) {
+    return { input: 0, series: 0 };
+  }
+
+  const waveInput = {
+    beachId: beach.id,
+    waveHeightFt: waveHeightFt,
+    model: waveEntry ? waveEntry.model : null,
+    windSpeedMph: windSpeedMph,
+    windGustMph: windGustMph,
+    updated: nowIso
+  };
+  await env.FLAGS.put(
+    "waveinput:" + beach.id,
+    JSON.stringify(waveInput),
+    { expirationTtl: WAVE_DATA_TTL_SECONDS }
+  );
+
+  // WaveSeries for the detail-page 24 h strip: only when the entry carries a
+  // real hourly series with at least one finite cell (a masked series or
+  // buoy-only reading writes no series so the old one expires naturally).
+  if (waveEntry && Array.isArray(waveEntry.hoursFt) &&
+      waveEntry.hoursFt.some(function (v) { return typeof v === "number" && isFinite(v); })) {
+    const models = waveEntry.models || [];
+    const waveSeries = {
+      beachId: beach.id,
+      startIso: wavesStartIso,
+      hoursFt: waveEntry.hoursFt,
+      models: models,
+      byModel: waveEntry.byModel || {},
+      sources: [{
+        label: models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models",
+        url: OPEN_METEO_MARINE_URL
+      }],
+      updated: nowIso
+    };
+    await env.FLAGS.put(
+      "waves:" + beach.id,
+      JSON.stringify(waveSeries),
+      { expirationTtl: WAVE_DATA_TTL_SECONDS }
+    );
+    return { input: 1, series: 1 };
+  }
+  return { input: 1, series: 0 };
+}
+
 // 6-hourly wave refresh (cron path). Owns ALL Open-Meteo/GLOS wave & wind
 // fetching — deliberately separate from the hourly estimate so the marine
 // models (which only publish every 6-12 h) are fetched at their own cadence,
@@ -844,16 +1124,38 @@ async function runFlagRecompute(env) {
 // A beach whose marine fetch merely failed this run is left untouched so its
 // last-good KV rides the TTL — the same graceful-degradation contract the strip
 // series has always had.
+//
+// The run is bounded in WALL CLOCK end to end (runBudget): gathering stops
+// starting new upstream work at WAVE_GATHER_DEADLINE_MS and the write pool
+// yields at WAVE_WRITE_DEADLINE_MS, so a bad run truncates and persists a prefix
+// instead of being SIGKILLed at the 900 s scheduled ceiling with nothing to show
+// for it. Progress is recorded incrementally in beaches.wave_updated (migration
+// 0012), this cron's private rotation cursor.
 async function runWaveRefresh(env) {
+  // Measured from the top of the invocation (before the D1 SELECT) so the
+  // budgets below bound TRUE elapsed time, not just the phases after the query.
+  const startedMs = Date.now();
   const nowIso = new Date().toISOString();
   // Anchor the series start to the top of the run's UTC hour: hoursFt[0] is the
   // current-hour forecast, so the strip trims from the hour boundary.
   const wavesStartDate = new Date(Date.parse(nowIso));
   wavesStartDate.setUTCMinutes(0, 0, 0);
   const wavesStartIso = wavesStartDate.toISOString();
-  const timing = batchTiming(env);
+  const budget = runBudget(env);
+  const gatherDeadline = makeDeadline(startedMs, budget.gatherDeadlineMs);
+  const writeDeadline = makeDeadline(startedMs, budget.writeDeadlineMs);
+  const timing = batchTiming(env, gatherDeadline);
   let inputCount = 0;
   let seriesCount = 0;
+  let waterTempCount = 0;
+  let stampedCount = 0;
+  // Beaches the write pool REACHED but that persisted nothing because every
+  // write threw. Distinct from truncation (the run stopping early) and from the
+  // degradation skips (which deliberately write nothing and are still stamped).
+  let writeFailureCount = 0;
+  // Beaches the gather deadline stopped this run from ever fetching. They are
+  // neither written nor stamped, so they sort to the front of next run's queue.
+  const unattempted = new Set();
 
   const hotCutoffIso = new Date(Date.parse(nowIso) - HOT_VIEW_WINDOW_MS).toISOString();
 
@@ -865,38 +1167,51 @@ async function runWaveRefresh(env) {
     const beachesResult = await selectRunBeaches(
       env,
       "id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed",
-      hotCutoffIso
+      hotCutoffIso,
+      "wave"
     ).all();
     const beaches = beachesResult.results || [];
 
-    // Step 1: waves (marine), paced.
+    // Step 1: waves (marine), paced. Own try/catch, like every gather step
+    // below: before this, one unexpected throw anywhere in the gather skipped
+    // the ENTIRE write pass and the run persisted nothing at all — the most
+    // expensive possible failure mode for a 6-hourly cron.
     const waveResults = new Map();
-    const wavePoints = beaches.map(function (b) {
-      return { beachId: b.id, lat: b.lat, lon: b.lon };
-    });
-    const waveWeightedCalls = await batchByBeach(
-      wavePoints,
-      function (batch) { return fetchWaveHeightsFt(batch, nowIso); },
-      function (point, entry) {
-        waveResults.set(point.beachId, {
-          waveHeightFt: entry.waveHeightFt,
-          model: entry.model,
-          hoursFt: entry.hoursFt,
-          models: entry.models,
-          byModel: entry.byModel
-        });
-      },
-      function (batch) {
-        for (const point of batch) {
-          // hoursFt: null (not an all-null array) marks "fetch failed" distinctly
-          // from "fetched, all cells masked" so the write step below can PRESERVE
-          // a failed beach's last-good KV instead of clobbering it with a null.
-          waveResults.set(point.beachId, { waveHeightFt: null, model: null, hoursFt: null, models: [], byModel: {} });
-        }
-        console.log("index: wave batch failed for " + String(batch.length) + " beaches");
-      },
-      timing
-    );
+    let waveWeightedCalls = 0;
+    try {
+      const wavePoints = beaches.map(function (b) {
+        return { beachId: b.id, lat: b.lat, lon: b.lon };
+      });
+      const waveBatch = await batchByBeach(
+        wavePoints,
+        function (batch) { return fetchWaveHeightsFt(batch, nowIso); },
+        function (point, entry) {
+          waveResults.set(point.beachId, {
+            waveHeightFt: entry.waveHeightFt,
+            model: entry.model,
+            hoursFt: entry.hoursFt,
+            models: entry.models,
+            byModel: entry.byModel
+          });
+        },
+        function (batch) {
+          for (const point of batch) {
+            // hoursFt: null (not an all-null array) marks "fetch failed" distinctly
+            // from "fetched, all cells masked" so the write step below can PRESERVE
+            // a failed beach's last-good KV instead of clobbering it with a null.
+            waveResults.set(point.beachId, { waveHeightFt: null, model: null, hoursFt: null, models: [], byModel: {} });
+          }
+          console.log("index: wave batch failed for " + String(batch.length) + " beaches");
+        },
+        timing
+      );
+      waveWeightedCalls = waveBatch.weightedCalls;
+      for (const point of waveBatch.unattempted) {
+        unattempted.add(point.beachId);
+      }
+    } catch (err) {
+      console.log("index: wave marine pass threw: " + err.message);
+    }
 
     // Step 2: Great Lakes buoy gap-filler. Open-Meteo's wave models commonly
     // return masked/null cells on the Great Lakes; for beaches still wave-null,
@@ -904,7 +1219,20 @@ async function runWaveRefresh(env) {
     // fetches internally and caps them, so this stays well under the subrequest
     // budget even on a fully wave-null run.
     const glcfsPoints = waveNullPoints(beaches, waveResults);
-    if (glcfsPoints.length > 0) {
+    // Gate on the SAME gather deadline every other upstream step honors. Without
+    // this, a marine pass that already consumed the budget still let this step
+    // start a fresh catalog download plus up to MAX_PLATFORM_FETCHES buoy
+    // fetches — hundreds of seconds of NEW upstream work begun AFTER the
+    // deadline, and every reading it produced was then discarded anyway, since
+    // those beaches are already in the unattempted set and the pool skips them.
+    // It also falsified the invariant this file asserts: no new upstream work
+    // starts after the gather deadline.
+    if (glcfsPoints.length > 0 && gatherDeadline.expired()) {
+      console.log(
+        "index: glcfs gap-fill skipped, gather deadline reached (" +
+        String(glcfsPoints.length) + " wave-null beaches)"
+      );
+    } else if (glcfsPoints.length > 0) {
       try {
         // Read the cron-cached derived catalogs (Set rehydrated from its array
         // form). A miss or corrupt payload deserializes to null, and the client
@@ -973,148 +1301,123 @@ async function runWaveRefresh(env) {
     // NDBC), so this block does real upstream work on every wave-null beach;
     // the length guard below only short-circuits the empty-registry case the
     // wave-source tests construct.
+    //
+    // Stays SEQUENTIAL by design. src/waveSources/index.js memoizes the RESOLVED
+    // ft-or-null, not the in-flight promise, so pooling this loop would issue up
+    // to N duplicate api.weather.gov fetches per key in production while every
+    // existing (sequential) dedup test stayed green. Its wall time is bounded by
+    // a sub-budget instead — see WAVE_SUPPLEMENTAL_BUDGET_MS.
     const supPoints = waveNullPoints(beaches, waveResults);
     if (supPoints.length > 0 && waveSources.length > 0) {
-      const beachById = new Map();
-      for (const b of beaches) {
-        beachById.set(b.id, b);
-      }
-      // Run-scoped dedup memo: many wave-null beaches share one gridpoint cell
-      // (nws_grid_url), one marine zone (NSH), or one nearest NDBC station, so
-      // resolveSupplementalWaveFt fetches each unique (source, key) ONCE and
-      // fans the ft-or-null to every beach sharing it — mirroring the step-2
-      // GLOS platform dedup and the step-5b wqFloor gather grouping. Without
-      // this a fully wave-null (winter) run would issue thousands of duplicate
-      // upstream fetches and risk the per-invocation subrequest ceiling. Fallback
-      // semantics are unchanged: ordered registry, first finite value wins.
-      const supMemo = new Map();
-      for (const point of supPoints) {
-        const beach = beachById.get(point.beachId);
-        if (!beach) {
-          continue;
+      try {
+        // Two deadlines, either of which stops the loop: the run-wide gather
+        // deadline, and this step's own sub-budget. The sub-budget is what keeps
+        // the step-3 wind pass alive — in a fully wave-null winter run these
+        // sequential fetches want ~500 s, which would consume the entire gather
+        // deadline and leave every one of those beaches with no wind fallback
+        // and therefore an "unknown" flag.
+        const supDeadline = makeDeadline(Date.now(), budget.supplementalBudgetMs);
+        const beachById = new Map();
+        for (const b of beaches) {
+          beachById.set(b.id, b);
         }
-        let resolved = null;
-        try {
-          resolved = await resolveSupplementalWaveFt(beach, nowIso, env, supMemo);
-        } catch (err) {
-          console.log("index: supplemental wave resolve threw for beach " + beach.id + ": " + err.message);
-          resolved = null;
+        // Run-scoped dedup memo: many wave-null beaches share one gridpoint cell
+        // (nws_grid_url), one marine zone (NSH), or one nearest NDBC station, so
+        // resolveSupplementalWaveFt fetches each unique (source, key) ONCE and
+        // fans the ft-or-null to every beach sharing it — mirroring the step-2
+        // GLOS platform dedup and the step-5b wqFloor gather grouping. Without
+        // this a fully wave-null (winter) run would issue thousands of duplicate
+        // upstream fetches and risk the per-invocation subrequest ceiling. Fallback
+        // semantics are unchanged: ordered registry, first finite value wins.
+        const supMemo = new Map();
+        for (let i = 0; i < supPoints.length; i = i + 1) {
+          if (gatherDeadline.expired() || supDeadline.expired()) {
+            console.log(
+              "index: supplemental wave deadline reached after " + String(i) +
+              " of " + String(supPoints.length) + " beaches"
+            );
+            break;
+          }
+          const point = supPoints[i];
+          const beach = beachById.get(point.beachId);
+          if (!beach) {
+            continue;
+          }
+          let resolved = null;
+          try {
+            resolved = await resolveSupplementalWaveFt(beach, nowIso, env, supMemo);
+          } catch (err) {
+            console.log("index: supplemental wave resolve threw for beach " + beach.id + ": " + err.message);
+            resolved = null;
+          }
+          if (resolved && typeof resolved.waveHeightFt === "number" && isFinite(resolved.waveHeightFt)) {
+            const existing = waveResults.get(point.beachId);
+            const merged = existing
+              ? { hoursFt: existing.hoursFt, models: existing.models, byModel: existing.byModel }
+              : { hoursFt: null, models: [], byModel: {} };
+            merged.waveHeightFt = resolved.waveHeightFt;
+            merged.model = resolved.model;
+            waveResults.set(point.beachId, merged);
+          }
         }
-        if (resolved && typeof resolved.waveHeightFt === "number" && isFinite(resolved.waveHeightFt)) {
-          const existing = waveResults.get(point.beachId);
-          const merged = existing
-            ? { hoursFt: existing.hoursFt, models: existing.models, byModel: existing.byModel }
-            : { hoursFt: null, models: [], byModel: {} };
-          merged.waveHeightFt = resolved.waveHeightFt;
-          merged.model = resolved.model;
-          waveResults.set(point.beachId, merged);
-        }
+      } catch (err) {
+        console.log("index: supplemental wave pass threw: " + err.message);
       }
     }
 
     // Step 3: wind, only for beaches whose wave height is still null (the wind
     // fallback the estimate uses when every wave model is null). Recomputed
     // fresh — step 2 may have gap-filled some beaches out of the wave-null set.
+    // Deliberately NOT capped by a coverage limit: truncating the wind pass
+    // would change which INPUTS reach estimateFlag and turn wind-derived
+    // greens/yellows into "unknown", which is a product regression, not a
+    // performance fix. Only the shared gather deadline bounds it.
     const windResults = new Map();
-    const windPoints = waveNullPoints(beaches, waveResults);
-    const windWeightedCalls = await batchByBeach(
-      windPoints,
-      function (batch) { return fetchWinds(batch); },
-      function (point, entry) {
-        windResults.set(point.beachId, {
-          windSpeedMph: entry.windSpeedMph,
-          windGustMph: entry.windGustMph
-        });
-      },
-      function (batch) {
-        console.log("index: wind batch failed for " + String(batch.length) + " beaches");
-      },
-      timing
-    );
-
-    // Step 4: persist per-beach wave inputs (+ the strip series), isolated
-    // failures. A beach whose marine fetch failed AND got no buoy fill is
-    // SKIPPED so its last-good "waveinput:"/"waves:" KV survives the TTL rather
-    // than being overwritten by a transient null (graceful degradation).
-    for (const beach of beaches) {
-      try {
-        const waveEntry = waveResults.get(beach.id);
-        const windEntry = windResults.get(beach.id);
-        const waveHeightFt = waveEntry ? waveEntry.waveHeightFt : null;
-        const windSpeedMph = windEntry && typeof windEntry.windSpeedMph === "number"
-          ? windEntry.windSpeedMph : null;
-        const windGustMph = windEntry && typeof windEntry.windGustMph === "number"
-          ? windEntry.windGustMph : null;
-
-        // hoursFt === null is the batch-failure sentinel (vs. an array of nulls
-        // for a fetched-but-masked cell). A failed marine fetch with no buoy
-        // reading has nothing trustworthy to record — leave the old KV alone.
-        const marineFetchFailed = !waveEntry || waveEntry.hoursFt === null;
-        if (waveHeightFt === null && marineFetchFailed) {
-          continue;
-        }
-        // Fetched cleanly but nothing usable (masked, no buoy, no wind) — also
-        // skip; the old key expires on its own.
-        if (waveHeightFt === null && windSpeedMph === null && windGustMph === null) {
-          continue;
-        }
-
-        const waveInput = {
-          beachId: beach.id,
-          waveHeightFt: waveHeightFt,
-          model: waveEntry ? waveEntry.model : null,
-          windSpeedMph: windSpeedMph,
-          windGustMph: windGustMph,
-          updated: nowIso
-        };
-        await env.FLAGS.put(
-          "waveinput:" + beach.id,
-          JSON.stringify(waveInput),
-          { expirationTtl: WAVE_DATA_TTL_SECONDS }
-        );
-        inputCount = inputCount + 1;
-
-        // WaveSeries for the detail-page 24 h strip: only when the entry carries
-        // a real hourly series with at least one finite cell (a masked series or
-        // buoy-only reading writes no series so the old one expires naturally).
-        if (waveEntry && Array.isArray(waveEntry.hoursFt) &&
-            waveEntry.hoursFt.some(function (v) { return typeof v === "number" && isFinite(v); })) {
-          const models = waveEntry.models || [];
-          const waveSeries = {
-            beachId: beach.id,
-            startIso: wavesStartIso,
-            hoursFt: waveEntry.hoursFt,
-            models: models,
-            byModel: waveEntry.byModel || {},
-            sources: [{
-              label: models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models",
-              url: OPEN_METEO_MARINE_URL
-            }],
-            updated: nowIso
-          };
-          await env.FLAGS.put(
-            "waves:" + beach.id,
-            JSON.stringify(waveSeries),
-            { expirationTtl: WAVE_DATA_TTL_SECONDS }
-          );
-          seriesCount = seriesCount + 1;
-        }
-      } catch (err) {
-        console.log("index: wave input write failed for beach " + beach.id + ": " + err.message);
+    let windWeightedCalls = 0;
+    try {
+      const windPoints = waveNullPoints(beaches, waveResults);
+      const windBatch = await batchByBeach(
+        windPoints,
+        function (batch) { return fetchWinds(batch); },
+        function (point, entry) {
+          windResults.set(point.beachId, {
+            windSpeedMph: entry.windSpeedMph,
+            windGustMph: entry.windGustMph
+          });
+        },
+        function (batch) {
+          console.log("index: wind batch failed for " + String(batch.length) + " beaches");
+        },
+        timing
+      );
+      windWeightedCalls = windBatch.weightedCalls;
+      for (const point of windBatch.unattempted) {
+        unattempted.add(point.beachId);
       }
+    } catch (err) {
+      console.log("index: wind pass threw: " + err.message);
     }
 
-    // Step 5: NDBC water temperature (DISPLAY-ONLY). Self-contained pass over the
-    // beaches already SELECTed this run — never reads or mutates waveResults /
-    // windResults / the wave KV, and never feeds src/rules.js (it colors no flag).
-    // Many beaches share one nearest NDBC buoy, so dedup by station id (exactly
-    // like the step-2b supplemental memo): fetch each unique station's realtime2
-    // file ONCE via stationWaterTemp and fan the parsed reading to every beach
-    // under it. It is fine that this may re-fetch a couple of station files the
-    // wave fallback also touched (<=10 unique stations total) — the pass is kept
-    // isolated on purpose rather than sharing a cache across passes. Per-station
-    // and per-beach failures are isolated; a bad station never poisons the pass.
-    let waterTempCount = 0;
+    // Step 3b: NDBC water temperature — FETCH half (DISPLAY-ONLY). Self-contained
+    // pass over the beaches already SELECTed this run: never reads or mutates
+    // waveResults / windResults / the wave KV, and never feeds src/rules.js (it
+    // colors no flag and bumps no RULES_VERSION). Many beaches share one nearest
+    // NDBC buoy, so dedup by station id (exactly like the step-2b supplemental
+    // memo): fetch each unique station's realtime2 file ONCE via stationWaterTemp
+    // and fan the parsed reading to every beach under it. It is fine that this
+    // may re-fetch a couple of station files the wave fallback also touched
+    // (<=10 unique stations total) — the pass is kept isolated on purpose rather
+    // than sharing a cache across passes.
+    //
+    // This pass ran AFTER the write loop until now, which is why not one
+    // "watertemp:" key has ever existed in production: the sequential ~1450-put
+    // write loop consumed the entire invocation and this code was never reached.
+    // Splitting it — the fetch here, the put folded into the write pool below —
+    // makes it un-starvable by POSITION rather than merely bounded, and DELETES a
+    // second ~1000-put sequential loop instead of parallelizing it. It is last in
+    // the gather on purpose: if the gather deadline bites, display-only data is
+    // the correct thing to sacrifice.
+    const waterTempByBeach = new Map();
     try {
       const stationBeaches = new Map();
       for (const beach of beaches) {
@@ -1128,6 +1431,10 @@ async function runWaveRefresh(env) {
         stationBeaches.get(station.id).push({ beachId: beach.id, station: station });
       }
       for (const entry of stationBeaches) {
+        if (gatherDeadline.expired()) {
+          console.log("index: water temp gather deadline reached");
+          break;
+        }
         const stationId = entry[0];
         const members = entry[1];
         let reading = null;
@@ -1138,58 +1445,163 @@ async function runWaveRefresh(env) {
           reading = null;
         }
         // Station fetch/parse returned null (winter gap, all-"MM", stale, 404):
-        // write nothing so every beach's old "watertemp:" key expires on its own.
+        // record nothing, so every beach's old "watertemp:" key expires on its own.
         if (reading === null) {
           continue;
         }
         for (const member of members) {
-          try {
-            const waterTemp = {
-              beachId: member.beachId,
-              tempF: reading.tempF,
-              tempC: reading.tempC,
-              station: {
-                id: member.station.id,
-                name: member.station.name,
-                distanceKm: member.station.distanceKm
-              },
-              observedIso: reading.observedIso,
-              updated: nowIso
-            };
-            await env.FLAGS.put(
-              "watertemp:" + member.beachId,
-              JSON.stringify(waterTemp),
-              { expirationTtl: WAVE_DATA_TTL_SECONDS }
-            );
-            waterTempCount = waterTempCount + 1;
-          } catch (err) {
-            console.log("index: water temp write failed for beach " + member.beachId + ": " + err.message);
-          }
+          waterTempByBeach.set(member.beachId, {
+            beachId: member.beachId,
+            tempF: reading.tempF,
+            tempC: reading.tempC,
+            station: {
+              id: member.station.id,
+              name: member.station.name,
+              distanceKm: member.station.distanceKm
+            },
+            observedIso: reading.observedIso,
+            updated: nowIso
+          });
         }
       }
     } catch (err) {
       console.log("index: water temp pass threw: " + err.message);
     }
+
+    // Step 4: persist per-beach wave inputs (+ the strip series, + the water-temp
+    // reading gathered in step 3b), isolated failures, at KV_WRITE_CONCURRENCY.
+    // This loop was sequential and was ~80% of the run that got SIGKILLed; it is
+    // embarrassingly parallel — nothing in the body depends on the previous
+    // beach. The pool YIELDS at writeDeadline instead of being killed, and the
+    // wave_updated cursor is flushed incrementally as it goes, so a truncated run
+    // persists a prefix and the beaches it never reached sort first next run.
+    const stamper = makeWaveCursorStamper(env, nowIso, WAVE_CURSOR_FLUSH_SIZE);
+    const writeReached = await runPool(beaches, KV_WRITE_CONCURRENCY, async function (beach) {
+      // The gather never attempted this beach (deadline), so the run genuinely
+      // has no opinion about it: no writes and NO stamp — stamping here would
+      // advance the cursor past work that never happened.
+      if (unattempted.has(beach.id)) {
+        return;
+      }
+      // A beach counts as DECIDED once any write path completed without
+      // throwing — either it persisted something, or a degradation guard
+      // deliberately chose to write nothing. A beach whose every write THREW
+      // reached no decision at all, and must not be stamped (see below).
+      let decided = false;
+      try {
+        const counts = await writeWaveKvForBeach(
+          env,
+          beach,
+          waveResults.get(beach.id),
+          windResults.get(beach.id),
+          wavesStartIso,
+          nowIso
+        );
+        inputCount = inputCount + counts.input;
+        seriesCount = seriesCount + counts.series;
+        decided = true;
+      } catch (err) {
+        console.log("index: wave input write failed for beach " + beach.id + ": " + err.message);
+      }
+
+      // Water temp is written INDEPENDENTLY of the two wave skip guards,
+      // deliberately: a failed marine fetch says nothing about an NDBC buoy
+      // reading, and coupling the two would re-create the zero-watertemp gap for
+      // exactly the beaches whose wave data is missing and which most need a
+      // fallback signal. Its own try/catch, so a rejected water-temp put can
+      // neither lose the wave writes already made nor cost the beach its stamp.
+      try {
+        const waterTemp = waterTempByBeach.get(beach.id);
+        if (waterTemp) {
+          await env.FLAGS.put(
+            "watertemp:" + beach.id,
+            JSON.stringify(waterTemp),
+            { expirationTtl: WAVE_DATA_TTL_SECONDS }
+          );
+          waterTempCount = waterTempCount + 1;
+          decided = true;
+        }
+      } catch (err) {
+        console.log("index: water temp write failed for beach " + beach.id + ": " + err.message);
+      }
+
+      // Stamped for EVERY beach that reached a write DECISION — INCLUDING the two
+      // graceful-degradation skips, which write nothing. Stamping only on a
+      // successful write would INVERT the starvation this cursor exists to fix:
+      // Open-Meteo masking on the Great Lakes is documented as normal (not an
+      // error), so a permanently-masked beach writes nothing on every single run
+      // and would pin itself to the head of the queue forever.
+      //
+      // But a beach whose writes all THREW is the opposite case: it got nothing,
+      // and stamping it would advance the cursor past a beach that still has no
+      // data, sending it to the BACK of the queue on the strength of a failure.
+      // An unstamped beach sorts first next run, which is the honest outcome.
+      //
+      // This is counted SEPARATELY from truncation rather than folded into it.
+      // A write failure and a cut-short run are different operational events: a
+      // single flaky put must not trip the truncated= alarm (that would cry wolf
+      // every run), while a run where EVERY write failed — the shape a newly
+      // enforced per-invocation KV ceiling would take — must be impossible to
+      // miss. It shows up here as failures= equal to beaches= with stamped=0.
+      if (!decided) {
+        writeFailureCount = writeFailureCount + 1;
+        return;
+      }
+      stampedCount = stampedCount + 1;
+      await stamper.add(beach.id);
+    }, writeDeadline);
+    await stamper.drain();
+
     console.log("index: water temp writes this run=" + String(waterTempCount));
 
     // Open-Meteo weighted-call accounting (U1): each location in a batch costs
     // ~1 weighted call and the one backoff retry doubles a throttled batch, so
     // this is the run's contribution to the free-tier daily ceiling. Logged for
     // visibility only — no behavioral throttling on the daily budget yet. Once
-    // nationwide pagination removes the LIMIT 1000 cap, this ceiling binds
-    // before the Workers subrequest limit does (TODO.md).
+    // nationwide pagination removes the MAX_BEACHES_PER_RUN cap, this ceiling
+    // binds before the Workers subrequest limit does (TODO.md).
+    //
+    // peak= is the run's rolling PER-MINUTE rate against Open-Meteo's documented
+    // 600/min free-tier ceiling, which is the limit actually producing the HTTP
+    // 429s — and it was invisible in the logs, which reported only the daily
+    // figure. Same arithmetic as the OPEN_METEO_CONCURRENCY comment: batch size x
+    // concurrency per (gap + ~3 s fetch).
     const openMeteoWeightedCalls = waveWeightedCalls + windWeightedCalls;
     console.log(
       "index: open-meteo weighted calls this run=" + String(openMeteoWeightedCalls) +
       " (wave=" + String(waveWeightedCalls) +
       " wind=" + String(windWeightedCalls) +
-      ") of " + String(OPEN_METEO_DAILY_WEIGHTED_CEILING) + "/day free-tier ceiling"
+      ") of " + String(OPEN_METEO_DAILY_WEIGHTED_CEILING) + "/day free-tier ceiling" +
+      " peak=" + String(Math.round(OPEN_METEO_BATCH * timing.concurrency * 60000 / (timing.gapMs + 3000))) + "/min"
     );
 
+    // The completion log is the operator trip-wire. The run that motivated all
+    // of this produced THREE log lines and no completion record at all, so
+    // diagnosing it needed Cloudflare observability rather than the logs.
+    //
+    // The two failure shapes are reported SEPARATELY on purpose:
+    //   truncated=yes — the run ran out of clock. Either the gather deadline
+    //     left beaches unattempted, or the write pool yielded before reaching
+    //     every beach (writeReached is what runPool actually got to). This is
+    //     the alarm: it means coverage now depends on the rotation cursor.
+    //   failures=N   — beaches the pool reached whose every write threw. One
+    //     flaky put is noise; failures= near beaches= with stamped=0 is a
+    //     systemic write outage (the shape an enforced per-invocation KV
+    //     operation ceiling would take) and needs immediate attention.
+    // elapsedMs= is the number to watch if KV throughput turns out worse than
+    // the ~0.45 s/put this design was sized against.
+    const truncated = writeReached < beaches.length || unattempted.size > 0;
     console.log(
       "index: wave refresh complete, beaches=" + String(beaches.length) +
+      " stamped=" + String(stampedCount) +
+      " reached=" + String(writeReached) +
+      " unattempted=" + String(unattempted.size) +
+      " failures=" + String(writeFailureCount) +
       " inputs=" + String(inputCount) +
-      " series=" + String(seriesCount)
+      " series=" + String(seriesCount) +
+      " watertemp=" + String(waterTempCount) +
+      " truncated=" + (truncated ? "yes" : "no") +
+      " elapsedMs=" + String(Date.now() - startedMs)
     );
   } catch (err) {
     console.log("index: wave refresh failed: " + err.message);

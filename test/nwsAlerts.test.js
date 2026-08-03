@@ -369,3 +369,44 @@ describe("fetchPointMetadata", function () {
     expect(await fetchPointMetadata(45.0, -82.0)).toBeNull();
   });
 });
+
+// Every api.weather.gov request routes through one fetchNwsJson wrapper, and
+// src/clients/http.js arms its AbortController ONLY when timeoutMs > 0. An
+// unarmed call site is genuinely unbounded: a single hung socket runs the
+// hourly cron to the 900 s scheduled ceiling and kills it mid-run — the exact
+// failure that truncated the wave cron for months. A wall-clock deadline cannot
+// rescue it, because deadlines are checked BETWEEN units of work, never inside
+// a pending fetch.
+describe("NWS transport timeout", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on the national active-alerts fetch", async function () {
+    let seenInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
+      seenInit = init;
+      return Promise.resolve(new Response(JSON.stringify({ features: [] }), {
+        status: 200,
+        headers: { "content-type": "application/geo+json" }
+      }));
+    });
+    await fetchAllActiveAlerts();
+    expect(seenInit.signal).toBeDefined();
+    expect(seenInit.signal.aborted).toBe(false);
+  });
+
+  it("arms an abort signal on the point-metadata fetch", async function () {
+    let seenInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
+      seenInit = init;
+      return Promise.resolve(new Response(JSON.stringify({ properties: {} }), {
+        status: 200,
+        headers: { "content-type": "application/geo+json" }
+      }));
+    });
+    await fetchPointMetadata(42.9, -86.2);
+    expect(seenInit.signal).toBeDefined();
+    expect(seenInit.signal.aborted).toBe(false);
+  });
+});

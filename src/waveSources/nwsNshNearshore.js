@@ -49,6 +49,15 @@ export const NSH_MODEL = "nws_nsh_nearshore_wave";
 export const NSH_LABEL = "NWS Nearshore Marine Forecast";
 export const NSH_URL = "https://www.weather.gov/marine/";
 
+// Transport cap for BOTH legs of the two-leg resolution below (zone -> WFO,
+// then WFO -> latest NSH product). fetchJson only arms its AbortController when
+// timeoutMs > 0, so without this a hung api.weather.gov socket stalls the wave
+// cron's SEQUENTIAL supplemental pass until the platform SIGKILLs the
+// invocation — that pass's wall-clock budget is checked between beaches, never
+// inside a request. The two legs run sequentially within one key resolution, so
+// BOTH need the cap; one bounded leg still leaves the other unbounded.
+const NWS_WAVE_TIMEOUT_MS = 15000;
+
 // A marine/land UGC zone code: two letters, Z (zone) or C (county), 3 digits.
 const ZONE_CODE_RE = /^[A-Z]{2}[ZC]\d{3}$/;
 
@@ -230,7 +239,8 @@ async function fetchWfoForZone(zone) {
   const url = "https://api.weather.gov/zones/marine/" + encodeURIComponent(zone);
   const json = await fetchJson(url, {
     headers: { "User-Agent": NWS_USER_AGENT, "Accept": "application/geo+json" },
-    label: "nwsNshNearshore: zone " + zone
+    label: "nwsNshNearshore: zone " + zone,
+    timeoutMs: NWS_WAVE_TIMEOUT_MS
   });
   if (json === null) {
     return null;
@@ -259,7 +269,8 @@ async function fetchNshProductText(wfo) {
     encodeURIComponent(wfo) + "/latest";
   const json = await fetchJson(url, {
     headers: { "User-Agent": NWS_USER_AGENT },
-    label: "nwsNshNearshore: NSH latest for " + wfo
+    label: "nwsNshNearshore: NSH latest for " + wfo,
+    timeoutMs: NWS_WAVE_TIMEOUT_MS
   });
   if (json === null) {
     return null;

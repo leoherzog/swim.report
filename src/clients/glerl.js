@@ -55,6 +55,25 @@ export const MAX_PLATFORM_FETCHES = 60;
 // Politeness: at most this many concurrent requests against the Seagull API.
 const OBS_FETCH_CONCURRENCY = 4;
 
+// Transport caps for the two shapes of Seagull request. fetchJson only arms its
+// AbortController when timeoutMs > 0, so until these were passed BOTH catalog
+// downloads and every platform obs fetch were unbounded — one hung socket here
+// runs the wave cron's whole 900 s clock to a SIGKILL, and no wall-clock
+// deadline in the cron can rescue it because deadlines are checked between
+// units of work, never inside one.
+//
+// The catalogs get a much larger budget than a small JSON call on purpose: they
+// are ~3.4 MB (/parameters) and ~2.1 MB (/obs-datasets.geojson), and the timer
+// bounds the WHOLE response body, not just the response headers. A tight cap
+// would abort a perfectly healthy multi-megabyte download on a slow-but-working
+// link and null out every GLOS beach for the run. 45 s still leaves the paced
+// batch loop most of the budget on a catalog-cache miss.
+const GLERL_CATALOG_TIMEOUT_MS = 45000;
+// Obs responses are one platform's recent observations — small JSON, and up to
+// MAX_PLATFORM_FETCHES of them per run — so they take the tight cap. An abort
+// nulls only the beaches mapped to that platform (see fetchGlcfsWaveHeightsFt).
+const GLERL_OBS_TIMEOUT_MS = 15000;
+
 // distanceKm and metersToFeet live in the dependency-free src/geo.js. distanceKm
 // is re-exported here because tests and windyWebcams.js import it from this
 // module.
@@ -190,8 +209,11 @@ export function parseObsWaveHeightFt(obsJson, obsDatasetId, waveParameterIds, no
   return metersToFeet(bestMeters);
 }
 
-function fetchJson(url, label) {
-  return httpFetchJson(url, { label: "glerl: " + label });
+// Every caller MUST pass a timeoutMs — the parameter is required in practice,
+// not optional, because an omitted one silently restores the unbounded fetch
+// this wrapper exists to prevent.
+function fetchJson(url, label, timeoutMs) {
+  return httpFetchJson(url, { label: "glerl: " + label, timeoutMs: timeoutMs });
 }
 
 // Fetch + parse the two large semi-static Seagull catalogs (the ~3.4 MB
@@ -204,13 +226,17 @@ function fetchJson(url, label) {
 // fetchGlcfsWaveHeightsFt, avoiding the ~5.5 MB re-download on a normal run.
 // Env-free: knows nothing about KV — the cron owns caching.
 export async function fetchWaveCatalogs() {
-  const geojson = await fetchJson(SEAGULL_PLATFORMS_URL, "platform catalog");
+  const geojson = await fetchJson(
+    SEAGULL_PLATFORMS_URL, "platform catalog", GLERL_CATALOG_TIMEOUT_MS
+  );
   if (geojson === null) {
     return null;
   }
   const platforms = parseWavePlatforms(geojson);
 
-  const paramsJson = await fetchJson(SEAGULL_PARAMETERS_URL, "parameter catalog");
+  const paramsJson = await fetchJson(
+    SEAGULL_PARAMETERS_URL, "parameter catalog", GLERL_CATALOG_TIMEOUT_MS
+  );
   if (paramsJson === null) {
     return null;
   }
@@ -344,7 +370,9 @@ export async function fetchGlcfsWaveHeightsFt(points, nowIso, cachedCatalogs) {
     const settled = await Promise.allSettled(batch.map(function (obsDatasetId) {
       const url = SEAGULL_API_BASE + "/obs?obsDatasetId=" + String(obsDatasetId) +
         "&startDate=" + startDate + "&parameterId=" + parameterIdQuery;
-      return fetchJson(url, "obs for platform " + String(obsDatasetId));
+      return fetchJson(
+        url, "obs for platform " + String(obsDatasetId), GLERL_OBS_TIMEOUT_MS
+      );
     }));
     for (let j = 0; j < batch.length; j = j + 1) {
       const outcome = settled[j];

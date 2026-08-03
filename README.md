@@ -395,7 +395,7 @@ water-body classification are **not** in this list — they run offline (see
 and neither is `marine_zone` (the sixth bullet below records the retired probe).
 
 - `7 * * * *` (hourly) — `runFlagRecompute`: reads beaches from D1 (up to
-  `MAX_BEACHES_PER_RUN = 1000`), ordered hot-first then oldest-`recompute_updated`-first:
+  `MAX_BEACHES_PER_RUN = 1200`), ordered hot-first then oldest-`recompute_updated`-first:
   a beach viewed within the last `HOT_VIEW_WINDOW_MS` (7 days, tracked via the
   `last_viewed` demand stamp) is always covered every run, so its 2 h flag KV TTL never
   lapses while it's in demand; cold (never/rarely-viewed) rows rotate through the
@@ -415,7 +415,11 @@ and neither is `marine_zone` (the sixth bullet below records the retired probe).
   many zones or beaches a run covers. It runs
   them through `estimateFlag`, runs the official-source scrapers (once per distinct
   matched scraper, resolved per beach, with KV-backed health monitoring), and
-  writes both to KV (`flag:` + beachId, `official:` + beachId) with a 7200 second
+  writes both to KV (`flag:` + beachId, `official:` + beachId) — through a
+  bounded-concurrency write pool (`KV_WRITE_CONCURRENCY`, `src/pool.js`) rather than a
+  sequential per-beach walk, which is what kept this cron at 78–83% of its 900 s ceiling;
+  only the inner per-beach loops are pooled, the outer per-scraper loop stays sequential
+  because it mutates shared scraper-health state — with a 7200 second
   TTL (a scraper may set an optional `officialTtlSeconds` to extend its own
   official-KV TTL when it fetches on a reduced cadence; no registered scraper
   declares one today — it is a retained extension point). The official record
@@ -427,27 +431,43 @@ and neither is `marine_zone` (the sixth bullet below records the retired probe).
   means no wave input that run — the estimate falls back to wind or `unknown`, never
   a wrong flag.
 - `15 */6 * * *` (6-hourly) — `runWaveRefresh`: owns **all** upstream wave and wind
-  fetching. It fetches Open-Meteo marine wave heights, gap-fills Great-Lakes
-  wave-null beaches from the nearest GLOS Seagull wave buoy (within 25 km, freshest
-  observation within 2 h, `src/clients/glerl.js`), and fetches the Open-Meteo wind
-  fallback for beaches still wave-null, then writes two KV shapes per beach at a 7 h
-  TTL: `waveinput:` + beachId (the wave height + wind fallback the hourly estimate
-  reads) and `waves:` + beachId (the detail page's 24 h forecast strip, only when a
-  real hourly series exists). It runs 6-hourly rather than hourly because Open-Meteo's
-  marine models only publish every 6–12 h; the fetches are paced (small concurrency
-  window, a gap between batch waves, one backoff retry on a throttled batch) to stay
-  under Open-Meteo's per-minute weighted rate limit. The 7 h TTL outlives the gap
-  between runs, so a transient throttle leaves the strip showing slightly-older-but-
-  still-model-current data rather than blanking it. A beach whose fetch merely failed
-  is left untouched so its last-good KV survives. Reads beaches with the same hot-first
-  ordering as `runFlagRecompute` (`last_viewed` within `HOT_VIEW_WINDOW_MS`, then oldest
-  `recompute_updated` first), sharing that column as a read-only rotation cursor — only
-  `runFlagRecompute` ever writes `recompute_updated`. A final self-contained step writes
-  `watertemp:` + beachId (same 7 h TTL) — the nearest NOAA NDBC realtime2 buoy's water
-  temperature (WTMP), deduped by station id so each buoy file is fetched once and fanned to
-  every beach sharing it. This reading is **display-only**: the detail page appends it to the
-  beach subtitle (e.g. "Ottawa Beach • 72°F Water") when it is fresh, but it never feeds
-  `src/rules.js` and cannot change a flag color.
+  fetching, in a fixed order — marine wave heights from Open-Meteo, then a Great-Lakes
+  gap-fill for wave-null beaches from the nearest GLOS Seagull wave buoy (within 25 km,
+  freshest observation within 2 h, `src/clients/glerl.js`), then the ordered supplemental
+  fallback wave sources for beaches still wave-null, then the Open-Meteo wind fallback for
+  whatever is *still* wave-null, then the NDBC water-temperature fetch, and finally one
+  per-beach write pass. It runs 6-hourly rather than hourly because Open-Meteo's
+  marine models only publish every 6–12 h; the fetches are paced (one batch of 100 at a
+  time, a 12 s gap between batches, one 60 s backoff retry on a throttled batch) to stay
+  under Open-Meteo's per-minute weighted rate limit — ~400 locations/min against a
+  documented 600/min ceiling. Every upstream client on this path also carries a transport
+  timeout, so no single hung socket can run out the invocation.
+  The write pass writes three KV shapes per beach at a 7 h TTL — `waveinput:` + beachId
+  (the wave height + wind fallback the hourly estimate reads), `waves:` + beachId (the
+  detail page's 24 h forecast strip, only when a real hourly series exists), and
+  `watertemp:` + beachId (the nearest NOAA NDBC realtime2 buoy's WTMP water temperature,
+  deduped by station id so each buoy file is fetched once and fanned to every beach sharing
+  it) — through the same bounded-concurrency pool. The water-temp write is independent of
+  the wave skip guards: a failed marine fetch says nothing about a buoy reading. That
+  reading is **display-only**: the detail page appends it to the beach subtitle (e.g.
+  "Ottawa Beach • 72°F Water") when it is fresh, but it never feeds `src/rules.js` and
+  cannot change a flag color. The 7 h TTL outlives the gap between runs, so a transient
+  throttle leaves the strip showing slightly-older-but-still-model-current data rather than
+  blanking it. A beach whose fetch merely failed is left untouched so its last-good KV
+  survives.
+  The whole run is bounded in wall clock against the 900 s scheduled ceiling: no new
+  upstream work starts after T+480 s (with a 120 s sub-budget on the supplemental sources,
+  so they can never starve the wind fallback), and the write pool yields at T+840 s instead
+  of being killed. Reads beaches with the same hot-first ordering as `runFlagRecompute`
+  (`last_viewed` within `HOT_VIEW_WINDOW_MS`), then oldest-`wave_updated`-first — its **own**
+  rotation cursor (migration 0012), which it stamps incrementally as the write pool reaches
+  each beach. The two crons deliberately do *not* share a cursor: `runFlagRecompute` rewrites
+  `recompute_updated` to one timestamp for its whole run every hour, which flattens the
+  column and collapsed the wave cron's rotation to `id ASC`, starving a fixed tail of the
+  table. Because the cursor advances incrementally, a run that yields early persists
+  everything it finished and the beaches it never reached sort first next time; its
+  completion log line reports `beaches= stamped= unattempted= inputs= series= watertemp=
+  truncated= elapsedMs=`.
 - `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
   `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
   api.weather.gov/points. A beach without `nws_zone` silently skips the alert and
@@ -605,18 +625,33 @@ and never touching the delete path. The committed geometry file is regenerated
 (see `docs/offline-discovery.md` for the file format and refresh procedure).
 
 **Paid-plan assumption**: the cron subrequest budgets exceed the free plan's
-50-subrequest ceiling (the paid plan allows 10,000 per invocation). The hourly
-`runFlagRecompute` runs alert + SRF + scraper fetches plus up to ~700 KV
-reads/writes, and
-the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy gap-fill + wind
-fetches plus up to ~1200 `waveinput:`/`waves:` KV writes — each well under 10,000 but far
-past the free ceiling. Production deployment assumes the Workers Paid plan. `runWaveRefresh`
-also logs a per-run **Open-Meteo weighted-call** estimate (each batched location counts as
-~1 weighted call, and one backoff retry doubles a throttled batch) against Open-Meteo's
-free-tier **10,000 weighted calls/day** ceiling — a separate limit from the Workers
-subrequest budget that binds first once nationwide pagination removes the
-`MAX_BEACHES_PER_RUN = 1000` cap (accounting only for now; see `TODO.md`). See `TODO.md`
-for a free-plan-friendly fallback (lower `MAX_BEACHES_PER_RUN`).
+50-subrequest ceiling (the paid plan allows 10,000 per invocation). At the current
+`MAX_BEACHES_PER_RUN = 1200`, the hourly `runFlagRecompute` runs alert + SRF + scraper
+fetches plus up to ~3,850 KV reads/writes in its worst case (every beach carrying an active
+water-quality advisory), and the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine +
+GLOS buoy gap-fill + supplemental + wind fetches plus up to ~3,600
+`waveinput:`/`waves:`/`watertemp:` KV writes, ~4,360 subrequests all told — each well under
+10,000 but far past the free ceiling. Production deployment assumes the Workers Paid plan.
+
+**Wall clock, not subrequest count, is the binding limit.** The run that forced the current
+design used ~1,470 subrequests of 10,000 — and 899.989 s of its 900 s scheduled ceiling,
+where it was SIGKILLed mid-write-loop. Two platform facts drive the budgets above: a
+scheduled invocation gets 900 s, and Cloudflare caps an invocation at **six simultaneous
+open connections** with KV `get`/`put` counting toward that cap — so a write pool wider than
+~6 buys no throughput (the platform queues the excess) and all wall-clock sizing here is done
+at 6, roughly 13 puts/second.
+
+`runWaveRefresh` also logs a per-run **Open-Meteo weighted-call** estimate (each batched
+location counts as ~1 weighted call, and one backoff retry doubles a throttled batch) against
+Open-Meteo's free-tier **10,000 weighted calls/day** ceiling, alongside the run's rolling
+**per-minute peak** against the documented 600/min ceiling — the per-minute limit is the one
+that actually produces HTTP 429s. At 1200 beaches a summer run costs ~1,200 weighted calls
+(~4,800/day, 48% of the daily ceiling) and a fully wave-null winter run ~2,400 (~9,600/day,
+96%, and that counter is a known over-count). That daily ceiling — not the Workers
+subrequest budget and not wall clock — is what bounds any further increase of
+`MAX_BEACHES_PER_RUN`, and it binds outright once nationwide pagination removes the cap
+(accounting only for now; see `TODO.md`). See `TODO.md` for a free-plan-friendly fallback
+(lower `MAX_BEACHES_PER_RUN`).
 
 ## Deployment
 

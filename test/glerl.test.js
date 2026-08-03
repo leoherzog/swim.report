@@ -602,3 +602,34 @@ describe("serializeWaveCatalogs / deserializeWaveCatalogs", function () {
     expect(deserializeWaveCatalogs({ waveParameterIds: [195] })).toBe(null);
   });
 });
+
+// The wave cron's wall-clock deadlines are checked BETWEEN units of work, never
+// inside one, so a Seagull request that never settles runs the invocation into
+// the platform's 900 s SIGKILL regardless of any budget. fetchJson only arms its
+// AbortController when timeoutMs > 0, and this module's private wrapper used to
+// pass only { label } — leaving BOTH multi-megabyte catalog downloads and every
+// platform obs fetch unbounded. These pin the cap on all three request sites.
+describe("Seagull transport timeouts", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on both catalog fetches and every obs fetch", async function () {
+    const calls = installFetch(function (url) {
+      if (url === SEAGULL_PLATFORMS_URL) {
+        return Promise.resolve(jsonResponse(PLATFORMS_FIXTURE));
+      }
+      if (url === SEAGULL_PARAMETERS_URL) {
+        return Promise.resolve(jsonResponse(PARAMS_FIXTURE));
+      }
+      return Promise.resolve(jsonResponse(OBS_37_FIXTURE));
+    });
+    await fetchGlcfsWaveHeightsFt([{ beachId: "b1", lat: 42.4, lon: -86.29 }], NOW);
+    // Platform catalog, parameter catalog, one obs request.
+    expect(calls.length).toBe(3);
+    calls.forEach(function (c) {
+      expect(c.init.signal).toBeDefined();
+      expect(c.init.signal.aborted).toBe(false);
+    });
+  });
+});

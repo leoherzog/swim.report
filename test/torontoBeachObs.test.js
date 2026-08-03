@@ -4,8 +4,9 @@
 // ES modules, NO template literals (string concat with +), function () {}
 // callbacks, one describe per exported pure function.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { makeBeach } from "./helpers/beach.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 import {
   normalizeWaveAction,
   waveActionToFt,
@@ -267,5 +268,29 @@ describe("torontoBeachObsSource object", function () {
 
   it("curates exactly the 10 Lake Ontario beaches", function () {
     expect(TORONTO_SITES.length).toBe(10);
+  });
+});
+
+// The wave cron's supplemental pass is SEQUENTIAL and its wall-clock budget is
+// checked between beaches, never inside a request — so a CKAN socket that never
+// settles runs the invocation into the platform's 900 s SIGKILL. fetchJson only
+// arms its AbortController when timeoutMs > 0, so this pins the cap on the one
+// request this source issues per run.
+describe("Toronto transport timeout", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on the CKAN fetch", async function () {
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse({ result: { records: [] } }));
+    });
+    // A nowIso no other test in this file uses, so the module's run-scoped
+    // records memo is guaranteed cold and the fetch actually happens.
+    const nowIso = "2026-07-23T13:45:00Z";
+    await torontoBeachObsSource.waveFt(makeBeach({ name: "Sunnyside Beach" }), nowIso, {});
+    expect(calls.length).toBe(1);
+    expect(calls[0].init.signal).toBeDefined();
+    expect(calls[0].init.signal.aborted).toBe(false);
   });
 });

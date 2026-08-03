@@ -406,3 +406,41 @@ describe("truncation warning at the 2000-feature fetch limit", function () {
     expect(logCallsContaining(logSpy, "at the 2000 limit").length).toBe(0);
   });
 });
+
+// Both GeoMet calls are bulk national collections fetched once per run. Before
+// this they passed no timeoutMs, and src/clients/http.js arms its
+// AbortController ONLY when timeoutMs > 0 — so one hung socket could run the
+// hourly (alerts) or enrichment (zones) cron to the 900 s scheduled ceiling.
+describe("ECCC transport timeout", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on the national alerts fetch", async function () {
+    let seenInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
+      seenInit = init;
+      return Promise.resolve(new Response(JSON.stringify({ features: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }));
+    });
+    await fetchActiveEcccAlerts("2026-07-15T16:00:00.000Z");
+    expect(seenInit.signal).toBeDefined();
+    expect(seenInit.signal.aborted).toBe(false);
+  });
+
+  it("arms an abort signal on the forecast-zones fetch", async function () {
+    let seenInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
+      seenInit = init;
+      return Promise.resolve(new Response(JSON.stringify({ features: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }));
+    });
+    await fetchEcccForecastZones();
+    expect(seenInit.signal).toBeDefined();
+    expect(seenInit.signal.aborted).toBe(false);
+  });
+});

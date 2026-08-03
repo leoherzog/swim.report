@@ -1,0 +1,32 @@
+-- Private rotation cursor for the 6-hourly wave cron (runWaveRefresh): ISO
+-- timestamp of the last run that reached a write DECISION for this beach.
+--
+-- WHY IT CANNOT SHARE recompute_updated. runFlagRecompute rewrites
+-- recompute_updated to a single shared nowIso for its ENTIRE run's beach set
+-- every hour, which flattens the column to ~2 distinct values across the table.
+-- A cursor that a different cron flattens hourly is not a cursor: the wave
+-- cron's cold-tier sort collapsed to id ASC permanently, so once the table
+-- outgrew what one wave run could finish, a fixed tail of rows starved forever.
+-- Each cron is now single-writer of its own cursor column.
+--
+-- WHO WRITES IT: runWaveRefresh only, INCREMENTALLY (batches of
+-- WAVE_CURSOR_FLUSH_SIZE as the write pool reaches each beach, never one batch
+-- after the loop — the loop is the thing that gets killed). Stamped for every
+-- beach that reached a write decision, INCLUDING the two graceful-degradation
+-- skips that write no KV: Open-Meteo masking on the Great Lakes is documented as
+-- normal, so stamping only on a successful write would pin permanently-masked
+-- beaches to the head of the queue forever and invert the starvation this column
+-- exists to fix. Beaches the run never ATTEMPTED (gather deadline) are NOT
+-- stamped, so they sort first next run.
+--
+-- WHO READS IT: runWaveRefresh's own SELECT (ORDER BY ... wave_updated ASC, id
+-- ASC) only. It rides along in row objects on the hourly cron and router.js's
+-- SELECT *, but nothing on the request path reads it.
+--
+-- NULL is required (SQLite ADD COLUMN forbids NOT NULL without a DEFAULT) and is
+-- also semantically right: NULL sorts first under ASC, so the first
+-- post-migration run orders identically to today and rotation begins from run 2
+-- with no backfill. Offline discovery's UPSERTs enumerate columns explicitly, so
+-- newly discovered rows arrive NULL and are picked up first. No index, matching
+-- the precedent that recompute_updated has never been indexed at this row count.
+ALTER TABLE beaches ADD COLUMN wave_updated TEXT;

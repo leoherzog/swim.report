@@ -44,6 +44,16 @@ export const GRIDPOINT_MODEL = "nws_gridpoint_wave";
 export const GRIDPOINT_LABEL = "NWS Gridpoint Wave Forecast";
 export const GRIDPOINT_URL = "https://www.weather.gov/";
 
+// Transport cap for the gridpoint fetch. fetchJson only arms its
+// AbortController when timeoutMs > 0, so without this one hung api.weather.gov
+// socket stalls the wave cron's SEQUENTIAL supplemental pass until the platform
+// SIGKILLs the invocation — the pass's wall-clock budget is checked between
+// beaches, never inside a request. This source is the largest contributor to
+// that pass (hundreds of distinct gridpoint URLs on a wave-null run) and
+// measured latency is well under a second, so 15 s is generous. An abort
+// resolves to null and the beach simply falls through to the next source.
+const NWS_WAVE_TIMEOUT_MS = 15000;
+
 // Pure. Parse an ISO8601 duration (e.g. "PT1H", "PT6H", "P1DT6H", "PT30M") to
 // milliseconds, or null when it is not a recognizable P[nD][T[nH][nM][nS]]
 // duration. Weeks (PnW) and fractional components are deliberately unhandled
@@ -213,7 +223,8 @@ async function waveFt(beach, nowIso, env) {
       "User-Agent": NWS_USER_AGENT,
       "Accept": "application/geo+json"
     },
-    label: "nwsGridpointWaves: " + beach.nws_grid_url
+    label: "nwsGridpointWaves: " + beach.nws_grid_url,
+    timeoutMs: NWS_WAVE_TIMEOUT_MS
   });
   if (json === null) {
     return null;

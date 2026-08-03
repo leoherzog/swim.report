@@ -25,7 +25,19 @@ enabled = true
 #                    Offset off the congested top-of-hour :00 slot the repo's own
 #                    GH workflows deliberately avoid; still reads (never fetches)
 #                    the waveinput: KV the :15 wave cron last wrote.
-# 15 */6 * * *     — 6-hourly wave/wind refresh (Open-Meteo/GLOS -> KV)
+# 15 */6 * * *     — 6-hourly wave/wind refresh (Open-Meteo/GLOS -> KV). The run is
+#                    wall-clock bounded inside runWaveRefresh (gather stops at T+480s,
+#                    the KV write pool yields at T+840s) against the 900s scheduled
+#                    ceiling; a truncated run persists a prefix and advances its own
+#                    wave_updated cursor, so shortening this cadence is never the fix
+#                    for a slow run — and it would double the daily Open-Meteo quota.
+#
+# EVERY interval here must stay >= 1 hour. Cloudflare gives a scheduled invocation
+# 15 minutes of CPU only at hourly-or-longer intervals; below that the allowance
+# drops to 30 seconds, which no beach-walking cron in this Worker fits inside.
+# Changing a cron string is also a FOUR-file edit (this file, package.json's
+# seed:* URLs, CRON_JOBS in src/index.js, and the cron strings hard-coded in the
+# tests) — miss one and the job silently never runs.
 # 17 3,9,15,21 * * * — NWS point enrichment, 4x daily
 # 29 4,10,16,22 * * * — ECCC zone enrichment, 4x daily (Canadian beaches the
 #                    NWS enrichment permanently parked)

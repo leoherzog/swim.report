@@ -24,6 +24,14 @@ export const ECCC_API_BASE = "https://api.weather.gc.ca";
 // MSC usage policy asks for a meaningful, self-identifying User-Agent so ECCC
 // can reach the operator before throttling. Mirrors nws.js NWS_USER_AGENT.
 export const ECCC_USER_AGENT = "swim.report (https://swim.report)";
+
+// Unbounded fetches are what let a single hung socket run a cron to the 900 s
+// scheduled ceiling (see NWS_TIMEOUT_MS in src/clients/nws.js — http.js arms
+// its AbortController only when timeoutMs > 0). Both GeoMet calls behind this
+// constant are bulk national collections (the alert feed and the full
+// forecast-zone polygon set), so the budget is generous; it exists to bound the
+// invocation, not to police latency.
+export const ECCC_TIMEOUT_MS = 45000;
 // Human-readable alerts page for source { url } entries shown to visitors.
 export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
 // weather-alerts features per fetch. The national active set runs ~500 in a
@@ -54,7 +62,8 @@ export async function fetchActiveEcccAlerts(nowIso) {
     "&limit=" + String(ECCC_ALERTS_FETCH_LIMIT);
   const json = await fetchJson(url, {
     headers: { "User-Agent": ECCC_USER_AGENT },
-    label: "eccc: active alerts"
+    label: "eccc: active alerts",
+    timeoutMs: ECCC_TIMEOUT_MS
   });
   if (json === null) {
     return null;
@@ -124,7 +133,8 @@ export async function fetchEcccForecastZones() {
     "&limit=" + String(ECCC_ZONES_FETCH_LIMIT);
   const json = await fetchJson(url, {
     headers: { "User-Agent": ECCC_USER_AGENT },
-    label: "eccc: forecast zones"
+    label: "eccc: forecast zones",
+    timeoutMs: ECCC_TIMEOUT_MS
   });
   if (json === null) {
     return null;

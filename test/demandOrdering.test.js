@@ -5,12 +5,17 @@
 // the project; if this Node build has no node:sqlite, the whole file is
 // skipped rather than failing the run.
 //
-// The four clauses under test are copied VERBATIM from src/index.js so a
+// The clauses under test are copied VERBATIM from src/index.js so a
 // drift between this file and the real cron SQL is a merge conflict, not a
 // silent divergence:
-//   - runFlagRecompute / runWaveRefresh (shared hybrid clause):
+//   - runFlagRecompute (hourly rotation, cursor = recompute_updated):
 //       ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
 //                recompute_updated ASC, id ASC
+//   - runWaveRefresh (6-hourly rotation, cursor = wave_updated — migration
+//     0012; identical to the hourly clause EXCEPT the cursor column, which
+//     selectRunBeaches picks from the two-entry ROTATION_COLUMNS whitelist):
+//       ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
+//                wave_updated ASC, id ASC
 //   - runNwsEnrichment:
 //       ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM()
 //   - runEcccEnrichment:
@@ -49,13 +54,17 @@ function makeBeachesDb(rows) {
     "eccc_attempts INTEGER, " +
     "webcam_checked TEXT, " +
     "recompute_updated TEXT, " +
+    // Migration 0012: the wave cron's own rotation cursor. Nullable with no
+    // backfill, exactly as the migration ships it, so the NULL-sorts-first
+    // behavior every never-refreshed row depends on is what these tests see.
+    "wave_updated TEXT, " +
     "last_viewed TEXT" +
     ")"
   );
   const insert = db.prepare(
     "INSERT INTO beaches " +
-    "(id, enrichment_attempts, eccc_attempts, webcam_checked, recompute_updated, last_viewed) " +
-    "VALUES (?, ?, ?, ?, ?, ?)"
+    "(id, enrichment_attempts, eccc_attempts, webcam_checked, recompute_updated, wave_updated, last_viewed) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
   );
   for (const row of rows) {
     insert.run(
@@ -64,6 +73,7 @@ function makeBeachesDb(rows) {
       row.eccc_attempts === undefined ? 0 : row.eccc_attempts,
       row.webcam_checked === undefined ? null : row.webcam_checked,
       row.recompute_updated === undefined ? null : row.recompute_updated,
+      row.wave_updated === undefined ? null : row.wave_updated,
       row.last_viewed === undefined ? null : row.last_viewed
     );
   }
@@ -87,7 +97,7 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite (F8)", funct
     staleIso = new Date(now - 8 * 86400000).toISOString(); // 8 days ago: cold
   });
 
-  describe("runFlagRecompute / runWaveRefresh hybrid clause", function () {
+  describe("runFlagRecompute hybrid clause (cursor = recompute_updated)", function () {
     const CLAUSE =
       "ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, " +
       "recompute_updated ASC, id ASC";
@@ -116,6 +126,65 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite (F8)", funct
       ]);
       const rows = db.prepare("SELECT * FROM beaches " + CLAUSE).all(hotCutoffIso);
       expect(idsOf(rows)).toEqual(["hot", "never-viewed"]);
+    });
+  });
+
+  // The wave cron's clause differs from the hourly one in EXACTLY one token —
+  // the rotation cursor column. It is repeated verbatim here rather than
+  // generated from a shared string on purpose: these tests exist so a drift in
+  // either cron's SQL shows up as a diff in this file.
+  describe("runWaveRefresh hybrid clause (cursor = wave_updated, migration 0012)", function () {
+    const CLAUSE =
+      "ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, " +
+      "wave_updated ASC, id ASC";
+
+    it("keeps the hot-first demand term: a recently-viewed beach outranks an earlier wave rotation turn", function () {
+      const db = makeBeachesDb([
+        { id: "cold", wave_updated: "2026-07-01T00:00:00.000Z", last_viewed: null },
+        { id: "hot", wave_updated: "2026-07-22T00:00:00.000Z", last_viewed: recentIso },
+        { id: "cold-old-view", wave_updated: "2026-07-10T00:00:00.000Z", last_viewed: staleIso }
+      ]);
+      const rows = db.prepare("SELECT * FROM beaches " + CLAUSE).all(hotCutoffIso);
+      expect(idsOf(rows)).toEqual(["hot", "cold", "cold-old-view"]);
+    });
+
+    it("a NULL wave_updated row sorts AHEAD of every stamped row (no backfill needed)", function () {
+      // This is why migration 0012 ships the column nullable with no backfill:
+      // never-refreshed rows (and every beach offline discovery inserts, since
+      // its UPSERTs enumerate columns explicitly) sort to the FRONT of the
+      // rotation on their own, and the first post-migration run — where every
+      // row is NULL — orders identically to the pre-migration id ASC sweep.
+      const db = makeBeachesDb([
+        { id: "b-stamped-early", wave_updated: "2026-07-01T00:00:00.000Z", last_viewed: null },
+        { id: "a-never-refreshed", wave_updated: null, last_viewed: null },
+        { id: "c-stamped-late", wave_updated: "2026-07-22T00:00:00.000Z", last_viewed: null }
+      ]);
+      const rows = db.prepare("SELECT * FROM beaches " + CLAUSE).all(hotCutoffIso);
+      expect(idsOf(rows)).toEqual(["a-never-refreshed", "b-stamped-early", "c-stamped-late"]);
+    });
+
+    it("is INSENSITIVE to recompute_updated — the hourly cron flattening its own cursor cannot reorder this queue", function () {
+      // The production bug in one assertion: runFlagRecompute stamps
+      // recompute_updated with one shared nowIso for the whole table every hour,
+      // so under the OLD shared clause both rows below tied and the sort fell
+      // through to id ASC forever, starving a fixed tail. On wave_updated the
+      // wave cron's own rotation still decides.
+      const db = makeBeachesDb([
+        {
+          id: "a-recently-waved",
+          recompute_updated: "2026-07-22T12:00:00.000Z",
+          wave_updated: "2026-07-22T12:00:00.000Z",
+          last_viewed: null
+        },
+        {
+          id: "z-starved",
+          recompute_updated: "2026-07-22T12:00:00.000Z",
+          wave_updated: "2026-06-01T00:00:00.000Z",
+          last_viewed: null
+        }
+      ]);
+      const rows = db.prepare("SELECT * FROM beaches " + CLAUSE).all(hotCutoffIso);
+      expect(idsOf(rows)).toEqual(["z-starved", "a-recently-waved"]);
     });
   });
 

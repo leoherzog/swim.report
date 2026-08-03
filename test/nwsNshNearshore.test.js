@@ -4,12 +4,14 @@
 // functions against inline fixtures. Project style: ES modules, NO template
 // literals (string concat with +), function () {} callbacks.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseNshWaveFt,
   expandUgcZones,
-  matches
+  matches,
+  nwsNshNearshoreSource
 } from "../src/waveSources/nwsNshNearshore.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 const NOW_ISO = "2026-07-22T11:00:00Z";
 
@@ -153,5 +155,32 @@ describe("matches", function () {
     expect(matches({ id: "b1", marine_zone: null })).toBe(false);
     expect(matches({ id: "b1" })).toBe(false);
     expect(matches(null)).toBe(false);
+  });
+});
+
+// The wave cron's supplemental pass is SEQUENTIAL and its wall-clock budget is
+// checked between beaches, never inside a request — so an api.weather.gov socket
+// that never settles runs the invocation into the platform's 900 s SIGKILL.
+// fetchJson only arms its AbortController when timeoutMs > 0, and BOTH legs of
+// this source's two-leg resolution run sequentially inside one key resolution,
+// so a cap on only one of them still leaves the other unbounded.
+describe("NSH transport timeouts", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on both the zone lookup and the NSH product fetch", async function () {
+    const calls = installFetch(function (url) {
+      if (url.indexOf("/zones/marine/") !== -1) {
+        return Promise.resolve(jsonResponse({ properties: { cwa: ["MKX"] } }));
+      }
+      return Promise.resolve(jsonResponse({ productText: NSH_MKX }));
+    });
+    await nwsNshNearshoreSource.waveFt({ id: "b1", marine_zone: "LMZ643" }, NOW_ISO, {});
+    expect(calls.length).toBe(2);
+    calls.forEach(function (c) {
+      expect(c.init.signal).toBeDefined();
+      expect(c.init.signal.aborted).toBe(false);
+    });
   });
 });

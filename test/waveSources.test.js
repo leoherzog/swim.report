@@ -254,6 +254,40 @@ describe("resolveSupplementalWaveFt run-scoped dedup (memo)", function() {
     expect(secondFetches).toBe(1);
   });
 
+  it("DOES NOT dedup two CONCURRENT calls sharing a key — which is why the cron's step 2b stays sequential", async function() {
+    // Documentary, and deliberately asserting the CURRENT (weaker) behavior.
+    //
+    // The memo caches the RESOLVED ft-or-null, not the in-flight promise, so it
+    // only dedups calls that are AWAITED one after another — exactly how
+    // runWaveRefresh's supplemental pass calls it today. Pooling that loop for
+    // throughput would therefore issue up to N duplicate api.weather.gov fetches
+    // per gridpoint cell IN PRODUCTION while every sequential dedup test above
+    // stayed green: the highest-risk silent regression in this area. The
+    // supplemental pass is bounded by WAVE_SUPPLEMENTAL_BUDGET_MS instead.
+    //
+    // If step 2b is ever pooled, ship the promise-valued memo FIRST and flip
+    // this expectation to 1 in the same commit.
+    let fetches = 0;
+    waveSources.push({
+      id: "grid", model: "m1", label: "L1", url: "u1",
+      matches: function(beach) { return typeof beach.nws_grid_url === "string"; },
+      keyOf: function(beach) { return beach.nws_grid_url; },
+      waveFt: function() {
+        fetches = fetches + 1;
+        return Promise.resolve(3.3);
+      }
+    });
+    const memo = new Map();
+    const url = "https://api.weather.gov/gridpoints/GRR/33,33";
+    const results = await Promise.all([
+      resolveSupplementalWaveFt(makeBeach({ id: 1, nws_grid_url: url }), "t", {}, memo),
+      resolveSupplementalWaveFt(makeBeach({ id: 2, nws_grid_url: url }), "t", {}, memo)
+    ]);
+    expect(fetches).toBe(2);
+    expect(results[0].waveHeightFt).toBe(3.3);
+    expect(results[1].waveHeightFt).toBe(3.3);
+  });
+
   it("real registry sources all expose the documented shape (keyOf optional)", function() {
     ORIGINAL_SOURCES.forEach(function(s) {
       if (s.keyOf !== undefined) {

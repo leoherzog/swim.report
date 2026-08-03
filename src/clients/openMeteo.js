@@ -9,6 +9,17 @@ import { fetchJson } from "./http.js";
 
 export const WAVE_MODEL_ORDER = ["ecmwf_wam025", "ncep_gfswave025", "meteofrance_wave"];
 
+// Transport cap for every Open-Meteo request. fetchJson only arms its
+// AbortController when timeoutMs > 0, so without this a single hung socket
+// blocks the wave cron until the platform SIGKILLs the invocation at 900 s —
+// the cron's wall-clock deadlines are checked BETWEEN units of work, never
+// inside one, so they cannot rescue a request that never settles. A 100-point
+// marine batch measures ~1-3 s, so 30 s is generous for a healthy fetch while
+// still leaving room for the paced batch loop to finish the run. An abort
+// resolves to null through the existing data-or-null boundary, which the
+// callers already treat as "no wave data for these points".
+const OPEN_METEO_TIMEOUT_MS = 30000;
+
 // The request uses forecast_days=2&timezone=UTC, so hourly.time always starts
 // at hour 0 UTC of the current day and has 48 entries. The array index for the
 // current hour equals the UTC hour of nowIso (0-23), and the 24-hour forecast
@@ -79,7 +90,12 @@ function latLonQuery(points) {
 // the module boundary: any network error, non-2xx status, or JSON parse
 // failure is caught, logged with console.log, and resolves to null.
 async function fetchLocations(url, label) {
-  const json = await fetchJson(url, { label: "openMeteo: " + label });
+  // One timeoutMs here covers BOTH fetchWaveHeightsFt and fetchWinds — they
+  // share this wrapper, so neither can regress to an unbounded request.
+  const json = await fetchJson(url, {
+    label: "openMeteo: " + label,
+    timeoutMs: OPEN_METEO_TIMEOUT_MS
+  });
   if (json === null) {
     return null;
   }

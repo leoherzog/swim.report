@@ -9,7 +9,7 @@ import { PAGE_STYLES } from "./styles.js";
 import { LIST_SEARCH_SCRIPT } from "./searchScript.js";
 import { LIST_SWAP_SCRIPT } from "./listSwapScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
-import { LIST_MAP_SCRIPT } from "./mapScript.js";
+import { buildListMapScript } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import {
   trimWaveSeries,
@@ -46,14 +46,18 @@ const WATER_TEMP_STALE_MS = 43200000; // 12 h — matches the parser window; wat
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
 // The matching wa-theme-matter / wa-palette-mild classes go on <html>.
-const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.10.0";
+const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.11.0";
 
 // MapLibre GL JS (pinned) + the OpenFreeMap positron style: browser-only assets
 // for the home-page map (src/frontend/mapScript.js). Loaded from renderListPage,
 // not from renderDocument's shared <head> — detail/error pages never pay for
 // them, and the Worker itself never fetches them (two-path rule).
-const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js";
-const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css";
+//
+// MapLibre 6 dropped the UMD bundle, so the library is an ES module (.mjs) that
+// the inline map script pulls in with a dynamic import() — there is no
+// <script src> for it any more. Keep both pins on the SAME version.
+const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.1.0/dist/maplibre-gl.mjs";
+const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.1.0/dist/maplibre-gl.css";
 
 // Kit theme overrides, minus the kit's webfont downloads: body/heading lead
 // with genuine system fonts so the pinned matter.css Roboto @font-face (served
@@ -731,8 +735,7 @@ export function renderListPage(data) {
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
     "<script>" + LIST_GEO_SCRIPT + "</script>" +
     "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +
-    "<script src=\"" + MAPLIBRE_JS + "\"></script>" +
-    "<script>" + LIST_MAP_SCRIPT + "</script>";
+    "<script>" + buildListMapScript(MAPLIBRE_JS) + "</script>";
 
   return renderDocument("Swim Report", bodyHtml);
 }

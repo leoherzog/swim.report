@@ -79,6 +79,16 @@ export const TORONTO_API_URL =
   "?resource_id=" + TORONTO_RESOURCE_ID +
   "&sort=dataCollectionDate%20desc&limit=100";
 
+// Transport cap for the CKAN fetch. fetchJson only arms its AbortController
+// when timeoutMs > 0, so without this a hung open.toronto.ca socket stalls the
+// wave cron's SEQUENTIAL supplemental pass until the platform SIGKILLs the
+// invocation — that pass's wall-clock budget is checked between beaches, never
+// inside a request. Only ONE such request is issued per run (the memo below
+// caches its result for every Toronto beach), and the response is a 100-record
+// JSON page, so 15 s is generous. An abort caches null for the run, which is
+// the module's existing fail-closed behavior for a failed fetch.
+const TORONTO_TIMEOUT_MS = 15000;
+
 // Representative feet per coarse staff category. Stand-in magnitudes chosen only
 // so the value lands in the correct wave-height band (rules.js: >=4 red, >=2
 // yellow, else green). Exported for tests.
@@ -323,7 +333,10 @@ async function fetchRecordsForRun(nowIso) {
   if (_recordsCache.key === nowIso) {
     return _recordsCache.records;
   }
-  const json = await fetchJson(TORONTO_API_URL, { label: "torontoBeachObs: fetch" });
+  const json = await fetchJson(TORONTO_API_URL, {
+    label: "torontoBeachObs: fetch",
+    timeoutMs: TORONTO_TIMEOUT_MS
+  });
   let records = null;
   if (json !== null) {
     records = extractRecords(json);
