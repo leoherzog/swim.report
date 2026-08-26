@@ -19,11 +19,11 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "vitest": "^4.1.10",
-    "wrangler": "^4.118.0"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.126.0"
   },
   "dependencies": {
     "@awesome.me/kit-ddd41b2d81": "^1.0.2",
-    "@web.awesome.me/webawesome-pro": "^3.11.0"
+    "@web.awesome.me/webawesome-pro": "^3.12.0"
   }
 }

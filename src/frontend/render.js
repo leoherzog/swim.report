@@ -46,7 +46,7 @@ const WATER_TEMP_STALE_MS = 43200000; // 12 h — matches the parser window; wat
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
 // The matching wa-theme-matter / wa-palette-mild classes go on <html>.
-const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.11.0";
+const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.12.0";
 
 // MapLibre GL JS (pinned) + the OpenFreeMap positron style: browser-only assets
 // for the home-page map (src/frontend/mapScript.js). Loaded from renderListPage,
