@@ -298,7 +298,7 @@ describe("buildWaveModelChartConfig", () => {
     });
   });
 
-  it("carries no scales block (the 'ft' y-axis title rides on the element's yLabel attribute) and hides the chart title plugin", () => {
+  it("carries no scales block (the 'ft' y-axis title rides on the element's y-label attribute) and hides the chart title plugin", () => {
     const config = buildWaveModelChartConfig(threeModelTrimmed());
     expect(config.options.scales).toBeUndefined();
     expect(config.options.plugins.title.display).toBe(false);

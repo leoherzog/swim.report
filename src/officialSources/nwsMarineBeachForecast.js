@@ -2,7 +2,9 @@
 //
 // KIND: official HAZARD scraper (src/officialSources). An official color from
 // this source OVERRIDES the swim.report estimate everywhere it is shown
-// (map marker, list, detail title via render.js markerFlagColor / titleColor),
+// (map marker, list, detail title via render.js markerFlagColor / titleColor —
+// except that once a reading ages past the 2 h STALE_MS horizon a fresher
+// estimate may RAISE the displayed color, never lower it; see displayFlagColor),
 // so this source may ONLY sit on the HAZARD axis — it reports the NWS-forecast
 // swim risk (rip) and surf-height conditions, both genuine surf hazards.
 //

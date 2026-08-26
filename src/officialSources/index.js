@@ -25,7 +25,11 @@ import { nwsMarineBeachForecast } from "./nwsMarineBeachForecast.js";
 // Registry scope note: this product's official flags are HAZARD flags
 // (surf/rip/closure) — the authoritative version of what src/rules.js
 // estimates — and an official color OVERRIDES the estimate everywhere it is
-// shown (render.js markerFlagColor / titleColor). Water-quality (E. coli /
+// shown (render.js markerFlagColor / titleColor), with one bounded exception:
+// once a reading has aged past the 2 h STALE_MS horizon, a fresher estimate may
+// RAISE the displayed color but never lower it (render.js displayFlagColor).
+// The OFFICIAL card always reports the scraped color verbatim regardless.
+// Water-quality (E. coli /
 // bacteria) monitoring sources were intentionally removed: a clean-water
 // reading is a DIFFERENT axis from surf hazard, and letting its "green" win
 // would mask a genuine hazard estimate (e.g. a gale-driven red). Only

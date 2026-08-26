@@ -318,7 +318,9 @@ async function handleBeachesGeojson(env) {
     row.lon = lon;
     finite.push(row);
   }
-  await attachFeatureFlags(env, finite);
+  // Same "now" the detail page's title flag is rendered against: the marker
+  // color rule is staleness-aware (render.js displayFlagColor), so it needs one.
+  await attachFeatureFlags(env, finite, new Date().toISOString());
   const features = [];
   for (let i = 0; i < finite.length; i = i + 1) {
     const row = finite[i];
@@ -348,11 +350,13 @@ async function handleBeachesGeojson(env) {
 }
 
 // Bulk-reads flag:/official: KV for every row and stamps the collapsed color
-// keyword onto row.flag in place. Chunked to the 100-key bulk-get ceiling and
+// keyword onto row.flag in place. nowIso feeds markerFlagColor's staleness gate
+// (an aged point-in-time official reading may be raised by a fresher, more
+// severe estimate — see render.js displayFlagColor). Chunked to the 100-key bulk-get ceiling and
 // read in parallel; with the full flag-worthy directory (~613 rows today) that
 // is ~7 chunks per key family, scaling linearly with row count. A missing or
 // expired KV value maps to the honest "unknown" keyword, never a green default.
-async function attachFeatureFlags(env, rows) {
+async function attachFeatureFlags(env, rows, nowIso) {
   if (!rows || rows.length === 0) {
     return;
   }
@@ -376,7 +380,7 @@ async function attachFeatureFlags(env, rows) {
       const row = chunk[j];
       const estimate = flagMap.get("flag:" + row.id) || null;
       const official = officialMap.get("official:" + row.id) || null;
-      row.flag = markerFlagColor(estimate, official);
+      row.flag = markerFlagColor(estimate, official, nowIso);
     }
   }
 }

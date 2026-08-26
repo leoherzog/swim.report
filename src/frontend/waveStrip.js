@@ -402,10 +402,11 @@ export function modelNowCaption(trimmed) {
 // cleanly; nulls preserved so spanGaps:false draws honest gaps. Unlike the band
 // strip this keeps tooltips + legend (an interactive comparison view). The
 // chart type AND the "ft" y-axis label both come from the <wa-line-chart>
-// element (its yLabel attribute — empirically the axis title renders from
-// parsed HTML; the kebab y-label spelling does NOT), so this config only needs
-// to keep plugins.title.display false to suppress the element's accessibility
-// label leaking as a visible chart title. The caller stringifies this.
+// element (its y-label attribute — the component declares the yLabel property
+// with an explicit attribute name of "y-label", so that kebab spelling is the
+// only one it observes), so this config only needs to keep
+// plugins.title.display false to suppress the element's accessibility label
+// leaking as a visible chart title. The caller stringifies this.
 export function buildWaveModelChartConfig(trimmed) {
   const t = readTrimmed(trimmed);
   const byModel = t.byModel;

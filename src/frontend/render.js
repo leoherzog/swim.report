@@ -11,6 +11,7 @@ import { LIST_SWAP_SCRIPT } from "./listSwapScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
 import { buildListMapScript } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
+import { SEVERITY_RANK } from "../rules.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
@@ -122,19 +123,6 @@ function flagIconColorClass(color) {
   return "flag-icon-" + collapseFlagColor(color);
 }
 
-// The collapsed map-flag color KEYWORD for a beach, given its cached estimate
-// and official reading. Best-color precedence mirrors the detail page's
-// titleColor: official wins over estimate, estimate wins over "unknown".
-// double-red collapses to "red" (exactly as flagIconColorClass tints it), so
-// the result is always one of green|yellow|red|unknown. Exported so the
-// /api/beaches.geojson endpoint (router.js) stamps each feature's `flag`
-// property from the same single color rule the UI flags use.
-export function markerFlagColor(estimate, official) {
-  const best = official ? official.color
-    : (estimate ? estimate.color : "unknown");
-  return collapseFlagColor(best);
-}
-
 function isStale(nowIso, updatedIso, thresholdMs) {
   if (!nowIso || !updatedIso) {
     return false;
@@ -146,6 +134,67 @@ function isStale(nowIso, updatedIso, thresholdMs) {
   }
   const limit = typeof thresholdMs === "number" ? thresholdMs : STALE_MS;
   return (now - updated) > limit;
+}
+
+// The more severe of two colors by the shared SEVERITY_RANK. "unknown" ranks
+// below green, so it can never pull a real color down and is never raised to.
+function worstColor(a, b) {
+  const ca = normalizeColor(a);
+  const cb = normalizeColor(b);
+  return SEVERITY_RANK[cb] > SEVERITY_RANK[ca] ? cb : ca;
+}
+
+// The single "best current reading" color for a beach, given its cached
+// estimate, its scraped official record, and now. Behind BOTH the detail page's
+// title flag and the map/list marker (markerFlagColor), so the two can never
+// disagree about one beach.
+//
+// A scraped official color normally wins OUTRIGHT: it is a posted flag, and an
+// estimate must never talk over one. But "official" is not the same as
+// "current". Several of these sources are POINT-IN-TIME readings on their own
+// slow cadence — NWS Grand Rapids' OMR beach report is a single morning
+// observation, stamped with the product's issuance time and carrying its own
+// disclaimer that it "may not be representative of conditions later in the
+// day". Once such a reading has aged past our own hourly-recompute horizon
+// (STALE_MS — the same 2 h that already puts the stale warning or the
+// readingNote on its card), a fresher estimate may RAISE the displayed color
+// but never lower it. That is the identical raise-only floor shape rules.js
+// already uses for nws-floor / eccc-floor / wq-floor.
+//
+// Note this gate is the 2 h DEFAULT, deliberately NOT the source's own longer
+// staleMs: a 30 h horizon means "the card is not yet misleading to show", not
+// "this reading is still current enough to outrank live hazard data".
+//
+// The case this rule exists for (2026-08-26, Holland State Park): WFO GRR's
+// 10:20 AM OMR posted Yellow at 3 ft; the SAME office then issued a Beach
+// Hazards Statement at 11:38 AM and a 2:06 PM Surf Zone Forecast calling Ottawa
+// County swim risk High with 3–5 ft waves. The estimate correctly read red
+// while the title flag and map marker still showed the four-hour-old yellow.
+//
+// Raise-only, never lower, in every staleness state: a fresher GREEN estimate
+// can never pull a posted RED down. And the OFFICIAL card itself is untouched —
+// it keeps rendering the scraped color verbatim with its own stale warning — so
+// no estimate is ever presented AS an official flag status.
+export function displayFlagColor(estimate, official, nowIso) {
+  const estimateColor = estimate ? estimate.color : null;
+  if (!official) {
+    return normalizeColor(estimateColor);
+  }
+  // No usable timestamp (a legacy KV record) reads as fresh: without evidence
+  // that the reading has aged, the posted flag keeps winning outright.
+  if (!isStale(nowIso, official.updated, STALE_MS)) {
+    return normalizeColor(official.color);
+  }
+  return worstColor(official.color, estimateColor);
+}
+
+// The collapsed map-flag color KEYWORD for a beach. double-red collapses to
+// "red" (exactly as flagIconColorClass tints it), so the result is always one
+// of green|yellow|red|unknown. Exported so the /api/beaches.geojson endpoint
+// (router.js) stamps each feature's `flag` property from the same single color
+// rule the UI flags use.
+export function markerFlagColor(estimate, official, nowIso) {
+  return collapseFlagColor(displayFlagColor(estimate, official, nowIso));
 }
 
 function isUrlLike(value) {
@@ -949,7 +998,7 @@ function renderWaveModelCompare(series) {
   const modelSummary = waveModelSummary(series);
   return "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\" " +
     "appearance=\"plain\" icon-placement=\"start\">" +
-    "<wa-line-chart class=\"wave-model-chart\" without-animation yLabel=\"ft\" " +
+    "<wa-line-chart class=\"wave-model-chart\" without-animation y-label=\"ft\" " +
     "label=\"Wave height by forecast model\" description=\"" +
     escapeHtml(modelSummary) + "\">" +
     chartScriptAndFallback(modelConfig, modelSummary) +
@@ -1022,9 +1071,11 @@ export function renderDetailPage(data) {
   const lat = Number(beach.lat).toFixed(4);
   const lon = Number(beach.lon).toFixed(4);
 
-  // Title flag mirrors the best current reading: scraped official color when
-  // available, otherwise the estimate (null-safe: no flag data renders gray).
-  const titleColor = official ? official.color : (estimate ? estimate.color : null);
+  // Title flag mirrors the best current reading: the scraped official color
+  // when available, raised by a fresher, more severe estimate once that
+  // official reading has aged past STALE_MS, otherwise the estimate. Null-safe:
+  // no flag data renders gray. See displayFlagColor for the full rule.
+  const titleColor = displayFlagColor(estimate, official, nowIso);
   const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null,
     FLAG_ICON_LABELS[normalizeColor(titleColor)]);
 

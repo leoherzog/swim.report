@@ -12,7 +12,11 @@ export const RULES_VERSION = "1.5.0";
 // pull a higher hazard color down. unknown ranks below green so an advisory can
 // also lift a no-data unknown to yellow/red (a real advisory is more actionable
 // than "no data"), matching how the NWS floor treats unknown.
-const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-red": 4 };
+//
+// Exported because the frontend's displayFlagColor (src/frontend/render.js)
+// applies the SAME raise-only comparison when a point-in-time official reading
+// has aged past our recompute horizon. One severity ordering, one place.
+export const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-red": 4 };
 
 // Caveat appended to the reason when the cron reports that weather alerts
 // were not checkable for this beach (neither NWS nor ECCC enrichment has

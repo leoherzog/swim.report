@@ -1050,6 +1050,38 @@ describe("GET /api/beaches.geojson (clustered map directory)", () => {
     expect(byId.b2).toBe("green");
   });
 
+  it("raises an aged official color to a fresher, more severe estimate", async () => {
+    // Same rule as the detail-page title (render.js displayFlagColor): once the
+    // official reading is past the 2 h horizon the marker takes the worst of the
+    // two, so the map and the detail page can never disagree about one beach.
+    const rows = [
+      { id: "aged", name: "Aged", park_name: null, lat: 42, lon: -86 },
+      { id: "floor", name: "Floor", park_name: null, lat: 43, lon: -85 }
+    ];
+    const { env } = makeEnv(rows, flagsFrom({
+      "flag:aged": { color: "red" },
+      "official:aged": { color: "yellow", updated: "2020-01-01T00:00:00.000Z" },
+      // Raise-only: a fresher green estimate must NOT pull an aged posted red down.
+      "flag:floor": { color: "green" },
+      "official:floor": { color: "red", updated: "2020-01-01T00:00:00.000Z" }
+    }));
+    const body = await (await geojson(env)).json();
+    const byId = {};
+    body.features.forEach(function (f) { byId[f.properties.id] = f.properties.flag; });
+    expect(byId.aged).toBe("red");
+    expect(byId.floor).toBe("red");
+  });
+
+  it("keeps a still-fresh official color over a more severe estimate", async () => {
+    const rows = [{ id: "fresh", name: "Fresh", park_name: null, lat: 42, lon: -86 }];
+    const { env } = makeEnv(rows, flagsFrom({
+      "flag:fresh": { color: "red" },
+      "official:fresh": { color: "yellow", updated: new Date().toISOString() }
+    }));
+    const body = await (await geojson(env)).json();
+    expect(body.features[0].properties.flag).toBe("yellow");
+  });
+
   it("collapses double-red to the red keyword", async () => {
     const rows = [{ id: "dr", name: "DR", park_name: null, lat: 42, lon: -86 }];
     const { env } = makeEnv(rows, flagsFrom({ "official:dr": { color: "double-red" } }));
@@ -1446,6 +1478,82 @@ describe("detail-page title flag precedence", () => {
     expect(h1).toContain("flag-icon-unknown");
     expect(h1).toContain("label=\"Flag status unknown\"");
     expect(h1).not.toContain("flag-icon-green");
+  });
+});
+
+// An official record whose reading has aged past the 2 h STALE_MS default is a
+// POINT-IN-TIME observation, not a live one (NWS GRR's morning OMR beach report
+// is the canonical case). Past that horizon a fresher estimate may RAISE the
+// displayed color but never lower it — the same raise-only floor shape rules.js
+// uses for nws-floor / eccc-floor / wq-floor.
+describe("detail-page title flag: raise-only over an aged official reading", () => {
+  function titleOf(html) {
+    return sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
+  }
+  // 4 h before NOW_ISO — past the 2 h default, well inside the OMR's own 30 h
+  // staleMs, which is deliberately NOT the gate.
+  const AGED = "2026-07-05T08:00:00.000Z";
+  // 30 min before NOW_ISO — still fresh.
+  const FRESH = "2026-07-05T11:30:00.000Z";
+
+  function official(color, updated) {
+    return {
+      color: color,
+      reason: "posted",
+      official: true,
+      source: "https://www.weather.gov/grr/",
+      updated: updated,
+      staleMs: 30 * 60 * 60 * 1000,
+      readingNote: "Morning reading — conditions may have changed since it was posted"
+    };
+  }
+
+  it("raises an aged official yellow to a fresher estimate's red", () => {
+    const h1 = titleOf(detailPage(
+      { color: "red", reason: "Active NWS alert: Beach Hazards Statement", sources: [] },
+      official("yellow", AGED)
+    ));
+    expect(h1).toContain("flag-icon-red");
+    expect(h1).toContain("label=\"Red flag\"");
+    expect(h1).not.toContain("flag-icon-yellow");
+  });
+
+  it("never lowers an aged official red to a fresher estimate's green", () => {
+    const h1 = titleOf(detailPage(
+      { color: "green", reason: "calm", sources: [] },
+      official("red", AGED)
+    ));
+    expect(h1).toContain("flag-icon-red");
+    expect(h1).not.toContain("flag-icon-green");
+  });
+
+  it("keeps the official color outright while the reading is still fresh", () => {
+    const h1 = titleOf(detailPage(
+      { color: "red", reason: "Active NWS alert: Beach Hazards Statement", sources: [] },
+      official("yellow", FRESH)
+    ));
+    expect(h1).toContain("flag-icon-yellow");
+    expect(h1).not.toContain("flag-icon-red");
+  });
+
+  it("does not let an unknown estimate pull an aged official green down", () => {
+    const h1 = titleOf(detailPage(null, official("green", AGED)));
+    expect(h1).toContain("flag-icon-green");
+    expect(h1).not.toContain("flag-icon-unknown");
+  });
+
+  it("leaves the OFFICIAL card reporting the scraped color verbatim", () => {
+    // The raised title must never rewrite the official card: that card is the
+    // posted flag, and an estimate may never be presented AS official.
+    const html = detailPage(
+      { color: "red", reason: "Active NWS alert: Beach Hazards Statement", sources: [] },
+      official("yellow", AGED)
+    );
+    const card = officialCardOf(html);
+    expect(card).toContain(">YELLOW</span>");
+    expect(card).toContain("flag-icon-yellow");
+    expect(card).not.toContain("flag-icon-red");
+    expect(titleOf(html)).toContain("flag-icon-red");
   });
 });
 

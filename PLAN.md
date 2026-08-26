@@ -1757,7 +1757,9 @@ wrapper). No Date.now(), no ambient clock.
     // fixed-site scrapers, then regional tables, then broad statewide bboxes.
     //
     // SCOPE: hazard/flag/closure sources ONLY. An official color OVERRIDES the
-    // estimate everywhere it is shown, so water-quality (E. coli / bacteria)
+    // estimate everywhere it is shown (subject only to the section-9
+    // displayFlagColor raise-only rule for an aged reading), so water-quality
+    // (E. coli / bacteria)
     // monitoring sources are deliberately NOT registered here — clean-water
     // "green" is a different axis from surf hazard and would mask a genuine
     // hazard estimate (e.g. a gale-driven red). Six such sources (bldhd-mi,
@@ -1976,7 +1978,9 @@ ANY failure, and ambiguous / stale / unrecognized-status sites OMITTED (never a
 guessed color). Full color semantics are in README.md's official-sources table.
 
 REGISTRY SCOPE — hazard/flag/closure sources only. An official color OVERRIDES
-the estimate everywhere it is shown (render.js markerFlagColor / titleColor), so
+the estimate everywhere it is shown (render.js markerFlagColor / titleColor —
+subject only to the section-9 displayFlagColor raise-only rule once the reading
+has aged past the default 2 h STALE_MS; the official CARD is never affected), so
 water-quality (E. coli / bacteria) monitoring sources are NOT registered: a
 clean-water "green" is a different axis from surf hazard and would mask a genuine
 hazard estimate (e.g. a gale-driven red). Six such water-quality scrapers were
@@ -3182,7 +3186,7 @@ Routing table (method GET only; anything else → 405):
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate PLANAR squared-distance ordering (cheap, monotone in true distance at this scale) so the LIMIT is a pure safety cap on an ALREADY-ordered read: it keeps the 500 NEAREST candidates, not the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is load-bearing correctness, not an optimization — without it the cap truncated in scan order, so a visitor at the far end of the table got a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null (falling back to the unordered shape) if any value is non-finite; NO request text is ever interpolated. Without: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by DISPLAY name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the WHOLE table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty/whitespace q is ignored; with a location it filters THEN distance-sorts (proximity preserved). KV: ONE bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — 2 KV reads per page regardless of row count; HOME_LIST_LIMIT (100) is load-bearing here, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null); 404 HTML if no row |
-| GET /api/beaches.geojson  | handleBeachesGeojson | D1: SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] — NO bbox predicate, NO LIMIT (the full flag-worthy directory, ~613 today). Then attachFeatureFlags: bulk KV read of flag:/official: for every id (chunked to the 100-key bulk-get cap → ~7 chunks × 2 families at present, read in parallel; scales linearly with row count) stamps a per-feature `flag` KEYWORD via markerFlagColor — best-color official>estimate>unknown with double-red collapsed to red, missing/expired KV → "unknown". Rows with non-finite lat/lon are skipped (no NaN coordinate). Location-independent (no request.cf, no bbox) so fully cacheable; the homepage map fetches it ONCE on load and feeds it to a native clustered GeoJSON source. Scaling beyond ~5–10k features needs server clustering / paging (see section 9 / TODO). | GeoJSON { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] } |
+| GET /api/beaches.geojson  | handleBeachesGeojson | D1: SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] — NO bbox predicate, NO LIMIT (the full flag-worthy directory, ~613 today). Then attachFeatureFlags: bulk KV read of flag:/official: for every id (chunked to the 100-key bulk-get cap → ~7 chunks × 2 families at present, read in parallel; scales linearly with row count) stamps a per-feature `flag` KEYWORD via markerFlagColor(estimate, official, nowIso) — the section-9 displayFlagColor rule (official wins outright while fresh; once the official reading is older than the default 2 h STALE_MS, the MORE SEVERE of official and estimate, raise-only) with double-red collapsed to red, missing/expired KV → "unknown". Rows with non-finite lat/lon are skipped (no NaN coordinate). Location-independent (no request.cf, no bbox) so fully cacheable; the homepage map fetches it ONCE on load and feeds it to a native clustered GeoJSON source. Scaling beyond ~5–10k features needs server clustering / paging (see section 9 / TODO). | GeoJSON { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] } |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -3497,10 +3501,41 @@ exporting a CSS string); render.js is the sole module the router imports.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
   the display name (plus subtitle when applicable), estimated flag chip, and OFFICIAL
   badge when official is non-null.
+- DISPLAY COLOR (displayFlagColor in render.js) — the ONE rule behind both the detail
+  page's h1 title flag and the map/list marker keyword (markerFlagColor), so the two can
+  never disagree about one beach. Signature: displayFlagColor(estimate, official, nowIso)
+  -> one of green|yellow|red|double-red|unknown; markerFlagColor is the same value passed
+  through collapseFlagColor (double-red -> red).
+    1. No official record -> normalizeColor(estimate.color), gray unknown when absent.
+    2. Official record that is NOT stale by the DEFAULT 2 h STALE_MS (which includes a
+       record carrying no parseable updated — a legacy KV value reads as fresh, so the
+       posted flag keeps winning outright) -> normalizeColor(official.color). This is the
+       normal case: a posted official flag outranks the estimate, full stop.
+    3. Official record older than the DEFAULT STALE_MS -> the MORE SEVERE of
+       official.color and estimate.color by rules.js SEVERITY_RANK (exported for this;
+       unknown ranks 0 so it can neither lower a real color nor be raised to).
+  Rationale: "official" is not the same as "current". Several sources are POINT-IN-TIME
+  readings on their own slow cadence (nws-omr-grr is a single MORNING observation stamped
+  with the product's issuance time and carrying its own "may not be representative of
+  conditions later in the day" disclaimer). Past our own hourly-recompute horizon, a
+  fresher estimate may RAISE the displayed color but NEVER lower it — the identical
+  raise-only floor shape rules.js uses for nws-floor / eccc-floor / wq-floor. Observed
+  2026-08-26 at Holland State Park: the 10:20 AM OMR table posted Yellow, and WFO GRR's
+  own 11:38 AM Beach Hazards Statement plus its 2:06 PM Surf Zone Forecast (Ottawa County
+  swim risk High, 3-5 ft waves) made red the honest headline four hours later.
+  The gate is the 2 h DEFAULT, deliberately NOT the record's own longer staleMs: a 30 h
+  horizon means "this card is not yet misleading to show", not "this reading still
+  outranks live hazard data".
+  The OFFICIAL CARD is UNAFFECTED — renderOfficialCard always reports official.color
+  verbatim with its own stale warning / reading note, so an estimate is never presented
+  AS an official flag status. Likewise the LIST ROW chip stays the estimate color plus a
+  colorless OFFICIAL badge (see the list-page bullet); only the title flag and the marker
+  take the display color.
 - Detail page, in order: a beach-identity block (div.beach-identity, a tight
   wa-stack wa-gap-2xs nested in the main stack) holding back link; h1 title with a
-  colorized flag icon on the left (official color when available, else estimate
-  color, else gray unknown) + display name; optional beach-name subtitle; lat/lon
+  colorized flag icon on the left (displayFlagColor above: the official color when
+  available, raised by a fresher, more severe estimate once that official reading has
+  aged past the default STALE_MS; else the estimate color; else gray unknown) + display name; optional beach-name subtitle; lat/lon
   meta line linking to OpenStreetMap. The nested stack groups these lines tightly
   and zero-margins its children, so .beach-title/.beach-subtitle carry no margins.
   Then the detail stack — answer first, exploration second: official card (if any) →
@@ -3599,13 +3634,20 @@ exporting a CSS string); render.js is the sole module the router imports.
     series colors var(--wa-color-blue-60) / var(--wa-color-purple-60)
     / var(--wa-color-cyan-60) — never green/yellow/red, which are reserved for flag
     semantics. Category labels "Now", "+1 h" ... ; the y axis is titled "ft" via the
-    element's yLabel="ft" attribute (NOT the slotted config — buildWaveModelChartConfig
-    emits no scales block). Empirically verified against the pinned webawesome@3.11.0
-    kit: wa-line-chart's yLabel attribute IS observed from parsed HTML and renders the
-    axis title, but ONLY in its camelCase spelling yLabel="ft" (the HTML parser
-    lowercases it to ylabel, which the component observes); the kebab spelling
-    y-label="ft" renders no axis title and must never be emitted (a test asserts the
-    html does not contain "y-label="). The slotted config still sets
+    element's y-label="ft" attribute (NOT the slotted config — buildWaveModelChartConfig
+    emits no scales block). The kebab spelling is the ONLY one that works, and the
+    attribute must always be emitted as y-label="ft" (a test asserts the html does not
+    contain "yLabel="). Verified against the pinned webawesome@3.12.0 kit, which is the
+    build production loads: wa-chart declares the property as
+    property({ attribute: "y-label" }), and Lit uses an explicit attribute string
+    verbatim rather than lowercasing the property name, so the element's
+    observedAttributes contains "y-label" and does NOT contain "ylabel". A camelCase
+    yLabel="ft" in server-rendered HTML is therefore lowercased by the parser to
+    "ylabel", which the component never observes, and the axis title silently does not
+    render. (An earlier revision of this document claimed the opposite, citing an
+    empirical check against the 3.11.0 kit. That claim was wrong: the chart chunk is
+    identical in 3.11.0 and 3.12.0 apart from four import hashes, so no version
+    difference could have produced the reported behavior.) The slotted config still sets
     plugins.title.display false so the element's label attribute ("Wave height by
     forecast model", an accessibility label) does not leak as a visible chart title above
     the plot. UNLIKE the band strip this chart keeps the default legend and tooltips

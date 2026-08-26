@@ -6,6 +6,16 @@
 // because it reports POSTED LIFEGUARD FLAG COLORS — the gold-standard hazard
 // axis, exactly what src/rules.js estimates.
 //
+// POINT-IN-TIME CAVEAT: this product is a single MORNING observation (see the
+// updated= note below and the declared readingNote). It is therefore the
+// canonical case for render.js displayFlagColor's raise-only rule — past the
+// 2 h STALE_MS horizon a fresher, more severe estimate lifts the title flag and
+// map marker above this color, though never below it, and this card keeps
+// reporting the scraped color verbatim. Observed 2026-08-26 at Holland State
+// Park: the 10:20 AM table posted Yellow, and WFO GRR's own 11:38 AM Beach
+// Hazards Statement plus its 2:06 PM Surf Zone Forecast (Ottawa County swim
+// risk High, 3-5 ft) made red the honest headline four hours later.
+//
 // SOURCE: NWS Grand Rapids (WFO GRR) "Other Marine Reports" product (AWIPS
 // OMRGRR), which carries the fixed "Lake Michigan Beach Reports" table for the
 // west-Michigan Lake Michigan state-park beaches. Fetched two-legged through

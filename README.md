@@ -82,7 +82,11 @@ own name.
 `properties.flag` is the beach's current best-known flag color as a keyword — one
 of `green`, `yellow`, `red`, or `unknown` (a scraped official reading wins over the
 estimate, which wins over `unknown`; `double-red` collapses to `red`; a missing or
-expired reading maps to `unknown`, never a green default). The map keys each flag
+expired reading maps to `unknown`, never a green default). One exception keeps a
+point-in-time official reading from going stale on the map: once the official
+record is more than 2 h old, the more severe of the official and estimated colors
+wins — a fresher estimate can **raise** the marker but never lower it. The detail
+page's title flag uses the identical rule. The map keys each flag
 icon's tint off this value. Beaches with non-finite coordinates are omitted.
 
 ### `GET /api/flag/:beachId`
@@ -708,7 +712,10 @@ Registered scrapers (registry order — most-specific match first, since
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (verified-live: CLE, BUF — Lake Erie/Ontario) | Zonal (county-scale) rip "Swim Risk" (Low→green/Moderate→yellow/High→red) and surf-height text (max ft → `waveColorForHeight`); site color = more severe of the two; both null → no data. Bound to beaches by curated name/proximity table. Registered **last** (broad bbox) |
 
 Only hazard/flag/closure sources are registered. An official color **overrides**
-the estimate wherever it is shown, so water-quality (E. coli / bacteria)
+the estimate wherever it is shown — with the single bounded exception that a
+reading older than 2 h may be **raised** (never lowered) by a more severe fresh
+estimate on the title flag and map marker; the OFFICIAL card always reports the
+scraped color verbatim. So water-quality (E. coli / bacteria)
 monitoring sources are deliberately excluded from *this* registry — a clean-water
 reading is a different axis from surf hazard, and letting its "green" win would
 mask a genuine hazard estimate (e.g. a gale-driven red). Six such water-quality

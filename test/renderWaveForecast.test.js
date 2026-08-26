@@ -316,11 +316,13 @@ describe("wave-forecast model comparison", () => {
     const open = "<wa-details class=\"wave-model-compare\" summary=\"Compare wave models\" " +
       "appearance=\"plain\" icon-placement=\"start\">";
     expect(html).toContain(open);
-    // The "ft" y-axis unit rides on the element via the yLabel attribute
-    // (empirically the axis title renders from parsed HTML). The kebab
-    // y-label spelling is dead and must never be emitted.
-    expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation yLabel=\"ft\"");
-    expect(html).not.toContain("y-label=");
+    // The "ft" y-axis unit rides on the element via the y-label attribute.
+    // wa-line-chart declares yLabel with an explicit attribute name of
+    // "y-label", so that is the only spelling it observes: a camelCase
+    // yLabel="ft" is lowercased by the HTML parser to "ylabel", which the
+    // component never sees, and the axis title would silently not render.
+    expect(html).toContain("<wa-line-chart class=\"wave-model-chart\" without-animation y-label=\"ft\"");
+    expect(html).not.toContain("yLabel=");
     // Collapsed by default: the model disclosure's opening tag must not carry "open".
     const tagStart = html.indexOf("<wa-details class=\"wave-model-compare\"");
     const tagEnd = html.indexOf(">", tagStart);
@@ -353,7 +355,7 @@ describe("wave-forecast model comparison", () => {
     expect(html).toContain("--point-radius: 0");
     expect(modelConfig.data.datasets[0]).not.toHaveProperty("pointRadius");
     expect(modelConfig.data.datasets[0].spanGaps).toBe(false);
-    // The "ft" y-axis label rides on the element (yLabel attribute), not the
+    // The "ft" y-axis label rides on the element (y-label attribute), not the
     // slotted config — so the config carries no scales block. It keeps only
     // plugins.title.display false to suppress the element's label leaking as
     // a visible chart title.
