@@ -169,14 +169,24 @@ const SCRIPT_LINES = [
   // Add the clustered source + its three layers (cluster circle, count label,
   // unclustered flag icon), then wire the click/cursor handlers. Called once,
   // after the images are registered and the FeatureCollection is in hand.
+  //
+  // Clustering is deliberately tuned WEAK: it exists to keep the fully zoomed-out
+  // continental view legible, not to thin out a regional one. clusterRadius is
+  // one icon width (CSS_SIZE, 28 px) rather than the 50 px default, so two
+  // beaches merge only when their flags would genuinely collide; and
+  // clusterMaxZoom 8 turns clustering off entirely from zoom 9 up — the zoom the
+  // map itself opens at once a user location is resolved, so a located visitor
+  // never lands on a bubble. Individual symbols are cheap here (GPU-drawn, and
+  // icon-allow-overlap is already true), so the cost of the looser setting is
+  // only visual density, which is the point.
   "  const addBeachLayers = function (fc) {",
   "    try {",
   "      map.addSource('beaches', {",
   "        type: 'geojson',",
   "        data: fc,",
   "        cluster: true,",
-  "        clusterRadius: 50,",
-  "        clusterMaxZoom: 12",
+  "        clusterRadius: CSS_SIZE,",
+  "        clusterMaxZoom: 8",
   "      });",
   "    } catch (e) { return; }",
   "    try {",
