@@ -181,10 +181,13 @@ function sleep(ms) {
 // Kept pure + three-arg (no injected clock) so it is trivially unit-testable.
 //
 // The production call site does NOT pass a budget any more — the classification
-// pass is a local join, not a per-beach network probe — but the machinery stays
-// wired and tested because the join's real cost at continental scale is a
-// prediction, not a measurement, and re-inventing a budget after a SIGKILLed
-// daily job is strictly worse than keeping one that costs nothing.
+// pass is a local join, not a per-beach network probe. The Great Lakes cost is
+// now MEASURED rather than predicted: 5.8 s for the whole 1771-beach pass on a
+// GitHub runner (17 s on a slower laptop), inside a 22 s end-to-end batch. The
+// machinery stays wired and tested anyway, because that figure is a Great Lakes
+// figure and the stated goal is every ocean and Great Lakes beach in North
+// America — roughly 6x the table. Re-inventing a budget after a SIGKILLed daily
+// job is strictly worse than keeping one that costs nothing to carry.
 export function budgetExhausted(startMs, budgetMs, nowMs) {
   return budgetMs > 0 && (nowMs - startMs) >= budgetMs;
 }

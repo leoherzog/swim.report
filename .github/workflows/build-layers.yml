@@ -25,8 +25,9 @@ on:
   # loses at most a few days of OSM freshness while downloading ~38 GB per week
   # instead of ~133 from a free service the project depends on.
   # It is twice weekly rather than weekly because GitHub does not merely DEFER
-  # this repo's crons by 17 min to 11 h — it SKIPS occurrences (classify.yml used
-  # to fire 4-6 of its 24 hourly slots). On a WEEKLY cron one skipped occurrence
+  # this repo's crons by 17 min to 11 h — it SKIPS occurrences (the retired hourly
+  # classification workflow fired 4-6 of its 24 daily slots, measured over a week).
+  # On a WEEKLY cron one skipped occurrence
   # is a 14-day gap, which is exactly MAX_SOURCE_AGE_DAYS. Two slots plus a 21-day
   # horizon means a single miss can never trip the staleness tripwire.
   schedule:

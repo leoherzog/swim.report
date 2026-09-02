@@ -9,7 +9,8 @@
 //
 // Two things here are load-bearing beyond ordinary coverage:
 //
-//   1. GRID-VS-LINEAR EQUALITY, including ORDER. Every consumer's tie-break
+//   1. GRID-VS-LINEAR EQUALITY of queryGridByBounds, including ORDER. Every
+//      consumer's tie-break
 //      (associateParkForBeach's smallest-area-then-first-seen, nearbyLakeQids'
 //      push order) rides on candidates arriving in ascending original index
 //      order, so the grid is only correct if it is bit-identical to the full
@@ -26,8 +27,6 @@ import { describe, it, expect } from "vitest";
 import {
   GRID_CELL_DEG,
   buildLayerGrid,
-  queryGrid,
-  queryGridNearVertices,
   queryGridByBounds,
   buildSegmentGrid,
   addFeatureSegments,
@@ -37,10 +36,6 @@ import {
   segmentGridStats
 } from "../src/layerGrid.js";
 import { KM_PER_DEG, minGeometryDistanceKm } from "../src/geo.js";
-
-// The longitude clamp the module applies (mirrored, not imported — it is an
-// implementation detail there and a reference-implementation input here).
-const MIN_COS_LAT = 0.01;
 
 // --- fixture builders ----------------------------------------------------------
 
@@ -84,24 +79,6 @@ function randomLayer(count, rng) {
     features.push(boxFeature("f" + i, lon, lat, lon + w, lat + h));
   }
   return features;
-}
-
-// The reference implementation of queryGrid: the full-list scan the grid
-// replaces, padded exactly the same way (degrees of latitude, scaled by
-// 1/cos(lat) on the longitude axis so the reach is the same distance on both
-// axes).
-function linearQueryGrid(features, lat, lon, padDeg) {
-  const latPad = padDeg > 0 ? padDeg : 0;
-  const lonPad = latPad / Math.max(Math.abs(Math.cos(lat * Math.PI / 180)), MIN_COS_LAT);
-  const out = [];
-  for (let i = 0; i < features.length; i = i + 1) {
-    const b = features[i].bounds;
-    if (lat >= b.minLat - latPad && lat <= b.maxLat + latPad &&
-      lon >= b.minLon - lonPad && lon <= b.maxLon + lonPad) {
-      out.push(i);
-    }
-  }
-  return out;
 }
 
 // The reference implementation of queryGridByBounds: osmSelect's boundsOverlap,
@@ -159,7 +136,7 @@ function lonDegForKm(km, lat) {
 
 // --- mode A: the envelope grid -------------------------------------------------
 
-describe("buildLayerGrid / queryGrid — basics", function () {
+describe("buildLayerGrid / queryGridByBounds — basics", function () {
   it("uses a 0.05 degree cell, an order of magnitude above every probe radius", function () {
     expect(GRID_CELL_DEG).toBe(0.05);
     // The largest radius in the pipeline is OCEAN_RADIUS_M / GREAT_LAKE_RADIUS_M
@@ -169,43 +146,14 @@ describe("buildLayerGrid / queryGrid — basics", function () {
 
   it("returns [] and never throws on an empty index", function () {
     const grid = buildLayerGrid([]);
-    expect(queryGrid(grid, 44, -87, 0.01)).toEqual([]);
-    expect(queryGridNearVertices(grid, [{ lat: 44, lon: -87 }], 0.01)).toEqual([]);
     expect(queryGridByBounds(grid, { minLat: 43, minLon: -88, maxLat: 45, maxLon: -86 })).toEqual([]);
   });
 
   it("returns [] and never throws for missing, malformed or non-finite input", function () {
     const grid = buildLayerGrid([squareFeature("a", -87, 44, 0.01)]);
-    expect(queryGrid(null, 44, -87, 0.01)).toEqual([]);
-    expect(queryGrid(grid, NaN, -87, 0.01)).toEqual([]);
-    expect(queryGrid(grid, 44, Infinity, 0.01)).toEqual([]);
-    expect(queryGridNearVertices(grid, [], 0.01)).toEqual([]);
-    expect(queryGridNearVertices(grid, [{ lat: null, lon: -87 }], 0.01)).toEqual([]);
     expect(queryGridByBounds(grid, null)).toEqual([]);
     expect(queryGridByBounds(grid, { minLat: 1, minLon: 2 })).toEqual([]);
     expect(buildLayerGrid(null).count).toBe(0);
-  });
-
-  it("finds a feature whose envelope contains the point, and nothing far away", function () {
-    const features = [
-      squareFeature("near", -87.02, 44.02, 0.01),
-      squareFeature("far", -80, 41, 0.01)
-    ];
-    const grid = buildLayerGrid(features);
-    expect(queryGrid(grid, 44.025, -87.015, 0)).toEqual([0]);
-    expect(queryGrid(grid, 41.005, -79.995, 0)).toEqual([1]);
-    expect(queryGrid(grid, 43, -85, 0)).toEqual([]);
-  });
-
-  it("finds a feature within the pad and drops one beyond it", function () {
-    // 150 m expressed the way the pipeline expresses it.
-    const padDeg = 0.15 / KM_PER_DEG;
-    const features = [squareFeature("beach", -87, 44, 0.002)];
-    const grid = buildLayerGrid(features);
-    // ~100 m north of the envelope's top edge: inside the pad.
-    expect(queryGrid(grid, 44.002 + 0.1 / KM_PER_DEG, -86.999, padDeg)).toEqual([0]);
-    // ~500 m north: outside it, and outside the one-cell widening too.
-    expect(queryGrid(grid, 44.002 + 0.5 / KM_PER_DEG, -86.999, padDeg)).toEqual([]);
   });
 
   it("keeps malformed-bounds features in the index positionally but matches none", function () {
@@ -219,39 +167,11 @@ describe("buildLayerGrid / queryGrid — basics", function () {
     expect(grid.count).toBe(4);
     // Index 2 still means the third feature — alignment with the caller's array
     // is the whole contract of returning indices.
-    const hits = queryGrid(grid, 44.005, -86.995, 0);
+    const hits = queryGridByBounds(grid, {
+      minLat: 44, minLon: -87, maxLat: 44.01, maxLon: -86.99
+    });
     expect(hits).toEqual([0, 2]);
     expect(features[hits[1]].name).toBe("ok2");
-  });
-
-  it("finds a multi-cell feature from any cell it spans", function () {
-    // 0.4 x 0.4 degrees = an 8x8 block of cells.
-    const grid = buildLayerGrid([boxFeature("park", -87.4, 44.1, -87.0, 44.5)]);
-    expect(queryGrid(grid, 44.11, -87.39, 0)).toEqual([0]);
-    expect(queryGrid(grid, 44.30, -87.20, 0)).toEqual([0]);
-    expect(queryGrid(grid, 44.49, -87.01, 0)).toEqual([0]);
-  });
-
-  it("finds a feature across a cell boundary from the neighbouring cell", function () {
-    // The envelope sits entirely below the lat = 44.05 cell line; the probe sits
-    // just above it, in the next cell up, within the pad. Without the one-cell
-    // widening of the neighbourhood this is the classic miss.
-    const grid = buildLayerGrid([boxFeature("edge", -87.03, 44.0, -87.02, 44.0499)]);
-    const padDeg = 0.15 / KM_PER_DEG;
-    expect(queryGrid(grid, 44.0501, -87.025, padDeg)).toEqual([0]);
-  });
-
-  it("returns candidates in ascending original index order, not geographic order", function () {
-    // Deliberately built east-to-west so cell traversal order and array order
-    // disagree.
-    const features = [
-      squareFeature("east", -86.98, 44.0, 0.02),
-      squareFeature("west", -87.06, 44.0, 0.02),
-      squareFeature("middle", -87.02, 44.0, 0.02)
-    ];
-    const grid = buildLayerGrid(features);
-    const padDeg = 5 / KM_PER_DEG;
-    expect(queryGrid(grid, 44.01, -87.02, padDeg)).toEqual([0, 1, 2]);
   });
 
   it("indexes an oversized envelope through the always-scanned overflow list", function () {
@@ -263,56 +183,8 @@ describe("buildLayerGrid / queryGrid — basics", function () {
     ];
     const grid = buildLayerGrid(features);
     expect(grid.oversized.length).toBe(1);
-    expect(queryGrid(grid, 44.005, -86.995, 0)).toEqual([0, 1]);
-    expect(queryGrid(grid, 47, -85, 0)).toEqual([0]);
-    expect(queryGrid(grid, 30, -85, 0)).toEqual([]);
     expect(queryGridByBounds(grid, { minLat: 46.9, minLon: -85.1, maxLat: 47.1, maxLon: -84.9 }))
       .toEqual([0]);
-  });
-});
-
-describe("queryGrid — grid-vs-linear equality (the mandatory cross-check)", function () {
-  it("matches a full linear scan for 200 random points over a 500-feature layer", function () {
-    const rng = makeRng(20260901);
-    const features = randomLayer(500, rng);
-    const grid = buildLayerGrid(features);
-    const pads = [0, 0.15 / KM_PER_DEG, 0.12 / KM_PER_DEG, 0.02];
-    for (let p = 0; p < 200; p = p + 1) {
-      const lat = 41 + rng() * 7;
-      const lon = -92 + rng() * 12;
-      const padDeg = pads[p % pads.length];
-      const fromGrid = queryGrid(grid, lat, lon, padDeg);
-      const fromScan = linearQueryGrid(features, lat, lon, padDeg);
-      // toEqual on arrays compares ORDER as well as membership, which is the
-      // property the consumers' first-seen tie-breaks depend on.
-      expect(fromGrid).toEqual(fromScan);
-    }
-  });
-
-  it("matches a linear scan for probe-vertex unions, deduped and ascending", function () {
-    const rng = makeRng(7788);
-    const features = randomLayer(300, rng);
-    const grid = buildLayerGrid(features);
-    const padDeg = 0.15 / KM_PER_DEG;
-    for (let p = 0; p < 40; p = p + 1) {
-      const lat = 41 + rng() * 7;
-      const lon = -92 + rng() * 12;
-      // A tight cluster of vertices, the shape probeVertices produces for a way.
-      const vertices = [
-        { lat: lat, lon: lon },
-        { lat: lat + 0.0004, lon: lon + 0.0006 },
-        { lat: lat - 0.0007, lon: lon + 0.0002 },
-        { lat: lat, lon: lon }
-      ];
-      const union = new Set();
-      for (const vertex of vertices) {
-        for (const i of linearQueryGrid(features, vertex.lat, vertex.lon, padDeg)) {
-          union.add(i);
-        }
-      }
-      const expected = Array.from(union).sort(function (a, b) { return a - b; });
-      expect(queryGridNearVertices(grid, vertices, padDeg)).toEqual(expected);
-    }
   });
 });
 
@@ -382,17 +254,6 @@ describe("longitude scaling — asserted at both latitude extremes", function ()
   const padDeg = radiusKm / KM_PER_DEG;
 
   for (const lat of [49, 25]) {
-    it("admits a feature " + radiusKm + " km east at " + lat + " N (envelope grid)", function () {
-      const insideLonDeg = lonDegForKm(radiusKm * 0.99, lat);
-      // The whole point: that offset is LARGER than the unscaled degree pad, so
-      // an implementation that padded both axes identically would miss it.
-      expect(insideLonDeg).toBeGreaterThan(padDeg);
-      const grid = buildLayerGrid([boxFeature("f", -87, lat, -87, lat)]);
-      expect(queryGrid(grid, lat, -87 + insideLonDeg, padDeg)).toEqual([0]);
-      const outsideLonDeg = lonDegForKm(radiusKm * 1.5, lat);
-      expect(queryGrid(grid, lat, -87 + outsideLonDeg, padDeg)).toEqual([]);
-    });
-
     it("admits a segment " + radiusKm + " km east at " + lat + " N (segment grid)", function () {
       const seg = { geometry: lineString([[-87, lat - 0.002], [-87, lat + 0.002]]) };
       const segGrid = segmentGridOf([seg]);

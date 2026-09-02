@@ -1528,10 +1528,13 @@ Two indexes, because the two questions have different costs.
     export const GRID_CELL_DEG = 0.05;
 
     export function buildLayerGrid(features)          // Mode A: ENVELOPE grid
-    export function queryGrid(grid, lat, lon, padDeg)
-    export function queryGridNearVertices(grid, vertices, padDeg)
     export function queryGridByBounds(grid, bounds)
       // Pure. Bucketed by envelope, for park containment and water matching.
+      // Mode A deliberately exposes ONLY the bounds query: the point and
+      // vertex-union variants it originally shipped with (queryGrid,
+      // queryGridNearVertices) never acquired a caller — membership matches bbox to
+      // bbox, and the radius work all went to the Mode B segment grid — so they were
+      // deleted rather than carried as untested-in-anger surface.
 
     export function buildSegmentGrid()                // Mode B: SEGMENT grid
     export function addFeatureSegments(builder, featureIndex, geometry)
@@ -1669,9 +1672,16 @@ contract, so classifyQueue's body did not change.
       // hasPark false makes upsertSql emit the five-column variant, leaving park_name
       // UNTOUCHED; hardcoding true would let a 9%-short parks layer BLANK park_name on
       // every named row in the missing parks and strand the park-origin rows those
-      // names produced as DELETE candidates. A parks-line count of ZERO is a hard
-      // refusal, never a reading. A bootstrap set (build 1, empty history, unseeded
-      // floor) returns false and self-heals on the next build.
+      // names produced as DELETE candidates. A parks-line count of ZERO is NOT a
+      // refusal: GDAL routes closed area-tagged ways to multipolygons and leaves only
+      // UNCLOSED ways in its lines layer, so at Great Lakes scope parks-line is
+      // legitimately empty (build 1 measured 0 against 6457 in parks-polygon). The
+      // hard zero refusal lives on parks-POLYGON, which is where membership - and
+      // therefore every delete candidate - comes from. The floor and previous-count
+      // ratio still apply to lineCount and still catch a populated line layer that
+      // EMPTIES, which is delete-bearing through the parksName tier. A bootstrap set
+      // (build 1, empty history, unseeded floor) returns false and self-heals on the
+      // next build.
 
     export function regionsDigestInput(regions)
       // Pure. The canonical string whose digest ties a layer set to the REGIONS array
@@ -2949,8 +2959,9 @@ reconciliationAllowed or the delete path — it only ever appends change-only UP
   (id, name, lat, lon, park_name), `marineZoneSql` (id, lat, lon, nws_zone, marine_zone)
   and `buildClassifyQueue` (id, osm_id, water_class, water_class_version,
   water_class_attempts) read. The old deliberate asymmetry between discovery.yml's
-  seven-column SELECT and classify.yml's wider one is GONE with classify.yml; do not
-  re-introduce a second snapshot. This matters on the delete rail: the snapshot step
+  seven-column SELECT and the retired classify workflow's wider one is gone along with
+  that workflow (deleted once one real run cleared all four of its benchmark gates); do
+  not re-introduce a second snapshot. This matters on the delete rail: the snapshot step
   aborts the ONLY delete-bearing run if D1's `--json` response truncates, and the column
   set just widened from 7 to 11 — a paginated snapshot is a recorded prerequisite for the
   North America expansion (TODO.md).
@@ -3099,9 +3110,12 @@ DELETE FROM flag_history WHERE observed_at < nowIso - FLAG_HISTORY_RETENTION_DAY
 season).
 
 If North America-scale delta generation ever reintroduces incremental flushing of the
-delta file, the always()-gated Upload+Apply + truncate-the-torn-tail belt that used to
-live in classify.yml MOVES to discovery.yml rather than being re-invented from scratch.
-It is not needed today: one local scan produces one delta in one shot.
+delta file, the always()-gated Upload+Apply + truncate-the-torn-tail belt that the
+retired classify workflow carried should be restored onto discovery.yml rather than
+re-invented from scratch; `classifyQueue`'s `flush` option and `budgetExhausted` are
+deliberately still wired and tested for that day. It is not needed today: one local scan
+produces one delta in one shot, and the first live run measured the whole batch at 22.1 s
+with a 5.8 s classification pass and 1210 MB peak RSS.
 
 The batch is discovery + classification ONLY — NWS/ECCC point enrichment and webcam
 hydration run on their own in-Worker cron triggers below, so a failed discovery run never
@@ -3258,7 +3272,7 @@ The queue, the version/attempts gate and the legacy re-drain marker are UNCHANGE
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
-water_class_attempts ASC, RANDOM() LIMIT <--classify-limit N, unbounded by default>
+water_class_attempts ASC, RANDOM() LIMIT <classifyQueue's limit option, unbounded by default>
 (fresh-first then random; re-drain on a version bump; skip parked), UNION the LEGACY
 RE-DRAIN set: rows left unclassified AT/ABOVE the cap by the pre-decisive classifier,
 identified by water_class_version IS NULL AND water_class IS NULL AND

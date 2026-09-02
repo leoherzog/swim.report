@@ -243,22 +243,6 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     lakes-polygon layer directly — a local lookup, not a new upstream probe. Kept as
     is for now only to avoid changing discovery output in the same change that
     changed its transport.
-- **Follow-up: delete `.github/workflows/classify.yml`.** Classification moved into the
-  daily discovery run, so the hourly classify workflow has no scheduled work left; it is
-  retained **manual-only** as a fallback. The claim that a whole-table local join costs
-  seconds was a projection, not a measurement, and getting it backwards costs a
-  SIGKILLed daily job that produces no delta at all — including no `flag_history`
-  retention prune. Delete the file only once **one real `discovery.yml` run** has
-  printed all four of these within budget (the workflow header states the same gates,
-  keep the two in sync):
-  1. classification pass wall clock ≤ 300 s (`classification done in <n>ms`);
-  2. whole `discovery-batch.js` run ≤ 900 s (`run complete … <n>ms total`);
-  3. peak RSS of the batch ≤ 6000 MB (`Maximum resident set size`);
-  4. lakes segments actually indexed ≤ 8e6 (`signals index built in <n>ms: …`).
-  When it goes, take the `--classify-limit` / `--classify-delay-ms` /
-  `--classify-budget-ms` plumbing that only it used with it. While it is still present
-  it must keep `DENO_NO_PACKAGE_JSON=1` on its `deno` step like every other workflow
-  (see below).
 - **Every `deno` step in every workflow must set `DENO_NO_PACKAGE_JSON=1`.** The
   repo-root `deno.lock` is auto-discovered for all Deno commands here; without that env
   var Deno folds `package.json`'s npm tree into the lockfile it expects, `deno check

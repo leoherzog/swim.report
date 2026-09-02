@@ -15,8 +15,8 @@
 //
 // TWO INDEX MODES, because one does not fit both jobs:
 //
-//   Mode A — ENVELOPE grid (buildLayerGrid / queryGrid / queryGridNearVertices /
-//   queryGridByBounds). For features that are SMALL relative to a cell and whose
+//   Mode A — ENVELOPE grid (buildLayerGrid / queryGridByBounds). For features
+//   that are SMALL relative to a cell and whose
 //   whole geometry the caller needs anyway: beaches and parks. It is a CANDIDACY
 //   filter — the exact decision (point-in-polygon, nearest-edge distance) always
 //   happens at the call site against the retained geometry.
@@ -248,85 +248,8 @@ function visitPointCells(grid, lat, lon, latPad, lonPad, visit) {
   }
 }
 
-function collectPoint(grid, lat, lon, padDeg, seen, out) {
-  const latPad = isFiniteNumber(padDeg) && padDeg > 0 ? padDeg : 0;
-  const lonPad = lonPadFor(lat, latPad);
-  visitPointCells(grid, lat, lon, latPad, lonPad, function (i) {
-    if (seen.has(i)) {
-      return;
-    }
-    seen.add(i);
-    if (paddedEnvelopeHit(grid, i, lat, lon, latPad, lonPad)) {
-      out.push(i);
-    }
-  });
-}
-
 function ascending(a, b) {
   return a - b;
-}
-
-// Candidate features whose envelope, padded by padDeg, contains the point.
-// Ascending original index order. padDeg is in degrees of LATITUDE and is
-// scaled by 1/cos(lat) on the longitude axis (see MIN_COS_LAT above), so a
-// radius expressed as (metres / 1000) / KM_PER_DEG reaches the same distance in
-// both directions.
-export function queryGrid(grid, lat, lon, padDeg) {
-  if (grid === null || typeof grid !== "object" || grid.count === 0) {
-    return [];
-  }
-  if (!isFiniteNumber(lat) || !isFiniteNumber(lon)) {
-    return [];
-  }
-  const out = [];
-  collectPoint(grid, lat, lon, padDeg, new Set(), out);
-  out.sort(ascending);
-  return out;
-}
-
-// Candidates near ANY of a set of probe vertices ([{ lat, lon }, ...]), deduped,
-// ascending index order. This is the shape probeVertices produces: a beach is
-// probed from every member vertex of its way/relation, never from its centroid.
-export function queryGridNearVertices(grid, vertices, padDeg) {
-  if (grid === null || typeof grid !== "object" || grid.count === 0) {
-    return [];
-  }
-  if (!Array.isArray(vertices) || vertices.length === 0) {
-    return [];
-  }
-  const out = [];
-  const seen = new Set();
-  for (const vertex of vertices) {
-    if (vertex === null || typeof vertex !== "object" ||
-      !isFiniteNumber(vertex.lat) || !isFiniteNumber(vertex.lon)) {
-      continue;
-    }
-    // The accepted set is shared across vertices, so a feature admitted by an
-    // earlier vertex is never retested and never emitted twice. Rejections are
-    // deliberately NOT remembered: a feature that misses vertex A can easily hit
-    // vertex B, and memoising the miss would turn this union into whatever the
-    // first vertex happened to see.
-    collectPointForVertexUnion(grid, vertex.lat, vertex.lon, padDeg, seen, out);
-  }
-  out.sort(ascending);
-  return out;
-}
-
-// The union variant: a feature is remembered as ACCEPTED (never re-tested) but a
-// feature that failed the envelope test for an earlier vertex must be retested
-// for later ones, so rejections are not memoised.
-function collectPointForVertexUnion(grid, lat, lon, padDeg, accepted, out) {
-  const latPad = isFiniteNumber(padDeg) && padDeg > 0 ? padDeg : 0;
-  const lonPad = lonPadFor(lat, latPad);
-  visitPointCells(grid, lat, lon, latPad, lonPad, function (i) {
-    if (accepted.has(i)) {
-      return;
-    }
-    if (paddedEnvelopeHit(grid, i, lat, lon, latPad, lonPad)) {
-      accepted.add(i);
-      out.push(i);
-    }
-  });
 }
 
 // Candidates whose envelope OVERLAPS a query RECTANGLE, ascending index order.

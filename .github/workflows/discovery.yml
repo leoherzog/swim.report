@@ -199,11 +199,15 @@ jobs:
           # SUCCESSFUL run, which is precisely when they need reading. pipefail keeps
           # a batch failure a step failure through the pipe.
           #
-          # This is also the OQ7 / contract 9.7 benchmark instrument. The four numbers
-          # that gate retiring classify.yml all land in this one log: "classification
-          # done in <n>ms" and "signals index built in <n>ms: <segment counts>" from
-          # the batch, plus "Elapsed (wall clock)" and "Maximum resident set size"
-          # from /usr/bin/time -v.
+          # This is also the OQ7 / contract 9.7 benchmark instrument, and it is what
+          # retired the separate classification workflow: the first live run cleared all
+          # four gates with large margins — classification pass 5783 ms (limit 300 s),
+          # whole batch 22107 ms (limit 900 s), peak RSS 1210 MB (limit 6000 MB) and
+          # 346660 lake segments indexed (limit 8e6). Keep emitting them: they are the
+          # early warning for the North America expansion, where the table grows ~6x.
+          # "classification done in <n>ms" and "signals index built in <n>ms: <segment
+          # counts>" come from the batch, "Elapsed (wall clock)" and "Maximum resident
+          # set size" from /usr/bin/time -v.
           /usr/bin/time -v deno run --lock=deno.lock --frozen \
             --v8-flags=--max-old-space-size=12288 \
             --allow-read --allow-write \

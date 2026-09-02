@@ -822,7 +822,7 @@ describe("classifyQueue bump path (clean fetch, empty classification)", function
   });
 });
 
-describe("classifyQueue --classify-limit cap keeps attempts-ASC group ordering", function () {
+describe("classifyQueue limit cap keeps attempts-ASC group ordering", function () {
   // When limit caps a larger queue, the loop reshuffles within equal-attempts
   // groups but MUST keep attempts ASC across groups: the attempts-2 group is
   // never selected before the attempts-0 group is exhausted. The invariant is

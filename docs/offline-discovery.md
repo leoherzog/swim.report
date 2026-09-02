@@ -243,8 +243,11 @@ The emitted SQL preserves every invariant the previous pipeline established
   manifest" and "the parks layer is correctly populated" are different predicates.
   Hardcoding this true would let a 9%-short parks layer blank `park_name` on every
   named row in the missing parks and strand the park-origin rows those names
-  produced as **delete candidates**. A parks-line count of zero is a hard refusal,
-  never a reading.
+  produced as **delete candidates**. A `parks-line` count of zero is **not** a
+  refusal — GDAL routes closed area-tagged ways to multipolygons, so at Great Lakes
+  scope that layer is legitimately empty (build 1: 0 against 6457 in
+  `parks-polygon`). The hard zero refusal sits on `parks-polygon`, which is where
+  membership, and therefore every delete candidate, comes from.
 - **Classification is gated too, and symmetrically.** It runs only when
   `classificationAllowed(report)` is true. A `fatal` manifest tier exits 1 with no
   SQL at all; an `incomplete` tier suppresses **both** deletes and classification;
