@@ -392,10 +392,24 @@ jobs:
           cd "$WORK/layers"
           # Only lakes-polygon is carved straight to a published layer here; every
           # other layer is produced by clip-layers.js, which owns BOTH the region
-          # filter and the proximity clip. -simplifyPreserveTopology, not
-          # -simplify: plain Douglas-Peucker self-intersects megapolygons.
+          # filter and the proximity clip.
+          #
+          # SIMPLIFICATION: ogr2ogr has NO -simplifyPreserveTopology flag. That name
+          # is the GEOS/PostGIS function ST_SimplifyPreserveTopology; ogr2ogr offers
+          # only -simplify <tolerance> (plain Douglas-Peucker) and -makevalid. The
+          # flag was previously passed anyway and GDAL rejected the whole invocation
+          # with "ERROR 6: Unknown option name", failing this step in a tenth of a
+          # second. The concern behind it was real though — DP can self-intersect a
+          # megapolygon — so the repair is done explicitly afterwards with
+          # -makevalid, which is the Simple-Features-validity fix GEOS provides.
+          # Verified on GDAL 3.12.4, the runner's version. -nlt PROMOTE_TO_MULTI was
+          # considered and is NOT needed: FlatGeobuf stores geometry per feature, so
+          # a makevalid split into a MultiPolygon is written without dropping the
+          # feature (checked: a mixed Polygon/MultiPolygon source round-trips with
+          # its full feature count). Losing one of the six lake relations here would
+          # be severe — every served beach classifies through the QID lake path.
           ogr2ogr -f FlatGeobuf lakes-polygon.fgb "$WORK/raw/multipolygons.fgb" -nln lakes_polygon \
-            -simplifyPreserveTopology 0.0001 \
+            -simplify 0.0001 -makevalid \
             -where "natural='water' AND water='lake' AND wikidata IN ('Q1066','Q1169','Q1383','Q5492','Q1062','Q736707')"
 
       # Proximity clip: every remaining layer is reduced to features within
