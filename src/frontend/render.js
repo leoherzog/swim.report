@@ -458,18 +458,23 @@ function renderBrandHeader() {
 
 // The disclaimer sentence below is a product invariant (PLAN.md section 9):
 // estimates must never read as official flag status, on any page.
-// The second paragraph is the site-wide attribution for the data sources; the
-// Windy credit links Windy.com to the webcams hub. This footer line is now the
-// only Windy attribution on the page — renderWebcam no longer carries a
-// per-cam credit. The third paragraph is the homepage map's basemap credit:
+// wa-page makes the slotted <footer> itself a flex ROW (::slotted([slot='footer'])
+// is display:flex; justify-content:space-between; flex-wrap:wrap), so sibling
+// paragraphs would spread across it as wrapping flex items. The footer therefore
+// carries ONE child: a single centered <p> of three <small> lines separated by
+// <br>. Line 1 is the disclaimer. Line 2 is the site-wide attribution for the
+// data sources; the Windy credit links Windy.com to the webcams hub, and this
+// line is now the only Windy attribution on the page — renderWebcam no longer
+// carries a per-cam credit. Line 3 is the homepage map's basemap credit:
 // mapScript.js runs the MapLibre map with attributionControl disabled (its
 // async-populated links would otherwise become focusable inside the aria-hidden
 // mount), so OpenFreeMap's required OpenStreetMap attribution lives here as
 // static, in-reading-order text instead.
 function renderFooter() {
-  return "<p><small>Estimated — not the official flag status. " +
-    "Always obey posted flags and lifeguards.</small></p>" +
-    "<p><small>Thanks to " +
+  return "<p class=\"footer-lines\">" +
+    "<small>Estimated — not the official flag status. " +
+    "Always obey posted flags and lifeguards.</small><br>" +
+    "<small>Thanks to " +
     "<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
     "for beach locations, " +
     "<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a> + " +
@@ -477,13 +482,14 @@ function renderFooter() {
     "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a> " +
     "for marine and weather data, and " +
     "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> " +
-    "for webcams.</small></p>" +
-    "<p><small>Map tiles by " +
+    "for webcams.</small><br>" +
+    "<small>Map tiles by " +
     "<a href=\"https://openfreemap.org\" rel=\"noopener noreferrer\">OpenFreeMap</a> " +
     "(data © " +
     "<a href=\"https://www.openstreetmap.org/copyright\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
     "contributors), rendered with " +
-    "<a href=\"https://maplibre.org\" rel=\"noopener noreferrer\">MapLibre</a>.</small></p>";
+    "<a href=\"https://maplibre.org\" rel=\"noopener noreferrer\">MapLibre</a>.</small>" +
+    "</p>";
 }
 
 // Ambient, Firewatch-style layered wave swells anchored to the bottom of the

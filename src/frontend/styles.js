@@ -133,10 +133,22 @@ const RULES = [
   // shadow ::slotted() declarations regardless of specificity. The sticky
   // header deliberately keeps its opaque ::slotted fill so content scrolling
   // under it can't show through.
+  // wa-page also makes the slotted footer a space-between flex ROW; the footer
+  // holds exactly one child (.footer-lines) and centers it instead.
   ".app-footer {",
   "  padding-inline: var(--wa-space-xl);",
   "  color: var(--wa-color-text-quiet);",
   "  background-color: transparent;",
+  "  justify-content: center;",
+  "}",
+
+  // One centered block of three <small> lines (disclaimer, data attribution,
+  // basemap credit). Capped to the main column's width so a wrapped line
+  // still reads as one centered paragraph rather than a full-bleed run.
+  ".footer-lines {",
+  "  max-width: 48rem;",
+  "  margin: 0;",
+  "  text-align: center;",
   "}",
 
   "main.app-main {",

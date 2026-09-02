@@ -3627,9 +3627,11 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
 - Disclaimer in the footer of EVERY page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
-  Rendered as the first footer paragraph (its own <small>); the sentence itself is the
-  invariant. A second footer paragraph carries the site-wide data-source attributions as
-  a single sentence with each service linked: "Thanks to OpenStreetMap (openstreetmap.org)
+  The footer is ONE horizontally centered block (<p class="footer-lines">, three <small>
+  lines separated by <br>; wa-page makes the slotted footer a space-between flex row, so a
+  single child is what keeps it centered). The disclaimer is the first line (its own
+  <small>); the sentence itself is the invariant. The second line carries the site-wide
+  data-source attributions as a single sentence with each service linked: "Thanks to OpenStreetMap (openstreetmap.org)
   for beach locations, NOAA/NWS (weather.gov) + ECCC (weather.gc.ca) + Open-Meteo
   (open-meteo.com/en/docs/marine-weather-api) for marine and weather data, and Windy.com
   (windy.com/webcams) for webcams." This once-per-page Windy credit (Windy.com linking to
