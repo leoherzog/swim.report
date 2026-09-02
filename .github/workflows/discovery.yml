@@ -92,7 +92,6 @@ jobs:
       # job gets 4.x fixes automatically but a future wrangler 5 can never silently
       # change flags or --file parsing under a scheduled run.
       WRANGLER_VERSION: "4"
-      LAYERS_DIR: ${{ runner.temp }}/layers
       # workflow_dispatch inputs are absent on scheduled and workflow_run runs.
       APPLY: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_run') && 'true' || inputs.apply }}
     steps:
@@ -131,6 +130,16 @@ jobs:
         # never mix two sets.
         run: |
           set -euo pipefail
+          # LAYERS_DIR is resolved HERE, not in the job-level env block. The
+          # runner context is not available to jobs.<id>.env — only to steps — so
+          # "LAYERS_DIR: ${{ runner.temp }}/layers" up there made the whole
+          # workflow file invalid and GitHub failed the run in 0s with "workflow
+          # file issue" before creating a single job. RUNNER_TEMP is a default
+          # environment variable present in every step, and $GITHUB_ENV carries
+          # the resolved value to every later step (a job-level env value is
+          # never re-expanded by the shell, so the literal would not have worked).
+          LAYERS_DIR="$RUNNER_TEMP/layers"
+          echo "LAYERS_DIR=$LAYERS_DIR" >> "$GITHUB_ENV"
           deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
             scripts/fetch-layers.js --dest "$LAYERS_DIR"
           cat "$LAYERS_DIR/report.json"

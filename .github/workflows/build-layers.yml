@@ -74,7 +74,6 @@ jobs:
     # margin under the 6 h job cap without letting a hung download burn hours.
     timeout-minutes: 180
     env:
-      WORK: ${{ runner.temp }}/osm
       R2_BUCKET: swim.report
       R2_PUBLIC_BASE: https://map.swim.report
       AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY }}
@@ -187,6 +186,16 @@ jobs:
       - name: Prepare workspace and fetch the previous manifest
         run: |
           set -euo pipefail
+          # WORK is resolved HERE, not in the job-level env block. The runner
+          # context is not available to jobs.<id>.env — only to steps — so
+          # "WORK: ${{ runner.temp }}/osm" up there made the whole workflow file
+          # invalid and GitHub failed the run in 0s with "workflow file issue"
+          # before creating a single job. RUNNER_TEMP is a default environment
+          # variable present in every step, and $GITHUB_ENV carries the resolved
+          # value to every later step (a job-level env value is never re-expanded
+          # by the shell, so the literal string would not have worked either).
+          WORK="$RUNNER_TEMP/osm"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
           mkdir -p "$WORK/pbf" "$WORK/filtered" "$WORK/raw" "$WORK/raw-lines" "$WORK/layers" "$WORK/verify" "$WORK/gdaltmp"
           # The GDAL OSM driver's node index temp file is created in the CURRENT
           # WORKING DIRECTORY when CPL_TMPDIR is unset, and is unlinked immediately

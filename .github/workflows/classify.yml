@@ -93,7 +93,6 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
       DB_NAME: swim-report
       WRANGLER_VERSION: "4"
-      LAYERS_DIR: ${{ runner.temp }}/layers
       # Defaults to a DRY RUN. This workflow exists to measure and to stand by; a
       # human who actually wants it to write to D1 says so at dispatch time.
       APPLY: ${{ inputs.apply }}
@@ -120,6 +119,16 @@ jobs:
         # The only network-touching step, and it reads public data only.
         run: |
           set -euo pipefail
+          # LAYERS_DIR is resolved HERE, not in the job-level env block. The
+          # runner context is not available to jobs.<id>.env — only to steps — so
+          # "LAYERS_DIR: ${{ runner.temp }}/layers" up there made the whole
+          # workflow file invalid and GitHub failed the run in 0s with "workflow
+          # file issue" before creating a single job. RUNNER_TEMP is a default
+          # environment variable present in every step, and $GITHUB_ENV carries
+          # the resolved value to every later step (a job-level env value is
+          # never re-expanded by the shell, so the literal would not have worked).
+          LAYERS_DIR="$RUNNER_TEMP/layers"
+          echo "LAYERS_DIR=$LAYERS_DIR" >> "$GITHUB_ENV"
           deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
             scripts/fetch-layers.js --dest "$LAYERS_DIR"
           cat "$LAYERS_DIR/report.json"
