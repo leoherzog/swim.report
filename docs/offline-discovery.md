@@ -97,7 +97,7 @@ enters the request path, and `wrangler.toml` deliberately carries no
     counts. Absolute floors come from the committed `data/layer-floors.json`,
     keyed by `regionsDigest`.
   - **Publication order matters.** Ten layer files plus the manifest go to an
-    **immutable per-build prefix** in the R2 bucket `swim.report`; the single small
+    **immutable per-build prefix** in the R2 bucket `swim-report`; the single small
     `layers/current.json` pointer is overwritten **last**. A reader can therefore
     never see a torn set. The bucket is served publicly at
     `https://map.swim.report`. Writes use the runner's preinstalled AWS CLI over
@@ -307,7 +307,7 @@ The emitted SQL preserves every invariant the previous pipeline established
    `@web.awesome.me` / `@fortawesome` deps and fail). Every wrangler call goes
    through `npx --yes wrangler@<pin>`, which fetches only wrangler from the
    default registry and never consults the repo's `package.json`.
-3. **The R2 bucket `swim.report`**, served publicly at `https://map.swim.report`,
+3. **The R2 bucket `swim-report`**, served publicly at `https://map.swim.report`,
    plus repository secrets **`CLOUDFLARE_R2_ACCESS_KEY`** and
    **`CLOUDFLARE_R2_SECRET_ACCESS_KEY`** — used by the **layer build only**. The
    discovery job needs **no** R2 credentials; it reads over plain HTTPS. Nothing in

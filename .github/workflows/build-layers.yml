@@ -1,7 +1,7 @@
 name: Build layers
 
 # Builds the prebuilt OSM spatial layers that scripts/discovery-batch.js consumes,
-# and publishes them to the swim.report R2 bucket (public at https://map.swim.report).
+# and publishes them to the swim-report R2 bucket (public at https://map.swim.report).
 #
 # NOT DELETE-BEARING. This job never touches D1. A failed or refused build simply
 # leaves the previous good layer set as the live one, and discovery keeps running on
@@ -13,7 +13,7 @@ name: Build layers
 # per-build prefix that nobody is reading, and only then is the single small
 # layers/current.json pointer overwritten. A reader can never see a torn set.
 #
-# Requires two repository secrets (S3-API keys on the swim.report bucket):
+# Requires two repository secrets (S3-API keys on the swim-report bucket):
 #   CLOUDFLARE_R2_ACCESS_KEY
 #   CLOUDFLARE_R2_SECRET_ACCESS_KEY
 # It needs NO Cloudflare API token and NO npm registry tokens: it never runs
@@ -74,7 +74,12 @@ jobs:
     # margin under the 6 h job cap without letting a hung download burn hours.
     timeout-minutes: 180
     env:
-      R2_BUCKET: swim.report
+      # The bucket is swim-report with a HYPHEN. The zone is swim.report with a
+      # dot and the public R2 domain is map.swim.report, so the dotted form reads
+      # naturally and is wrong: R2 returns AccessDenied (never NoSuchBucket) for a
+      # bucket the token cannot see, so the wrong name looks exactly like a bad
+      # secret. Verified against the live account: swim.report 403, swim-report 200.
+      R2_BUCKET: swim-report
       R2_PUBLIC_BASE: https://map.swim.report
       AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
@@ -163,12 +168,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/.aws
-          # PATH-STYLE IS MANDATORY: the bucket name contains a dot, so
-          # virtual-hosted addressing would produce
-          # swim.report.<account>.r2.cloudflarestorage.com, which the wildcard
-          # certificate for *.r2.cloudflarestorage.com does not cover — TLS fails.
-          # botocore usually falls back on its own for dotted buckets; pinning it
-          # means a botocore change can never silently break the only publish path.
+          # PATH-STYLE, pinned deliberately. The bucket name (swim-report) carries
+          # no dot, so the wildcard certificate for *.r2.cloudflarestorage.com
+          # would in fact cover virtual-hosted addressing today. It is pinned
+          # anyway because this is the only publish path and path-style is what
+          # R2 documents: a future rename to a DOTTED bucket would otherwise
+          # produce <bucket>.<account>.r2.cloudflarestorage.com, which that
+          # wildcard does NOT cover, and the failure would be a TLS error at
+          # upload time rather than anything resembling a naming mistake.
           cat > ~/.aws/config <<'AWSCFG'
           [default]
           s3 =

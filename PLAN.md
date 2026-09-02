@@ -2870,7 +2870,7 @@ GitHub runner, NOT delete-bearing and NOT a Deno program:
   featureCount, `oldestSourceTimestamp`, the regionsDigest, the sanity verdict, and a
   history array of previous builds' counts. Absolute floors come from
   `data/layer-floors.json`, keyed by regionsDigest.
-- Publication: an IMMUTABLE per-build prefix in the R2 bucket `swim.report`, then the
+- Publication: an IMMUTABLE per-build prefix in the R2 bucket `swim-report`, then the
   single small `layers/current.json` pointer overwritten LAST, so a reader can never see a
   torn set. Served publicly at `https://map.swim.report`. Written with the preinstalled AWS
   CLI over the S3 API using repo secrets `CLOUDFLARE_R2_ACCESS_KEY` /
