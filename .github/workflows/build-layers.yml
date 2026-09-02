@@ -203,7 +203,14 @@ jobs:
           # by the shell, so the literal string would not have worked either).
           WORK="$RUNNER_TEMP/osm"
           echo "WORK=$WORK" >> "$GITHUB_ENV"
-          mkdir -p "$WORK/pbf" "$WORK/filtered" "$WORK/raw" "$WORK/raw-lines" "$WORK/layers" "$WORK/verify" "$WORK/gdaltmp"
+          # NOTE: $WORK/raw and $WORK/raw-lines are deliberately NOT created here.
+          # A suffix-less FlatGeobuf output path makes the driver write a DIRECTORY
+          # of one .fgb per layer, and it CREATES that directory itself — if the path
+          # already exists it refuses with "It seems a file system object called
+          # '<path>' already exists" / "FlatGeobuf driver failed to create <path>"
+          # and ogr2ogr exits non-zero in about a tenth of a second. Reproduced on
+          # GDAL 3.12.4, the same version the runner installs.
+          mkdir -p "$WORK/pbf" "$WORK/filtered" "$WORK/layers" "$WORK/verify" "$WORK/gdaltmp"
           # The GDAL OSM driver's node index temp file is created in the CURRENT
           # WORKING DIRECTORY when CPL_TMPDIR is unset, and is unlinked immediately
           # after creation — so du, ls and df -k all report nothing while it eats
@@ -345,16 +352,27 @@ jobs:
           # emit a flood of "Cannot read node <id>" and then return an EMPTY result
           # with a ZERO exit status.
           df -h "$WORK" | tail -1
-          OSM_CONFIG_FILE=$GITHUB_WORKSPACE/.github/build/osmconf.ini \
+          # The 2> capture is required for the "Cannot read node" grep below, but it
+          # also means a FAILING ogr2ogr prints nothing at all to the CI log — set -e
+          # kills the step before the cat further down. Surface it explicitly.
+          if ! OSM_CONFIG_FILE=$GITHUB_WORKSPACE/.github/build/osmconf.ini \
             ogr2ogr -f FlatGeobuf "$WORK/raw" "$WORK/merged.osm.pbf" \
-              -spat $SPAT points lines multipolygons other_relations 2> "$WORK/ogr-main.log"
+              -spat $SPAT points lines multipolygons other_relations 2> "$WORK/ogr-main.log"; then
+            echo "::error::ogr2ogr (main pass) failed — captured stderr below"
+            cat "$WORK/ogr-main.log"
+            exit 1
+          fi
           df -h "$WORK" | tail -1
           # Second pass with closed_ways_are_polygons=building so closed
           # natural=coastline ways (islands) do not get routed into multipolygons.
           # This pass is the SOLE source of coastline features.
-          OSM_CONFIG_FILE=$GITHUB_WORKSPACE/.github/build/osmconf-lines.ini \
+          if ! OSM_CONFIG_FILE=$GITHUB_WORKSPACE/.github/build/osmconf-lines.ini \
             ogr2ogr -f FlatGeobuf "$WORK/raw-lines" "$WORK/merged.osm.pbf" \
-              -spat $SPAT lines 2> "$WORK/ogr-lines.log"
+              -spat $SPAT lines 2> "$WORK/ogr-lines.log"; then
+            echo "::error::ogr2ogr (coastline lines pass) failed — captured stderr below"
+            cat "$WORK/ogr-lines.log"
+            exit 1
+          fi
           cat "$WORK/ogr-main.log" "$WORK/ogr-lines.log" > "$WORK/ogr.log" || true
           if grep -q "Cannot read node" "$WORK/ogr.log"; then
             echo "::error::GDAL node index exhausted (CPL_TMPDIR out of space) — the result is silently EMPTY with exit 0"
