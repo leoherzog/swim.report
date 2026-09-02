@@ -404,11 +404,31 @@ export function absoluteFloorRefusals(layerCounts, floorsEntry) {
       out.push(refusal("absolute-floor", key, "no feature count was measured", false));
       continue;
     }
-    if (key === "parks-line.fgb" && count === 0) {
-      out.push(refusal("parks-line-empty", key,
-        "a parks-line count of ZERO is never legitimate — named park ways exist " +
-        "unconditionally in this scope, so the carve is broken and the consequence is " +
-        "unnamed beaches plus deleted park-origin rows", false));
+    // The hard zero refusal belongs on parks-POLYGON, not parks-line.
+    //
+    // It was originally on parks-line, reasoning that "named park ways exist
+    // unconditionally in this scope". That is an Overpass-era invariant and it does
+    // NOT survive the move to a GDAL-derived layer set. Overpass's way[leisure=park]
+    // [name] selector returns closed AND unclosed ways; GDAL's lines layer holds
+    // ONLY unclosed ways, because a closed way carrying an area tag is routed to
+    // multipolygons instead. Verified on GDAL 3.12.4: a closed named leisure=park
+    // way lands in multipolygons (as osm_way_id), an unclosed one lands in lines.
+    // Essentially every mapped Great Lakes park is closed or a relation, so
+    // parks-line is legitimately EMPTY (the first real build measured 0 against
+    // 6457 in parks-polygon) and the refusal blocked a correct build.
+    //
+    // parks-polygon is where the guard actually belongs. Park MEMBERSHIP is
+    // parks-polygon and nothing else (D7/M1 in src/layerDiscovery.js), membership is
+    // what produces park-origin rows, and park-origin rows are the ENTIRE
+    // delete-candidate set. parks-line feeds only parksName, which is naming-only
+    // and cannot move a row into or out of the delete set. So zero parks-polygon is
+    // the genuinely catastrophic case and had no hard refusal at all — on a
+    // bootstrap build its floor is null, so nothing would have caught it.
+    if (key === "parks-polygon.fgb" && count === 0) {
+      out.push(refusal("parks-polygon-empty", key,
+        "a parks-polygon count of ZERO is never legitimate — park MEMBERSHIP comes " +
+        "from this layer alone, and park-origin rows are the entire delete-candidate " +
+        "set, so an empty parks-polygon means every park-origin row reads as stale", false));
       continue;
     }
     const floor = floors[key];
@@ -501,7 +521,11 @@ export function sidecarRefusals(layerCounts, sidecarCounts) {
 // field list from no features, and an empty layer contributes to no decision
 // downstream. An UNEXPECTEDLY empty layer is caught by the count gates instead —
 // the absolute floor, the 0.95x ratio and the decay check all fire on zero, and
-// parks-line and lakes-polygon each have their own hard zero refusal. Asserting
+// parks-polygon and lakes-polygon each have their own hard zero refusal. (The
+// line layers — beaches-line, parks-line, water-line — and other-relations are
+// legitimately empty at Great Lakes scope for the same reason coastline-line is:
+// GDAL routes closed area-tagged ways to multipolygons, so only unclosed ways
+// reach a lines layer.) Asserting
 // a schema here would instead make the very first Great Lakes build fail.
 export function schemaRefusals(layerFields, requiredFields, layerCounts) {
   const required = isPlainObject(requiredFields) ? requiredFields : REQUIRED_LAYER_FIELDS;

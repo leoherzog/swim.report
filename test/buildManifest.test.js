@@ -336,15 +336,40 @@ describe("absoluteFloorRefusals", () => {
     expect(out[0].overridable).toBe(true);
   });
 
-  // parks-line zero is the M1 canary: named park ways exist unconditionally, so
-  // zero means the carve is broken and the visible consequence is unnamed beaches
-  // plus DELETED park-origin rows (982 of 1669 rows).
-  it("hard-refuses a parks-line count of ZERO, and that refusal is NOT overridable", () => {
-    const layers = layerSet({ "parks-line.fgb": { featureCount: 0 } });
+  // parks-POLYGON zero is the real canary. Park membership comes from this layer
+  // alone (D7/M1), membership produces park-origin rows, and park-origin rows are
+  // the entire delete-candidate set (982 of 1669 rows), so an empty parks-polygon
+  // makes every one of them read as stale.
+  it("hard-refuses a parks-polygon count of ZERO, and that refusal is NOT overridable", () => {
+    const layers = layerSet({ "parks-polygon.fgb": { featureCount: 0 } });
     const out = absoluteFloorRefusals(layerCountsOf(layers), { layers: {} });
     expect(out.length).toBe(1);
-    expect(out[0].check).toBe("parks-line-empty");
+    expect(out[0].check).toBe("parks-polygon-empty");
     expect(out[0].overridable).toBe(false);
+  });
+
+  // The guard used to sit on parks-line, reasoning that named park ways exist
+  // unconditionally. That is an Overpass-era invariant: Overpass's way[leisure=park]
+  // [name] returns closed AND unclosed ways, while GDAL's lines layer holds only
+  // UNCLOSED ways (a closed area-tagged way is routed to multipolygons). The first
+  // real build measured parks-line 0 against parks-polygon 6457 and the refusal
+  // blocked an entirely correct build.
+  it("accepts a parks-line count of ZERO, which is legitimate for a GDAL layer set", () => {
+    const layers = layerSet({ "parks-line.fgb": { featureCount: 0 } });
+    const out = absoluteFloorRefusals(layerCountsOf(layers), { layers: {} });
+    expect(out).toEqual([]);
+  });
+
+  // The other line layers are empty for the same structural reason.
+  it("accepts empty line layers and other-relations at Great Lakes scope", () => {
+    const layers = layerSet({
+      "beaches-line.fgb": { featureCount: 0 },
+      "water-line.fgb": { featureCount: 0 },
+      "coastline-line.fgb": { featureCount: 0 },
+      "other-relations.fgb": { featureCount: 0 }
+    });
+    const out = absoluteFloorRefusals(layerCountsOf(layers), { layers: {} });
+    expect(out).toEqual([]);
   });
 
   it("refuses a layer whose count was never measured", () => {
