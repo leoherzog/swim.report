@@ -13,24 +13,44 @@
 // A single rectangle enclosing all five lakes would also enclose the entire
 // continental interior between and around them — Wisconsin, lower Michigan,
 // Ontario, upstate New York, etc. That interior is dense with INLAND lakes, and
-// Overpass would return thousands of inland-lake "beach" elements from it. The
-// water-body classifier (src/waterClass.js) drops every one of those (they are
-// not Great Lakes shoreline), so the fetch, transfer, and classification work is
-// pure waste — and it inflates the daily Overpass query volume against a public
-// API with a 2-slots-per-IP limit. Tracing the shoreline with coastal boxes and
-// leaving the interior OUT keeps the discovery universe to actual coast: the
-// query stays small and almost every returned element survives classification.
+// it carries thousands of inland-lake "beach" elements. The water-body
+// classifier (src/waterClass.js) drops every one of those (they are not Great
+// Lakes shoreline), so carrying them through the layer build, the download, the
+// in-process index and the classification join is pure waste. Tracing the
+// shoreline with coastal boxes and leaving the interior OUT keeps the discovery
+// universe to actual coast: the layers stay small and almost every feature in
+// them survives classification.
 //
-// BOX SIZE IS NOT THE CONSTRAINT
-// ------------------------------
-// Each box here is auto-tiled by tileBbox() at TILE_MAX_SPAN_DEG (2.0 deg) before
-// any Overpass query runs, so a physically large box simply becomes more tiles —
-// it is never queried as one oversized request. Open water inside a box is cheap:
-// a tile sitting over mid-lake returns few or no beach elements and its query
-// resolves fast. So we size boxes for clean SHORELINE COVERAGE (with a ~10-20%
-// margin inland so beaches set back from the waterline are still included), not
-// to minimize area. Merging adjacent lakes into one broad box, or splitting one
-// lake across a few boxes, are both fine — tiling normalizes them either way.
+// Under the layer pipeline this stopped being merely an efficiency argument and
+// became a CORRECTNESS one. A beach discovered from outside every box below
+// would be UPSERTed but could never be deleted, because reconcileStaleRows only
+// treats in-region rows as delete candidates (see the section below) — an
+// interior inland-lake row would be immortal, not just wasteful.
+//
+// THE UNION RECTANGLE IS A PRE-FILTER; THIS ARRAY IS THE SCOPE
+// ------------------------------------------------------------
+// The layer build hands ogr2ogr ONE -spat rectangle, the union envelope of every
+// box below (scripts/print-spat-bbox.js). That rectangle necessarily encloses
+// the continental interior the section above argues against, so it is only a
+// cheap first cut that keeps the extract pass from scanning all of North
+// America. It is NOT the scope. The authoritative scope is per-box and is
+// applied twice, after the extract:
+//
+//   (a) scripts/clip-layers.js keeps a feature only if its envelope intersects
+//       some box below padded by REGION_SPAT_PAD_DEG, so the PUBLISHED layers
+//       carry coastal features rather than the interior; and
+//   (b) discoverFromLayers (src/layerDiscovery.js) applies pointInAnyRegion to
+//       every beach candidate before park association, so the UPSERT universe
+//       and the reconciliation DELETE-candidate universe are literally the same
+//       set — which is the property the paragraph above depends on.
+//
+// So box SIZE is still not the constraint: open water inside a box is cheap
+// (nothing there matches the layer filters, so it contributes no features), and
+// merging adjacent lakes into one broad box or splitting one lake across a few
+// boxes are both fine. Box COVERAGE is the constraint: anything outside every
+// box is not clipped into the layers and not discovered from them at all. Size
+// boxes for clean SHORELINE COVERAGE, with a ~10-20% margin inland so beaches
+// set back from the waterline are still included.
 //
 // pointInAnyRegion ALSO SCOPES THE OFFLINE RECONCILIATION-DELETE
 // --------------------------------------------------------------
@@ -50,9 +70,15 @@
 // ---------------------
 // Bringing a new coast online (Pacific, Gulf, Atlantic — see the placeholder
 // section at the bottom) means APPENDING boxes to REGIONS. Nothing about the
-// existing Great Lakes boxes, tiling, classification, or reconciliation changes:
-// discovery, pointInAnyRegion scoping, and the delete rail all iterate REGIONS,
-// so they pick up new coasts automatically the moment their boxes are added.
+// existing Great Lakes boxes, clipping, classification, or reconciliation
+// changes: the build's union rectangle, the per-box clip, discovery,
+// pointInAnyRegion scoping, and the delete rail all iterate REGIONS, so they
+// pick up new coasts automatically the moment their boxes are added. The one
+// thing that does NOT come for free is data/layer-floors.json — the floors are
+// keyed by a digest over REGIONS (src/layerManifest.js), so appending a box
+// invalidates them and the next build REFUSES until the new coast's floors are
+// seeded and committed. That refusal is deliberate: it is what stops a new coast
+// from being published against floors that never measured it.
 //
 // Project style: plain JS, ES modules, const/let only, string concatenation with
 // + only (never template literals), console.log for logging.
@@ -89,7 +115,7 @@ export const REGIONS = [
     bbox: { minLon: -84.9, minLat: 42.8, maxLon: -79.5, maxLat: 46.4 },
     note: "US (MI) west shore and the extensive Canadian (Ontario) shore " +
       "including Georgian Bay and the North Channel. Broad east-west span; " +
-      "tiling splits it into several sub-boxes."
+      "the open water inside it simply contributes no features."
   },
   {
     name: "Lake St. Clair + St. Clair / Detroit Rivers",
@@ -150,12 +176,16 @@ export function pointInAnyRegion(lat, lon) {
 
 // --- FUTURE COAST EXPANSION (placeholder — NOT yet live) --------------------
 // Expansion is purely additive: append coastal boxes for the next coast to the
-// REGIONS array above and everything downstream (tiling, discovery,
-// pointInAnyRegion scoping, reconciliation) picks them up automatically. Keep
-// the same coastal-box discipline — trace the shoreline with a ~10-20% inland
-// margin, leave the continental interior OUT, and let tileBbox split the boxes.
-// Both US and Canadian/Mexican shores are welcome; ECCC handles Canada, and the
-// classifier drops anything that is not genuine ocean/gulf/lake shoreline.
+// REGIONS array above and everything downstream (the build's union rectangle,
+// the per-box clip, discovery, pointInAnyRegion scoping, reconciliation) picks
+// them up automatically. Keep the same coastal-box discipline — trace the
+// shoreline with a ~10-20% inland margin and leave the continental interior OUT,
+// because the per-box clip is the only thing keeping the layer set O(coast)
+// rather than O(continent). Both US and Canadian/Mexican shores are welcome;
+// ECCC handles Canada, and the classifier drops anything that is not genuine
+// ocean/gulf/lake shoreline. Remember the floors: a new box changes the REGIONS
+// digest, so data/layer-floors.json must gain that coast's seeded counts in the
+// same change or the first build after it refuses.
 //
 // Rough starting extents to REFINE before going live (do NOT paste as-is):
 //
@@ -178,4 +208,4 @@ export function pointInAnyRegion(lat, lon) {
 // A very long, thin coast (the Atlantic) may be better expressed as several
 // stacked boxes than one tall rectangle, to keep the inland margin from swelling
 // where the coastline bends far west — but that is a refinement, not a
-// requirement, since tiling handles the size either way.
+// requirement, since the per-box clip handles the size either way.

@@ -1,10 +1,12 @@
-// Tests for the pure SQL / queue builders in scripts/discovery-batch.js — the
-// offline discovery + water-class pipeline. These verify the emitted SQL mirrors
-// the in-Worker runOverpassSync statements and that classification queueing +
-// reconciliation gating match the Worker's semantics. The network-touching
-// discovery/classify orchestration is NOT exercised here (that runs live against
-// Overpass in CI); the entrypoint is guarded by import.meta.main so importing
-// this module never triggers it.
+// Tests for the pure SQL / queue / rail builders in scripts/discovery-batch.js —
+// the offline discovery + water-class pipeline, now driven by prebuilt spatial
+// layers rather than per-tile upstream queries. These verify the emitted SQL
+// mirrors the statements the Worker upsert used, that classification queueing
+// matches the Worker's semantics, and — the part that carries the real risk —
+// that every one of the four safety rails refuses what it is supposed to refuse.
+// The Deno-bound layer reading and the main() orchestration are NOT exercised
+// here; the entrypoint is guarded by import.meta.main so importing this module
+// never triggers it.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -12,25 +14,54 @@ import {
   sqlNum,
   parseSnapshot,
   parseArgs,
+  joinLayerPath,
+  layerFilePlanProblems,
+  splitOtherRelations,
   upsertSql,
   syncMetaSql,
   reconcileStaleRows,
+  reconciliationDelta,
+  reconciliationGate,
   reconciliationAllowed,
-  shouldFastDefer,
+  classificationAllowed,
+  applyRunConjuncts,
+  sourceAgeDays,
+  regionForPoint,
+  regionDeleteRailAllows,
+  classificationFlipRailAllows,
+  formatFlipMatrix,
   deleteBeachSql,
   classifyUpdateSql,
   bumpAttemptsSql,
   buildClassifyQueue,
   classifyCoverageCounts,
-  tileBbox,
-  backoffDelayMs,
   budgetExhausted,
   classifyQueue,
   marineZoneSql,
   nothingToDo
 } from "../scripts/discovery-batch.js";
 import { WATER_CLASS_VERSION, WATER_CLASS_MAX_ATTEMPTS } from "../src/waterClass.js";
+import { EXPECTED_LAYER_KEYS } from "../src/layerManifest.js";
 import { buildMarineZoneIndex, nearestMarineZone } from "../src/marineZones.js";
+
+// A layer report every conjunct of src/layerManifest.js accepts. Tests knock ONE
+// field out at a time, which is the realistic shape of the failure: the report is
+// assembled by three separate scripts and a field going missing is far likelier
+// than one going explicitly false.
+function verifiedReport(extra) {
+  return Object.assign({
+    schemaVersion: 1,
+    pointerAgreesWithManifest: true,
+    layersVerified: true,
+    layersPresent: EXPECTED_LAYER_KEYS.length,
+    layersExpected: EXPECTED_LAYER_KEYS.length,
+    buildStatus: "complete",
+    sourcesVerified: true,
+    buildSanityPassed: true,
+    regionsDigestMatches: true,
+    sourceAgeDays: 3
+  }, extra || {});
+}
 
 describe("sqlStr / sqlNum literal escaping", function () {
   it("doubles single quotes and NULLs empty values", function () {
@@ -63,38 +94,53 @@ describe("parseSnapshot", function () {
 });
 
 describe("parseArgs", function () {
-  it("defaults classify on, limit 0, out discovery-delta.sql", function () {
+  it("defaults classify on, out discovery-delta.sql", function () {
     const a = parseArgs([]);
     expect(a.classify).toBe(true);
-    expect(a.classifyLimit).toBe(0);
-    expect(a.classifyBudgetMs).toBe(0);
     expect(a.out).toBe("discovery-delta.sql");
   });
-  it("parses --classify-budget-ms; a bad value falls back to 0 (disabled)", function () {
-    expect(parseArgs(["--classify-budget-ms", "4200000"]).classifyBudgetMs).toBe(4200000);
-    expect(parseArgs(["--classify-budget-ms", "x"]).classifyBudgetMs).toBe(0);
-  });
   it("parses flags", function () {
-    const a = parseArgs(["--snapshot", "s.json", "--out", "o.sql", "--no-classify", "--classify-limit", "50"]);
+    const a = parseArgs(["--snapshot", "s.json", "--out", "o.sql", "--no-classify"]);
     expect(a.snapshot).toBe("s.json");
     expect(a.out).toBe("o.sql");
     expect(a.classify).toBe(false);
-    expect(a.classifyLimit).toBe(50);
   });
   it("defaults discovery on; --no-discovery turns it off (classify-only mode)", function () {
     expect(parseArgs([]).discovery).toBe(true);
-    const a = parseArgs(["--no-discovery", "--classify-limit", "150"]);
+    const a = parseArgs(["--no-discovery"]);
     expect(a.discovery).toBe(false);
     expect(a.classify).toBe(true);
-    expect(a.classifyLimit).toBe(150);
   });
   it("throws on unknown argument", function () {
     expect(function () { return parseArgs(["--nope"]); }).toThrow();
+  });
+  it("rejects the retired per-run classify pacing flags", function () {
+    // Classification is a local join in the same run as discovery now, so there
+    // is nothing to ration per run. The parameters survive INSIDE classifyQueue
+    // (see the budget/limit/flush tests below) — only the CLI surface is gone,
+    // and it must fail loudly rather than silently ignore a stale invocation.
+    expect(function () { return parseArgs(["--classify-limit", "25"]); }).toThrow();
+    expect(function () { return parseArgs(["--classify-delay-ms", "300"]); }).toThrow();
+    expect(function () { return parseArgs(["--classify-budget-ms", "3600000"]); }).toThrow();
   });
   it("defaults marineZones to null; --marine-zones takes a path", function () {
     expect(parseArgs([]).marineZones).toBe(null);
     const a = parseArgs(["--marine-zones", "data/marine-zones-greatlakes.json"]);
     expect(a.marineZones).toBe("data/marine-zones-greatlakes.json");
+  });
+  it("defaults layers to null and derives --report from --layers", function () {
+    expect(parseArgs([]).layers).toBe(null);
+    expect(parseArgs([]).report).toBe(null);
+    const a = parseArgs(["--layers", "./.layers"]);
+    expect(a.layers).toBe("./.layers");
+    expect(a.report).toBe("./.layers/report.json");
+  });
+  it("an explicit --report wins regardless of flag order", function () {
+    expect(parseArgs(["--report", "r.json", "--layers", "./.layers"]).report).toBe("r.json");
+    expect(parseArgs(["--layers", "./.layers", "--report", "r.json"]).report).toBe("r.json");
+  });
+  it("tolerates a trailing slash on --layers when deriving the report path", function () {
+    expect(parseArgs(["--layers", "/tmp/layers/"]).report).toBe("/tmp/layers/report.json");
   });
 });
 
@@ -109,29 +155,6 @@ describe("nothingToDo guard", function () {
   it("any single mode is valid", function () {
     expect(nothingToDo(parseArgs(["--no-classify"]))).toBe(false);
     expect(nothingToDo(parseArgs(["--no-discovery"]))).toBe(false);
-  });
-});
-
-describe("backoffDelayMs", function () {
-  // rand injected so the jitter is deterministic. rand()=0.5 -> jitter factor 0.
-  const noJitter = function () { return 0.5; };
-  it("is exponential in the retry number (base * 2^(retry-1)) with no jitter", function () {
-    expect(backoffDelayMs(1, 30000, 120000, noJitter)).toBe(30000);
-    expect(backoffDelayMs(2, 30000, 120000, noJitter)).toBe(60000);
-    expect(backoffDelayMs(3, 30000, 120000, noJitter)).toBe(120000);
-  });
-  it("caps the base delay at maxMs before jitter", function () {
-    // retry 5 -> 30000*16=480000 capped to 120000.
-    expect(backoffDelayMs(5, 30000, 120000, noJitter)).toBe(120000);
-  });
-  it("applies at most +/-20% jitter around the capped value", function () {
-    const lo = backoffDelayMs(2, 30000, 120000, function () { return 0; });   // -20%
-    const hi = backoffDelayMs(2, 30000, 120000, function () { return 1; });   // +20%
-    expect(lo).toBeCloseTo(48000, 5);   // 60000 * 0.8
-    expect(hi).toBeCloseTo(72000, 5);   // 60000 * 1.2
-  });
-  it("never returns negative", function () {
-    expect(backoffDelayMs(1, 0, 0, function () { return 0; })).toBe(0);
   });
 });
 
@@ -235,7 +258,7 @@ describe("upsertSql", function () {
 describe("classify UPDATE builders mirror classifyBeaches", function () {
   it("decision UPDATE stores class + version and RESETS attempts to 0", function () {
     expect(classifyUpdateSql("osm-node-1", "great_lake")).toBe(
-      "UPDATE beaches SET water_class = 'great_lake', water_class_version = 1, water_class_attempts = 0 WHERE id = 'osm-node-1';"
+      "UPDATE beaches SET water_class = 'great_lake', water_class_version = 2, water_class_attempts = 0 WHERE id = 'osm-node-1';"
     );
   });
   it("bump UPDATE increments attempts by 1", function () {
@@ -270,58 +293,98 @@ describe("SQL literal delivery is statement-split safe", function () {
   });
 });
 
-describe("reconciliationAllowed gates DELETE on provably-complete coverage", function () {
-  // THE SAFETY INVARIANT: a DELETE may be emitted ONLY when EVERY named tile AND
-  // EVERY park tile fetched this run. Any incomplete coverage => reconciliation
-  // refused (upserts only). This predicate is the single choke point in main().
-  it("allows reconciliation ONLY when named AND park coverage are both complete", function () {
-    expect(reconciliationAllowed(true, true)).toBe(true);
+describe("reconciliationAllowed / classificationAllowed gate on a VERIFIED layer set", function () {
+  // THE SAFETY INVARIANT, restated for the layers transport: a DELETE may be
+  // emitted ONLY when the manifest PROVES the set is a complete, intact,
+  // in-scope, fresh view of OSM. Under the old transport failure was noisy and
+  // delete-safe; under prebuilt layers a wrong tag filter exits 0 with a
+  // well-formed manifest and every checksum matching, so the proof has to be
+  // positive. This predicate is the single choke point in main().
+  it("allows reconciliation ONLY under a fully verified report", function () {
+    expect(reconciliationAllowed(verifiedReport())).toBe(true);
+    expect(classificationAllowed(verifiedReport())).toBe(true);
   });
-  it("refuses when named coverage is incomplete (partial named fetch)", function () {
-    expect(reconciliationAllowed(false, true)).toBe(false);
-    expect(reconciliationAllowed(false, false)).toBe(false);
+  it("refuses BOTH when the view is genuinely incomplete", function () {
+    // Incompleteness is the one failure that must also stop classification: a
+    // partial water view makes the classifier's clean-but-empty branch decide
+    // inland, which HIDES beaches.
+    const cases = [
+      { buildStatus: "partial" },
+      { sourcesVerified: false },
+      { buildSanityPassed: false }
+    ];
+    for (let i = 0; i < cases.length; i = i + 1) {
+      expect(reconciliationAllowed(verifiedReport(cases[i]))).toBe(false);
+      expect(classificationAllowed(verifiedReport(cases[i]))).toBe(false);
+    }
   });
-  it("refuses when park coverage is incomplete (park query degraded)", function () {
-    expect(reconciliationAllowed(true, false)).toBe(false);
+  it("refuses DELETES but KEEPS CLASSIFYING when the set is merely out of scope or stale", function () {
+    // A regions-digest mismatch is what an expansion commit produces by
+    // construction, and a stale extract's geometry is complete, just older.
+    // Gating classification on either would publish thousands of unclassified
+    // beaches live with estimated flag cards until a rebuild lands.
+    const outOfScope = verifiedReport({ regionsDigestMatches: false });
+    expect(reconciliationAllowed(outOfScope)).toBe(false);
+    expect(classificationAllowed(outOfScope)).toBe(true);
+    const stale = verifiedReport({ sourceAgeDays: 99 });
+    expect(reconciliationAllowed(stale)).toBe(false);
+    expect(classificationAllowed(stale)).toBe(true);
   });
-  it("is strict about the boolean true — any non-true (null/undefined) refuses", function () {
-    // runDiscovery signals incomplete park as parkBeaches === null; main derives
-    // parkComplete = (parkBeaches !== null). Guard against a truthy-but-not-true
-    // slipping a delete through.
-    expect(reconciliationAllowed(1, 1)).toBe(false);
-    expect(reconciliationAllowed(true, null)).toBe(false);
-    expect(reconciliationAllowed(undefined, true)).toBe(false);
+  it("is strict about the boolean true — any non-true (null/undefined/truthy) refuses", function () {
+    // Ported verbatim in intent from the per-tile era, and it matters MORE now:
+    // the report is assembled by three separate scripts, so a MISSING field is
+    // the realistic failure and must refuse exactly as an explicit false does.
+    expect(reconciliationAllowed(verifiedReport({ layersVerified: 1 }))).toBe(false);
+    expect(reconciliationAllowed(verifiedReport({ layersVerified: "true" }))).toBe(false);
+    expect(reconciliationAllowed(verifiedReport({ pointerAgreesWithManifest: null }))).toBe(false);
+    expect(reconciliationAllowed(verifiedReport({ sourcesVerified: undefined }))).toBe(false);
+    expect(reconciliationAllowed(verifiedReport({ regionsDigestMatches: 1 }))).toBe(false);
+  });
+  it("refuses a missing or malformed report rather than throwing", function () {
+    expect(reconciliationAllowed(null)).toBe(false);
+    expect(reconciliationAllowed(undefined)).toBe(false);
+    expect(reconciliationAllowed([])).toBe(false);
+    expect(classificationAllowed(null)).toBe(false);
   });
 });
 
-describe("shouldFastDefer is the early total-outage circuit breaker", function () {
-  // Fires ONLY while ZERO tiles have succeeded AND at least maxFailed have failed —
-  // the mirrors-down-from-the-start signature where continuing the best-effort loop
-  // would grind every tile and still ingest nothing. Any single success disarms it.
-  it("fires once maxFailed tiles have failed with zero successes", function () {
-    expect(shouldFastDefer(0, 3, 3)).toBe(true);
-    expect(shouldFastDefer(0, 5, 3)).toBe(true);
+describe("sourceAgeDays / applyRunConjuncts fold in the two conjuncts the fetcher cannot compute", function () {
+  it("measures the OSM data cutoff, not the build wall clock", function () {
+    expect(sourceAgeDays("2026-08-31T00:00:00.000Z", "2026-09-03T00:00:00.000Z")).toBe(3);
+    expect(sourceAgeDays("2026-09-03T12:00:00.000Z", "2026-09-03T00:00:00.000Z")).toBe(-0.5);
   });
-  it("does not fire before maxFailed failures", function () {
-    expect(shouldFastDefer(0, 2, 3)).toBe(false);
-    expect(shouldFastDefer(0, 0, 3)).toBe(false);
+  it("returns NaN for a missing or unparseable timestamp, which FAILS the range check", function () {
+    expect(Number.isNaN(sourceAgeDays(null, "2026-09-03T00:00:00.000Z"))).toBe(true);
+    expect(Number.isNaN(sourceAgeDays("not-a-date", "2026-09-03T00:00:00.000Z"))).toBe(true);
+    const folded = applyRunConjuncts(
+      { regionsDigest: "sha256:abc", oldestSourceTimestamp: null }, "2026-09-03T00:00:00.000Z", "sha256:abc"
+    );
+    expect(reconciliationAllowed(Object.assign(verifiedReport(), folded))).toBe(false);
   });
-  it("is disarmed permanently the moment any tile succeeds", function () {
-    expect(shouldFastDefer(1, 30, 3)).toBe(false);
+  it("matches the digest only on an exact string equality, and never mutates the fetched report", function () {
+    const fetched = {
+      regionsDigest: "sha256:abc", oldestSourceTimestamp: "2026-09-01T00:00:00.000Z"
+    };
+    const ok = applyRunConjuncts(fetched, "2026-09-03T00:00:00.000Z", "sha256:abc");
+    expect(ok.regionsDigestMatches).toBe(true);
+    expect(ok.sourceAgeDays).toBe(2);
+    expect(applyRunConjuncts(fetched, "2026-09-03T00:00:00.000Z", "sha256:zzz").regionsDigestMatches).toBe(false);
+    expect(applyRunConjuncts({ oldestSourceTimestamp: "2026-09-01T00:00:00.000Z" },
+      "2026-09-03T00:00:00.000Z", "sha256:abc").regionsDigestMatches).toBe(false);
+    // The caller still sees exactly what scripts/fetch-layers.js wrote.
+    expect(fetched.regionsDigestMatches).toBe(undefined);
+    expect(fetched.sourceAgeDays).toBe(undefined);
+  });
+  it("passes a null report straight through so the gate reports it as fatal", function () {
+    expect(applyRunConjuncts(null, "2026-09-03T00:00:00.000Z", "sha256:abc")).toBe(null);
   });
 });
 
-// The delete rail has no single exported SQL builder: main() composes it inline
-// (reconcileStaleRows -> deleteBeachSql, scripts/discovery-batch.js:832-835).
-// This test-local helper mirrors that composition verbatim so the emitted DELETE
-// text below still exercises exactly what production emits.
+// The delete rail's full composition is exported as a real builder
+// (reconciliationDelta), so this helper no longer mirrors production by hand —
+// it just names the half of that builder these assertions read.
 function reconciliationDeletes(snapshotRows, producedIds, producedParkRowCount) {
-  const out = [];
-  const staleRows = reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount);
-  for (let i = 0; i < staleRows.length; i = i + 1) {
-    out.push(deleteBeachSql(staleRows[i].id));
-  }
-  return out;
+  return reconciliationDelta(snapshotRows, producedIds, producedParkRowCount).statements;
 }
 
 describe("reconcileStaleRows / deleteBeachSql single-source the delete set", function () {
@@ -435,9 +498,55 @@ describe("classifyCoverageCounts (required visibility for NULL-hides)", function
 
 describe("syncMetaSql", function () {
   it("upserts key/value/updated", function () {
-    const sql = syncMetaSql("last_overpass_count", "613", "2026-07-18T08:47:00.000Z");
-    expect(sql).toContain("INSERT INTO sync_meta (key, value, updated) VALUES ('last_overpass_count', '613', '2026-07-18T08:47:00.000Z')");
+    // The key is last_discovery_count, not the retired transport-named row: a D1
+    // row literally named after a data source this pipeline no longer uses,
+    // frozen at its final value forever, is exactly the residue to avoid.
+    const sql = syncMetaSql("last_discovery_count", "613", "2026-07-18T08:47:00.000Z");
+    expect(sql).toContain("INSERT INTO sync_meta (key, value, updated) VALUES ('last_discovery_count', '613', '2026-07-18T08:47:00.000Z')");
     expect(sql).toContain("ON CONFLICT(key) DO UPDATE SET value = '613', updated = '2026-07-18T08:47:00.000Z'");
+  });
+});
+
+describe("reconciliationGate — the three run-level preconditions on any DELETE", function () {
+  it("allows deletes only when the layer set is verified, parks are healthy and a snapshot exists", function () {
+    const gate = reconciliationGate(true, true, true);
+    expect(gate.allowed).toBe(true);
+  });
+
+  it("refuses when the layer set is not provably complete", function () {
+    const gate = reconciliationGate(false, true, true);
+    expect(gate.allowed).toBe(false);
+    expect(gate.reason).toContain("not provably complete");
+  });
+
+  // The band the proportional rails structurally cannot see: a parks layer at
+  // 0.96x clears every build gate (they refuse below 0.95x) while the missing
+  // polygons make real beaches fail park membership and read as stale.
+  it("refuses when the parks layer is unhealthy, even on a verified set with a snapshot", function () {
+    const gate = reconciliationGate(true, false, true);
+    expect(gate.allowed).toBe(false);
+    expect(gate.reason).toContain("parksLayerHealthy=false");
+  });
+
+  it("refuses when there is no snapshot to diff against", function () {
+    const gate = reconciliationGate(true, true, false);
+    expect(gate.allowed).toBe(false);
+    expect(gate.reason).toContain("no snapshot");
+  });
+
+  // Strictness: the gate must not be satisfiable by a truthy non-boolean, the
+  // same discipline reconciliationAllowed is held to.
+  it("is strict — any falsy precondition refuses and every refusal names a reason", function () {
+    const combos = [
+      [false, false, false], [false, false, true], [false, true, false],
+      [true, false, false], [true, false, true], [false, true, true], [true, true, false]
+    ];
+    for (const combo of combos) {
+      const gate = reconciliationGate(combo[0], combo[1], combo[2]);
+      expect(gate.allowed).toBe(false);
+      expect(typeof gate.reason).toBe("string");
+      expect(gate.reason.length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -465,7 +574,7 @@ describe("reconciliation safety rails", function () {
     expect(deletes).toEqual([]);
   });
   it("refuses a mass-delete beyond the proportional allowance", function () {
-    // 100 candidates, none produced -> 100 stale > allowance max(10, 25) = 25.
+    // 100 candidates, none produced -> 100 stale > allowance max(10, ceil(5)) = 10.
     const snap = [];
     for (let i = 0; i < 100; i = i + 1) { snap.push(parkRow("osm-way-" + i)); }
     const deletes = reconciliationDeletes(snap, new Set(), 1);
@@ -478,82 +587,107 @@ describe("reconciliation safety rails", function () {
     const deletes = reconciliationDeletes(snap, new Set(), 1);
     expect(deletes).toEqual([]);
   });
+
+  // --- the TIGHTENED global fraction (0.05, was 0.25) ------------------------
+  // 0.25 was calibrated for a transport where partial coverage was normal and a
+  // large legitimate delete set was plausible. Under verified layers it is
+  // never legitimate, and against the measured table (982 park-origin
+  // candidates) it permitted 246 silent deletes — waving through every
+  // regression worth naming. These two cases pin the new boundary from both
+  // sides; the second is a delete the OLD fraction would have allowed.
+  function candidates(n, staleFrom) {
+    const snap = [];
+    for (let i = 0; i < n; i = i + 1) { snap.push(parkRow("osm-way-" + i)); }
+    const produced = new Set();
+    for (let i = 0; i < staleFrom; i = i + 1) { produced.add("osm-way-" + i); }
+    return { snap: snap, produced: produced };
+  }
+  it("allows a delete set exactly AT the 5% allowance", function () {
+    // 300 candidates -> global allowance max(10, 15) = 15; all in one region, so
+    // the per-region allowance is also 15. 15 stale is admitted.
+    const c = candidates(300, 285);
+    expect(reconciliationDeletes(c.snap, c.produced, 1).length).toBe(15);
+  });
+  it("refuses one delete PAST the 5% allowance that 25% would have waved through", function () {
+    // 16 stale of 300 candidates: allowance 15 at 0.05, but 75 at the old 0.25.
+    const c = candidates(300, 284);
+    expect(reconciliationDeletes(c.snap, c.produced, 1)).toEqual([]);
+  });
 });
 
-describe("tileBbox", function () {
-  const PILOT = { minLon: -87.6, minLat: 41.6, maxLon: -82.3, maxLat: 46.6 };
-
-  it("splits the pilot bbox into a ceil(span/max) grid", function () {
-    // 5.3 deg wide / 1.5 = ceil 4 cols; 5.0 deg tall / 1.5 = ceil 4 rows.
-    const tiles = tileBbox(PILOT, 1.5, 0.05);
-    expect(tiles.length).toBe(16);
+describe("regionForPoint buckets a row deterministically", function () {
+  it("returns the FIRST REGIONS entry containing the point (boxes overlap)", function () {
+    expect(regionForPoint(43.0, -86.0)).toBe("Lake Michigan");
+    expect(regionForPoint(43.3, -79.0)).toBe("Niagara River");
+    // (43.0, -79.0) is inside BOTH Lake Erie and Niagara River; Erie is earlier
+    // in the fixed REGIONS order, so it wins, always.
+    expect(regionForPoint(43.0, -79.0)).toBe("Lake Erie");
   });
-
-  it("keeps every base tile under maxSpan + 2*overlap on each side", function () {
-    const tiles = tileBbox(PILOT, 1.5, 0.05);
-    const maxAllowed = 1.5 + 2 * 0.05 + 1e-9;
-    for (const t of tiles) {
-      expect(t.maxLon - t.minLon).toBeLessThanOrEqual(maxAllowed);
-      expect(t.maxLat - t.minLat).toBeLessThanOrEqual(maxAllowed);
-    }
+  it("returns null outside every box and for non-finite input", function () {
+    expect(regionForPoint(10.0, 10.0)).toBe(null);
+    expect(regionForPoint(NaN, -86.0)).toBe(null);
+    expect(regionForPoint("43", -86.0)).toBe(null);
   });
+});
 
-  it("union-covers the whole bbox with no gaps and never exceeds it", function () {
-    const tiles = tileBbox(PILOT, 1.5, 0.05);
-    // Corners are inside some tile, and no tile spills past the original bbox
-    // (overlap is clamped to the edges).
-    for (const t of tiles) {
-      expect(t.minLon).toBeGreaterThanOrEqual(PILOT.minLon);
-      expect(t.minLat).toBeGreaterThanOrEqual(PILOT.minLat);
-      expect(t.maxLon).toBeLessThanOrEqual(PILOT.maxLon);
-      expect(t.maxLat).toBeLessThanOrEqual(PILOT.maxLat);
-    }
-    const covers = function (lon, lat) {
-      return tiles.some(function (t) {
-        return lon >= t.minLon && lon <= t.maxLon && lat >= t.minLat && lat <= t.maxLat;
-      });
-    };
-    expect(covers(PILOT.minLon, PILOT.minLat)).toBe(true);
-    expect(covers(PILOT.maxLon, PILOT.maxLat)).toBe(true);
-    expect(covers(-85.0, 44.0)).toBe(true); // interior point
+describe("the per-REGION delete rail catches what the global rail structurally cannot", function () {
+  // The global rail's protection asymptotes toward zero as the number of
+  // independently breakable clip masks grows: a bug that zeroes ONE region's
+  // parks is a small fraction of the global candidate set and passes. The small
+  // regions are exactly the ones it can never protect — Niagara has 5
+  // park-origin candidates in production, so a floor of 10 would be vacuous.
+  function rowAt(id, lat, lon) {
+    return { id: id, name: "Some Park", park_name: "Some Park", lat: lat, lon: lon };
+  }
+  function fixture() {
+    const snap = [];
+    for (let i = 0; i < 400; i = i + 1) { snap.push(rowAt("mich-" + i, 43.0, -86.0)); }
+    for (let i = 0; i < 5; i = i + 1) { snap.push(rowAt("niag-" + i, 43.3, -79.0)); }
+    return snap;
+  }
+  it("refuses the ENTIRE reconciliation when one small region blows its own allowance", function () {
+    const snap = fixture();
+    // Everything produced except three Niagara rows: 3 stale of 405 candidates
+    // clears the global allowance of 21, but Niagara's own allowance is
+    // max(2, ceil(0.05 * 5)) = 2.
+    const produced = new Set();
+    for (let i = 0; i < snap.length; i = i + 1) { produced.add(snap[i].id); }
+    produced.delete("niag-0");
+    produced.delete("niag-1");
+    produced.delete("niag-2");
+    const rail = regionDeleteRailAllows(snap, snap.filter(function (r) { return !produced.has(r.id); }));
+    expect(rail.allowed).toBe(false);
+    expect(rail.region).toBe("Niagara River");
+    expect(rail.staleCount).toBe(3);
+    expect(rail.allowance).toBe(2);
+    // And the composed builder emits NOTHING — not even the Lake Michigan rows.
+    expect(reconciliationDeletes(snap, produced, 1)).toEqual([]);
   });
-
-  it("interior base-grid seams overlap (no point falls between adjacent tiles)", function () {
-    // With overlap > 0, adjacent tiles share a band, so a point exactly on a base
-    // seam is inside both — never orphaned by floating-point drift.
-    const tiles = tileBbox(PILOT, 1.5, 0.05);
-    const lonStep = (PILOT.maxLon - PILOT.minLon) / 4;
-    const seamLon = PILOT.minLon + lonStep;
-    const hits = tiles.filter(function (t) {
-      return seamLon >= t.minLon && seamLon <= t.maxLon && 44.0 >= t.minLat && 44.0 <= t.maxLat;
-    });
-    expect(hits.length).toBeGreaterThanOrEqual(2);
+  it("admits a delete set within every region's own allowance", function () {
+    const snap = fixture();
+    const produced = new Set();
+    for (let i = 0; i < snap.length; i = i + 1) { produced.add(snap[i].id); }
+    produced.delete("niag-0");
+    produced.delete("mich-0");
+    const stale = snap.filter(function (r) { return !produced.has(r.id); });
+    const rail = regionDeleteRailAllows(snap, stale);
+    expect(rail.allowed).toBe(true);
+    expect(rail.region).toBe(null);
+    expect(rail.staleCount).toBe(2);
+    expect(reconciliationDeletes(snap, produced, 1).length).toBe(2);
   });
-
-  it("returns a single tile when the bbox is smaller than maxSpan", function () {
-    const small = { minLon: -87.0, minLat: 41.6, maxLon: -86.5, maxLat: 42.0 };
-    const tiles = tileBbox(small, 1.5, 0.05);
-    expect(tiles.length).toBe(1);
-    // Overlap is clamped to the bbox, so the lone tile equals the input.
-    expect(tiles[0]).toEqual(small);
+  it("reports the per-region tally in REGIONS order regardless of snapshot order", function () {
+    const snap = fixture().reverse();
+    const rail = regionDeleteRailAllows(snap, []);
+    expect(rail.regions.map(function (r) { return r.name; })).toEqual(["Lake Michigan", "Niagara River"]);
+    expect(rail.regions[0].candidates).toBe(400);
+    expect(rail.regions[1].candidates).toBe(5);
+    expect(rail.regions[1].allowance).toBe(2);
   });
-
-  it("tiles at the production 2.0-deg span with no base tile exceeding it", function () {
-    // TILE_MAX_SPAN_DEG in discovery-batch.js is 2.0 (with 0.05 overlap): this is
-    // the span every REGION bbox is actually tiled at before any Overpass query.
-    // A REGION-sized box (Lake Michigan: 3.8 deg wide / 4.7 deg tall) at 2.0 deg
-    // -> ceil(3.8/2)=2 cols x ceil(4.7/2)=3 rows = 6 tiles.
-    const lakeMichigan = { minLon: -88.3, minLat: 41.5, maxLon: -84.5, maxLat: 46.2 };
-    const tiles = tileBbox(lakeMichigan, 2.0, 0.05);
-    expect(tiles.length).toBe(6);
-    const maxAllowed = 2.0 + 2 * 0.05 + 1e-9;
-    for (const t of tiles) {
-      expect(t.maxLon - t.minLon).toBeLessThanOrEqual(maxAllowed);
-      expect(t.maxLat - t.minLat).toBeLessThanOrEqual(maxAllowed);
-      // No tile spills past the region box (overlap clamps to the edges).
-      expect(t.minLon).toBeGreaterThanOrEqual(lakeMichigan.minLon);
-      expect(t.maxLon).toBeLessThanOrEqual(lakeMichigan.maxLon);
-    }
+  it("never throws on empty input", function () {
+    const rail = regionDeleteRailAllows([], []);
+    expect(rail.allowed).toBe(true);
+    expect(rail.regions).toEqual([]);
   });
 });
 
@@ -786,5 +920,205 @@ describe("buildClassifyQueue", function () {
     ];
     const q = buildClassifyQueue(snap, [], new Set());
     expect(q.map(function (b) { return b.water_class_attempts; })).toEqual([1, 3]);
+  });
+});
+
+describe("classifyQueue absent-from-layers bump (the D21 attempts semantics)", function () {
+  // Under the old per-beach probe there was no such thing as "absent": the
+  // server answered for any id. Under a VERIFIED layer set, absent means GONE
+  // FROM OSM, which is a real answer and must bump attempts — otherwise the row
+  // re-queues forever with attempts stuck at 0 and the fail-open serves it live
+  // with an estimated flag card permanently.
+  const queue = [{ id: "osm-way-gone", water_class_attempts: 0 }];
+  it("bumps attempts and counts absent_from_layers when the set is verified", async function () {
+    const result = await classifyQueue(queue, {
+      now: function () { return 0; },
+      fetchSignals: async function () { return null; },
+      isKnownAbsent: function () { return true; }
+    });
+    expect(result.statements).toEqual([bumpAttemptsSql("osm-way-gone")]);
+    expect(result.counts.absent_from_layers).toBe(1);
+    expect(result.counts.bumped).toBe(1);
+    expect(result.counts.transient).toBe(0);
+  });
+  it("stays TRANSIENT when the bump is disarmed (an unverified or out-of-scope set)", async function () {
+    // This is what keeps an expansion commit from parking and hiding every
+    // beach on the newly-added coast while the first rebuild is pending.
+    const result = await classifyQueue(queue, {
+      now: function () { return 0; },
+      fetchSignals: async function () { return null; },
+      isKnownAbsent: function () { return false; }
+    });
+    expect(result.statements).toEqual([]);
+    expect(result.counts.absent_from_layers).toBe(0);
+    expect(result.counts.transient).toBe(1);
+  });
+  it("never reads a THROWN probe as absent, however the predicate answers", async function () {
+    // A throw says the probe failed, never that the element is missing.
+    const result = await classifyQueue(queue, {
+      now: function () { return 0; },
+      fetchSignals: async function () { throw new Error("boom"); },
+      isKnownAbsent: function () { return true; }
+    });
+    expect(result.statements).toEqual([]);
+    expect(result.counts.absent_from_layers).toBe(0);
+    expect(result.counts.transient).toBe(1);
+  });
+  it("returns the DECISIONS it made as verdicts, and never a bump or an absence", async function () {
+    // verdicts is what feeds the classification flip rail: it must carry
+    // re-decisions and nothing else, or a run full of attempts bumps would read
+    // as a run full of flips.
+    const rows = [
+      { id: "decided", water_class_attempts: 0 },
+      { id: "bumped", water_class_attempts: 0 },
+      { id: "gone", water_class_attempts: 0 }
+    ];
+    const result = await classifyQueue(rows, {
+      now: function () { return 0; },
+      fetchSignals: async function (beach) { return beach.id === "gone" ? null : {}; },
+      isKnownAbsent: function () { return true; },
+      classify: function () { return null; }
+    });
+    // Two clean-but-empty answers plus one absence, all three of them bumps.
+    expect(result.counts.bumped).toBe(3);
+    expect(result.counts.absent_from_layers).toBe(1);
+    expect(result.verdicts.size).toBe(0);
+    const decided = await classifyQueue([rows[0]], {
+      now: function () { return 0; },
+      fetchSignals: async function () { return {}; },
+      classify: function () { return "great_lake"; }
+    });
+    expect(decided.verdicts.get("decided")).toBe("great_lake");
+    expect(decided.verdicts.size).toBe(1);
+  });
+});
+
+describe("classificationFlipRailAllows — the rail on mass RE-classification", function () {
+  // Deciding inland HIDES a beach: the same product loss as deleting the row,
+  // arriving faster, and invisible in the row count. There were four rails on
+  // deletes and none here, while 100% of the served flag-worthy rows classify
+  // through one code path — so one broken build plus a version bump re-decides
+  // all of them in a single delta and empties the site.
+  function snapshot(flagWorthyCount, inlandCount) {
+    const rows = [];
+    for (let i = 0; i < flagWorthyCount; i = i + 1) {
+      rows.push({ id: "gl-" + i, water_class: "great_lake" });
+    }
+    for (let i = 0; i < inlandCount; i = i + 1) {
+      rows.push({ id: "in-" + i, water_class: "inland" });
+    }
+    return rows;
+  }
+  it("allows the normal drain: unclassified rows deciding for the first time", function () {
+    const rows = [{ id: "new-1", water_class: null }, { id: "new-2" }];
+    const rail = classificationFlipRailAllows(rows, new Map([["new-1", "inland"], ["new-2", "great_lake"]]));
+    expect(rail.allowed).toBe(true);
+    expect(rail.hideFlips).toBe(0);
+    expect(rail.matrix.unclassified.inland).toBe(1);
+    expect(rail.matrix.unclassified.great_lake).toBe(1);
+  });
+  it("allows a small hide set within max(10, 10% of the flag-worthy rows)", function () {
+    const rows = snapshot(200, 0);
+    const verdicts = new Map();
+    for (let i = 0; i < 20; i = i + 1) { verdicts.set("gl-" + i, "inland"); }
+    const rail = classificationFlipRailAllows(rows, verdicts);
+    expect(rail.flagWorthy).toBe(200);
+    expect(rail.allowance).toBe(20);
+    expect(rail.hideFlips).toBe(20);
+    expect(rail.allowed).toBe(true);
+  });
+  it("REFUSES a synthetic mass hide", function () {
+    const rows = snapshot(200, 0);
+    const verdicts = new Map();
+    for (let i = 0; i < 150; i = i + 1) { verdicts.set("gl-" + i, "inland"); }
+    const rail = classificationFlipRailAllows(rows, verdicts);
+    expect(rail.allowed).toBe(false);
+    expect(rail.hideFlips).toBe(150);
+    expect(rail.allowance).toBe(20);
+    expect(rail.matrix.great_lake.inland).toBe(150);
+  });
+  it("keeps a floor of 10 so a tiny table is not railed into uselessness", function () {
+    const rows = snapshot(12, 0);
+    const verdicts = new Map();
+    for (let i = 0; i < 10; i = i + 1) { verdicts.set("gl-" + i, "inland"); }
+    expect(classificationFlipRailAllows(rows, verdicts).allowance).toBe(10);
+    expect(classificationFlipRailAllows(rows, verdicts).allowed).toBe(true);
+  });
+  it("is ASYMMETRIC: inland -> flag-worthy is un-hiding and is never refused", function () {
+    const rows = snapshot(0, 500);
+    const verdicts = new Map();
+    for (let i = 0; i < 500; i = i + 1) { verdicts.set("in-" + i, "great_lake"); }
+    const rail = classificationFlipRailAllows(rows, verdicts);
+    expect(rail.allowed).toBe(true);
+    expect(rail.unhideFlips).toBe(500);
+    expect(rail.hideFlips).toBe(0);
+    expect(rail.matrix.inland.great_lake).toBe(500);
+  });
+  it("accepts a plain object verdict map and ignores rows with no verdict", function () {
+    const rows = snapshot(3, 0);
+    const rail = classificationFlipRailAllows(rows, { "gl-0": "inland" });
+    expect(rail.hideFlips).toBe(1);
+    expect(rail.matrix.great_lake.inland).toBe(1);
+  });
+  it("never throws on empty or missing input", function () {
+    expect(classificationFlipRailAllows([], new Map()).allowed).toBe(true);
+    expect(classificationFlipRailAllows(null, null).allowed).toBe(true);
+    expect(classificationFlipRailAllows(undefined, undefined).hideFlips).toBe(0);
+  });
+  it("renders every row of the confusion matrix, logged whether or not the rail fires", function () {
+    const rendered = formatFlipMatrix(classificationFlipRailAllows(snapshot(2, 0), { "gl-0": "inland" }).matrix);
+    expect(rendered).toContain("great_lake->{great_lake=0 ocean=0 inland=1}");
+    expect(rendered).toContain("ocean->{");
+    expect(rendered).toContain("inland->{");
+    expect(rendered).toContain("unclassified->{");
+  });
+});
+
+describe("the layer file plan", function () {
+  it("consumes every published layer key and names no key the build does not publish", function () {
+    // A drift here does not throw or warn at runtime — it silently zeroes a
+    // logical layer, which is precisely the valid-looking failure the manifest
+    // gate exists for. main() asserts it too, before any SQL is emitted.
+    expect(layerFilePlanProblems()).toEqual({ missing: [], unexpected: [] });
+  });
+  it("joins a layer directory and a file name with exactly one separator", function () {
+    expect(joinLayerPath("/tmp/layers", "report.json")).toBe("/tmp/layers/report.json");
+    expect(joinLayerPath("/tmp/layers/", "report.json")).toBe("/tmp/layers/report.json");
+    expect(joinLayerPath("", "report.json")).toBe("report.json");
+  });
+});
+
+describe("splitOtherRelations halves the relation layer by TAG, not by file", function () {
+  // GDAL routes type=site and unassemblable beach/park relations to
+  // other_relations. The beach half must reach discovery (such a beach vanishes
+  // entirely otherwise) and the park half must reach the NAMING tier (dropping
+  // it unnames beaches and deletes their park-origin rows), so the one file is
+  // split by the same branch-precedence chain the rest of discovery uses.
+  function feature(tags) {
+    return {
+      osmType: "relation", osmId: 1, tags: tags,
+      bounds: { minLat: 43.0, minLon: -86.0, maxLat: 43.01, maxLon: -85.99 },
+      geometry: { type: "Point", coordinates: [-86.0, 43.0] }
+    };
+  }
+  it("routes natural=beach to the beach half and a named park to the park half", function () {
+    const beach = feature({ natural: "beach", name: "Sandy" });
+    const park = feature({ leisure: "park", name: "Some Park" });
+    const split = splitOtherRelations([beach, park]);
+    expect(split.beaches).toEqual([beach]);
+    expect(split.parks).toEqual([park]);
+  });
+  it("keeps a named protected lake in the PARK half — losing its park role deletes rows", function () {
+    // natural=water AND park-tagged AND named: the branch order is load-bearing,
+    // and it is not re-implemented here.
+    const protectedLake = feature({ natural: "water", boundary: "protected_area", name: "Reserve Lake" });
+    const split = splitOtherRelations([protectedLake]);
+    expect(split.parks).toEqual([protectedLake]);
+    expect(split.beaches).toEqual([]);
+  });
+  it("drops a relation that is neither, and never throws on junk input", function () {
+    expect(splitOtherRelations([feature({ type: "site" })])).toEqual({ beaches: [], parks: [] });
+    expect(splitOtherRelations(null)).toEqual({ beaches: [], parks: [] });
+    expect(splitOtherRelations([null, undefined, {}])).toEqual({ beaches: [], parks: [] });
   });
 });

@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "_readme": [
+    "data/layer-floors.json - the committed ABSOLUTE floors for the prebuilt FlatGeobuf layer",
+    "sets, read by scripts/build-manifest.js (Level 1 and Level 2 of the build gates) before the",
+    "layers/current.json pointer is written.",
+    "",
+    "WHY THIS FILE EXISTS. No absolute floor in this pipeline is ever a continental measurement.",
+    "A floor whose basis is a different bounding box than the published mask is not a floor: it is",
+    "either a day-one hard refusal that makes the pipeline unpublishable, or a number the interior",
+    "surplus clears while every Great Lakes shoreline beach is missing. So every floor here is",
+    "SEEDED FROM A REAL BUILD UNDER THE PUBLISHED MASK, cross-checked by a human against D1 truth,",
+    "and moved only by a reviewed commit - exactly the discipline data/marine-zones-greatlakes.json",
+    "already has.",
+    "",
+    "WHY IT IS KEYED BY regionsDigest. The digest is sha256 over regionsDigestInput(REGIONS) from",
+    "src/layerManifest.js: region name plus bbox, sorted, canonical JSON. Appending a coastal box",
+    "to src/regions.js changes the digest, so the new footprint has NO entry here and the build",
+    "REFUSES to auto-publish until someone seeds and commits floors for it. That is what turns",
+    "\"remember to add a coastline floor when the first saltwater box lands\" from prose into a",
+    "build-time refusal - without it, a Pacific box would silently mass-hide every ocean beach.",
+    "",
+    "HOW TO SEED A NEW DIGEST.",
+    "  1. Run build-layers.yml by workflow_dispatch with publish true (bootstrap: the ratio checks",
+    "     have no previous manifest to run against, so the pointer is not written automatically).",
+    "  2. Read the produced manifest.json. Confirm lakes-polygon is exactly 6 features carrying",
+    "     exactly the six wikidata QIDs in lakesIdentity below, and cross-check the global and",
+    "     per-region counts against D1 truth before trusting any of them.",
+    "  3. Commit an entry under the new digest with status \"seeded\", seededFromBuildId set to that",
+    "     manifest buildId, and each floor set to 0.75x the seeded count (rounded down), EXCEPT the",
+    "     lakes identity, which is an identity and not a ratio.",
+    "",
+    "SHAPE.",
+    "  floors[<regionsDigest>].status          \"bootstrap\" | \"seeded\"",
+    "  floors[<regionsDigest>].layers[<key>]   global feature-count floor, keyed by the ten",
+    "                                          EXPECTED_LAYER_KEYS of src/layerManifest.js",
+    "  floors[<regionsDigest>].regions[<name>][<layer>]",
+    "                                          per-REGION envelope-intersection floor, keyed by the",
+    "                                          src/regions.js REGIONS name and one of the six",
+    "                                          LOGICAL layer names listed in _regionLayerNames",
+    "  lakesIdentity                           digest-independent identity, not a heuristic",
+    "",
+    "A null floor means NO FLOOR HAS BEEN SEEDED YET and the corresponding Level 1 / Level 2 check",
+    "does not apply. A null is deliberate and reviewable; an invented number is not. A floors file",
+    "carrying made-up counts is strictly worse than one carrying nulls, because a wrong floor either",
+    "blocks every build forever or blesses a broken one.",
+    "",
+    "status \"bootstrap\" is NOT a licence to auto-publish. An entry whose status is \"bootstrap\"",
+    "records that the footprint is known and its floors are still pending; the pointer step must",
+    "still require an explicit workflow_dispatch with publish true. Only status \"seeded\" (with the",
+    "nulls replaced by real, reviewed numbers) means the digest is fully gated. Do not add a",
+    "bootstrap entry for a NEW footprint just to get past a refusal - that defeats the entire",
+    "purpose of keying this file by digest."
+  ],
+  "_regionLayerNames": [
+    "beaches",
+    "parks-polygon",
+    "parks-line",
+    "coastline",
+    "water",
+    "other-relations"
+  ],
+  "lakesIdentity": {
+    "_comment": [
+      "The ONLY hardcoded absolute in the whole gate set, and the sharpest canary in it: the six",
+      "Great Lake relations are the largest and most reference-heavy objects in the data, so if the",
+      "GDAL node index broke, lakes-polygon.fgb goes empty first. This is an IDENTITY - exactly six",
+      "features carrying exactly these six QIDs - not a floor, so it never moves with the mask and",
+      "is not nested under a digest. build-manifest.js should assert it against GREAT_LAKE_QIDS in",
+      "src/waterClass.js (the set src/waterClass.js actually classifies with) rather than trusting",
+      "this file alone; the copy here exists so the expected values are readable next to the floors."
+    ],
+    "featureCount": 6,
+    "wikidata": [
+      "Q1066",
+      "Q1169",
+      "Q1383",
+      "Q5492",
+      "Q1062",
+      "Q736707"
+    ]
+  },
+  "floors": {
+    "sha256:b206bbdc0ded40457dfeb046221ad69e44eef71f22ab297e69df0735828907c3": {
+      "_comment": [
+        "BOOTSTRAP ENTRY for the Great Lakes footprint - the nine REGIONS boxes of src/regions.js as",
+        "of the FlatGeobuf migration. Every floor below is null because build 1 has not run: build 1 is",
+        "what SEEDS these numbers, under the published mask, and a human commits them here afterwards",
+        "(see _readme, HOW TO SEED A NEW DIGEST). Until then no absolute or per-region floor applies",
+        "and the layers/current.json pointer must be written only by an explicit workflow_dispatch.",
+        "",
+        "The digest key was computed as sha256 over regionsDigestInput(REGIONS) from",
+        "src/layerManifest.js. VERIFY IT against the regionsDigest the first manifest actually carries",
+        "before seeding: if the two disagree the build refuses to auto-publish, which is the safe",
+        "direction, but the fix is to correct this key rather than to loosen the check.",
+        "",
+        "coastline is legitimately null-and-zero at Great Lakes scope: the lakes are mapped as water",
+        "relations, not natural=coastline ways, which is why 100% of the served Great Lakes rows",
+        "classify through the wikidata QID path. It becomes structurally REQUIRED the moment a",
+        "saltwater box lands - and that box changes the digest, so it needs a fresh entry anyway.",
+        "",
+        "parks-line has one extra rule that is not a ratio: a count of ZERO is a hard REFUSAL even",
+        "while the floor here is null. Named park ways exist unconditionally in this scope, so zero",
+        "means the carve is broken, and the visible consequence is unnamed beaches plus DELETED",
+        "park-origin rows - which is the majority of the table (982 of 1669 rows are park-origin)."
+      ],
+      "status": "bootstrap",
+      "seededFromBuildId": null,
+      "seededAt": null,
+      "regionCount": 9,
+      "regionNames": [
+        "Lake Erie",
+        "Lake Huron + Georgian Bay",
+        "Lake Michigan",
+        "Lake Ontario",
+        "Lake St. Clair + St. Clair / Detroit Rivers",
+        "Lake Superior",
+        "Niagara River",
+        "St. Marys River / Sault",
+        "Upper St. Lawrence / Thousand Islands"
+      ],
+      "layers": {
+        "beaches-point.fgb": null,
+        "beaches-line.fgb": null,
+        "beaches-polygon.fgb": null,
+        "parks-polygon.fgb": null,
+        "parks-line.fgb": null,
+        "coastline-line.fgb": null,
+        "water-line.fgb": null,
+        "water-polygon.fgb": null,
+        "lakes-polygon.fgb": null,
+        "other-relations.fgb": null
+      },
+      "regions": {
+        "Lake Superior": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "St. Marys River / Sault": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Lake Michigan": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Lake Huron + Georgian Bay": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Lake St. Clair + St. Clair / Detroit Rivers": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Lake Erie": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Niagara River": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Lake Ontario": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        },
+        "Upper St. Lawrence / Thousand Islands": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        }
+      }
+    }
+  }
+}

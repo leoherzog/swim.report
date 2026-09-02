@@ -1,49 +1,49 @@
 name: Beach discovery
 
-# Offline replacement for the retired in-Worker runOverpassSync ("47 8 * * *")
-# cron. Runs the discovery half of scripts/discovery-batch.js (--no-classify):
-# Overpass tiling over the src/regions.js coastal region set -> beach upserts +
-# stale-row reconciliation (the ONLY delete path) + flag_history retention +
-# sync_meta, emitted as one idempotent .sql delta and bulk-loaded into production
-# D1 with `wrangler d1 execute --remote --file`.
+# Discovery + water-body classification + the offline marine_zone pass, all as PURE
+# LOCAL MATH over the prebuilt spatial layers published by build-layers.yml. This job
+# makes ZERO upstream data queries: it downloads a verified layer set over plain
+# HTTPS, then runs scripts/discovery-batch.js with NO network permission at all.
 #
-# Water-body CLASSIFICATION is a SEPARATE workflow (classify.yml, --no-discovery):
-# it runs more often, drains the queue N beaches per run, and emits only
-# water_class UPDATEs — so a slow classify pass can never starve or blow the
-# time budget of this fast, delete-bearing discovery pass. See docs/offline-discovery.md.
+# Output is one idempotent .sql delta bulk-loaded into production D1 with
+# wrangler d1 execute --remote --file: beach upserts + stale-row reconciliation (the
+# ONLY delete path) + water_class UPDATEs + flag_history retention + sync_meta +
+# change-only marine_zone UPDATEs.
 #
-# This run ALSO derives beaches.marine_zone offline (--marine-zones), replacing
-# the retired in-Worker marine enrichment cron: a pure local nearest-marine-zone
-# pass (point-in-polygon + nearest-edge, 15 km cap) over the snapshot against
-# the repo-committed data/marine-zones-greatlakes.json, refreshed manually via
-# scripts/build-marine-zones.js when NWS publishes new coastal marine zone
-# shapefiles (https://www.weather.gov/gis/MarineZones, ~biannually). Change-only
-# idempotent UPDATEs; zero upstream requests; never touches the delete path.
+# Classification runs in the SAME run that discovers a beach, so the
+# FLAG_WORTHY_WATER_SQL fail-open window (an unclassified beach served live with an
+# estimated flag card) is zero rather than hours.
+#
+# DELETE SAFETY: reconciliation AND classification both run only under a verified
+# manifest (src/layerManifest.js reconciliationAllowed / classificationAllowed). A
+# partial view of OSM must never read as "gone from OSM", and must never be allowed
+# to decide inland either. On top of that, two proportional rails still apply to the
+# proposed delete set: the global max(10, 5% of candidates) and the per-region rail.
 #
 # Requires one repository secret:
-#   CLOUDFLARE_API_TOKEN  — value = the CLOUDFLARE_TOKEN in .dev.vars (a token
-#                           with D1 edit scope on the swim-report database).
-# No npm private-registry tokens are needed: this job never runs `npm install`/
-# `npm ci` in the repo (which would reify package.json's private
-# @web.awesome.me / @fortawesome deps and fail E401). Every wrangler call goes
-# through `npx --yes wrangler@<pin>`, which fetches only wrangler from the
-# default registry and never consults the repo's package.json.
+#   CLOUDFLARE_API_TOKEN — value = the CLOUDFLARE_TOKEN in .dev.vars (D1 edit scope
+#                          on the swim-report database).
+# It needs NO R2 credentials: the layers are public data read from
+# https://map.swim.report. That is a deliberate blast-radius reduction — this is the
+# only job in the repo that can DELETE production rows.
+# No npm private-registry tokens are needed: this job never runs npm install / npm ci
+# in the repo (which would reify package.json's private @web.awesome.me /
+# @fortawesome deps and fail E401). Every wrangler call goes through
+# npx --yes wrangler@<pin>.
 
 on:
-  # Daily, offset from the old in-Worker discovery cron's 08:47 UTC slot. GitHub
-  # cron is UTC and best-effort (can lag several minutes under load). Overpass
-  # outage behavior (scripts/discovery-batch.js): the per-tile backoff retries ride
-  # out short bursts; the named fetch is BEST-EFFORT — a tile still null after its
-  # retries no longer aborts the run, the loop CONTINUES past it to salvage every
-  # tile that DID fetch. A PARTIAL-but-productive run exits 0 and emits a delta of
-  # UPSERTS + flag_history retention + sync_meta with NO reconciliation DELETEs (the
-  # DELETE pass runs ONLY on provably-complete coverage; Apply applies the delta,
-  # idempotent). A HOPELESS run (0 successes + 3 failed tiles via the circuit
-  # breaker, OR 0 tiles fetched, OR the 90-min wall-clock budget stopping at zero)
-  # aborts with no SQL (exit 1) so Upload+Apply skip and it fast-defers to the next day.
+  # Daily. GitHub's scheduler defers this repo's crons by anywhere from 17 minutes to
+  # 11 hours (measured over 12 consecutive runs), and this design makes that stop
+  # mattering: the layers in R2 are up to a few days old by design, so an 11-hour-late
+  # 10-minute run is indistinguishable from an on-time one.
   schedule:
     - cron: "47 8 * * *"
-  # Manual runs: choose whether to apply to D1 or just produce the .sql artifact.
+  # Consume a fresh layer set immediately rather than waiting for the next deferred
+  # schedule. workflow_run fires on a real event, not the scheduler queue, so it does
+  # not inherit the deferral tax.
+  workflow_run:
+    workflows: ["Build layers"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       apply:
@@ -52,34 +52,49 @@ on:
         default: true
 
 concurrency:
-  # Overpass allows 2 slots per IP and the D1 write is not safely re-entrant —
-  # never let two discovery runs overlap.
+  # The D1 write is not safely re-entrant, and one delta now carries both the
+  # discovery and the classification column families — never let two runs overlap.
   group: discovery
   cancel-in-progress: false
 
 permissions:
   contents: read
 
+# Workflow-scoped so it covers EVERY deno invocation in EVERY job and step. The
+# repo-root deno.lock is auto-discovered by Deno for every deno invocation in this
+# repo, and without this Deno also wants a workspace.packageJson block for
+# package.json's npm deps: "deno cache --frozen" then FAILS with "The lockfile is out
+# of date", and a plain "deno run" SILENTLY REWRITES the checked-in deno.lock. On the
+# one job in this repo that can DELETE production rows, a silently rewritten lock is a
+# retired guarantee.
+env:
+  DENO_NO_PACKAGE_JSON: "1"
+
 jobs:
   discover:
+    # Skip the workflow_run path when the build failed or was cancelled.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    # 120 (not 90): the per-tile exponential-backoff retries added to ride out
-    # public-Overpass 504 bursts can extend a flaky run; a fast run still finishes
-    # in minutes. Classification (the former long pole) now lives in classify.yml.
-    timeout-minutes: 120
+    # Budget: snapshot ~30 s + layer download 1-2 min + local scan / merge / pond
+    # filter / classification join + apply ~1 min. Realistic 5-12 min. 45 leaves
+    # 3-4x headroom for the North America expansion without leaving a wedged job
+    # burning two hours. Down from 120, which was sized for Overpass per-tile
+    # backoff; the typical run drops from 85 min to about 10.
+    timeout-minutes: 45
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      # A minimal D1-only API token can't enumerate GET /accounts to auto-discover
-      # the account, so wrangler needs the account ID handed to it explicitly.
-      # Account IDs are not secret (they ship in wrangler.toml / dashboard URLs).
+      # A minimal D1-only API token cannot enumerate GET /accounts to auto-discover
+      # the account, so wrangler needs it handed over explicitly. Account IDs are not
+      # secret (they ship in wrangler.toml and dashboard URLs).
       CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
       DB_NAME: swim-report
-      # Pin to the wrangler MAJOR line (matches package.json's `^4.112.0`), so the
-      # unattended job gets 4.x fixes automatically but a future wrangler 5 can
-      # never silently change flags / `--file` parsing under a scheduled run.
+      # Pin to the wrangler MAJOR line (matches package.json's ^4), so the unattended
+      # job gets 4.x fixes automatically but a future wrangler 5 can never silently
+      # change flags or --file parsing under a scheduled run.
       WRANGLER_VERSION: "4"
-      # workflow_dispatch inputs are absent on scheduled runs — default there.
-      APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
+      LAYERS_DIR: ${{ runner.temp }}/layers
+      # workflow_dispatch inputs are absent on scheduled and workflow_run runs.
+      APPLY: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_run') && 'true' || inputs.apply }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -94,33 +109,53 @@ jobs:
         with:
           node-version: "22"
 
-      # NOTE: we do NOT `npm install`/`npm ci` here. Any npm install in the repo
-      # root reifies the whole package.json — including the private
-      # @web.awesome.me / @fortawesome deps whose registry tokens this job does
-      # not have — and fails E401. Instead every wrangler call goes through
-      # `npx --yes wrangler@<pin>`, which fetches ONLY wrangler from the default
-      # registry and never consults the repo's package.json. (setup-node above
-      # provides the node/npx runtime.)
+      # The ONLY job in this repo that can DELETE production rows must not resolve an
+      # unpinned transitive npm tree from the network on every invocation. --frozen
+      # refuses any lockfile drift; an npm outage fails here, loudly, before any D1
+      # read.
+      - name: Cache Deno dependencies (frozen lockfile)
+        run: deno cache --lock=deno.lock --frozen scripts/fetch-layers.js scripts/discovery-batch.js
+
+      # NOTE: we do NOT npm install / npm ci here. Any npm install in the repo root
+      # reifies the whole package.json — including the private @web.awesome.me /
+      # @fortawesome deps whose registry tokens this job does not have — and fails
+      # E401. Every wrangler call goes through npx --yes wrangler@<pin>, which
+      # fetches ONLY wrangler from the default registry.
+
+      - name: Fetch and verify the layer set
+        # This is the ONLY network-touching step. It pins layers/current.json ONCE,
+        # logs the buildId, downloads only from that immutable prefix, verifies every
+        # sha256 and byte length against the manifest, and writes report.json. It
+        # exits 1 on any FATAL conjunct, so a set we cannot decode never reaches the
+        # batch. Pinning the buildId at the top means a build completing mid-run can
+        # never mix two sets.
+        run: |
+          set -euo pipefail
+          deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
+            scripts/fetch-layers.js --dest "$LAYERS_DIR"
+          cat "$LAYERS_DIR/report.json"
 
       - name: Snapshot current beaches from D1
-        # The batch job needs the current table for reconciliation deletes and for
-        # the offline marine_zone pass. Read-only. Guarded against a silently
-        # truncated snapshot (D1's --json response is size-capped) by comparing
-        # the row count to SELECT COUNT(*).
+        # Read-only. Guarded against a silently truncated snapshot (D1's --json
+        # response is size-capped) by comparing the row count to SELECT COUNT(*).
         #
-        # Columns are the exact union of what this --no-classify run reads:
-        # reconcileStaleRows (id, name, lat, lon, park_name) + marineZoneSql
-        # (id, lat, lon, nws_zone, marine_zone). The water_class* / osm_id columns
-        # are read only by buildClassifyQueue, which is gated behind
-        # "if (args.classify)" and therefore never runs here — selecting them just
-        # inflates the response and raises the truncation risk on the ONLY
-        # delete-bearing run. classify.yml selects its own (different) column set.
+        # Columns are the exact UNION of what a discovery + classify + marine run
+        # reads: reconcileStaleRows (id, name, lat, lon, park_name) + marineZoneSql
+        # (id, lat, lon, nws_zone, marine_zone) + buildClassifyQueue (id, osm_id, lat,
+        # lon, water_class, water_class_version, water_class_attempts). Folding
+        # classification in widens the only delete-bearing snapshot from 7 columns to
+        # 11, which raises truncation risk — watch the "snapshot bytes" line. A
+        # paginated LIMIT/OFFSET snapshot is the planned fix and is REQUIRED before
+        # the North America expansion. This is also why discoverFromLayers applies
+        # pointInAnyRegion — without it the union -spat rectangle would grow the table
+        # by thousands of continental-interior inland-lake rows and this guard would
+        # abort the only delete path.
         run: |
-          # --json writes API errors (bad token, missing DB) to STDOUT, so a
-          # naive `> snapshot.json` swallows them and the step fails with a blank
-          # log. Capture the exit code and surface the file on failure.
+          set -euo pipefail
+          # --json writes API errors (bad token, missing DB) to STDOUT, so a naive
+          # redirect swallows them and the step fails with a blank log.
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT id, name, lat, lon, park_name, nws_zone, marine_zone FROM beaches" \
+            --command "SELECT id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class, water_class_version, water_class_attempts FROM beaches" \
             > snapshot.json; then
             echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
             cat snapshot.json
@@ -137,16 +172,44 @@ jobs:
             exit 1
           fi
 
-      - name: Run discovery (emit SQL)
+      - name: Run discovery + classification (emit SQL)
+        # NO --allow-net. That is the machine-enforced form of the offline-path
+        # contract: any --allow-net on a discovery-batch.js invocation anywhere in
+        # this repo is a leftover upstream call, findable by one grep.
         run: |
-          deno run --allow-net --allow-read --allow-write \
+          set -euo pipefail
+          # GeoJSON in a JS heap costs many times its packed FGB footprint even with
+          # the segment-grid design, and OOM is the one failure mode that is fail-SAFE
+          # (non-zero exit, no delta) but invisible until it happens. Raise the ceiling
+          # explicitly and log peak RSS so headroom is observable BEFORE it is
+          # exceeded.
+          #
+          # 2>&1 | tee, NOT "2> file": the batch logs to stderr by design, so
+          # redirecting stderr to a file would hide the whole run log — the layer
+          # load, the delete-rail decisions, the classification counts — on every
+          # SUCCESSFUL run, which is precisely when they need reading. pipefail keeps
+          # a batch failure a step failure through the pipe.
+          #
+          # This is also the OQ7 / contract 9.7 benchmark instrument. The four numbers
+          # that gate retiring classify.yml all land in this one log: "classification
+          # done in <n>ms" and "signals index built in <n>ms: <segment counts>" from
+          # the batch, plus "Elapsed (wall clock)" and "Maximum resident set size"
+          # from /usr/bin/time -v.
+          /usr/bin/time -v deno run --lock=deno.lock --frozen \
+            --v8-flags=--max-old-space-size=12288 \
+            --allow-read --allow-write \
             scripts/discovery-batch.js \
+            --layers "$LAYERS_DIR" \
             --snapshot snapshot.json \
             --out discovery-delta.sql \
-            --no-classify \
-            --marine-zones data/marine-zones-greatlakes.json
+            --marine-zones data/marine-zones-greatlakes.json 2>&1 | tee batch-timing.log
+          echo "---- benchmark (contract 9.7) ----"
+          grep -E "Elapsed \(wall clock\)|Maximum resident set size|classification done in|signals index built in|run complete" batch-timing.log || true
           echo "---- delta summary ----"
-          grep -c ';' discovery-delta.sql | xargs echo "statements:"
+          # || true: set -euo pipefail plus a grep -c that finds nothing is a step
+          # failure, and a delta with zero statements is a legitimate (if unlikely)
+          # outcome worth reporting rather than crashing on.
+          { grep -c ';' discovery-delta.sql || true; } | xargs echo "statements:"
           head -n 20 discovery-delta.sql
 
       - name: Upload SQL delta artifact
@@ -156,19 +219,26 @@ jobs:
           path: discovery-delta.sql
           retention-days: 14
 
+      - name: Upload batch log artifact
+        # The benchmark numbers and every rail decision live here. Kept as an artifact
+        # so the 9.7 gate can be answered from a run that has already scrolled out of
+        # the live log view.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: discovery-batch-log
+          path: batch-timing.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Apply SQL to production D1
-        # A PARTIAL run (best-effort named loop salvaged some tiles, others failed)
-        # exits 0 and its delta carries UPSERTS but NO reconciliation DELETEs —
-        # perfectly valid to apply (upserts are idempotent; a beach that sat in an
-        # un-fetched tile just keeps its existing row). A total-outage run never
-        # reaches here (the script exits 1 -> this step skips). The delta always has
-        # at least the flag_history-retention DELETE + sync_meta, so it is never
-        # empty; wrangler applies it as an idempotent no-op at worst.
-        # Discovery deliberately RETAINS the success()-gated Apply and does NOT copy
-        # classify.yml's always()/budget/truncate machinery: discovery writes its
-        # whole delta atomically at the end, so it has a clean binary — exit 0 with a
-        # complete file, or exit 1 with no file. There is no torn-tail / partial-flush
-        # window for the always()+truncate belt to protect against.
+        # success()-gated on purpose. The batch writes its whole delta atomically at
+        # the end, so it has a clean binary outcome — exit 0 with a complete file, or
+        # exit 1 with no file. There is no torn-tail window, so no always() belt and
+        # no truncation step. A degraded run (readable layers that are not provably a
+        # complete view) still exits 0 and emits upserts + retention + marine +
+        # sync_meta with NO deletes and NO water_class UPDATEs; that delta is
+        # perfectly valid to apply and is idempotent.
         if: ${{ env.APPLY == 'true' }}
         run: |
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file discovery-delta.sql; then

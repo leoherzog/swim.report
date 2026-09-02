@@ -1,0 +1,59 @@
+swim.report prebuilt OpenStreetMap layer sets
+=============================================
+
+(c) OpenStreetMap contributors
+
+The FlatGeobuf (.fgb) files published alongside this notice are a DERIVED
+DATABASE produced from OpenStreetMap data and are made available under the Open
+Database License (ODbL) v1.0.
+
+  Full licence text: https://opendatacommons.org/licenses/odbl/1-0/
+  OSM copyright page: https://www.openstreetmap.org/copyright
+
+You are free to copy, distribute, transmit and adapt this data, as long as you
+credit OpenStreetMap and its contributors. If you alter or build upon this data,
+you may distribute the result only under the same licence. Some of the data
+under this notice may be individually attributable to other contributors under
+compatible terms; the manifest.json in this same prefix records the exact source
+extracts and their OSM replication timestamps.
+
+
+How this derived database was produced
+--------------------------------------
+
+Upstream source: country extracts published by Geofabrik GmbH
+(https://download.geofabrik.de/), which are themselves distributed under ODbL
+1.0 and require derived databases to retain this licence.
+
+Processing, in order:
+
+  1. osmium tags-filter with the expressions committed at
+     .github/build/expressions.txt in the swim.report repository, retaining
+     natural=water, natural=coastline, natural=beach, leisure=beach_resort,
+     leisure=park, leisure=nature_reserve and boundary=protected_area, together
+     with all referenced members.
+  2. osmium merge of the filtered per-country extracts, all taken from the same
+     OSM replication timestamp.
+  3. ogr2ogr (GDAL) conversion to FlatGeobuf using the tag-promotion
+     configuration committed at .github/build/osmconf.ini and
+     .github/build/osmconf-lines.ini.
+  4. A region filter and a proximity clip (scripts/clip-layers.js) reducing each
+     layer to features near a beach inside the discovery regions declared in
+     src/regions.js.
+
+Geometry in lakes-polygon.fgb is simplified with a topology-preserving
+Douglas-Peucker pass at a 0.0001 degree (roughly 11 m) tolerance. Every other
+published layer carries unmodified OSM geometry. No attribute values are
+altered; attributes absent from the promotion configuration above are dropped.
+
+These files are a convenience artefact for the swim.report beach discovery
+pipeline, not an authoritative copy of OpenStreetMap. For the canonical data,
+go to openstreetmap.org.
+
+
+Not covered by this notice
+--------------------------
+
+Nothing in this notice applies to swim.report's own estimated beach hazard flag
+output. Those estimates are NOT official flag status and must never be presented
+as such.

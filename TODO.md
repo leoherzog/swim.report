@@ -5,27 +5,26 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 
 ## Data quality / coverage
 
-- **Pond filter covers unnamed park beaches only.** The discovery sync drops
-  unnamed park-contained beaches whose adjacent `natural=water` is all below
-  ~4.5 ha bbox (`isPondBeach`). NAMED pond beaches (rows from the named-beach
-  query) are deliberately untouched — someone mapping a name is treated as
-  intent — and the named-beach query fetches no water context (`out center
-  tags`, no bb). If named pond beaches turn out to be noise too, extend the
-  water fetch to that query and apply the same `isPondBeach` test. Known
-  residual of the ways-only water fetch (see PLAN.md §5): an unnamed beach on a
-  relation-mapped INLAND lake (no coastline tagging) whose only nearby
-  way-water is a small pond would be wrongly dropped — no confirmed real
-  instance yet; if one shows up, the fix is a cheap water-relation membership
-  probe, not reverting to `relation(around...)` (pathologically slow, >10 min
-  server-side).
+- **Pond filter covers unnamed park beaches only.** Discovery drops unnamed
+  park-contained beaches whose adjacent `natural=water` is all below ~4.5 ha bbox
+  (`isPondBeach`). NAMED pond beaches are deliberately untouched — someone mapping a
+  name is treated as intent. If named pond beaches turn out to be noise too, apply
+  the same `isPondBeach` test to them. Known residual of the WAYS-ONLY water
+  evidence (see PLAN.md §5): an unnamed beach on a relation-mapped INLAND lake (no
+  coastline tagging) whose only nearby way-water is a small pond would be wrongly
+  dropped — no confirmed real instance yet. This is kept as-is only for parity with
+  the pre-layers behaviour; the fix is now **cheap** (consult the lakes-polygon
+  layer, a local lookup) rather than the pathologically slow `relation(around...)`
+  query it used to imply. See the Scale-out section.
 - **Flag-worthy water classification** (migration 0009, `src/waterClass.js`).
   Runs only in the offline GitHub Actions batch (`scripts/discovery-batch.js`,
-  Deno). Each beach's adjacent water body is probed via Overpass (vertex
-  recurse-down anchor at 150 m / 120 m, `out ids tags bb`) and classified
-  ocean / great_lake / inland by the pure `classifyWaterBody` (Great Lakes
-  matched by wikidata QID, never by name). A complete probe ALWAYS decides — a
-  clean-but-empty result classifies `inland`, so only a transient failure leaves a
-  row unclassified. Inland + parked rows are hidden by
+  Deno). Each beach's adjacent water body is resolved by a **local spatial join**
+  over the prebuilt FlatGeobuf layers (`src/layerSignals.js`), anchored on the same
+  member vertices and at the same 150 m / 120 m radii the old remote probe used,
+  and classified ocean / great_lake / inland by the pure `classifyWaterBody` (Great
+  Lakes matched by wikidata QID, never by name). The join ALWAYS decides — a
+  clean-but-empty result classifies `inland`, and there is no transient-failure
+  mode left, so an unclassified row now means only "not in the layer set". Inland + parked rows are hidden by
   the shared `FLAG_WORTHY_WATER_SQL` gate on every consumer (never deleted);
   still-unclassified NULL rows stay visible (fail-open), which is why deciding on
   the first complete probe matters — a pending row is a published row. The offline
@@ -45,23 +44,21 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     the radii, NOT restoring a pending state. Note the asymmetry: ocean/great_lake
     probe at 150 m while inland probes at 120 m, so a beach whose only water sits
     in the 120–150 m band can be confirmed flag-worthy but never confirmed on
-    inland water. Widening `INLAND_RADIUS_M` to 150 m would close it; unmeasured,
-    and it WOULD change stored decisions, so it needs a `WATER_CLASS_VERSION` bump
-    (unlike the clean-but-empty change, which provably could not).
-  - **The fail-open window is now ~1 h, not eliminated.** `FLAG_WORTHY_WATER_SQL`
-    still shows unclassified rows, and `src/waterClass.js`'s claim that
-    "post-backfill no pending NULLs remain" is structurally unreachable: daily
-    discovery injects new NULL rows (and the centroid-move reset re-NULLs existing
-    ones) forever, so there is a permanent trickle of beaches served an estimated
-    flag card between discovery and their next hourly classify run. Decisive
-    classification cut the exposure from ~5 h to ~1 h per beach; closing it
-    entirely means hiding NULL rows, which trades this for new legit beaches being
-    invisible for up to an hour. Not obviously the right trade — left open.
-  - **Per-beach relation-`around` cost.** The lake-relation probe is scoped to
-    one beach's vertices at 150 m with `[timeout:60]` at a small N/run; if it
-    proves slow, the documented fallback is a recurse-**up** probe
-    (`way[natural=water](around.a:150)` → `rel(bw)` → read their `wikidata`),
-    which never loads full multipolygon geometry.
+    inland water. Widening `INLAND_RADIUS_M` to 150 m would close it. **This is now
+    ACTIONABLE rather than deferred**: the cost argument that parked it was the
+    per-beach remote probe volume a re-drain implied, and a re-drain is now a
+    `WATER_CLASS_VERSION` bump plus one local re-run that re-decides the whole table
+    in seconds. It still changes stored decisions, so it needs the version bump, a
+    measured before/after distribution, and a look at the classification flip rail
+    (`CLASSIFY_MAX_HIDE_FLIPS` / `CLASSIFY_MAX_HIDE_FRACTION`) before it lands.
+  - ~~**The fail-open window.**~~ **CLOSED by the layers migration.**
+    Classification now runs in the SAME batch pass that discovers a beach, so the
+    gap between a row appearing and being decided is zero, not ~1 h. The structural
+    objection that kept this open — daily discovery injects new NULL rows forever,
+    and the centroid-move reset re-NULLs existing ones — no longer holds, because
+    the run that inserts or re-NULLs a row also decides it. Nothing needs hiding.
+  - ~~**Per-beach relation-`around` cost.**~~ **CLOSED.** There is no remote
+    relation probe any more; the lake join is a local segment-grid lookup.
   - **Parked rows** sit at `WATER_CLASS_MAX_ATTEMPTS = 5` (matches the
     enrichment caps). A version bump does NOT un-park them — `buildClassifyQueue`
     ANDs the version clause with `attempts < cap`, so no version value can reach a
@@ -162,7 +159,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   named `natural=beach` / `leisure=beach_resort` elements, and query 2's park
   containment only rescues unnamed beaches inside a NAMED park polygon. An
   unnamed beach outside any named park never enters the dataset, and any future
-  query (nationwide tiles included) should keep this constraint — a row with no
+  query (a nationwide layer set included) should keep this constraint — a row with no
   human-searchable name can't be displayed, searched, or trusted as a real swim
   spot. The excluded set is large (roughly three-quarters of US `natural=beach`
   elements are unnamed) and intentionally out of scope unless a future pass
@@ -208,13 +205,67 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 ## Scale-out
 
 - **Offline discovery + classification (live residuals).** Discovery and
-  water-body classification run in two independent GitHub Actions workflows that
-  bulk-load D1 — see `docs/offline-discovery.md` for the full design. Live
-  residual: Overpass runs on shared public mirrors, so the named query at
-  `[timeout:90]` plus bounded per-tile backoff retries (3 attempts) is a
-  mitigation, not a cure. The real fix for chronic public-Overpass 504 flakiness
-  is a **self-hosted Overpass instance** (or a paid/reliable endpoint) so
-  discovery no longer rides shared public infrastructure.
+  water-body classification run in one daily GitHub Actions workflow that scans a
+  prebuilt FlatGeobuf layer set and bulk-loads D1, over layers a second workflow
+  builds twice weekly from the Geofabrik OSM extracts — see
+  `docs/offline-discovery.md` for the full design. The old residual here (chronic
+  public-mirror 504 flakiness, and a self-hosted query instance as the real fix) is
+  **CLOSED**: there is no query API in the pipeline at all. The NEW residuals are
+  different in kind:
+  - **Freshness is now the extract cadence, not minutes.** A beach mapped in OSM
+    today appears after the next twice-weekly build, and `MAX_SOURCE_AGE_DAYS = 21`
+    is a hard refusal, not a warning. For a directory of beaches this is the right
+    trade, but it is a real regression in latency and should be stated plainly
+    rather than discovered.
+  - **The dangerous failure is a SUCCESSFUL build of a WRONG layer set** — a
+    clip-mask bug, a short parks layer, an `ogr2ogr` node-index exhaustion that
+    returns empty with exit status 0. These are quiet in a way a 504 never was. The
+    defenses are the absolute floors in `data/layer-floors.json`, the previous-build
+    ratio checks, the manifest's three-tier gate, the two proportional delete rails
+    and the classification flip rail. Every one of those numbers was calibrated
+    against a 1669-row table; re-derive them when the table changes scale.
+  - **Layer-set size at North America scale.** The published set is O(beaches)
+    because of the ~1.1 km proximity clip, but the pre-clip intermediate is not, and
+    the build's peak disk (~13.3 GB) sits inside a runner's budget with less headroom
+    than is comfortable. Measure before adding coasts.
+  - **`beaches-line` and `water-line` may be droppable.** Both are carried because
+    the first build had not yet reported their counts; if they turn out to
+    contribute nothing to discovery or classification, dropping them shrinks the set
+    and the download. Decide from a real build's manifest, not from reasoning.
+  - **Retire the vestigial classification columns.** `water_class_attempts` can no
+    longer be bumped by anything, and `parkedPreDecisive` / the attempts cap in
+    `buildClassifyQueue` exist only for rows parked before this migration. Once a
+    run reports zero such rows, delete the cap, the marker and (in a migration) the
+    column.
+  - **The relation-mapped-inland-lake pond filter is now cheap to fix.** The
+    known-correct-but-narrow residual at the top of this file (ways-only water
+    evidence, kept for parity with the old query) can be closed by consulting the
+    lakes-polygon layer directly — a local lookup, not a new upstream probe. Kept as
+    is for now only to avoid changing discovery output in the same change that
+    changed its transport.
+- **Follow-up: delete `.github/workflows/classify.yml`.** Classification moved into the
+  daily discovery run, so the hourly classify workflow has no scheduled work left; it is
+  retained **manual-only** as a fallback. The claim that a whole-table local join costs
+  seconds was a projection, not a measurement, and getting it backwards costs a
+  SIGKILLed daily job that produces no delta at all — including no `flag_history`
+  retention prune. Delete the file only once **one real `discovery.yml` run** has
+  printed all four of these within budget (the workflow header states the same gates,
+  keep the two in sync):
+  1. classification pass wall clock ≤ 300 s (`classification done in <n>ms`);
+  2. whole `discovery-batch.js` run ≤ 900 s (`run complete … <n>ms total`);
+  3. peak RSS of the batch ≤ 6000 MB (`Maximum resident set size`);
+  4. lakes segments actually indexed ≤ 8e6 (`signals index built in <n>ms: …`).
+  When it goes, take the `--classify-limit` / `--classify-delay-ms` /
+  `--classify-budget-ms` plumbing that only it used with it. While it is still present
+  it must keep `DENO_NO_PACKAGE_JSON=1` on its `deno` step like every other workflow
+  (see below).
+- **Every `deno` step in every workflow must set `DENO_NO_PACKAGE_JSON=1`.** The
+  repo-root `deno.lock` is auto-discovered for all Deno commands here; without that env
+  var Deno folds `package.json`'s npm tree into the lockfile it expects, `deno check
+  --frozen` fails with "The lockfile is out of date", and a plain `deno run` silently
+  REWRITES the checked-in lock. The npm scripts already set it. Do not "fix" this by
+  regenerating the lock without the env var — that trades a loud failure for a silent
+  drift in the only delete-bearing job in the repo.
 - **Demand-priority recompute rotation — mechanism landed, cold-tier tuning
   deferred.** The request path stamps `beaches.last_viewed` (migration 0007;
   detail page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`), and
@@ -270,15 +321,26 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   Also grow `GREAT_LAKES_ZONE_PREFIXES` in that script whenever `src/regions.js` `REGIONS`
   gains coasts beyond the Great Lakes system.
 - **North America coastal expansion — add Pacific / Gulf / Atlantic boxes to
-  `src/regions.js`.** Discovery tiles the `REGIONS` array in the offline batch
-  (`TILE_MAX_SPAN_DEG = 2.0`), so scale-out is purely additive: append coastal
-  bboxes to `REGIONS` (commented-out placeholders already stubbed at the bottom
-  of the file) and the batch tiles them automatically. Adding a saltwater box
-  also wakes the dormant `ocean` branch of the water classifier. **Invariant:**
-  `MAX_BEACHES_PER_RUN = 1000` in `runFlagRecompute` must always cover the whole
-  `beaches` table: any beach past the limit has its 2 h KV TTL expire between
-  rotation turns and goes flagless, so growth past 1000 rows needs real
-  pagination or multiple invocations (or a TTL/cadence change to match).
+  `src/regions.js`.** The DISCOVERY half of this is now genuinely cheap. `REGIONS`
+  feeds the layer build's clip mask, the per-region sanity floors and delete rail,
+  and `pointInAnyRegion` delete scoping — and nothing else. There is no tiling and
+  no per-box query cost, so scale-out stays purely additive: append coastal bboxes
+  to `REGIONS` (commented-out placeholders already stubbed at the bottom of the
+  file) and the build clips to them automatically. Adding a saltwater box also
+  wakes the dormant `ocean` branch of the water classifier. Two blockers remain,
+  and the first is **already violated in production today**:
+  - **`MAX_BEACHES_PER_RUN = 1200`** (`src/index.js`) must always cover the whole
+    `beaches` table: any beach past the limit has its 2 h KV TTL expire between
+    rotation turns and goes flagless. **The table is already 1669 rows.** This is a
+    live gap right now, not a future NA blocker — the hot/cold demand-priority
+    rotation mitigates it (a beach in active demand is always covered) but does not
+    close it. Growth needs real pagination or multiple invocations, or a
+    TTL/cadence change to match. Note the Open-Meteo daily weighted-call ceiling
+    binds here too (see README).
+  - **The D1 `--json` snapshot is size-capped and single-shot**, and the
+    delete-bearing snapshot just widened from 7 to 11 columns (discovery and
+    classification now share one). A truncated snapshot aborts the only delete path
+    there is. A **paginated snapshot is required before NA**, not after.
 
 ## Official-scraper fragility
 
@@ -562,6 +624,11 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
   MapLibre clustering — no per-viewport paging. That single-fetch model is
   comfortable to ~5–10k features; beyond that the GeoJSON endpoint itself needs
   server-side clustering / tiling before the 10k–100k North America target.)
+  Cross-reference, out of scope here: a browser-fetched static tiled artifact in the
+  same R2 bucket the layer build already writes would solve both this and the map's
+  scale problem without the Worker ever touching R2. But such an artifact MUST be
+  generated **from D1** — post-classification truth — and never from the OSM layers,
+  or the map would show beaches the pipeline rejected as inland.
 
 ## Explicitly deferred by PLAN.md (not gaps, just out of scope for this pass)
 

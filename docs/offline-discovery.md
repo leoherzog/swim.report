@@ -1,146 +1,200 @@
-# Offline discovery + water classification (GitHub Actions)
+# Offline discovery + classification from prebuilt OSM layers (GitHub Actions)
 
-Beach **discovery** (OpenStreetMap/Overpass) and **water-body classification**
-are *pipeline* concerns — they run occasionally, tolerate hours of latency, and
-produce a table — not *serving* concerns. This directory's pipeline moves them
-out of the Cloudflare Worker cron and into an offline GitHub Actions batch job
-that bulk-loads production D1. The Worker keeps everything else: serving, the
-hourly flag recompute, the 6-hourly wave refresh, and NWS/ECCC/webcam
-enrichment.
+Beach **discovery**, **water-body classification** and the **`marine_zone`
+derivation** are *pipeline* concerns — they run occasionally, tolerate hours of
+latency, and produce a table — not *serving* concerns. They run outside the
+Cloudflare Worker, in offline GitHub Actions jobs that bulk-load production D1.
+The Worker keeps everything else: serving, the hourly flag recompute, the
+6-hourly wave refresh, and NWS/ECCC/webcam enrichment.
+
+All three are now **pure local math over a prebuilt spatial layer set**. The job
+that produces the SQL makes zero upstream data queries and runs with **no network
+permission at all**.
 
 ## Why
 
-The in-Worker crons `runOverpassSync` (`47 8 * * *`) and `runWaterClassification`
-(`37 1,7,13,19 * * *`) — now **retired** — processed a rationed handful of rows per invocation
-(`WATER_CLASS_LIMIT = 25`, `WATER_CLASS_DELTA_CAP = 25`) because a Worker
-invocation is bounded (CPU / subrequest / wall-clock caps) and Overpass allows
-only 2 slots per IP. That "N per run → park → drip over days" pattern is a
-workaround for platform limits, and the initial classification backfill of the
-~700-row pilot takes roughly a week of drips. README already anticipated a
-"one-time bulk backfill … outside the cron"; this **is** that backfill,
-generalized and scheduled.
+The pipeline used to query the public Overpass API, tile by tile, on every run.
+That transport had three problems, and only the first was ever the loud one:
 
-An offline job can run a plain loop for minutes, pace Overpass politely with no
-subrequest ceiling, and write the whole table at once. The same constraint that
-made continental scale-out slow (rationing 25–50 rows per cron window) disappears
-when discovery/classification is a batch that produces a table and the Worker
-just serves it.
+1. **It was flaky in a way that scaled against us.** Discovery needed 33 named
+   tiles plus 33 park tiles to all succeed before a DELETE was safe. A 66-way
+   conjunction of independent public-mirror requests has a joint success
+   probability that decays as p^(2n), and in production it was simply false: the
+   run of 2026-08-31 exhausted its budget at park tile 27. The delete path was
+   therefore effectively off, which is not a safety property — it is a safety
+   property that has stopped being exercised.
+2. **It made classification expensive per beach**, so classification was rationed
+   (25 beaches an hour, its own workflow, its own cadence) and a beach could be
+   discovered and published hours before it was classified. Under a fail-open
+   NULL gate, that means an inland-lake beach served a live estimated flag card
+   for those hours (the Locklin Pines regression).
+3. **It priced scale-out per bounding box.** Every added region was more tiles,
+   more requests, more failure surface — which is exactly the cost that kept the
+   North America expansion parked.
+
+Prebuilt layers remove all three at once. A separate workflow turns the Geofabrik
+OpenStreetMap extracts into ten small FlatGeobuf files; the discovery job
+downloads and verifies them and does one local scan. Coverage becomes a
+locally-checkable fact about bytes on disk rather than a 66-way conjunction over
+someone else's server, classification becomes a spatial join in the same pass that
+discovers a beach, and a region box costs nothing to add.
+
+What we gave up is latency: freshness is now the extract cadence (twice weekly,
+with a hard 21-day refusal), not minutes. For a directory of beaches that is the
+right trade, and it is stated plainly here so nobody has to rediscover it.
+
+**A deliberate seam predicted this.** The previous design wrapped the per-beach
+classification probe as an explicit seam — one call, `fetchWaterClassSignals` +
+`classifyWaterBody`, with the note that a smarter bulk classifier should replace
+that one call and nothing else. That is exactly what happened:
+`src/layerSignals.js`'s `waterClassSignals` was dropped into the same seam with
+the same signature and the same null contract, and `classifyQueue`'s body did not
+change. The seam was worth building.
 
 ## The two-path rule still holds
 
 Nothing about the Worker changes. The **request path** still reads only D1 + KV.
-The **cron path** still owns the Worker's own upstream fetching. This batch job
-is a **third, offline path** that writes D1 out-of-band — it never runs inside
-the Worker.
+The **cron path** still owns the Worker's own upstream fetching. These batch jobs
+are a **third, offline path** that writes D1 out-of-band — they never run inside
+the Worker. The prebuilt layers are read by the **offline job only**: R2 never
+enters the request path, and `wrangler.toml` deliberately carries no
+`[[r2_buckets]]` binding, so the Worker cannot reach the bucket even by accident.
 
 ## Pieces
 
-- **`scripts/discovery-batch.js`** — Deno script. Imports the discovery +
-  classification logic *verbatim* from `src/` (`mergeBeachRows` from
-  `src/discovery.js`; `fetchBeaches` / `fetchParkBeaches` /
-  `fetchWaterClassSignals` from `src/clients/overpass.js`; `classifyWaterBody`
-  and the version/attempts constants from `src/waterClass.js`), so it can never
-  diverge from the Worker. It reads a D1 snapshot, fetches Overpass, classifies,
-  and emits **one idempotent `.sql` delta**. The two halves are selected by flag:
-  `--no-classify` emits the discovery delta (upserts + reconciliation deletes +
-  `flag_history` prune + `sync_meta`), `--no-discovery` emits the classify delta
-  (`water_class` UPDATEs only), and running with neither flag emits both. Either
-  mode may ALSO carry `--marine-zones <path>` to append the offline `marine_zone`
-  derivation (see "Offline marine-zone pass" below). The `nothingToDo` guard errors
-  only when discovery, classify, AND the marine pass are all off. It
-  writes no database itself.
-- **`.github/workflows/discovery.yml`** — schedules the **discovery** half daily
-  (`47 8 * * *`, plus manual `workflow_dispatch`), snapshots D1, runs the script
-  with `--no-classify` (Overpass tiling → upserts + stale-row reconciliation +
-  `flag_history` retention + `sync_meta`; no `water_class` UPDATEs), uploads the
-  `.sql` as an artifact, and applies it with `wrangler d1 execute --remote
-  --file`. `timeout-minutes: 120`.
-- **`.github/workflows/classify.yml`** — schedules the **water-classification**
-  half hourly (`23 * * * *`, plus `workflow_dispatch`), running the
-  script with `--no-discovery --classify-limit 25` (classify-only: no tiling, no
-  upserts, no reconciliation, no deletes; emits **only** `water_class` UPDATEs,
-  25 per run — short, polite Overpass bursts at ~600/day, the same throughput as
-  the old 4×-daily 150/run cadence; manual runs default to 150 for bulk drains —
-  draining the NULL/stale queue over repeated runs). It lives in its
-  own workflow — and a distinct concurrency group (`classify`, disjoint from
-  discovery's) so the two can run concurrently — because classification is
-  hundreds of **sequential** per-beach Overpass probes, the pipeline's long pole:
-  bundled into discovery it threatened the job's time budget and coupled its
-  flakiness to discovery. A single per-beach probe failure is non-fatal (the row
-  stays queued for the next run), so classify has no all-or-nothing abort.
+### The layer build
 
-  **Wall-clock budget (60 min) vs job timeout (90 min).** Under public-Overpass
-  504 storms each per-beach probe is slow, so 150 sequential probes overran the
-  `timeout-minutes: 90` job cap and GitHub CANCELLED the run mid-queue. A cancelled
-  step's later steps SKIP under their default `if`, so the Upload+Apply steps never
-  ran — every scheduled run persisted ZERO `water_class` progress. The PRIMARY fix
-  is a self-imposed wall-clock budget: `classify.yml` passes
-  `--classify-budget-ms $((CLASSIFY_BUDGET_MIN * 60000))` (`CLASSIFY_BUDGET_MIN=60`),
-  so the classify loop returns, `main()` exits 0, the classify step SUCCEEDS, and
-  Upload+Apply run on their normal gate — loading the full flushed delta.
-  `timeout-minutes: 90` stays as a hard backstop. The 30-min gap between budget and
-  timeout is the budget-to-timeout margin, not the exact stop time: the budget is
-  checked only at the TOP of each loop iteration, so a probe already in flight can
-  push the actual process exit past the 60-min mark by up to one full 2-mirror
-  Overpass timeout (~8 min worst case with both mirrors dead-hanging). That leaves
-  ~22 min of real headroom below the 90-min cap — deliberately larger than any
-  single probe — plus ~4 min job setup and ~2 min apply still fit under 90.
+- **`.github/workflows/build-layers.yml`** — twice weekly (`41 6 * * 0` and
+  `41 6 * * 3`, plus `workflow_dispatch`), concurrency group `build-layers`,
+  `timeout-minutes: 180`. Plain shell on a GitHub runner. It is **not**
+  delete-bearing and is **not** a Deno program.
+  - Reclaims runner disk and asserts a 40 GB floor.
+  - Per country (us, canada, mexico), **sequentially**: download the Geofabrik
+    extract, verify its published `.md5`, assert every extract carries the **same**
+    `osmosis_replication_timestamp` (osmium merge is documented as incorrect
+    across differing data vintages), `osmium tags-filter` it down to the tag sets
+    in `.github/build/expressions.txt`, and **delete the `.pbf`** before starting
+    the next country. Peak disk is ~13.3 GB. Reference completion is **on by
+    default** and `-R` must **never** be passed — without referenced objects the
+    six Great Lake relations cannot be assembled and Great Lake classification
+    silently collapses to zero.
+  - `osmium merge`, then **one** `ogr2ogr` OSM read into raw layers, with
+    `CPL_TMPDIR` set **explicitly**. An exhausted GDAL node-index temp filesystem
+    emits a flood of "Cannot read node" warnings and then returns an **empty**
+    result with a **zero** exit status. That is the shape of every dangerous
+    failure in this pipeline: valid-looking, quiet, and total.
+  - `.github/build/osmconf.ini` and `osmconf-lines.ini` promote `wikidata` (and
+    the other tag keys the pipeline reads) to first-class columns in every layer.
+    The stock GDAL `osmconf.ini` does not, and buries the QID inside an HSTORE
+    blob — which would collapse Great Lake matching, silently, to zero.
+  - `scripts/clip-layers.js` (Deno) trims the park / coastline / water layers to
+    within ~1.1 km of the beach set. **This clip is what makes the published set
+    O(beaches) rather than O(continent)** and is the reason the whole approach
+    fits in a runner and a daily download.
+  - `scripts/build-manifest.js` writes the manifest: schema version, build id,
+    per-layer sha256 and feature count, the oldest source timestamp, the
+    `regionsDigest`, the sanity verdict, and a history array of previous builds'
+    counts. Absolute floors come from the committed `data/layer-floors.json`,
+    keyed by `regionsDigest`.
+  - **Publication order matters.** Ten layer files plus the manifest go to an
+    **immutable per-build prefix** in the R2 bucket `swim.report`; the single small
+    `layers/current.json` pointer is overwritten **last**. A reader can therefore
+    never see a torn set. The bucket is served publicly at
+    `https://map.swim.report`. Writes use the runner's preinstalled AWS CLI over
+    the S3 API; **path-style addressing is mandatory**, because the bucket name
+    contains a dot and the wildcard certificate covers only one label.
+  - **Failure posture: last-good.** A failed build, or one a sanity floor refuses,
+    publishes nothing and leaves the previous layer set live. That is delete-safe:
+    an older extract is over-inclusive, so it can only fail to discover a new
+    beach, never invent a stale one.
+  - `osmium-tool` and GDAL are **workflow shell dependencies only** — never a
+    dependency of the Deno batch, of the Worker, or of the tests.
 
-  The budget is the dependable mechanism, but it is backed by TWO belt-and-suspenders
-  layers so a hard timeout-cancel is never catastrophic: (1) the classify SQL is
-  flushed INCREMENTALLY (the preamble is written before the loop, then each complete,
-  newline-terminated `UPDATE …;` is appended the instant it is decided), so a valid
-  statement-boundary-clean partial `.sql` always survives even a hard kill; (2)
-  Upload+Apply are `always()`-gated — NOT `!cancelled()`, which a `timeout-minutes`
-  cancel would SKIP (that cancel sets the `cancelled()` context true, so the belt
-  path would be dead in exactly the case it exists for). `always()` runs inside the
-  ~5-min cancellation grace window, enough for one `wrangler d1 execute`. It is safe
-  on a genuine unrelated failure (a bad token failing Snapshot leaves no delta file):
-  `if-no-files-found: ignore` makes upload a no-op, and Apply first truncates the
-  delta to its last complete `;`-terminated statement (so a torn SIGKILL tail can
-  never reach wrangler and fail the whole apply) then short-circuits on a
-  `[ ! -s classify-delta.sql ] || ! grep -q ';'` guard — a missing/empty/statement-less
-  delta applies as a harmless idempotent no-op. No SIGTERM/SIGINT handler is added:
-  the step is a bash `run: |` block and GitHub signals bash, which does not reliably
-  forward signals to the child Deno process, so the graceful budget (exit 0) is the
-  dependable mechanism.
+### The consuming job
 
-  **Drain liveness under sustained outages.** A transient probe failure (null
-  Overpass signals) emits NO statement and does NOT bump `water_class_attempts`, so
-  a persistently-failing beach stays at the attempts-ASC queue head and is re-probed
-  first on every run. During a sustained 504/hang storm a budget-stopped run can burn
-  its whole budget on a few TCP-hanging heads, emit zero decisions, and never reach
-  `WATER_CLASS_MAX_ATTEMPTS` to retire them — decided/bumped beaches advance, but
-  fetch-failed beaches do not. This is pre-existing (the in-Worker `runWaterClassification`
-  behaved the same) and the budget is a strict improvement over the old
-  cancel-everything-persist-nothing behavior, but operators should know a stuck head
-  can stall drain until Overpass recovers.
-- **`src/discovery.js`** — the extracted pure merge logic, imported by the batch
-  script (`scripts/discovery-batch.js`) and directly by the tests
-  (`test/parkContainment.test.js`). **Not** imported by the Worker: `src/index.js`
-  used to re-export `mergeBeachRows` for the test import path, which meant the
-  deployed Worker bundle shipped all of `src/discovery.js` for no runtime reason;
-  that re-export is gone, so the merge is now offline-only in fact as well as in
-  design. Its only dependency is `src/geo.js`.
-- **`src/regions.js`** — the discovery region set: `REGIONS` (a curated array of
-  coastal bounding boxes tracing the entire Great Lakes shoreline, US and
-  Canadian) plus the pure predicate `pointInAnyRegion(lat, lon)`. Pure data + one
-  function, no imports, so the Deno batch imports it verbatim like `src/geo.js`.
-  It replaces the old single Michigan `PILOT_BBOX`: `runDiscovery` tiles **every**
-  region, and `reconcileStaleRows` scopes its delete candidates through
-  `pointInAnyRegion` (see below).
+- **`.github/workflows/discovery.yml`** — daily (`47 8 * * *`), plus a
+  `workflow_run` trigger on a successful layer build, plus `workflow_dispatch`
+  with an `apply` input (false = artifact-only dry run). Concurrency group
+  `discovery`. It fetches and verifies the layer set, snapshots D1, runs the batch
+  once, uploads the `.sql` delta as an artifact, and applies it with
+  `wrangler d1 execute --remote --file`. It needs **no R2 credentials** — it reads
+  the published layers over plain HTTPS from `https://map.swim.report`.
+- **`scripts/fetch-layers.js`** — Deno, and the **only network-touching script in
+  the offline path**. It reads `layers/current.json` **once**, with a cache-buster,
+  logs the build id, and derives every subsequent URL from that one pinned prefix.
+  Re-reading the pointer per file would let a build completing mid-run hand back
+  three layers from set A and seven from set B: a set that passes every checksum
+  (each file matches its *own* manifest) while describing a world that never
+  existed. The download list is `EXPECTED_LAYER_KEYS` from `src/layerManifest.js`,
+  **never** `manifest.layers[].key` — a manifest describing nine layers is not a
+  nine-layer set to consume as-is, it is a set this code cannot decode, and this
+  choice also keeps every written filename a compile-time constant of this repo
+  rather than remote input. It writes `report.json`, the input to the delete gate.
+- **`scripts/discovery-batch.js`** — Deno. **Runs as
+  `deno run --allow-read --allow-write`. No `--allow-net`.** That is the
+  machine-enforced form of the claim that the only job in this repo that can DELETE
+  production rows cannot talk to the network; **any surviving `--allow-net` on a
+  `discovery-batch.js` invocation is a leftover upstream call and a bug.** It
+  imports the pure logic *verbatim* from `src/` so it can never diverge from the
+  Worker's own semantics, reads a D1 snapshot and the verified layer set, and emits
+  **one idempotent `.sql` delta**.
 
-The classifier itself is **reused, not authored here**: `classifyQueue()` in the
-script wraps the existing per-beach probe (`fetchWaterClassSignals` +
-`classifyWaterBody`) as a deliberate **seam**. To use a smarter bulk classifier
-(e.g. the segment-index approach in README's "One-time bulk backfill" note),
-replace that one call — or pass `--no-classify` and generate `water_class`
-`UPDATE`s from a separate tool. Everything else (queue construction, the
-NULL/version/attempts gate, SQL emission) stays put.
+### Modules
+
+- **`src/discovery.js`** — the pure merge logic (`mergeBeachRows`), imported by the
+  batch and directly by `test/parkContainment.test.js`. **Not** imported by the
+  Worker: `src/index.js` used to re-export it for a test import path, which meant
+  the deployed bundle shipped it for no runtime reason. That re-export is gone.
+  Its only dependency is `src/geo.js`.
+- **`src/regions.js`** — `REGIONS` (a curated array of coastal bounding boxes
+  tracing the entire Great Lakes shoreline, US and Canadian) plus the pure
+  predicate `pointInAnyRegion(lat, lon)`. Pure data + one function, no imports.
+  `REGIONS` now drives exactly three things: the layer build's `-spat` clip mask,
+  the per-region sanity floors and delete rail, and `pointInAnyRegion` delete
+  scoping. **There is no tiling and no per-box query cost**, so box size and count
+  are free — which is what makes the North America expansion cheap on the
+  discovery side.
+- **`src/osmSelect.js`** — the transport-independent selection semantics: the
+  probe radii (`OCEAN_RADIUS_M` 150, `GREAT_LAKE_RADIUS_M` 150,
+  `INLAND_RADIUS_M` 120), the tag predicates, park association, the pond filter,
+  `sortLayerFeatures` (a total order over `(osmType, osmId)`, because FlatGeobuf's
+  Hilbert storage order reshuffles on every rebuild and both the park tie-break
+  and the merge dedupe resolve by first seen), and `probeVertices`, which
+  reproduces the old recurse-down anchor: every classification distance is measured
+  from the beach element's own member **vertices**, never its centroid.
+- **`src/layerGrid.js`** — two spatial indexes. Mode A buckets by envelope, for
+  park containment and water matching. Mode B indexes the **segments**, because an
+  envelope grid prunes nothing for the six Great Lake polygons — their bounding
+  boxes contain essentially every Great Lakes beach. Mode B keeps typed arrays
+  rather than a multi-gigabyte GeoJSON heap and answers exactly the question the
+  old `around:R` clauses asked.
+- **`src/layerDiscovery.js`** — `discoverFromLayers`, the local replacement for the
+  tiled fetch/parse/dedupe pipeline, plus hole-aware park containment and the pond
+  water pooling.
+- **`src/layerSignals.js`** — the water-class **signal provider**, sitting in the
+  seam `fetchWaterClassSignals` occupied.
+- **`src/layerManifest.js`** — manifest verification and the delete gate.
+- **`scripts/lib/fgbReader.js`** — the FlatGeobuf reader, and the **only module in
+  this repo with an npm dependency** (`flatgeobuf`, a devDependency). It is never
+  reachable from `src/index.js`, and a test asserts that.
+
+Note on the Deno setup, because it bites: `deno.json` and `deno.lock` are
+**committed**. `deno.json` carries `"nodeModulesDir": "none"` (so the batch
+resolves `flatgeobuf` from the npm cache rather than a CI-absent `node_modules/`)
+and one import-map entry, `"flatgeobuf/": "npm:/flatgeobuf@4.4.0/"` — note the
+**leading slash** after `npm:`, which is the canonical Deno form for a
+trailing-slash directory mapping. The bare specifier is what lets the same module
+load under both Deno and vitest (`npm:` is a Deno-only URL scheme). And **every**
+`deno` invocation in this repo — npm script or workflow step — must set
+`DENO_NO_PACKAGE_JSON=1`: the repo-root lockfile is auto-discovered for all Deno
+commands here, and without that variable Deno folds `package.json`'s npm tree into
+the lockfile it expects, so `deno check --frozen` fails with "The lockfile is out
+of date" and a plain `deno run` **silently rewrites the checked-in lock**. Do not
+fix that by regenerating the lock without the variable.
 
 ## Faithful to the Worker's semantics
 
-The emitted SQL mirrors what the retired `runOverpassSync` cron did
+The emitted SQL preserves every invariant the previous pipeline established
 (`test/discoveryBatch.test.js` locks this down):
 
 - **Enrichment columns are preserved.** The upsert is
@@ -149,98 +203,97 @@ The emitted SQL mirrors what the retired `runOverpassSync` cron did
   reload can't clobber what the enrichment crons filled.
 - **Moved-centroid reset.** A re-discovered beach whose centroid moved > ~0.001°
   has its `water_class` reset to re-classify (same `CASE WHEN abs(lat-…)` clause).
-- **Reconciliation is guarded.** Stale unnamed-park rows (`name = park_name`,
-  inside a discovery region per `pointInAnyRegion`, not produced this run) are
-  deleted only when the run produced ≥1 park row and the stale set is within the
-  proportional rail (`max(10, 25% of candidates)`) — a partial/truncated Overpass
-  result never mass-deletes. The Overpass client already treats a truncation
-  `remark` as failure, so a partial result never reaches the script. Scoping the
-  candidate set by `pointInAnyRegion` **fails safe**: shrinking or removing a box
-  only ever drops rows from the delete-candidate set (they are left alone), never
-  adds one, so an over-tight box under-deletes rather than deleting a real,
-  enriched beach.
-- **Tiled discovery queries.** A single named-beach query over even one large
-  region box exceeds Overpass's server-side timeout and comes back a truncated
-  `remark`. `runDiscovery` iterates every box in `REGIONS` and `tileBbox()` splits
-  each into a grid of sub-boxes (≤ `TILE_MAX_SPAN_DEG`, currently 2.0°, with a
-  small edge overlap); even so a 2° tile needs ~53–67 s to answer even on a healthy
-  mirror, so the named query runs `[timeout:90]` (raised from `[timeout:60]`, which
-  left near-zero margin) under a tighter per-query transport cap
-  `OVERPASS_NAMED_TIMEOUT_MS = 150000` (must exceed the 90 s server budget plus
-  queue/transfer slack; the park and water-class queries keep the 240000 default).
-  Results are concatenated across all tiles of all regions and deduped by OSM
-  identity (`mergeBeachRows` also keys by id, so the merge is idempotent).
-  **Upserts are decoupled from reconciliation** (the safety invariant is that a
-  DELETE runs only under *provably-complete* coverage): the named loop is
-  **best-effort** — a tile still null after its retries no longer aborts the run, the
-  loop **continues past it** to salvage **every** tile that DID fetch, regardless of
-  *which* tile failed. It emits UPSERTS for those fetched tiles while **skipping
-  reconciliation entirely** whenever coverage is incomplete
-  (`namedComplete = (namedTilesOk === tiles.length)`, so any failed/skipped/budget-
-  stopped tile flips it `false`) — a beach that merely sat in an un-fetched tile is
-  never read as "gone from OSM", so it can't be wrongly deleted. Best-effort (rather
-  than break-early) is deliberate: the motivating outage was "32 of 33 tiles
-  succeeded", and the observed failure mode is *contiguous* multi-minute 504 bursts,
-  so a break-early prefix would lose **every** tile after the burst even once it
-  clears; continuing salvages them. Three **total-outage guards** keep a hopeless run
-  cheap so best-effort never regresses to a tens-of-minutes grind-that-ingests-nothing:
-  (1) `shouldFastDefer` — an early circuit breaker that aborts with no SQL after
-  `OVERPASS_DISCOVERY_MAX_FAILED_TILES` (3) failures **while zero tiles have
-  succeeded** (~4-5 min, mirrors down from the start; once any tile succeeds it
-  disarms and the run commits to best-effort); (2) a post-loop `namedTilesOk === 0`
-  defer (aborts if the loop ended having fetched nothing, e.g. the budget elapsed at
-  zero); (3) `OVERPASS_DISCOVERY_BUDGET_MS` (90 min, under the 120-min job timeout),
-  a wall-clock backstop reusing `budgetExhausted` that breaks the loop at the deadline
-  leaving coverage incomplete (upserts-only). A hopeless run exits 1 (Upload+Apply
-  skip, fast-defer); a partial-but-productive run exits 0 (so `Apply` applies its
-  upserts). Park beaches are fetched **only when the named pass completed** (the
-  delete pass, the sole consumer that needs park data, is already off under partial
-  named coverage, so probing park tiles during an outage is wasted Overpass load);
-  any park tile still null then degrades to named-only (`parkBeaches = null`, no
-  reconciliation), and the same wall-clock backstop bounds the park loop too. The gate
-  is a single pure predicate, `reconciliationAllowed(namedComplete, parkComplete)`
-  (both must be `true`), unit-tested in `test/discoveryBatch.test.js` alongside
-  `shouldFastDefer`. `sync_meta` records a `last_overpass_complete` marker
-  (`true`/`false`) alongside `last_overpass_count` so an operator never reads a
-  partial run's smaller count as a table shrink. Discovery deliberately does **not**
-  adopt classify's `always()` / incremental-flush / truncate machinery: it writes its
-  whole delta atomically at the end (a clean exit-0-with-complete-file /
-  exit-1-no-file binary, no torn-tail window), and its slow risk is the upstream
-  Overpass fetch — which the three guards bound — not a long local emit loop. This is
-  also the North America expansion rail — appending coastal boxes to `REGIONS` fans
-  out into per-tile queries that each stay under the timeout, with no other code change.
-- **Overpass burst resilience.** The public mirrors periodically return HTTP 504
-  overload bursts on both hosts at once. Each per-tile fetch therefore makes
-  `OVERPASS_TILE_ATTEMPTS = 3` bounded exponential-backoff-plus-jitter retries
-  (`backoffDelayMs`, base 30 s, cap 120 s), replacing the old single fixed retry —
-  spreading attempts across several minutes rides out a transient burst, while the
-  cap means a **sustained** outage fails fast and defers to the next scheduled run
-  rather than burning the whole job window. Adding more mirrors was investigated
-  and is **not** safe right now, so the list stays `overpass-api.de` +
-  `private.coffee`: `kumi.systems` shares Private.coffee's backend (false
-  redundancy), and regional instances (e.g. `overpass.osm.ch`) return **empty** for
-  North America — a fast-empty result is dangerous here because it could drive
-  reconciliation deletes.
-- **Whole-table classification.** The queue unifies the Worker's whole-table
-  `runWaterClassification` with `runOverpassSync`'s synchronous discovery-delta:
-  every beach (snapshot ∪ newly discovered, minus reconcile-deletes) where
+- **Reconciliation is guarded, and now by a gate that does not decay.** Stale
+  unnamed-park rows (`name = park_name`, inside a discovery region per
+  `pointInAnyRegion`, not produced this run) are deleted only under a verified,
+  complete, in-scope, fresh layer set. The single pure predicate is
+  `reconciliationAllowed(report)` in `src/layerManifest.js`; it **replaces**
+  `reconciliationAllowed(namedComplete, parkComplete)` at the same call site and
+  keeps its single-choke-point role, so the exported and unit-tested invariant
+  *incomplete coverage means no DELETE* survives with a new input. The difference
+  is that every conjunct is now a locally-checkable fact about bytes on disk
+  rather than a 66-way conjunction over a public mirror, so the gate does not decay
+  as the region set grows. Scoping the candidate set by `pointInAnyRegion` still
+  **fails safe**: shrinking or removing a box only ever drops rows from the
+  delete-candidate set, never adds one, so an over-tight box under-deletes rather
+  than deleting a real, enriched beach.
+- **Two proportional delete rails, and each refuses the whole run.**
+  - Global: at most `max(RECONCILE_MAX_DELETES = 10, ceil(0.05 × candidates))`.
+    **The fraction is 0.05, not the old 0.25.** 0.25 was calibrated for a per-tile
+    transport where partial coverage was normal; under prebuilt layers coverage is
+    either verified-complete or gated off, so a 25%-of-candidates delete run is
+    never legitimate. Against the measured table (1669 rows, 982 park-origin
+    candidates) 0.25 permitted 246 silent deletes — ~15% of the table in one run —
+    which waves through a 9% parks-layer shrink (~88), a 15% single-region parks
+    loss (~45) and a clip-mask bug that zeroes Lake Ontario (80). At 0.05 the
+    allowance is ~50 and all three refuse. A false refusal costs almost nothing:
+    the row simply is not deleted and reconciliation retries tomorrow.
+  - Per-region, applied after the global rail: each `REGIONS` box gets
+    `max(REGION_RECONCILE_MIN_DELETES = 2, ceil(0.05 × that region's candidates))`,
+    and any single region over its allowance refuses the whole run. The global
+    rail's protection asymptotes toward zero as the number of independently
+    breakable clip masks grows — a bug that zeroes *one* region's parks is a small
+    fraction of the global set and passes. **The floor is 2, not 10**, because the
+    region tail is tiny (Niagara has 5 park-origin candidates, St. Marys 6) and a
+    floor of 10 would make the rail vacuous for exactly the three regions a global
+    rail can never protect.
+- **The parks layer gets its own valve.** `parksLayerHealthy(report)` supplies
+  `hasPark`; when it is false the upsert drops to the five-column variant and
+  leaves `park_name` untouched. "The parks layer is present under a verified
+  manifest" and "the parks layer is correctly populated" are different predicates.
+  Hardcoding this true would let a 9%-short parks layer blank `park_name` on every
+  named row in the missing parks and strand the park-origin rows those names
+  produced as **delete candidates**. A parks-line count of zero is a hard refusal,
+  never a reading.
+- **Classification is gated too, and symmetrically.** It runs only when
+  `classificationAllowed(report)` is true. A `fatal` manifest tier exits 1 with no
+  SQL at all; an `incomplete` tier suppresses **both** deletes and classification;
+  a `scope_or_stale` tier (a `regionsDigest` mismatch, or an extract past
+  `MAX_SOURCE_AGE_DAYS = 21`) suppresses deletes only. The reason classification
+  needs a gate is the same reason deletes do: deciding `inland` **hides** a beach,
+  and product loss by hiding is the same family as product loss by deleting.
+- **A classification flip rail.** `CLASSIFY_MAX_HIDE_FLIPS = 10` /
+  `CLASSIFY_MAX_HIDE_FRACTION = 0.10`. There were four rails on deletes and none at
+  all on mass re-classification, while 100% of the flag-worthy rows served today
+  classify through a single code path: one broken build plus a
+  `WATER_CLASS_VERSION` bump would re-decide all of them in one delta and empty the
+  site, with the row count unchanged and every delete rail green. Over the
+  allowance, the whole `water_class` block is refused rather than partly applied.
+  The run logs the full before/after transition matrix either way.
+- **Whole-table classification, in the same pass as discovery.** The queue is every
+  beach (snapshot ∪ newly discovered, minus reconcile-deletes) where
   `water_class IS NULL OR water_class_version < WATER_CLASS_VERSION` and
-  `water_class_attempts < WATER_CLASS_MAX_ATTEMPTS`, PLUS a one-time legacy
+  `water_class_attempts < WATER_CLASS_MAX_ATTEMPTS`, plus a one-time legacy
   re-drain of rows left unclassified at/above the cap by the pre-decisive
-  classifier (`water_class_version IS NULL`, see below). Decisions reset attempts
-  to 0; transient Overpass failures are skipped (no bump).
-- **A complete probe always decides.** `classifyWaterBody` no longer returns null
-  for a clean-but-empty result — it classifies `inland`. Only a transient failure
-  leaves a row unclassified, so `bumped` should read 0 in every run log and a
-  nonzero value means the classifier regressed to a pending state. The old
-  behavior left away-from-water beaches NULL for all 5 attempts, and since
-  `FLAG_WORTHY_WATER_SQL` is fail-open for NULL under the cap, those beaches were
-  served live with estimated flag cards the whole time (the Locklin Pines
-  regression). The probe is deterministic, so the retries could only ever reach
-  the same answer. The `inland=N (no_water=M)` summary count splits the rows
-  decided by the empty branch from those with a real adjacent water way.
-- **`flag_history` prune moves here.** The 90-day retention sweep that lived in
-  `runOverpassSync` is emitted by the batch job, so it survives the cutover.
+  classifier (`water_class_version IS NULL`, attempts deliberately **not** reset so
+  they stay hidden while they re-decide). Decisions reset attempts to 0.
+  `water_class_attempts` is otherwise **vestigial** now: a local join has no
+  transient-failure mode, so nothing bumps it.
+- **The signal provider's null contract is the whole attempts semantics.**
+  `waterClassSignals(index, beach)` returns exactly
+  `{ coastlinePresent, nearbyLakeQids, nearbyWayWater }` or `null`. `null` means
+  **transient** — do not bump attempts, leave the row queued — and is returned in
+  exactly three cases: an unqueryable index, an unparseable `osm_id`, and no beach
+  feature indexed under that id. A signals object, **including the all-empty one**,
+  is a clean, complete answer that `classifyWaterBody` decides on, and all-empty
+  decides `inland`. **The provider must return `null`, never empty signals, on
+  incompleteness** — empty signals on a data bug would publish `inland`, i.e. hide
+  the beach. `beachAbsentFromLayers` separates the one failure mode the old
+  transport never had (the element is simply not in the layer set) so it is
+  reported as its own `absent_from_layers=` counter.
+- **A complete answer always decides.** `classifyWaterBody` classifies a
+  clean-but-empty result as `inland` rather than leaving the row NULL, so `bumped`
+  should read 0 in every run log and a nonzero value means the classifier regressed
+  to a pending state. The old behavior left away-from-water beaches NULL for all 5
+  attempts, and since `FLAG_WORTHY_WATER_SQL` is fail-open for NULL under the cap,
+  those beaches were served live with estimated flag cards the whole time (the
+  Locklin Pines regression). The join is pure local math over verified, immutable
+  bytes, so re-running it could only reach the same answer. The
+  `inland=N (no_water=M)` summary count splits the rows decided by the empty branch
+  from those with a real adjacent water way. **And the exposure window is now
+  zero**: a beach is classified in the run that discovers it.
+- **`flag_history` prune runs here.** The 90-day retention sweep is emitted by the
+  batch job, in its own try/catch so a pruning failure never costs a discovery run.
 
 ## Prerequisites
 
@@ -254,86 +307,80 @@ The emitted SQL mirrors what the retired `runOverpassSync` cron did
    `@web.awesome.me` / `@fortawesome` deps and fail). Every wrangler call goes
    through `npx --yes wrangler@<pin>`, which fetches only wrangler from the
    default registry and never consults the repo's `package.json`.
+3. **The R2 bucket `swim.report`**, served publicly at `https://map.swim.report`,
+   plus repository secrets **`CLOUDFLARE_R2_ACCESS_KEY`** and
+   **`CLOUDFLARE_R2_SECRET_ACCESS_KEY`** — used by the **layer build only**. The
+   discovery job needs **no** R2 credentials; it reads over plain HTTPS. Nothing in
+   the Worker holds a binding to this bucket, deliberately.
 
 ## Running
 
 Locally (dry run — produce the SQL, don't apply; needs Deno + a snapshot):
 
     export CLOUDFLARE_API_TOKEN=…   # from .dev.vars (CLOUDFLARE_TOKEN)
+    DENO_NO_PACKAGE_JSON=1 deno run --allow-net --allow-read --allow-write \
+      scripts/fetch-layers.js --dest ./.layers
     npx wrangler d1 execute swim-report --remote --json \
-      --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
+      --command "SELECT id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class, water_class_version, water_class_attempts FROM beaches" \
       > snapshot.json
-    deno run --allow-net --allow-read --allow-write \
-      scripts/discovery-batch.js --snapshot snapshot.json --out discovery-delta.sql
+    DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write \
+      scripts/discovery-batch.js --layers ./.layers --snapshot snapshot.json \
+      --out discovery-delta.sql
     # inspect discovery-delta.sql, then apply when satisfied:
     npx wrangler d1 execute swim-report --remote --file discovery-delta.sql
 
-That snapshot `SELECT` deliberately carries `osm_id` + the `water_class*` columns
-even though `discovery.yml`'s does not: the `deno run` above omits `--no-classify`,
-so it DOES build the classify queue and DOES need them. Do not "sync" it to the
-workflow's narrower column list.
+Note the permission sets: `fetch-layers.js` is the one script that needs
+`--allow-net`, and `discovery-batch.js` deliberately does not get it.
 
-Flags: `--no-classify` (discovery only), `--no-discovery` (classify only),
-`--marine-zones <path>` (the offline `marine_zone` pass over the snapshot —
-`discovery.yml` passes `data/marine-zones-greatlakes.json`; either mode may also
-carry it), `--classify-limit N` (cap per run; 0 = all), `--classify-delay-ms N`
-(default 300), `--classify-budget-ms N` (self-imposed wall-clock cap on the
-classify loop; 0 = disabled/full drain), `--now <iso>`.
+Flags: `--layers <dir>` (the verified layer set; required for discovery and
+classification), `--report <path>` (defaults to `<layers>/report.json`),
+`--no-classify` (skip the classification join), `--no-discovery` (skip discovery,
+reconciliation and deletes), `--marine-zones <path>` (the offline `marine_zone`
+pass over the snapshot — `discovery.yml` passes
+`data/marine-zones-greatlakes.json`; either mode may also carry it),
+`--snapshot <path>`, `--out <path>`, `--now <iso>`.
 
 `--no-classify --no-discovery` together is **not** an error as long as
 `--marine-zones` is also passed — that is exactly what `npm run seed:marine`
 runs (marine pass only, zero upstream requests). The `nothingToDo` guard errors
 only when discovery, classify, AND the marine pass are all off.
 
-For **local dev**, `npm run seed` is now this same offline batch pointed at the
-local D1: it runs `scripts/discovery-batch.js --out ./.seed.sql --no-classify`
-(discovery only, no snapshot) and applies the delta with
-`node scripts/apply-local-sql.js ./.seed.sql`, which splits it into <90 KB
-line-aligned chunks and runs one `wrangler d1 execute --local --file` per
+For **local dev**: `npm run seed:layers` fetches and verifies the layer set into
+`./.layers` (run it once per layer build, not per seed), then `npm run seed` runs
+`scripts/discovery-batch.js --layers ./.layers --out ./.seed.sql` and applies the
+delta with `node scripts/apply-local-sql.js ./.seed.sql`, which splits it into
+<90 KB line-aligned chunks and runs one `wrangler d1 execute --local --file` per
 chunk. The chunking exists because wrangler's LOCAL apply hands the whole file
 to miniflare/workerd as a single SQL call, capped at 100,000 bytes
-(`SQLITE_TOOBIG`) — a full delta is ~700 KB. The REMOTE apply the workflows use
+(`SQLITE_TOOBIG`) — a full delta is ~700 KB. The REMOTE apply the workflow uses
 is unaffected (it uploads through the D1 import API and ingests server-side).
-`npm run seed:classify` runs the batch without `--no-classify` to also emit
-`water_class` updates. Both replace the old "trigger the discovery cron" seed
-path, which no longer exists in the Worker.
+There is no `npm run seed:classify` any more: classification was opt-in only
+because it was expensive, and a local join is not.
 
-In CI: `discovery.yml` runs **daily** (`47 8 * * *`) and `classify.yml` runs
-**hourly** (`23 * * * *`), in their own concurrency groups, so they may overlap —
-they touch disjoint columns. Both have a manual `workflow_dispatch` with an
-`apply` input (false = artifact-only dry run); `classify_limit` (default 150 for
-bulk drains) and `budget_min` (default 60) are `classify.yml` inputs **only** —
-`discovery.yml` takes `apply` alone. Every run uploads its delta as an artifact
-for inspection: `discovery-delta.sql` (artifact `discovery-delta-sql`) from
-discovery, `classify-delta.sql` (artifact `classify-delta-sql`, uploaded with
-`if-no-files-found: ignore`) from classify.
+In CI: `build-layers.yml` runs twice weekly and `discovery.yml` runs daily plus on
+each successful build, in separate concurrency groups. Both have a manual
+`workflow_dispatch`; `discovery.yml` takes an `apply` input (false = artifact-only
+dry run) and uploads its delta as `discovery-delta.sql` (artifact
+`discovery-delta-sql`) for inspection on every run.
 
-## Cutover (complete)
+## History
 
-The offline job is now the **sole owner** of beach discovery and water-body
-classification. The two in-Worker triggers were retired:
+Two migrations preceded this one, and their end states still hold. First, beach
+discovery and water classification moved **out of the Worker** entirely: the
+in-Worker `runOverpassSync` (`"47 8 * * *"`) and `runWaterClassification`
+(`"37 1,7,13,19 * * *"`) triggers were retired from `wrangler.toml`'s `crons`
+array and their code deleted, leaving the merge logic as `mergeBeachRows` in
+`src/discovery.js`, imported by the batch and the tests but **not** by the Worker
+bundle. Second, `beaches.marine_zone` moved offline the same way, retiring the
+`"23 1,7,13,19 * * *"` marine-enrichment cron. This third migration replaced the
+query transport with prebuilt layers and merged the separate hourly classification
+workflow back into the daily discovery run.
 
-1. ✅ Repo pushed to GitHub, `CLOUDFLARE_API_TOKEN` secret set, migration 0009
-   applied remotely.
-2. ✅ Workflow verified with `apply: false` (artifact sanity-checked for row
-   counts and an expected `great_lake` / `inland` mix), then run with
-   `apply: true` and D1 confirmed updated.
-3. ✅ The two now-redundant triggers were removed from `wrangler.toml`'s `crons`
-   array — `"47 8 * * *"` (discovery) and `"37 1,7,13,19 * * *"` (water
-   classification) — and deployed. `runOverpassSync` / `runWaterClassification`
-   (and `PILOT_BBOX`) are gone from `src/index.js`; the merge logic survives only
-   as `mergeBeachRows` in `src/discovery.js`, imported by both the batch and the
-   tests. The last Worker-side reference — `src/index.js`'s `mergeBeachRows`
-   re-export, kept only so a test could import it through the Worker — has since
-   been removed too, so `src/discovery.js` is out of the Worker bundle entirely.
-
-The Worker's remaining cron path is: hourly flag recompute (`"7 * * * *"`, offset off
-the congested `:00` slot),
-6-hourly wave refresh (`"15 */6 * * *"`), and the NWS/ECCC/webcam enrichment crons
-(`"17 3,9,15,21"`, `"29 4,10,16,22"`, `"31 9"`). The former NWS marine-zone enrichment
-cron (`"23 1,7,13,19 * * *"`) was **retired** — `beaches.marine_zone` is now derived by
-the offline discovery job (see "Offline marine-zone pass" below). Discovery,
-classification, and marine-zone derivation are the offline job's alone.
+The Worker's remaining cron path is: hourly flag recompute (`"7 * * * *"`, offset
+off the congested `:00` slot), 6-hourly wave refresh (`"15 */6 * * *"`), and the
+NWS/ECCC/webcam enrichment crons (`"17 3,9,15,21"`, `"29 4,10,16,22"`,
+`"31 9"`). Discovery, classification, and marine-zone derivation are the offline
+job's alone.
 
 ## Offline marine-zone pass
 
@@ -358,19 +405,19 @@ derived-null NEVER NULLs an existing value (an old probe result beats nothing). 
 never affects `reconciliationAllowed` or the delete path (it only appends change-only
 UPDATEs), and it stamps `sync_meta` keys `last_marine_zone_pass` / `last_marine_zone_count`.
 A beach discovered THIS run resolves on the NEXT daily run, once the in-Worker NWS
-enrichment has stamped its `nws_zone`. `discovery.yml`'s snapshot `SELECT` is
-`SELECT id, name, lat, lon, park_name, nws_zone, marine_zone FROM beaches` — the exact
-union of what `reconcileStaleRows` (id, name, lat, lon, park_name) and `marineZoneSql`
-(id, lat, lon, nws_zone, marine_zone) read. It deliberately does **not** select `osm_id`
-or the `water_class` / `water_class_version` / `water_class_attempts` columns: those are
-read only by `buildClassifyQueue`, which is gated behind `if (args.classify)` and can
-never run on this hardcoded `--no-classify` job. Dropping them shrinks the snapshot
-~35-40%, which matters because this is the ONLY delete-bearing run and its truncation
-guard aborts the whole pass if D1's `--json` response is size-capped. `classify.yml`
-selects its own, wider set (`id, osm_id, name, lat, lon, park_name, water_class,
-water_class_version, water_class_attempts`) — the two are intentionally asymmetric and
-must not be synced. `beaches.marine_attempts` is vestigial (column retained, no
-writers).
+enrichment has stamped its `nws_zone`. There is now **one** snapshot, because discovery
+and classification run in the same pass: `discovery.yml`'s `SELECT` is
+`SELECT id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class,
+water_class_version, water_class_attempts FROM beaches` — the exact union of what
+`reconcileStaleRows` (id, name, lat, lon, park_name), `marineZoneSql` (id, lat, lon,
+nws_zone, marine_zone) and `buildClassifyQueue` (id, osm_id, water_class,
+water_class_version, water_class_attempts) read, and nothing else. The old deliberate
+asymmetry between a narrow discovery snapshot and a wider classify one is gone with the
+separate classify workflow; do **not** re-introduce a second snapshot. The column set
+widening from 7 to 11 does matter, though: this is the ONLY delete-bearing run and its
+truncation guard aborts the whole pass if D1's `--json` response is size-capped, so a
+paginated snapshot is a recorded prerequisite for the North America expansion (see
+`TODO.md`). `beaches.marine_attempts` is vestigial (column retained, no writers).
 
 **The committed data file** — `data/marine-zones-greatlakes.json`, generated by
 `scripts/build-marine-zones.js` from the NWS coastal marine-zone shapefile. Shape:

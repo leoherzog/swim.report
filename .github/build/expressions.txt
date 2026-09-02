@@ -1,0 +1,14 @@
+# osmium tags-filter expressions for the swim.report layer build.
+# Order is significant: osmium matches in the order given, so the most
+# frequently matching expression goes first.
+# Reference completion is ON BY DEFAULT. There is no -r flag (that belongs to
+# osmium getid); the flag that would TURN IT OFF is -R / --omit-referenced and
+# must NEVER be passed here — without referenced members, relation areas
+# cannot be assembled and the six Great Lake polygons vanish.
+nwr/natural=water
+w/natural=coastline
+nwr/natural=beach
+nwr/leisure=beach_resort
+wr/leisure=park
+wr/leisure=nature_reserve
+wr/boundary=protected_area

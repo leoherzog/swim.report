@@ -1,0 +1,3833 @@
+{
+  "schema": "overpass-golden/1",
+  "capturedAt": "2026-09-01T18:45:32.570Z",
+  "purpose": "Contract 9.1 golden fixture: real Overpass responses for representative beaches, captured while the Overpass path still runs, with the derived records/signals the pure functions produced from them. Temporary shadow-period scaffolding.",
+  "howCaptured": "Each case ran the three real production Overpass queries for its bbox (buildQuery, the private buildParkBeachQuery, and buildPondWaterQuery when pondWaterSeeds returned seeds) against the live public mirrors, then recorded the raw elements alongside the records the pure functions derived from them: parseParkBeachElements output, the seed list, the water evidence, and the kept/dropped beaches with their associated park. The waterClass entries ran buildWaterClassQuery per beach and recorded parseWaterClassElements signals plus the classifyWaterBody verdict.",
+  "lifecycle": "TEMPORARY shadow-period scaffolding for the prebuilt-layer (FlatGeobuf) migration. Captured BEFORE any deletion, per contract 9.1, because it is the only mechanical proof that the Overpass-derived and layer-derived records agree. Deleted together with its replay/parity test once the migration delete path is armed and clean.",
+  "mirrors": [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter"
+  ],
+  "characters": {
+    "named shoreline beach": "holland-state-park (way/505668572 Ottawa Beach), wasaga-georgian-bay (five named Wasaga beach areas)",
+    "unnamed park beach": "holland-state-park way/396460012 (Tunnel Park), van-buren-state-park way/1280732934 (nature_reserve + protected_area, NOT leisure=park)",
+    "pond sliver that must drop": "hawthorn-pond way/161131900 (the documented 5 m x 6 m sliver, bbox 3.6e-9 deg2) and independence-oaks-pond-drop way/1021947824",
+    "same-named parks pair": "sameNamedParks: twelve distinct Lakeside Park polygons across MI/ON, the reason parkKey identifies the park ELEMENT and not its name",
+    "set-back beach whose centroid is far from the water": "sleeping-bear way/889361412 and way/889361419, plus van-buren-state-park way/1280732934 - all classify great_lake from the vertex-recurse probe with nearbyWayWater false at the centroid",
+    "Great Lake relation beach (Georgian Bay)": "wasaga-georgian-bay - every beach resolves the PARENT Lake Huron QID Q1383 through the lake relation, the premise contract 9.5 case 1 must re-verify against the prebuilt lakes-polygon layer",
+    "island-in-a-hole": "beaver-island relation/6192330 (Beaver Island, Lake Michigan)",
+    "inland no-water regression": "locklin-pines way/1545732724 - a COMPLETE probe returns all-empty signals and must DECIDE inland (contract 9.5 case 2)"
+  },
+  "cases": [
+    {
+      "key": "holland-state-park",
+      "description": "Holland State Park MI: named shoreline beach (Ottawa Beach) plus unnamed park beach polygons on Lake Michigan.",
+      "bbox": {
+        "minLat": 42.755,
+        "minLon": -86.23,
+        "maxLat": 42.8,
+        "maxLon": -86.18
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](42.755,-86.23,42.8,-86.18);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](42.755,-86.23,42.8,-86.18);\n);\nout center tags;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 505668572,
+            "center": {
+              "lat": 42.77545,
+              "lon": -86.2113193
+            },
+            "tags": {
+              "ele": "179",
+              "name": "Ottawa Beach",
+              "natural": "beach",
+              "operator": "Michigan Department of Natural Resources",
+              "surface": "sand",
+              "wikidata": "Q33328028"
+            }
+          },
+          {
+            "type": "way",
+            "id": 953846255,
+            "center": {
+              "lat": 42.7674166,
+              "lon": -86.2102081
+            },
+            "tags": {
+              "lifeguard": "no",
+              "name": "Macatawa Park Beach",
+              "natural": "beach",
+              "supervised": "no",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1408407536,
+            "center": {
+              "lat": 42.7944069,
+              "lon": -86.2106107
+            },
+            "tags": {
+              "access": "private",
+              "lifeguard": "no",
+              "name": "Idlewood Beach",
+              "natural": "beach",
+              "supervised": "no",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1408407558,
+            "center": {
+              "lat": 42.7898288,
+              "lon": -86.2104939
+            },
+            "tags": {
+              "lifeguard": "no",
+              "name": "Sunset Bluff Beach",
+              "natural": "beach",
+              "supervised": "no",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1410067707,
+            "center": {
+              "lat": 42.7812127,
+              "lon": -86.2106112
+            },
+            "tags": {
+              "access": "private",
+              "lifeguard": "no",
+              "name": "Spyglass Beach",
+              "natural": "beach",
+              "supervised": "no",
+              "surface": "sand"
+            }
+          }
+        ],
+        "derivedBeaches": [
+          {
+            "osmType": "way",
+            "osmId": 505668572,
+            "name": "Ottawa Beach",
+            "lat": 42.77545,
+            "lon": -86.2113193
+          },
+          {
+            "osmType": "way",
+            "osmId": 953846255,
+            "name": "Macatawa Park Beach",
+            "lat": 42.7674166,
+            "lon": -86.2102081
+          },
+          {
+            "osmType": "way",
+            "osmId": 1408407536,
+            "name": "Idlewood Beach",
+            "lat": 42.7944069,
+            "lon": -86.2106107
+          },
+          {
+            "osmType": "way",
+            "osmId": 1408407558,
+            "name": "Sunset Bluff Beach",
+            "lat": 42.7898288,
+            "lon": -86.2104939
+          },
+          {
+            "osmType": "way",
+            "osmId": 1410067707,
+            "name": "Spyglass Beach",
+            "lat": 42.7812127,
+            "lon": -86.2106112
+          }
+        ]
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](42.755,-86.23,42.8,-86.18);\n  relation[\"leisure\"=\"park\"][\"name\"](42.755,-86.23,42.8,-86.18);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](42.755,-86.23,42.8,-86.18);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](42.755,-86.23,42.8,-86.18);\n  way[\"boundary\"=\"protected_area\"][\"name\"](42.755,-86.23,42.8,-86.18);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](42.755,-86.23,42.8,-86.18);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(42.755,-86.23,42.8,-86.18)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 396460012,
+            "bounds": {
+              "minlat": 42.7970304,
+              "minlon": -86.2111367,
+              "maxlat": 42.7991855,
+              "maxlon": -86.2100794
+            },
+            "tags": {
+              "natural": "beach",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 505668572,
+            "bounds": {
+              "minlat": 42.7734057,
+              "minlon": -86.2131032,
+              "maxlat": 42.7774943,
+              "maxlon": -86.2095354
+            },
+            "tags": {
+              "ele": "179",
+              "name": "Ottawa Beach",
+              "natural": "beach",
+              "operator": "Michigan Department of Natural Resources",
+              "surface": "sand",
+              "wikidata": "Q33328028"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1408407536,
+            "bounds": {
+              "minlat": 42.791781,
+              "minlon": -86.211143,
+              "maxlat": 42.7970329,
+              "maxlon": -86.2100784
+            },
+            "tags": {
+              "access": "private",
+              "lifeguard": "no",
+              "name": "Idlewood Beach",
+              "natural": "beach",
+              "supervised": "no",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 297233307,
+            "bounds": {
+              "minlat": 42.7970137,
+              "minlon": -86.2111333,
+              "maxlat": 42.7993072,
+              "maxlon": -86.2068522
+            },
+            "tags": {
+              "access": "yes",
+              "addr:city": "Holland",
+              "addr:housenumber": "50",
+              "addr:postcode": "49424",
+              "addr:state": "MI",
+              "addr:street": "Lakeshore Drive North",
+              "ele": "182",
+              "gnis:feature_id": "1615163",
+              "leisure": "park",
+              "name": "Tunnel Park",
+              "opening_hours": "Apr-Nov 07:00-22:00",
+              "operator": "Ottawa County",
+              "operator:type": "public",
+              "operator:wikidata": "Q94673",
+              "website": "https://miottawa.org/park-locations/tunnel-park/",
+              "wheelchair": "limited",
+              "wikidata": "Q33346206"
+            }
+          },
+          {
+            "type": "way",
+            "id": 358538736,
+            "bounds": {
+              "minlat": 42.7642696,
+              "minlon": -86.2038138,
+              "maxlat": 42.7677309,
+              "maxlon": -86.1966982
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Sanctuary Woods"
+            }
+          },
+          {
+            "type": "way",
+            "id": 844814722,
+            "bounds": {
+              "minlat": 42.7970567,
+              "minlon": -86.1945522,
+              "maxlat": 42.800699,
+              "maxlon": -86.1870924
+            },
+            "tags": {
+              "access": "yes",
+              "addr:city": "Holland",
+              "addr:housenumber": "2003",
+              "addr:state": "MI",
+              "addr:street": "Perry Street",
+              "leisure": "nature_reserve",
+              "name": "Kuker-Van Til Nature Preserve",
+              "operator": "Land Conservancy of West Michigan",
+              "operator:type": "private_non_profit"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1365945627,
+            "bounds": {
+              "minlat": 42.7707669,
+              "minlon": -86.1811193,
+              "maxlat": 42.7715905,
+              "maxlon": -86.1790207
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Virginia Park Woods",
+              "natural": "wood"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1402141759,
+            "bounds": {
+              "minlat": 42.796377,
+              "minlon": -86.2089671,
+              "maxlat": 42.7966092,
+              "maxlon": -86.2081864
+            },
+            "tags": {
+              "access": "private",
+              "addr:city": "Holland",
+              "addr:postcode": "49424",
+              "addr:state": "MI",
+              "addr:street": "Lake Street",
+              "leisure": "park",
+              "name": "Idlewood Beach Association",
+              "operator": "Idlewood Beach Association",
+              "operator:type": "private"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 8550215,
+            "bounds": {
+              "minlat": 42.7725408,
+              "minlon": -86.2160294,
+              "maxlat": 42.7834073,
+              "maxlon": -86.1965892
+            },
+            "tags": {
+              "addr:city": "Holland",
+              "addr:housenumber": "2215",
+              "addr:postcode": "49424",
+              "addr:state": "MI",
+              "addr:street": "Ottawa Beach Road",
+              "ele": "185",
+              "gnis:feature_id": "628431",
+              "leisure": "park",
+              "name": "Holland State Park",
+              "type": "multipolygon",
+              "website": "https://www.michigandnr.com/parksandtrails/details.aspx?id=458&type=SPRK",
+              "wikidata": "Q5881090",
+              "wikipedia": "en:Holland State Park"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 17005067,
+            "bounds": {
+              "minlat": 42.7907765,
+              "minlon": -86.189388,
+              "maxlat": 42.7937274,
+              "maxlon": -86.1864922
+            },
+            "tags": {
+              "addr:city": "Holland",
+              "addr:housenumber": "1826",
+              "addr:postcode": "49424",
+              "addr:state": "MI",
+              "addr:street": "Ottawa Beach Road",
+              "leisure": "park",
+              "name": "Lake Macatawa Public Access",
+              "operator": "Michigan Department of Natural Resources",
+              "operator:short": "Michigan DNR",
+              "operator:type": "government",
+              "operator:wikidata": "Q6837532",
+              "type": "multipolygon"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 17005068,
+            "bounds": {
+              "minlat": 42.7929916,
+              "minlon": -86.1870211,
+              "maxlat": 42.7969225,
+              "maxlon": -86.1731171
+            },
+            "tags": {
+              "access": "yes",
+              "addr:city": "Holland",
+              "addr:housenumber": "1700",
+              "addr:postcode": "49424",
+              "addr:state": "MI",
+              "addr:street": "Perry Street",
+              "leisure": "park",
+              "name": "Winstrom Park and Nature Preserve",
+              "operator": "Park Township",
+              "operator:type": "public",
+              "operator:wikidata": "Q7138110",
+              "type": "multipolygon",
+              "wikidata": "Q49582189"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 21131778,
+            "bounds": {
+              "minlat": 41.8712135,
+              "minlon": -86.7153433,
+              "maxlat": 42.8345896,
+              "maxlon": -86.2069382
+            },
+            "tags": {
+              "alt_name": "Southwest Michigan Bottomland Preserve",
+              "boundary": "protected_area",
+              "leisure": "nature_reserve",
+              "maritime": "yes",
+              "name": "Southwest Michigan Underwater Preserve",
+              "official_name": "Southwest Michigan Great Lakes State Bottomland Preserve",
+              "type": "multipolygon",
+              "wikidata": "Q7571319",
+              "wikipedia": "en:Southwest Michigan Underwater Preserve"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 396460012,
+              "name": null,
+              "locality": null,
+              "lat": 42.79810795,
+              "lon": -86.21060804999999,
+              "bounds": {
+                "minLat": 42.7970304,
+                "minLon": -86.2111367,
+                "maxLat": 42.7991855,
+                "maxLon": -86.2100794
+              },
+              "areaDeg2": 0.000002278587230001898
+            },
+            {
+              "osmType": "way",
+              "osmId": 505668572,
+              "name": "Ottawa Beach",
+              "locality": null,
+              "lat": 42.77545,
+              "lon": -86.2113193,
+              "bounds": {
+                "minLat": 42.7734057,
+                "minLon": -86.2131032,
+                "maxLat": 42.7774943,
+                "maxLon": -86.2095354
+              },
+              "areaDeg2": 0.000014587307080064349
+            },
+            {
+              "osmType": "way",
+              "osmId": 1408407536,
+              "name": "Idlewood Beach",
+              "locality": null,
+              "lat": 42.794406949999996,
+              "lon": -86.2106107,
+              "bounds": {
+                "minLat": 42.791781,
+                "minLon": -86.211143,
+                "maxLat": 42.7970329,
+                "maxLon": -86.2100784
+              },
+              "areaDeg2": 0.0000055911727400316245
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 297233307,
+              "name": "Tunnel Park",
+              "bounds": {
+                "minLat": 42.7970137,
+                "minLon": -86.2111333,
+                "maxLat": 42.7993072,
+                "maxLon": -86.2068522
+              },
+              "areaDeg2": 0.000009818702850001766
+            },
+            {
+              "osmType": "way",
+              "osmId": 358538736,
+              "name": "Sanctuary Woods",
+              "bounds": {
+                "minLat": 42.7642696,
+                "minLon": -86.2038138,
+                "maxLat": 42.7677309,
+                "maxLon": -86.1966982
+              },
+              "areaDeg2": 0.00002462922628000536
+            },
+            {
+              "osmType": "way",
+              "osmId": 844814722,
+              "name": "Kuker-Van Til Nature Preserve",
+              "bounds": {
+                "minLat": 42.7970567,
+                "minLon": -86.1945522,
+                "maxLat": 42.800699,
+                "maxLon": -86.1870924
+              },
+              "areaDeg2": 0.000027170829540044528
+            },
+            {
+              "osmType": "way",
+              "osmId": 1365945627,
+              "name": "Virginia Park Woods",
+              "bounds": {
+                "minLat": 42.7707669,
+                "minLon": -86.1811193,
+                "maxLat": 42.7715905,
+                "maxLon": -86.1790207
+              },
+              "areaDeg2": 0.0000017284069600170576
+            },
+            {
+              "osmType": "way",
+              "osmId": 1402141759,
+              "name": "Idlewood Beach Association",
+              "bounds": {
+                "minLat": 42.796377,
+                "minLon": -86.2089671,
+                "maxLat": 42.7966092,
+                "maxLon": -86.2081864
+              },
+              "areaDeg2": 1.8127853999774813e-7
+            },
+            {
+              "osmType": "relation",
+              "osmId": 8550215,
+              "name": "Holland State Park",
+              "bounds": {
+                "minLat": 42.7725408,
+                "minLon": -86.2160294,
+                "maxLat": 42.7834073,
+                "maxLon": -86.1965892
+              },
+              "areaDeg2": 0.00021124693329987998
+            },
+            {
+              "osmType": "relation",
+              "osmId": 17005067,
+              "name": "Lake Macatawa Public Access",
+              "bounds": {
+                "minLat": 42.7907765,
+                "minLon": -86.189388,
+                "maxLat": 42.7937274,
+                "maxLon": -86.1864922
+              },
+              "areaDeg2": 0.000008545216219976912
+            },
+            {
+              "osmType": "relation",
+              "osmId": 17005068,
+              "name": "Winstrom Park and Nature Preserve",
+              "bounds": {
+                "minLat": 42.7929916,
+                "minLon": -86.1870211,
+                "maxLat": 42.7969225,
+                "maxLon": -86.1731171
+              },
+              "areaDeg2": 0.00005465523359999065
+            },
+            {
+              "osmType": "relation",
+              "osmId": 21131778,
+              "name": "Southwest Michigan Underwater Preserve",
+              "bounds": {
+                "minLat": 41.8712135,
+                "minLon": -86.7153433,
+                "maxLat": 42.8345896,
+                "maxLon": -86.2069382
+              },
+              "areaDeg2": 0.48978532245811324
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [
+          {
+            "osmType": "way",
+            "osmId": 396460012
+          },
+          {
+            "osmType": "way",
+            "osmId": 505668572
+          },
+          {
+            "osmType": "way",
+            "osmId": 1408407536
+          }
+        ],
+        "pondWaterQuery": "[out:json][timeout:180][maxsize:134217728];\n(\n  way(id:396460012,505668572,1408407536);\n)->.b;\n(\n  way[\"natural\"=\"water\"](around.b:60);\n  way[\"natural\"=\"coastline\"](around.b:60);\n)->.water;\n.water out tags bb;",
+        "pondWaterElements": [
+          {
+            "type": "way",
+            "id": 1075382140,
+            "bounds": {
+              "minlat": 42.7721535,
+              "minlon": -86.212836,
+              "maxlat": 42.77325,
+              "maxlon": -86.2063224
+            },
+            "tags": {
+              "intermittent": "no",
+              "name": "Macatawa Channel",
+              "natural": "water",
+              "salt": "no",
+              "water": "canal"
+            }
+          }
+        ],
+        "waters": [
+          {
+            "bounds": {
+              "minLat": 42.7721535,
+              "minLon": -86.212836,
+              "maxLat": 42.77325,
+              "maxLon": -86.2063224
+            },
+            "areaDeg2": 0.000007142162399961585,
+            "shoreline": false
+          }
+        ],
+        "records": [
+          {
+            "osmType": "way",
+            "osmId": 396460012,
+            "name": null,
+            "locality": null,
+            "lat": 42.79810795,
+            "lon": -86.21060804999999,
+            "areaDeg2": 0.000002278587230001898,
+            "parkName": "Tunnel Park",
+            "parkKey": "way/297233307"
+          },
+          {
+            "osmType": "way",
+            "osmId": 505668572,
+            "name": "Ottawa Beach",
+            "locality": null,
+            "lat": 42.77545,
+            "lon": -86.2113193,
+            "areaDeg2": 0.000014587307080064349,
+            "parkName": "Holland State Park",
+            "parkKey": "relation/8550215"
+          },
+          {
+            "osmType": "way",
+            "osmId": 1408407536,
+            "name": "Idlewood Beach",
+            "locality": null,
+            "lat": 42.794406949999996,
+            "lon": -86.2106107,
+            "areaDeg2": 0.0000055911727400316245,
+            "parkName": "Tunnel Park",
+            "parkKey": "way/297233307"
+          }
+        ],
+        "droppedPondBeaches": []
+      }
+    },
+    {
+      "key": "van-buren-state-park",
+      "description": "Van Buren State Park MI: leisure=nature_reserve + boundary=protected_area, NOT leisure=park - proves the three-way park tag allowlist.",
+      "bbox": {
+        "minLat": 42.31,
+        "minLon": -86.34,
+        "maxLat": 42.375,
+        "maxLon": -86.27
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](42.31,-86.34,42.375,-86.27);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](42.31,-86.34,42.375,-86.27);\n);\nout center tags;",
+        "elements": [],
+        "derivedBeaches": []
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](42.31,-86.34,42.375,-86.27);\n  relation[\"leisure\"=\"park\"][\"name\"](42.31,-86.34,42.375,-86.27);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](42.31,-86.34,42.375,-86.27);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](42.31,-86.34,42.375,-86.27);\n  way[\"boundary\"=\"protected_area\"][\"name\"](42.31,-86.34,42.375,-86.27);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](42.31,-86.34,42.375,-86.27);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(42.31,-86.34,42.375,-86.27)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 1280732934,
+            "bounds": {
+              "minlat": 42.3252246,
+              "minlon": -86.3145375,
+              "maxlat": 42.3313494,
+              "maxlon": -86.3110828
+            },
+            "tags": {
+              "natural": "beach",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1093898133,
+            "bounds": {
+              "minlat": 42.3526988,
+              "minlon": -86.2995463,
+              "maxlat": 42.3548558,
+              "maxlon": -86.292546
+            },
+            "tags": {
+              "access": "yes",
+              "leisure": "nature_reserve",
+              "name": "Pilgrim Haven Natural Area",
+              "operator": "Southwest Michigan Land Conservancy",
+              "operator:wikidata": "Q58817235",
+              "website": "https://swmlc.org/project/pilgrim-haven-natural-area/",
+              "wikidata": "Q79861452"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1184247155,
+            "bounds": {
+              "minlat": 42.3489573,
+              "minlon": -86.3012844,
+              "maxlat": 42.3526218,
+              "maxlon": -86.2948848
+            },
+            "tags": {
+              "leisure": "nature_reserve",
+              "name": "Porter Legacy Dunes",
+              "operator": "South Haven Recreation Authority"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1184259012,
+            "bounds": {
+              "minlat": 42.3719883,
+              "minlon": -86.2928164,
+              "maxlat": 42.3724868,
+              "maxlon": -86.2907952
+            },
+            "tags": {
+              "access": "yes",
+              "addr:city": "South Haven",
+              "addr:housenumber": "76750",
+              "addr:postcode": "49090",
+              "addr:state": "MI",
+              "addr:street": "13th Avenue",
+              "leisure": "park",
+              "name": "Deerlick Creek Beach Park",
+              "operator": "South Haven Charter Township",
+              "operator:type": "public"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 16007837,
+            "bounds": {
+              "minlat": 42.3281936,
+              "minlon": -86.312094,
+              "maxlat": 42.3426059,
+              "maxlon": -86.2913926
+            },
+            "tags": {
+              "addr:city": "South Haven",
+              "addr:housenumber": "23960",
+              "addr:postcode": "49090",
+              "addr:state": "MI",
+              "addr:street": "Ruggles Road",
+              "leisure": "park",
+              "name": "Van Buren State Park",
+              "source": "State of Michigan GIS Data",
+              "type": "multipolygon",
+              "website": "https://www2.dnr.state.mi.us/parksandtrails/details.aspx?id=502&type=SPRK",
+              "wikidata": "Q7913194",
+              "wikipedia": "en:Van Buren State Park (Michigan)"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 16007838,
+            "bounds": {
+              "minlat": 42.342558,
+              "minlon": -86.3051848,
+              "maxlat": 42.3435134,
+              "maxlon": -86.2966676
+            },
+            "tags": {
+              "access": "yes",
+              "leisure": "nature_reserve",
+              "name": "North Point Conservation Area",
+              "operator": "Van Buren County",
+              "type": "multipolygon",
+              "website": "https://www.vanburencountymi.gov/438/North-Point-Conservation-Area"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 21131778,
+            "bounds": {
+              "minlat": 41.8712135,
+              "minlon": -86.7153433,
+              "maxlat": 42.8345896,
+              "maxlon": -86.2069382
+            },
+            "tags": {
+              "alt_name": "Southwest Michigan Bottomland Preserve",
+              "boundary": "protected_area",
+              "leisure": "nature_reserve",
+              "maritime": "yes",
+              "name": "Southwest Michigan Underwater Preserve",
+              "official_name": "Southwest Michigan Great Lakes State Bottomland Preserve",
+              "type": "multipolygon",
+              "wikidata": "Q7571319",
+              "wikipedia": "en:Southwest Michigan Underwater Preserve"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 1280732934,
+              "name": null,
+              "locality": null,
+              "lat": 42.328287,
+              "lon": -86.31281014999999,
+              "bounds": {
+                "minLat": 42.3252246,
+                "minLon": -86.3145375,
+                "maxLat": 42.3313494,
+                "maxLon": -86.3110828
+              },
+              "areaDeg2": 0.000021159346560043966
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 1093898133,
+              "name": "Pilgrim Haven Natural Area",
+              "bounds": {
+                "minLat": 42.3526988,
+                "minLon": -86.2995463,
+                "maxLat": 42.3548558,
+                "maxLon": -86.292546
+              },
+              "areaDeg2": 0.000015099647100030756
+            },
+            {
+              "osmType": "way",
+              "osmId": 1184247155,
+              "name": "Porter Legacy Dunes",
+              "bounds": {
+                "minLat": 42.3489573,
+                "minLon": -86.3012844,
+                "maxLat": 42.3526218,
+                "maxLon": -86.2948848
+              },
+              "areaDeg2": 0.000023451334199975764
+            },
+            {
+              "osmType": "way",
+              "osmId": 1184259012,
+              "name": "Deerlick Creek Beach Park",
+              "bounds": {
+                "minLat": 42.3719883,
+                "minLon": -86.2928164,
+                "maxLat": 42.3724868,
+                "maxLon": -86.2907952
+              },
+              "areaDeg2": 0.000001007568199998866
+            },
+            {
+              "osmType": "relation",
+              "osmId": 16007837,
+              "name": "Van Buren State Park",
+              "bounds": {
+                "minLat": 42.3281936,
+                "minLon": -86.312094,
+                "maxLat": 42.3426059,
+                "maxLon": -86.2913926
+              },
+              "areaDeg2": 0.0002983547872201782
+            },
+            {
+              "osmType": "relation",
+              "osmId": 16007838,
+              "name": "North Point Conservation Area",
+              "bounds": {
+                "minLat": 42.342558,
+                "minLon": -86.3051848,
+                "maxLat": 42.3435134,
+                "maxLon": -86.2966676
+              },
+              "areaDeg2": 0.000008137332880019346
+            },
+            {
+              "osmType": "relation",
+              "osmId": 21131778,
+              "name": "Southwest Michigan Underwater Preserve",
+              "bounds": {
+                "minLat": 41.8712135,
+                "minLon": -86.7153433,
+                "maxLat": 42.8345896,
+                "maxLon": -86.2069382
+              },
+              "areaDeg2": 0.48978532245811324
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [
+          {
+            "osmType": "way",
+            "osmId": 1280732934
+          }
+        ],
+        "pondWaterQuery": "[out:json][timeout:180][maxsize:134217728];\n(\n  way(id:1280732934);\n)->.b;\n(\n  way[\"natural\"=\"water\"](around.b:60);\n  way[\"natural\"=\"coastline\"](around.b:60);\n)->.water;\n.water out tags bb;",
+        "pondWaterElements": [],
+        "waters": [],
+        "records": [
+          {
+            "osmType": "way",
+            "osmId": 1280732934,
+            "name": null,
+            "locality": null,
+            "lat": 42.328287,
+            "lon": -86.31281014999999,
+            "areaDeg2": 0.000021159346560043966,
+            "parkName": "Van Buren State Park",
+            "parkKey": "relation/16007837"
+          }
+        ],
+        "droppedPondBeaches": []
+      }
+    },
+    {
+      "key": "hawthorn-pond",
+      "description": "Hawthorn Pond Natural Area, Holland Twp MI: the unnamed ~5 m x 6 m pond sliver (way/161131900) the pond filter must DROP, and the ~2.5e-6 deg2 pond that is the evidence.",
+      "bbox": {
+        "minLat": 42.77,
+        "minLon": -86.04,
+        "maxLat": 42.79,
+        "maxLon": -86.01
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](42.77,-86.04,42.79,-86.01);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](42.77,-86.04,42.79,-86.01);\n);\nout center tags;",
+        "elements": [],
+        "derivedBeaches": []
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](42.77,-86.04,42.79,-86.01);\n  relation[\"leisure\"=\"park\"][\"name\"](42.77,-86.04,42.79,-86.01);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](42.77,-86.04,42.79,-86.01);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](42.77,-86.04,42.79,-86.01);\n  way[\"boundary\"=\"protected_area\"][\"name\"](42.77,-86.04,42.79,-86.01);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](42.77,-86.04,42.79,-86.01);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(42.77,-86.04,42.79,-86.01)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 161131900,
+            "bounds": {
+              "minlat": 42.7792907,
+              "minlon": -86.0260356,
+              "maxlat": 42.779337,
+              "maxlon": -86.0259587
+            },
+            "tags": {
+              "natural": "beach",
+              "site": "area",
+              "supervised": "no",
+              "surface": "sand"
+            }
+          },
+          {
+            "type": "way",
+            "id": 159092871,
+            "bounds": {
+              "minlat": 42.7834948,
+              "minlon": -86.0408928,
+              "maxlat": 42.7846112,
+              "maxlon": -86.0367607
+            },
+            "tags": {
+              "dog": "leashed",
+              "leisure": "park",
+              "name": "Adams Street Landing",
+              "operator": "Ottawa County"
+            }
+          },
+          {
+            "type": "way",
+            "id": 961168232,
+            "bounds": {
+              "minlat": 42.7762081,
+              "minlon": -86.0182714,
+              "maxlat": 42.783384,
+              "maxlon": -86.0043476
+            },
+            "tags": {
+              "alt_name": "Middle Macatawa Preserve",
+              "leisure": "nature_reserve",
+              "name": "Geerlings Farm Park",
+              "owner": "Outdoor Discovery Center",
+              "source": "Ottawa County GIS"
+            }
+          },
+          {
+            "type": "way",
+            "id": 961181010,
+            "bounds": {
+              "minlat": 42.7761832,
+              "minlon": -86.0281785,
+              "maxlat": 42.7811811,
+              "maxlon": -86.0183761
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Hawthorn Pond Natural Area",
+              "source": "Ottawa County GIS"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 161131900,
+              "name": null,
+              "locality": null,
+              "lat": 42.779313849999994,
+              "lon": -86.02599715,
+              "bounds": {
+                "minLat": 42.7792907,
+                "minLon": -86.0260356,
+                "maxLat": 42.779337,
+                "maxLon": -86.0259587
+              },
+              "areaDeg2": 3.5604699999084156e-9
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 159092871,
+              "name": "Adams Street Landing",
+              "bounds": {
+                "minLat": 42.7834948,
+                "minLon": -86.0408928,
+                "maxLat": 42.7846112,
+                "maxLon": -86.0367607
+              },
+              "areaDeg2": 0.0000046130764399949475
+            },
+            {
+              "osmType": "way",
+              "osmId": 961168232,
+              "name": "Geerlings Farm Park",
+              "bounds": {
+                "minLat": 42.7762081,
+                "minLon": -86.0182714,
+                "maxLat": 42.783384,
+                "maxLon": -86.0043476
+              },
+              "areaDeg2": 0.00009991579642000446
+            },
+            {
+              "osmType": "way",
+              "osmId": 961181010,
+              "name": "Hawthorn Pond Natural Area",
+              "bounds": {
+                "minLat": 42.7761832,
+                "minLon": -86.0281785,
+                "maxLat": 42.7811811,
+                "maxLon": -86.0183761
+              },
+              "areaDeg2": 0.000048991414959983976
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [
+          {
+            "osmType": "way",
+            "osmId": 161131900
+          }
+        ],
+        "pondWaterQuery": "[out:json][timeout:180][maxsize:134217728];\n(\n  way(id:161131900);\n)->.b;\n(\n  way[\"natural\"=\"water\"](around.b:60);\n  way[\"natural\"=\"coastline\"](around.b:60);\n)->.water;\n.water out tags bb;",
+        "pondWaterElements": [
+          {
+            "type": "way",
+            "id": 161132478,
+            "bounds": {
+              "minlat": 42.7776573,
+              "minlon": -86.0273107,
+              "maxlat": 42.7792911,
+              "maxlon": -86.0258057
+            },
+            "tags": {
+              "name": "Hawthorn Pond",
+              "natural": "water"
+            }
+          }
+        ],
+        "waters": [
+          {
+            "bounds": {
+              "minLat": 42.7776573,
+              "minLon": -86.0273107,
+              "maxLat": 42.7792911,
+              "maxLon": -86.0258057
+            },
+            "areaDeg2": 0.0000024588689999917733,
+            "shoreline": false
+          }
+        ],
+        "records": [],
+        "droppedPondBeaches": [
+          {
+            "osmType": "way",
+            "osmId": 161131900,
+            "areaDeg2": 3.5604699999084156e-9
+          }
+        ]
+      }
+    },
+    {
+      "key": "wasaga-georgian-bay",
+      "description": "Wasaga Beach ON: Georgian Bay - the Great Lake whose beaches classify via the PARENT lake relation QID (contract 9.5 case 1).",
+      "bbox": {
+        "minLat": 44.485,
+        "minLon": -80.07,
+        "maxLat": 44.545,
+        "maxLon": -79.96
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](44.485,-80.07,44.545,-79.96);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](44.485,-80.07,44.545,-79.96);\n);\nout center tags;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 35247619,
+            "center": {
+              "lat": 44.5027372,
+              "lon": -80.0439869
+            },
+            "tags": {
+              "name": "Beach Area 3",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 59709681,
+            "center": {
+              "lat": 44.5426584,
+              "lon": -80.0041541
+            },
+            "tags": {
+              "name": "New Wasaga Beach",
+              "natural": "beach",
+              "source": "CanVec_Import_2009",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 686376404,
+            "center": {
+              "lat": 44.5222114,
+              "lon": -80.0233111
+            },
+            "tags": {
+              "description": "Beach Area 1 & 2",
+              "name": "Beach Area 1 & 2",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 686376664,
+            "center": {
+              "lat": 44.4855019,
+              "lon": -80.0683915
+            },
+            "tags": {
+              "name": "Beach Area 5",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 981906981,
+            "center": {
+              "lat": 44.4945551,
+              "lon": -80.0544828
+            },
+            "tags": {
+              "name": "Beach Area 4",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          }
+        ],
+        "derivedBeaches": [
+          {
+            "osmType": "way",
+            "osmId": 35247619,
+            "name": "Beach Area 3",
+            "lat": 44.5027372,
+            "lon": -80.0439869
+          },
+          {
+            "osmType": "way",
+            "osmId": 59709681,
+            "name": "New Wasaga Beach",
+            "lat": 44.5426584,
+            "lon": -80.0041541
+          },
+          {
+            "osmType": "way",
+            "osmId": 686376404,
+            "name": "Beach Area 1 & 2",
+            "lat": 44.5222114,
+            "lon": -80.0233111
+          },
+          {
+            "osmType": "way",
+            "osmId": 686376664,
+            "name": "Beach Area 5",
+            "lat": 44.4855019,
+            "lon": -80.0683915
+          },
+          {
+            "osmType": "way",
+            "osmId": 981906981,
+            "name": "Beach Area 4",
+            "lat": 44.4945551,
+            "lon": -80.0544828
+          }
+        ]
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](44.485,-80.07,44.545,-79.96);\n  relation[\"leisure\"=\"park\"][\"name\"](44.485,-80.07,44.545,-79.96);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](44.485,-80.07,44.545,-79.96);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](44.485,-80.07,44.545,-79.96);\n  way[\"boundary\"=\"protected_area\"][\"name\"](44.485,-80.07,44.545,-79.96);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](44.485,-80.07,44.545,-79.96);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(44.485,-80.07,44.545,-79.96)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 35247619,
+            "bounds": {
+              "minlat": 44.4975152,
+              "minlon": -80.0502868,
+              "maxlat": 44.5079591,
+              "maxlon": -80.037687
+            },
+            "tags": {
+              "name": "Beach Area 3",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 59709681,
+            "bounds": {
+              "minlat": 44.537604,
+              "minlon": -80.0075387,
+              "maxlat": 44.5477129,
+              "maxlon": -80.0007695
+            },
+            "tags": {
+              "name": "New Wasaga Beach",
+              "natural": "beach",
+              "source": "CanVec_Import_2009",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 686376404,
+            "bounds": {
+              "minlat": 44.5076043,
+              "minlon": -80.038167,
+              "maxlat": 44.5368185,
+              "maxlon": -80.0084551
+            },
+            "tags": {
+              "description": "Beach Area 1 & 2",
+              "name": "Beach Area 1 & 2",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 686376664,
+            "bounds": {
+              "minlat": 44.4795139,
+              "minlon": -80.0779993,
+              "maxlat": 44.4914898,
+              "maxlon": -80.0587836
+            },
+            "tags": {
+              "name": "Beach Area 5",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 981906981,
+            "bounds": {
+              "minlat": 44.4911459,
+              "minlon": -80.0591875,
+              "maxlat": 44.4979643,
+              "maxlon": -80.0497781
+            },
+            "tags": {
+              "name": "Beach Area 4",
+              "natural": "beach",
+              "surface": "sand",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 333614445,
+            "bounds": {
+              "minlat": 44.5274315,
+              "minlon": -80.0070653,
+              "maxlat": 44.5277806,
+              "maxlon": -80.0065586
+            },
+            "tags": {
+              "access": "private",
+              "barrier": "fence",
+              "fence_type": "metal",
+              "leisure": "park",
+              "name": "Stonebridge Pool"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 5844478,
+            "bounds": {
+              "minlat": 44.4695837,
+              "minlon": -80.1079787,
+              "maxlat": 44.5648451,
+              "maxlon": -79.9888741
+            },
+            "tags": {
+              "boundary": "protected_area",
+              "contact:city": "Wasaga Beach",
+              "contact:housenumber": "11",
+              "contact:postcode": "L9Z 2V9",
+              "contact:street": "22nd Street North",
+              "date:protected": "1959",
+              "leisure": "nature_reserve",
+              "name": "Wasaga Beach Provincial Park",
+              "name:short": "WASAGA BEACH",
+              "operator": "Ontario Parks",
+              "operator:type": "public",
+              "operator:url": "www.ontarioparks.com/english/",
+              "operator:wikidata": "Q3364902",
+              "phone": "+1-705-429-2516",
+              "protect_class": "2",
+              "protection_title": "Provincial Park",
+              "source": "Ontario GeoHub",
+              "type": "boundary",
+              "website": "https://www.ontarioparks.ca/park/wasagabeach",
+              "wikidata": "Q3364699",
+              "wikipedia": "en:Wasaga Beach"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 35247619,
+              "name": "Beach Area 3",
+              "locality": null,
+              "lat": 44.50273715,
+              "lon": -80.0439869,
+              "bounds": {
+                "minLat": 44.4975152,
+                "minLon": -80.0502868,
+                "maxLat": 44.5079591,
+                "maxLon": -80.037687
+              },
+              "areaDeg2": 0.0001315910512198727
+            },
+            {
+              "osmType": "way",
+              "osmId": 59709681,
+              "name": "New Wasaga Beach",
+              "locality": null,
+              "lat": 44.542658450000005,
+              "lon": -80.0041541,
+              "bounds": {
+                "minLat": 44.537604,
+                "minLon": -80.0075387,
+                "maxLat": 44.5477129,
+                "maxLon": -80.0007695
+              },
+              "areaDeg2": 0.00006842916587992791
+            },
+            {
+              "osmType": "way",
+              "osmId": 686376404,
+              "name": "Beach Area 1 & 2",
+              "locality": null,
+              "lat": 44.5222114,
+              "lon": -80.02331105,
+              "bounds": {
+                "minLat": 44.5076043,
+                "minLon": -80.038167,
+                "maxLat": 44.5368185,
+                "maxLon": -80.0084551
+              },
+              "areaDeg2": 0.0008680093889800249
+            },
+            {
+              "osmType": "way",
+              "osmId": 686376664,
+              "name": "Beach Area 5",
+              "locality": null,
+              "lat": 44.48550185,
+              "lon": -80.06839145000001,
+              "bounds": {
+                "minLat": 44.4795139,
+                "minLon": -80.0779993,
+                "maxLat": 44.4914898,
+                "maxLon": -80.0587836
+              },
+              "areaDeg2": 0.0002301253016299664
+            },
+            {
+              "osmType": "way",
+              "osmId": 981906981,
+              "name": "Beach Area 4",
+              "locality": null,
+              "lat": 44.4945551,
+              "lon": -80.05448279999999,
+              "bounds": {
+                "minLat": 44.4911459,
+                "minLon": -80.0591875,
+                "maxLat": 44.4979643,
+                "maxLon": -80.0497781
+              },
+              "areaDeg2": 0.00006415705295997191
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 333614445,
+              "name": "Stonebridge Pool",
+              "bounds": {
+                "minLat": 44.5274315,
+                "minLon": -80.0070653,
+                "maxLat": 44.5277806,
+                "maxLon": -80.0065586
+              },
+              "areaDeg2": 1.7688896999647834e-7
+            },
+            {
+              "osmType": "relation",
+              "osmId": 5844478,
+              "name": "Wasaga Beach Provincial Park",
+              "bounds": {
+                "minLat": 44.4695837,
+                "minLon": -80.1079787,
+                "maxLat": 44.5648451,
+                "maxLon": -79.9888741
+              },
+              "areaDeg2": 0.011346070942439794
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [],
+        "pondWaterQuery": null,
+        "waters": [],
+        "records": [
+          {
+            "osmType": "way",
+            "osmId": 35247619,
+            "name": "Beach Area 3",
+            "locality": null,
+            "lat": 44.50273715,
+            "lon": -80.0439869,
+            "areaDeg2": 0.0001315910512198727,
+            "parkName": "Wasaga Beach Provincial Park",
+            "parkKey": "relation/5844478"
+          },
+          {
+            "osmType": "way",
+            "osmId": 59709681,
+            "name": "New Wasaga Beach",
+            "locality": null,
+            "lat": 44.542658450000005,
+            "lon": -80.0041541,
+            "areaDeg2": 0.00006842916587992791,
+            "parkName": "Wasaga Beach Provincial Park",
+            "parkKey": "relation/5844478"
+          },
+          {
+            "osmType": "way",
+            "osmId": 686376404,
+            "name": "Beach Area 1 & 2",
+            "locality": null,
+            "lat": 44.5222114,
+            "lon": -80.02331105,
+            "areaDeg2": 0.0008680093889800249,
+            "parkName": "Wasaga Beach Provincial Park",
+            "parkKey": "relation/5844478"
+          },
+          {
+            "osmType": "way",
+            "osmId": 686376664,
+            "name": "Beach Area 5",
+            "locality": null,
+            "lat": 44.48550185,
+            "lon": -80.06839145000001,
+            "areaDeg2": 0.0002301253016299664,
+            "parkName": "Wasaga Beach Provincial Park",
+            "parkKey": "relation/5844478"
+          },
+          {
+            "osmType": "way",
+            "osmId": 981906981,
+            "name": "Beach Area 4",
+            "locality": null,
+            "lat": 44.4945551,
+            "lon": -80.05448279999999,
+            "areaDeg2": 0.00006415705295997191,
+            "parkName": "Wasaga Beach Provincial Park",
+            "parkKey": "relation/5844478"
+          }
+        ],
+        "droppedPondBeaches": []
+      }
+    },
+    {
+      "key": "sleeping-bear",
+      "description": "Sleeping Bear Dunes MI: a large multipolygon / set-back beach whose centroid is far from the water - proves the vertex-anchored probe.",
+      "bbox": {
+        "minLat": 44.76,
+        "minLon": -86.11,
+        "maxLat": 44.85,
+        "maxLon": -86.02
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](44.76,-86.11,44.85,-86.02);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](44.76,-86.11,44.85,-86.02);\n);\nout center tags;",
+        "elements": [],
+        "derivedBeaches": []
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](44.76,-86.11,44.85,-86.02);\n  relation[\"leisure\"=\"park\"][\"name\"](44.76,-86.11,44.85,-86.02);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](44.76,-86.11,44.85,-86.02);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](44.76,-86.11,44.85,-86.02);\n  way[\"boundary\"=\"protected_area\"][\"name\"](44.76,-86.11,44.85,-86.02);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](44.76,-86.11,44.85,-86.02);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(44.76,-86.11,44.85,-86.02)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 889361412,
+            "bounds": {
+              "minlat": 44.8116352,
+              "minlon": -86.0687098,
+              "maxlat": 44.8143315,
+              "maxlon": -86.0673276
+            },
+            "tags": {
+              "natural": "beach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 889361419,
+            "bounds": {
+              "minlat": 44.8137335,
+              "minlon": -86.0669065,
+              "maxlat": 44.8142494,
+              "maxlon": -86.0664594
+            },
+            "tags": {
+              "natural": "beach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 175080385,
+            "bounds": {
+              "minlat": 44.8201524,
+              "minlon": -86.0581059,
+              "maxlat": 44.8220297,
+              "maxlon": -86.0550927
+            },
+            "tags": {
+              "alt_name": "North Empire Park",
+              "gnis:feature_id": "2492812",
+              "leisure": "park",
+              "name": "Shalda Park",
+              "operator": "Village of Empire",
+              "operator:type": "public",
+              "source": "Bing",
+              "wikidata": "Q49532367"
+            }
+          },
+          {
+            "type": "way",
+            "id": 438878893,
+            "bounds": {
+              "minlat": 44.8123298,
+              "minlon": -86.0636559,
+              "maxlat": 44.8136499,
+              "maxlon": -86.0614975
+            },
+            "tags": {
+              "ele": "182",
+              "gnis:feature_id": "2492811",
+              "leisure": "park",
+              "name": "James R. Johnson Park",
+              "operator": "Empire Lions Club",
+              "wikidata": "Q49506666"
+            }
+          },
+          {
+            "type": "way",
+            "id": 994032388,
+            "bounds": {
+              "minlat": 44.8122969,
+              "minlon": -86.0654943,
+              "maxlat": 44.8140459,
+              "maxlon": -86.0636304
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "James R. Johnson Park",
+              "operator": "Village of Empire"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1529186919,
+            "bounds": {
+              "minlat": 44.811638,
+              "minlon": -86.0687117,
+              "maxlat": 44.8143712,
+              "maxlon": -86.0660419
+            },
+            "tags": {
+              "addr:city": "Empire",
+              "addr:housenumber": "10484",
+              "addr:postcode": "49630",
+              "addr:state": "MI",
+              "addr:street": "West Niagara Street",
+              "gnis:feature_id": "1618416",
+              "leisure": "park",
+              "name": "Lake Michigan Beach Park",
+              "operator": "Village of Empire",
+              "operator:type": "public/government",
+              "website": "https://www.leelanau.gov/villages/empire/services/parks/lake_michigan_beach_park.php",
+              "wikidata": "Q49575476"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1529950677,
+            "bounds": {
+              "minlat": 44.8091408,
+              "minlon": -86.0563132,
+              "maxlat": 44.809992,
+              "maxlon": -86.0550249
+            },
+            "tags": {
+              "access": "private",
+              "addr:city": "Empire",
+              "addr:postcode": "49630",
+              "addr:state": "MI",
+              "addr:street": "West Wilce Street",
+              "leisure": "park",
+              "name": "New Neighborhood Common Area"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 812810,
+            "bounds": {
+              "minlat": 44.6607221,
+              "minlon": -86.2067857,
+              "maxlat": 45.1629676,
+              "maxlon": -85.7960758
+            },
+            "tags": {
+              "boundary": "protected_area",
+              "ele": "179",
+              "gnis:feature_id": "638101",
+              "leisure": "nature_reserve",
+              "name": "Sleeping Bear Dunes National Lakeshore",
+              "operator": "National Park Service",
+              "operator:short": "NPS",
+              "operator:type": "public",
+              "operator:wikidata": "Q308439",
+              "operator:wikipedia": "en:National Park Service",
+              "ownership": "national",
+              "protect_class": "5",
+              "protected": "perpetuity",
+              "protected_area": "shore_reserve",
+              "protection_title": "National Lakeshore",
+              "shore_reserve": "lakeshore_reserve",
+              "type": "multipolygon",
+              "website": "https://www.nps.gov/slbe",
+              "wikidata": "Q1585822",
+              "wikipedia": "en:Sleeping Bear Dunes National Lakeshore"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 11768974,
+            "bounds": {
+              "minlat": 44.8146935,
+              "minlon": -86.0551244,
+              "maxlat": 44.8220539,
+              "maxlon": -86.0470243
+            },
+            "tags": {
+              "addr:city": "Empire",
+              "addr:housenumber": "11300",
+              "addr:postcode": "49630",
+              "addr:state": "MI",
+              "addr:street": "South Leelanau Highway",
+              "leisure": "nature_reserve",
+              "name": "Chippewa Run Natural Area",
+              "operator": "Leelanau Conservancy",
+              "type": "multipolygon"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 12922583,
+            "bounds": {
+              "minlat": 44.7190613,
+              "minlon": -86.2499503,
+              "maxlat": 45.1833528,
+              "maxlon": -85.8040754
+            },
+            "tags": {
+              "alt_name": "Manitou Passage Bottomland Preserve",
+              "boundary": "protected_area",
+              "leisure": "nature_reserve",
+              "maritime": "yes",
+              "name": "Manitou Passage Underwater Preserve",
+              "official_name": "Manitou Passage Great Lakes State Bottomland Preserve",
+              "operator": "Michigan Department of Natural Resources",
+              "operator:short": "Michigan DNR",
+              "operator:type": "government",
+              "operator:wikidata": "Q6837532",
+              "protection_title": "Underwater Preserve",
+              "type": "boundary",
+              "wikidata": "Q6750249",
+              "wikipedia": "en:Manitou Passage Underwater Preserve"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 16820310,
+            "bounds": {
+              "minlat": 44.699829,
+              "minlon": -86.2044275,
+              "maxlat": 45.1594171,
+              "maxlon": -85.8035982
+            },
+            "tags": {
+              "boundary": "protected_area",
+              "leisure": "nature_reserve",
+              "name": "Sleeping Bear Dunes Wilderness",
+              "operator": "National Park Service",
+              "operator:short": "NPS",
+              "operator:type": "public",
+              "operator:wikidata": "Q308439",
+              "ownership": "national",
+              "protect_class": "1a",
+              "protected": "perpetuity",
+              "protected_area": "wilderness_preserve",
+              "protection_title": "Wilderness Area",
+              "type": "multipolygon"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 889361412,
+              "name": null,
+              "locality": null,
+              "lat": 44.812983349999996,
+              "lon": -86.0680187,
+              "bounds": {
+                "minLat": 44.8116352,
+                "minLon": -86.0687098,
+                "maxLat": 44.8143315,
+                "maxLon": -86.0673276
+              },
+              "areaDeg2": 0.000003726825859991127
+            },
+            {
+              "osmType": "way",
+              "osmId": 889361419,
+              "name": null,
+              "locality": null,
+              "lat": 44.81399145,
+              "lon": -86.06668295,
+              "bounds": {
+                "minLat": 44.8137335,
+                "minLon": -86.0669065,
+                "maxLat": 44.8142494,
+                "maxLon": -86.0664594
+              },
+              "areaDeg2": 2.3065889000276498e-7
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 175080385,
+              "name": "Shalda Park",
+              "bounds": {
+                "minLat": 44.8201524,
+                "minLon": -86.0581059,
+                "maxLat": 44.8220297,
+                "maxLon": -86.0550927
+              },
+              "areaDeg2": 0.000005656680360007961
+            },
+            {
+              "osmType": "way",
+              "osmId": 438878893,
+              "name": "James R. Johnson Park",
+              "bounds": {
+                "minLat": 44.8123298,
+                "minLon": -86.0636559,
+                "maxLat": 44.8136499,
+                "maxLon": -86.0614975
+              },
+              "areaDeg2": 0.0000028493038400007042
+            },
+            {
+              "osmType": "way",
+              "osmId": 994032388,
+              "name": "James R. Johnson Park",
+              "bounds": {
+                "minLat": 44.8122969,
+                "minLon": -86.0654943,
+                "maxLat": 44.8140459,
+                "maxLon": -86.0636304
+              },
+              "areaDeg2": 0.000003259961100013302
+            },
+            {
+              "osmType": "way",
+              "osmId": 1529186919,
+              "name": "Lake Michigan Beach Park",
+              "bounds": {
+                "minLat": 44.811638,
+                "minLon": -86.0687117,
+                "maxLat": 44.8143712,
+                "maxLon": -86.0660419
+              },
+              "areaDeg2": 0.000007297097359964673
+            },
+            {
+              "osmType": "way",
+              "osmId": 1529950677,
+              "name": "New Neighborhood Common Area",
+              "bounds": {
+                "minLat": 44.8091408,
+                "minLon": -86.0563132,
+                "maxLat": 44.809992,
+                "maxLon": -86.0550249
+              },
+              "areaDeg2": 0.0000010966009599984723
+            },
+            {
+              "osmType": "relation",
+              "osmId": 812810,
+              "name": "Sleeping Bear Dunes National Lakeshore",
+              "bounds": {
+                "minLat": 44.6607221,
+                "minLon": -86.2067857,
+                "maxLat": 45.1629676,
+                "maxLon": -85.7960758
+              },
+              "areaDeg2": 0.20627719908045059
+            },
+            {
+              "osmType": "relation",
+              "osmId": 11768974,
+              "name": "Chippewa Run Natural Area",
+              "bounds": {
+                "minLat": 44.8146935,
+                "minLon": -86.0551244,
+                "maxLat": 44.8220539,
+                "maxLon": -86.0470243
+              },
+              "areaDeg2": 0.00005961997603997364
+            },
+            {
+              "osmType": "relation",
+              "osmId": 12922583,
+              "name": "Manitou Passage Underwater Preserve",
+              "bounds": {
+                "minLat": 44.7190613,
+                "minLon": -86.2499503,
+                "maxLat": 45.1833528,
+                "maxLon": -85.8040754
+              },
+              "areaDeg2": 0.20701592613334732
+            },
+            {
+              "osmType": "relation",
+              "osmId": 16820310,
+              "name": "Sleeping Bear Dunes Wilderness",
+              "bounds": {
+                "minLat": 44.699829,
+                "minLon": -86.2044275,
+                "maxLat": 45.1594171,
+                "maxLon": -85.8035982
+              },
+              "areaDeg2": 0.18421637641132818
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [
+          {
+            "osmType": "way",
+            "osmId": 889361412
+          },
+          {
+            "osmType": "way",
+            "osmId": 889361419
+          }
+        ],
+        "pondWaterQuery": "[out:json][timeout:180][maxsize:134217728];\n(\n  way(id:889361412,889361419);\n)->.b;\n(\n  way[\"natural\"=\"water\"](around.b:60);\n  way[\"natural\"=\"coastline\"](around.b:60);\n)->.water;\n.water out tags bb;",
+        "pondWaterElements": [
+          {
+            "type": "way",
+            "id": 175080386,
+            "bounds": {
+              "minlat": 44.8120606,
+              "minlon": -86.0673048,
+              "maxlat": 44.8260761,
+              "maxlon": -86.0603419
+            },
+            "tags": {
+              "name": "South Bar Lake",
+              "natural": "water",
+              "source": "Bing",
+              "water": "lake",
+              "wikidata": "Q14716281",
+              "wikipedia": "en:South Bar Lake"
+            }
+          }
+        ],
+        "waters": [
+          {
+            "bounds": {
+              "minLat": 44.8120606,
+              "minLon": -86.0673048,
+              "maxLat": 44.8260761,
+              "maxLon": -86.0603419
+            },
+            "areaDeg2": 0.00009758852495006345,
+            "shoreline": false
+          }
+        ],
+        "records": [
+          {
+            "osmType": "way",
+            "osmId": 889361412,
+            "name": null,
+            "locality": null,
+            "lat": 44.812983349999996,
+            "lon": -86.0680187,
+            "areaDeg2": 0.000003726825859991127,
+            "parkName": "Lake Michigan Beach Park",
+            "parkKey": "way/1529186919"
+          },
+          {
+            "osmType": "way",
+            "osmId": 889361419,
+            "name": null,
+            "locality": null,
+            "lat": 44.81399145,
+            "lon": -86.06668295,
+            "areaDeg2": 2.3065889000276498e-7,
+            "parkName": "Lake Michigan Beach Park",
+            "parkKey": "way/1529186919"
+          }
+        ],
+        "droppedPondBeaches": []
+      }
+    },
+    {
+      "key": "beaver-island",
+      "description": "Beaver Island MI: island-in-a-hole geometry in Lake Michigan.",
+      "bbox": {
+        "minLat": 45.59,
+        "minLon": -85.62,
+        "maxLat": 45.7,
+        "maxLon": -85.47
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](45.59,-85.62,45.7,-85.47);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](45.59,-85.62,45.7,-85.47);\n);\nout center tags;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 1136857348,
+            "center": {
+              "lat": 45.5929784,
+              "lon": -85.5228063
+            },
+            "tags": {
+              "ele": "180",
+              "gnis:feature_id": "2364654",
+              "name": "Beaver Island Public Beach",
+              "natural": "beach",
+              "wikidata": "Q33325460"
+            }
+          }
+        ],
+        "derivedBeaches": [
+          {
+            "osmType": "way",
+            "osmId": 1136857348,
+            "name": "Beaver Island Public Beach",
+            "lat": 45.5929784,
+            "lon": -85.5228063
+          }
+        ]
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](45.59,-85.62,45.7,-85.47);\n  relation[\"leisure\"=\"park\"][\"name\"](45.59,-85.62,45.7,-85.47);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](45.59,-85.62,45.7,-85.47);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](45.59,-85.62,45.7,-85.47);\n  way[\"boundary\"=\"protected_area\"][\"name\"](45.59,-85.62,45.7,-85.47);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](45.59,-85.62,45.7,-85.47);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(45.59,-85.62,45.7,-85.47)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "relation",
+            "id": 6192330,
+            "bounds": {
+              "minlat": 45.5736858,
+              "minlon": -85.6301765,
+              "maxlat": 45.6825912,
+              "maxlon": -85.5678295
+            },
+            "tags": {
+              "natural": "beach",
+              "type": "multipolygon"
+            }
+          },
+          {
+            "type": "way",
+            "id": 265438012,
+            "bounds": {
+              "minlat": 45.6851674,
+              "minlon": -85.512067,
+              "maxlat": 45.6886437,
+              "maxlon": -85.5038605
+            },
+            "tags": {
+              "boundary": "protected_area",
+              "name": "CMU Biological Station"
+            }
+          },
+          {
+            "type": "way",
+            "id": 995234302,
+            "bounds": {
+              "minlat": 45.6994109,
+              "minlon": -85.5012608,
+              "maxlat": 45.7024203,
+              "maxlon": -85.4936308
+            },
+            "tags": {
+              "leisure": "nature_reserve",
+              "name": "Conn's Cove Nature Preserve"
+            }
+          },
+          {
+            "type": "way",
+            "id": 995234303,
+            "bounds": {
+              "minlat": 45.6921624,
+              "minlon": -85.516534,
+              "maxlat": 45.6995123,
+              "maxlon": -85.5008468
+            },
+            "tags": {
+              "leisure": "nature_reserve",
+              "name": "Conn's Cove West Nature Preserve"
+            }
+          },
+          {
+            "type": "way",
+            "id": 995234304,
+            "bounds": {
+              "minlat": 45.6721691,
+              "minlon": -85.5060403,
+              "maxlat": 45.6727637,
+              "maxlon": -85.5037975
+            },
+            "tags": {
+              "leisure": "nature_reserve",
+              "name": "Margaret P. Erber Nature Preserve"
+            }
+          },
+          {
+            "type": "way",
+            "id": 995235174,
+            "bounds": {
+              "minlat": 45.6742701,
+              "minlon": -85.5783048,
+              "maxlat": 45.6887224,
+              "maxlon": -85.5700479
+            },
+            "tags": {
+              "leisure": "nature_reserve",
+              "name": "Sarah A. Martin Nature Preserve"
+            }
+          },
+          {
+            "type": "way",
+            "id": 995235175,
+            "bounds": {
+              "minlat": 45.6061194,
+              "minlon": -85.4942676,
+              "maxlat": 45.6079269,
+              "maxlon": -85.4924865
+            },
+            "tags": {
+              "leisure": "nature_reserve",
+              "name": "Erber Nature Preserve"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 13401360,
+            "bounds": {
+              "minlat": 45.3772704,
+              "minlon": -85.8842116,
+              "maxlat": 45.8295981,
+              "maxlon": -85.3387574
+            },
+            "tags": {
+              "access": "yes",
+              "leisure": "nature_reserve",
+              "name": "Beaver Islands State Wildlife Research Area",
+              "operator": "Michigan Department of Natural Resources",
+              "operator:short": "Michigan DNR",
+              "operator:type": "government",
+              "operator:wikidata": "Q6837532",
+              "operator:wikipedia": "en:Michigan Department of Natural Resources",
+              "ownership": "state",
+              "type": "multipolygon",
+              "wikidata": "Q48815390",
+              "wikipedia": "en:Beaver Islands State Wildlife Research Area"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 16382131,
+            "bounds": {
+              "minlat": 45.6087882,
+              "minlon": -85.5940514,
+              "maxlat": 45.6198797,
+              "maxlon": -85.5682178
+            },
+            "tags": {
+              "access": "yes",
+              "description": "This property is in two parcels, one 310 acre nature reserve and a developed lakeshore facility",
+              "leisure": "nature_reserve",
+              "name": "Central Michigan University Biological Station",
+              "operator": "Central Michigan University",
+              "operator:type": "university",
+              "type": "multipolygon",
+              "website": "https://www.cmich.edu/academics/colleges/college-science-engineering/centers/cmu-biological-station"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "relation",
+              "osmId": 6192330,
+              "name": null,
+              "locality": null,
+              "lat": 45.6281385,
+              "lon": -85.59900300000001,
+              "bounds": {
+                "minLat": 45.5736858,
+                "minLon": -85.6301765,
+                "maxLat": 45.6825912,
+                "maxLon": -85.5678295
+              },
+              "areaDeg2": 0.006789924973800133
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 265438012,
+              "name": "CMU Biological Station",
+              "bounds": {
+                "minLat": 45.6851674,
+                "minLon": -85.512067,
+                "maxLat": 45.6886437,
+                "maxLon": -85.5038605
+              },
+              "areaDeg2": 0.000028528255950021785
+            },
+            {
+              "osmType": "way",
+              "osmId": 995234302,
+              "name": "Conn's Cove Nature Preserve",
+              "bounds": {
+                "minLat": 45.6994109,
+                "minLon": -85.5012608,
+                "maxLat": 45.7024203,
+                "maxLon": -85.4936308
+              },
+              "areaDeg2": 0.000022961722000001153
+            },
+            {
+              "osmType": "way",
+              "osmId": 995234303,
+              "name": "Conn's Cove West Nature Preserve",
+              "bounds": {
+                "minLat": 45.6921624,
+                "minLon": -85.516534,
+                "maxLat": 45.6995123,
+                "maxLon": -85.5008468
+              },
+              "areaDeg2": 0.00011529935127993062
+            },
+            {
+              "osmType": "way",
+              "osmId": 995234304,
+              "name": "Margaret P. Erber Nature Preserve",
+              "bounds": {
+                "minLat": 45.6721691,
+                "minLon": -85.5060403,
+                "maxLat": 45.6727637,
+                "maxLon": -85.5037975
+              },
+              "areaDeg2": 0.000001333568879993139
+            },
+            {
+              "osmType": "way",
+              "osmId": 995235174,
+              "name": "Sarah A. Martin Nature Preserve",
+              "bounds": {
+                "minLat": 45.6742701,
+                "minLon": -85.5783048,
+                "maxLat": 45.6887224,
+                "maxLon": -85.5700479
+              },
+              "areaDeg2": 0.00011933119586990344
+            },
+            {
+              "osmType": "way",
+              "osmId": 995235175,
+              "name": "Erber Nature Preserve",
+              "bounds": {
+                "minLat": 45.6061194,
+                "minLon": -85.4942676,
+                "maxLat": 45.6079269,
+                "maxLon": -85.4924865
+              },
+              "areaDeg2": 0.0000032193382500136015
+            },
+            {
+              "osmType": "relation",
+              "osmId": 13401360,
+              "name": "Beaver Islands State Wildlife Research Area",
+              "bounds": {
+                "minLat": 45.3772704,
+                "minLon": -85.8842116,
+                "maxLat": 45.8295981,
+                "maxLon": -85.3387574
+              },
+              "areaDeg2": 0.24672404374133644
+            },
+            {
+              "osmType": "relation",
+              "osmId": 16382131,
+              "name": "Central Michigan University Biological Station",
+              "bounds": {
+                "minLat": 45.6087882,
+                "minLon": -85.5940514,
+                "maxLat": 45.6198797,
+                "maxLon": -85.5682178
+              },
+              "areaDeg2": 0.000286533374399962
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [],
+        "pondWaterQuery": null,
+        "waters": [],
+        "records": [
+          {
+            "osmType": "relation",
+            "osmId": 6192330,
+            "name": null,
+            "locality": null,
+            "lat": 45.6281385,
+            "lon": -85.59900300000001,
+            "areaDeg2": 0.006789924973800133,
+            "parkName": "Sarah A. Martin Nature Preserve",
+            "parkKey": "way/995235174"
+          }
+        ],
+        "droppedPondBeaches": []
+      }
+    },
+    {
+      "key": "independence-oaks-pond-drop",
+      "description": "Independence Oaks County Park, Clarkston MI: an unnamed sand sliver on a ~1.1e-6 deg2 pond - the pond filter DROPS it, and the containing county park never gets to donate its name.",
+      "bbox": {
+        "minLat": 42.74,
+        "minLon": -83.47,
+        "maxLat": 42.8,
+        "maxLon": -83.39
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](42.74,-83.47,42.8,-83.39);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](42.74,-83.47,42.8,-83.39);\n);\nout center tags;",
+        "elements": [],
+        "derivedBeaches": []
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](42.74,-83.47,42.8,-83.39);\n  relation[\"leisure\"=\"park\"][\"name\"](42.74,-83.47,42.8,-83.39);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](42.74,-83.47,42.8,-83.39);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](42.74,-83.47,42.8,-83.39);\n  way[\"boundary\"=\"protected_area\"][\"name\"](42.74,-83.47,42.8,-83.39);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](42.74,-83.47,42.8,-83.39);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(42.74,-83.47,42.8,-83.39)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 1021947824,
+            "bounds": {
+              "minlat": 42.7733089,
+              "minlon": -83.3907115,
+              "maxlat": 42.7747071,
+              "maxlon": -83.3899929
+            },
+            "tags": {
+              "natural": "beach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1021648054,
+            "bounds": {
+              "minlat": 42.7511169,
+              "minlon": -83.4002262,
+              "maxlat": 42.7588237,
+              "maxlon": -83.3901779
+            },
+            "tags": {
+              "addr:city": "Clarkston",
+              "addr:country": "US",
+              "addr:housenumber": "6000",
+              "addr:postcode": "48348",
+              "addr:state": "MI",
+              "addr:street": "Clintonville Road",
+              "leisure": "park",
+              "name": "Clintonwood Park"
+            }
+          },
+          {
+            "type": "relation",
+            "id": 13683019,
+            "bounds": {
+              "minlat": 42.7587174,
+              "minlon": -83.4062283,
+              "maxlat": 42.7942055,
+              "maxlon": -83.3720463
+            },
+            "tags": {
+              "addr:city": "Clarkston",
+              "addr:country": "US",
+              "addr:housenumber": "9501",
+              "addr:postcode": "48348",
+              "addr:state": "MI",
+              "addr:street": "Sashabaw Road",
+              "ele": "314",
+              "gnis:feature_id": "2648738",
+              "leisure": "park",
+              "name": "Independence Oaks County Park",
+              "type": "multipolygon",
+              "wikidata": "Q34891083"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 1021947824,
+              "name": null,
+              "locality": null,
+              "lat": 42.774008,
+              "lon": -83.3903522,
+              "bounds": {
+                "minLat": 42.7733089,
+                "minLon": -83.3907115,
+                "maxLat": 42.7747071,
+                "maxLon": -83.3899929
+              },
+              "areaDeg2": 0.0000010047465199964796
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 1021648054,
+              "name": "Clintonwood Park",
+              "bounds": {
+                "minLat": 42.7511169,
+                "minLon": -83.4002262,
+                "maxLat": 42.7588237,
+                "maxLon": -83.3901779
+              },
+              "areaDeg2": 0.00007744023844007468
+            },
+            {
+              "osmType": "relation",
+              "osmId": 13683019,
+              "name": "Independence Oaks County Park",
+              "bounds": {
+                "minLat": 42.7587174,
+                "minLon": -83.4062283,
+                "maxLat": 42.7942055,
+                "maxLon": -83.3720463
+              },
+              "areaDeg2": 0.0012130542341998712
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [
+          {
+            "osmType": "way",
+            "osmId": 1021947824
+          }
+        ],
+        "pondWaterQuery": "[out:json][timeout:180][maxsize:134217728];\n(\n  way(id:1021947824);\n)->.b;\n(\n  way[\"natural\"=\"water\"](around.b:60);\n  way[\"natural\"=\"coastline\"](around.b:60);\n)->.water;\n.water out tags bb;",
+        "pondWaterElements": [
+          {
+            "type": "way",
+            "id": 51385578,
+            "bounds": {
+              "minlat": 42.773409,
+              "minlon": -83.3904195,
+              "maxlat": 42.7746425,
+              "maxlon": -83.3894915
+            },
+            "tags": {
+              "NHD:ComID": "146646582",
+              "NHD:FCode": "39004",
+              "NHD:FDate": "2006/03/29",
+              "NHD:FTYPE": "LakePond",
+              "NHD:RESOLUTION": "High",
+              "NHD:ReachCode": "04090003004212",
+              "natural": "water",
+              "source": "NHD"
+            }
+          }
+        ],
+        "waters": [
+          {
+            "bounds": {
+              "minLat": 42.773409,
+              "minLon": -83.3904195,
+              "maxLat": 42.7746425,
+              "maxLon": -83.3894915
+            },
+            "areaDeg2": 0.0000011446879999827524,
+            "shoreline": false
+          }
+        ],
+        "records": [],
+        "droppedPondBeaches": [
+          {
+            "osmType": "way",
+            "osmId": 1021947824,
+            "areaDeg2": 0.0000010047465199964796
+          }
+        ]
+      }
+    },
+    {
+      "key": "locklin-pines",
+      "description": "Locklin Pines Beach Park, Oakland County MI (way/1545732724): the inland regression case - nearest water way is pond-sized and ~150 m out, so a COMPLETE probe finds nothing and the row must DECIDE inland rather than stay pending.",
+      "bbox": {
+        "minLat": 42.59805,
+        "minLon": -83.423769,
+        "maxLat": 42.610169,
+        "maxLon": -83.407563
+      },
+      "named": {
+        "query": "[out:json][timeout:90][maxsize:67108864];\n(\n  nwr[\"natural\"=\"beach\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n  nwr[\"leisure\"=\"beach_resort\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n);\nout center tags;",
+        "elements": [],
+        "derivedBeaches": []
+      },
+      "park": {
+        "query": "[out:json][timeout:180][maxsize:134217728];\n(\n  way[\"leisure\"=\"park\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n  relation[\"leisure\"=\"park\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n  way[\"leisure\"=\"nature_reserve\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n  relation[\"leisure\"=\"nature_reserve\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n  way[\"boundary\"=\"protected_area\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n  relation[\"boundary\"=\"protected_area\"][\"name\"](42.59805,-83.423769,42.610169,-83.407563);\n)->.parks;\n.parks map_to_area->.pa;\nnwr[\"natural\"=\"beach\"](area.pa)(42.59805,-83.423769,42.610169,-83.407563)->.b;\n.b out tags bb;\n.parks out tags bb;",
+        "elements": [
+          {
+            "type": "way",
+            "id": 1545732724,
+            "bounds": {
+              "minlat": 42.6040495,
+              "minlon": -83.4157689,
+              "maxlat": 42.6041688,
+              "maxlon": -83.4155633
+            },
+            "tags": {
+              "natural": "beach"
+            }
+          },
+          {
+            "type": "way",
+            "id": 970123075,
+            "bounds": {
+              "minlat": 42.6013602,
+              "minlon": -83.415278,
+              "maxlat": 42.6028248,
+              "maxlon": -83.4142465
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Willow Farm's Park"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1535100533,
+            "bounds": {
+              "minlat": 42.5972873,
+              "minlon": -83.419305,
+              "maxlat": 42.5984221,
+              "maxlon": -83.416173
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Willow Pond Preserve Park"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1535100534,
+            "bounds": {
+              "minlat": 42.5979734,
+              "minlon": -83.4204557,
+              "maxlat": 42.5995218,
+              "maxlon": -83.4164855
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Morth Willow Pond Preserve Park"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1537582623,
+            "bounds": {
+              "minlat": 42.5969295,
+              "minlon": -83.4100907,
+              "maxlat": 42.6018363,
+              "maxlon": -83.4012341
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Mission Springs Beach and Nature Preserve"
+            }
+          },
+          {
+            "type": "way",
+            "id": 1545732725,
+            "bounds": {
+              "minlat": 42.6038966,
+              "minlon": -83.4159889,
+              "maxlat": 42.6042549,
+              "maxlon": -83.4146275
+            },
+            "tags": {
+              "leisure": "park",
+              "name": "Locklin Pines Beach Park"
+            }
+          }
+        ],
+        "parsed": {
+          "beaches": [
+            {
+              "osmType": "way",
+              "osmId": 1545732724,
+              "name": null,
+              "locality": null,
+              "lat": 42.60410915,
+              "lon": -83.41566610000001,
+              "bounds": {
+                "minLat": 42.6040495,
+                "minLon": -83.4157689,
+                "maxLat": 42.6041688,
+                "maxLon": -83.4155633
+              },
+              "areaDeg2": 2.4528079998967532e-8
+            }
+          ],
+          "parks": [
+            {
+              "osmType": "way",
+              "osmId": 970123075,
+              "name": "Willow Farm's Park",
+              "bounds": {
+                "minLat": 42.6013602,
+                "minLon": -83.415278,
+                "maxLat": 42.6028248,
+                "maxLon": -83.4142465
+              },
+              "areaDeg2": 0.000001510734899993016
+            },
+            {
+              "osmType": "way",
+              "osmId": 1535100533,
+              "name": "Willow Pond Preserve Park",
+              "bounds": {
+                "minLat": 42.5972873,
+                "minLon": -83.419305,
+                "maxLat": 42.5984221,
+                "maxLon": -83.416173
+              },
+              "areaDeg2": 0.0000035541936000011637
+            },
+            {
+              "osmType": "way",
+              "osmId": 1535100534,
+              "name": "Morth Willow Pond Preserve Park",
+              "bounds": {
+                "minLat": 42.5979734,
+                "minLon": -83.4204557,
+                "maxLat": 42.5995218,
+                "maxLon": -83.4164855
+              },
+              "areaDeg2": 0.0000061474576800074495
+            },
+            {
+              "osmType": "way",
+              "osmId": 1537582623,
+              "name": "Mission Springs Beach and Nature Preserve",
+              "bounds": {
+                "minLat": 42.5969295,
+                "minLon": -83.4100907,
+                "maxLat": 42.6018363,
+                "maxLon": -83.4012341
+              },
+              "areaDeg2": 0.00004345756488001186
+            },
+            {
+              "osmType": "way",
+              "osmId": 1545732725,
+              "name": "Locklin Pines Beach Park",
+              "bounds": {
+                "minLat": 42.6038966,
+                "minLon": -83.4159889,
+                "maxLat": 42.6042549,
+                "maxLon": -83.4146275
+              },
+              "areaDeg2": 4.87789620005456e-7
+            }
+          ],
+          "waters": []
+        },
+        "pondSeeds": [
+          {
+            "osmType": "way",
+            "osmId": 1545732724
+          }
+        ],
+        "pondWaterQuery": "[out:json][timeout:180][maxsize:134217728];\n(\n  way(id:1545732724);\n)->.b;\n(\n  way[\"natural\"=\"water\"](around.b:60);\n  way[\"natural\"=\"coastline\"](around.b:60);\n)->.water;\n.water out tags bb;",
+        "pondWaterElements": [],
+        "waters": [],
+        "records": [
+          {
+            "osmType": "way",
+            "osmId": 1545732724,
+            "name": null,
+            "locality": null,
+            "lat": 42.60410915,
+            "lon": -83.41566610000001,
+            "areaDeg2": 2.4528079998967532e-8,
+            "parkName": "Locklin Pines Beach Park",
+            "parkKey": "way/1545732725"
+          }
+        ],
+        "droppedPondBeaches": []
+      }
+    }
+  ],
+  "waterClass": [
+    {
+      "caseKey": "holland-state-park",
+      "osmId": "way/396460012",
+      "name": null,
+      "parkName": "Tunnel Park",
+      "query": "[out:json][timeout:60];\nway(396460012);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "holland-state-park",
+      "osmId": "way/505668572",
+      "name": "Ottawa Beach",
+      "parkName": "Holland State Park",
+      "query": "[out:json][timeout:60];\nway(505668572);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "way",
+          "id": 1075382140,
+          "bounds": {
+            "minlat": 42.7721535,
+            "minlon": -86.212836,
+            "maxlat": 42.77325,
+            "maxlon": -86.2063224
+          },
+          "tags": {
+            "intermittent": "no",
+            "name": "Macatawa Channel",
+            "natural": "water",
+            "salt": "no",
+            "water": "canal"
+          }
+        },
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": true
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "holland-state-park",
+      "osmId": "way/953846255",
+      "name": "Macatawa Park Beach",
+      "parkName": null,
+      "query": "[out:json][timeout:60];\nway(953846255);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "way",
+          "id": 1075382140,
+          "bounds": {
+            "minlat": 42.7721535,
+            "minlon": -86.212836,
+            "maxlat": 42.77325,
+            "maxlon": -86.2063224
+          },
+          "tags": {
+            "intermittent": "no",
+            "name": "Macatawa Channel",
+            "natural": "water",
+            "salt": "no",
+            "water": "canal"
+          }
+        },
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": true
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "van-buren-state-park",
+      "osmId": "way/1280732934",
+      "name": null,
+      "parkName": "Van Buren State Park",
+      "query": "[out:json][timeout:60];\nway(1280732934);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "wasaga-georgian-bay",
+      "osmId": "way/35247619",
+      "name": "Beach Area 3",
+      "parkName": "Wasaga Beach Provincial Park",
+      "query": "[out:json][timeout:60];\nway(35247619);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205151,
+          "bounds": {
+            "minlat": 43.0008751,
+            "minlon": -84.7730717,
+            "maxlat": 46.2998307,
+            "maxlon": -79.6539063
+          },
+          "tags": {
+            "alt_name:oj": "Naadowewi-gichigami",
+            "ele": "176",
+            "name": "Lake Huron",
+            "name:ar": "بحيرة هرون",
+            "name:arc": "ܝܡܬܐ ܕܝܘܪܘܢ",
+            "name:be": "Возера Гурон",
+            "name:br": "Lenn Huron",
+            "name:cr": "ᐅᒋᐻᐏ ᓵᑲᐦᐃᑲᐣ",
+            "name:crk": "ocipwêwi-sâkahikan",
+            "name:cs": "Huronské jezero",
+            "name:de": "Huronsee",
+            "name:en": "Lake Huron",
+            "name:es": "Lago Hurón",
+            "name:eu": "Huron aintzira",
+            "name:fa": "دریاچه هورون",
+            "name:fi": "Huronin Järvi",
+            "name:fr": "Lac Huron",
+            "name:he": "ימת יורון",
+            "name:is": "Húron-vatn",
+            "name:it": "Lago Huron",
+            "name:ko": "휴런호",
+            "name:lt": "Huronas",
+            "name:mia": "kihcikami kaakaamionki alikonci",
+            "name:oj": "Gichi-aazhoogami-gichigami",
+            "name:pl": "Huron",
+            "name:qu": "Huron qucha",
+            "name:ru": "Гурон",
+            "name:sk": "Hurónske jazero",
+            "name:tr": "Huron Gölü",
+            "name:uk": "Гурон",
+            "name:zh": "休伦湖",
+            "name:zh-Hans": "休伦湖",
+            "natural": "water",
+            "note": "Fixed some mistakes. Someone can verify later.",
+            "old_name:da": "Huronsøen",
+            "salt": "no",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "59590",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1383",
+            "wikipedia": "en:Lake Huron"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1383"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "wasaga-georgian-bay",
+      "osmId": "way/59709681",
+      "name": "New Wasaga Beach",
+      "parkName": "Wasaga Beach Provincial Park",
+      "query": "[out:json][timeout:60];\nway(59709681);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205151,
+          "bounds": {
+            "minlat": 43.0008751,
+            "minlon": -84.7730717,
+            "maxlat": 46.2998307,
+            "maxlon": -79.6539063
+          },
+          "tags": {
+            "alt_name:oj": "Naadowewi-gichigami",
+            "ele": "176",
+            "name": "Lake Huron",
+            "name:ar": "بحيرة هرون",
+            "name:arc": "ܝܡܬܐ ܕܝܘܪܘܢ",
+            "name:be": "Возера Гурон",
+            "name:br": "Lenn Huron",
+            "name:cr": "ᐅᒋᐻᐏ ᓵᑲᐦᐃᑲᐣ",
+            "name:crk": "ocipwêwi-sâkahikan",
+            "name:cs": "Huronské jezero",
+            "name:de": "Huronsee",
+            "name:en": "Lake Huron",
+            "name:es": "Lago Hurón",
+            "name:eu": "Huron aintzira",
+            "name:fa": "دریاچه هورون",
+            "name:fi": "Huronin Järvi",
+            "name:fr": "Lac Huron",
+            "name:he": "ימת יורון",
+            "name:is": "Húron-vatn",
+            "name:it": "Lago Huron",
+            "name:ko": "휴런호",
+            "name:lt": "Huronas",
+            "name:mia": "kihcikami kaakaamionki alikonci",
+            "name:oj": "Gichi-aazhoogami-gichigami",
+            "name:pl": "Huron",
+            "name:qu": "Huron qucha",
+            "name:ru": "Гурон",
+            "name:sk": "Hurónske jazero",
+            "name:tr": "Huron Gölü",
+            "name:uk": "Гурон",
+            "name:zh": "休伦湖",
+            "name:zh-Hans": "休伦湖",
+            "natural": "water",
+            "note": "Fixed some mistakes. Someone can verify later.",
+            "old_name:da": "Huronsøen",
+            "salt": "no",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "59590",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1383",
+            "wikipedia": "en:Lake Huron"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1383"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "wasaga-georgian-bay",
+      "osmId": "way/686376404",
+      "name": "Beach Area 1 & 2",
+      "parkName": null,
+      "query": "[out:json][timeout:60];\nway(686376404);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205151,
+          "bounds": {
+            "minlat": 43.0008751,
+            "minlon": -84.7730717,
+            "maxlat": 46.2998307,
+            "maxlon": -79.6539063
+          },
+          "tags": {
+            "alt_name:oj": "Naadowewi-gichigami",
+            "ele": "176",
+            "name": "Lake Huron",
+            "name:ar": "بحيرة هرون",
+            "name:arc": "ܝܡܬܐ ܕܝܘܪܘܢ",
+            "name:be": "Возера Гурон",
+            "name:br": "Lenn Huron",
+            "name:cr": "ᐅᒋᐻᐏ ᓵᑲᐦᐃᑲᐣ",
+            "name:crk": "ocipwêwi-sâkahikan",
+            "name:cs": "Huronské jezero",
+            "name:de": "Huronsee",
+            "name:en": "Lake Huron",
+            "name:es": "Lago Hurón",
+            "name:eu": "Huron aintzira",
+            "name:fa": "دریاچه هورون",
+            "name:fi": "Huronin Järvi",
+            "name:fr": "Lac Huron",
+            "name:he": "ימת יורון",
+            "name:is": "Húron-vatn",
+            "name:it": "Lago Huron",
+            "name:ko": "휴런호",
+            "name:lt": "Huronas",
+            "name:mia": "kihcikami kaakaamionki alikonci",
+            "name:oj": "Gichi-aazhoogami-gichigami",
+            "name:pl": "Huron",
+            "name:qu": "Huron qucha",
+            "name:ru": "Гурон",
+            "name:sk": "Hurónske jazero",
+            "name:tr": "Huron Gölü",
+            "name:uk": "Гурон",
+            "name:zh": "休伦湖",
+            "name:zh-Hans": "休伦湖",
+            "natural": "water",
+            "note": "Fixed some mistakes. Someone can verify later.",
+            "old_name:da": "Huronsøen",
+            "salt": "no",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "59590",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1383",
+            "wikipedia": "en:Lake Huron"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1383"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "sleeping-bear",
+      "osmId": "way/889361412",
+      "name": null,
+      "parkName": "Lake Michigan Beach Park",
+      "query": "[out:json][timeout:60];\nway(889361412);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "way",
+          "id": 175080386,
+          "bounds": {
+            "minlat": 44.8120606,
+            "minlon": -86.0673048,
+            "maxlat": 44.8260761,
+            "maxlon": -86.0603419
+          },
+          "tags": {
+            "name": "South Bar Lake",
+            "natural": "water",
+            "source": "Bing",
+            "water": "lake",
+            "wikidata": "Q14716281",
+            "wikipedia": "en:South Bar Lake"
+          }
+        },
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": true
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "sleeping-bear",
+      "osmId": "way/889361419",
+      "name": null,
+      "parkName": "Lake Michigan Beach Park",
+      "query": "[out:json][timeout:60];\nway(889361419);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "way",
+          "id": 175080386,
+          "bounds": {
+            "minlat": 44.8120606,
+            "minlon": -86.0673048,
+            "maxlat": 44.8260761,
+            "maxlon": -86.0603419
+          },
+          "tags": {
+            "name": "South Bar Lake",
+            "natural": "water",
+            "source": "Bing",
+            "water": "lake",
+            "wikidata": "Q14716281",
+            "wikipedia": "en:South Bar Lake"
+          }
+        },
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": true
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "beaver-island",
+      "osmId": "relation/6192330",
+      "name": null,
+      "parkName": "Sarah A. Martin Nature Preserve",
+      "query": "[out:json][timeout:60];\nrelation(6192330);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "beaver-island",
+      "osmId": "way/1136857348",
+      "name": "Beaver Island Public Beach",
+      "parkName": null,
+      "query": "[out:json][timeout:60];\nway(1136857348);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "relation",
+          "id": 1205149,
+          "bounds": {
+            "minlat": 41.6088676,
+            "minlon": -88.0461286,
+            "maxlat": 46.1022863,
+            "maxlon": -84.7519302
+          },
+          "tags": {
+            "alt_name:ar": "بحيرة ميشيغين",
+            "ele": "176",
+            "name": "Lake Michigan",
+            "name:ar": "بحيرة ميشيغن",
+            "name:arc": "ܝܡܬܐ ܕܡܝܫܝܓܢ",
+            "name:be": "Возера Мічыган",
+            "name:br": "Lenn Michigan",
+            "name:cr": "ᒥᓯᑲᒥᐩ",
+            "name:crk": "misikamiy",
+            "name:cs": "Michiganské jezero",
+            "name:de": "Michigansee",
+            "name:en": "Lake Michigan",
+            "name:es": "Lago Michigan",
+            "name:fr": "Lac Michigan",
+            "name:he": "ימת מישיגן",
+            "name:is": "Michiganvatn",
+            "name:it": "Lago Michigan",
+            "name:kn": "ಮಿಚಿಗನ್ ಕೆರೆ",
+            "name:ko": "미시간호",
+            "name:lt": "Mičigano ežeras",
+            "name:mez": "Nanāweyah-Kæqcekam",
+            "name:mia": "kihcikami",
+            "name:oj": "Mishigami",
+            "name:pl": "Jezioro Michigan",
+            "name:ru": "озеро Мичиган",
+            "name:se": "Sjö Michigan",
+            "name:sk": "Michiganské jazero",
+            "name:te": "మిచిగన్ సరస్సు",
+            "name:th": "ทะเลสาบมิชิแกน",
+            "name:tr": "Michigan Gölü",
+            "name:uk": "Мічиґан",
+            "name:zh": "密歇根湖",
+            "name:zh-Hans": "密歇根湖",
+            "natural": "water",
+            "old_name:da": "Michigansøen",
+            "salt": "no",
+            "source": "Bing",
+            "source:name:br": "ofis publik ar brezhoneg",
+            "sqkm": "58030",
+            "tidal": "no",
+            "type": "multipolygon",
+            "water": "lake",
+            "wikidata": "Q1169",
+            "wikipedia": "en:Lake Michigan"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [
+          "Q1169"
+        ],
+        "nearbyWayWater": false
+      },
+      "verdict": "great_lake"
+    },
+    {
+      "caseKey": "hawthorn-pond",
+      "osmId": "way/161131900",
+      "name": null,
+      "parkName": null,
+      "query": "[out:json][timeout:60];\nway(161131900);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [
+        {
+          "type": "way",
+          "id": 161132478,
+          "bounds": {
+            "minlat": 42.7776573,
+            "minlon": -86.0273107,
+            "maxlat": 42.7792911,
+            "maxlon": -86.0258057
+          },
+          "tags": {
+            "name": "Hawthorn Pond",
+            "natural": "water"
+          }
+        },
+        {
+          "type": "way",
+          "id": 1436279355,
+          "bounds": {
+            "minlat": 42.7752891,
+            "minlon": -86.036192,
+            "maxlat": 42.7831535,
+            "maxlon": -86.0244068
+          },
+          "tags": {
+            "natural": "water",
+            "water": "river"
+          }
+        }
+      ],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [],
+        "nearbyWayWater": true
+      },
+      "verdict": "inland"
+    },
+    {
+      "caseKey": "locklin-pines",
+      "osmId": "way/1545732724",
+      "name": null,
+      "parkName": "Locklin Pines Beach Park",
+      "query": "[out:json][timeout:60];\nway(1545732724);>->.a;\n(\n  way[\"natural\"=\"coastline\"](around.a:150);\n  relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:150);\n  way[\"natural\"=\"water\"](around.a:120);\n);\nout ids tags bb;",
+      "elements": [],
+      "signals": {
+        "coastlinePresent": false,
+        "nearbyLakeQids": [],
+        "nearbyWayWater": false
+      },
+      "verdict": "inland"
+    }
+  ],
+  "sameNamedParks": {
+    "name": "Lakeside Park",
+    "query": "[out:json][timeout:90];\n(\n  way[\"leisure\"=\"park\"][\"name\"=\"Lakeside Park\"](41.6,-90.5,48.3,-82.0);\n  relation[\"leisure\"=\"park\"][\"name\"=\"Lakeside Park\"](41.6,-90.5,48.3,-82.0);\n);\nout tags bb;",
+    "elements": [
+      {
+        "type": "way",
+        "id": 379488853,
+        "bounds": {
+          "minlat": 42.2028896,
+          "minlon": -83.5646215,
+          "maxlat": 42.204819,
+          "maxlon": -83.5595121
+        },
+        "tags": {
+          "gnis:feature_id": "2635783",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "operator": "Ypsilanti Township",
+          "operator:type": "government",
+          "wikidata": "Q49513990"
+        }
+      },
+      {
+        "type": "way",
+        "id": 382756230,
+        "bounds": {
+          "minlat": 44.9776569,
+          "minlon": -87.1856251,
+          "maxlat": 44.9788132,
+          "maxlon": -87.1831516
+        },
+        "tags": {
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "source": "http://www.jacksonport.net/area-parks/"
+        }
+      },
+      {
+        "type": "way",
+        "id": 468612457,
+        "bounds": {
+          "minlat": 42.6574411,
+          "minlon": -83.3084712,
+          "maxlat": 42.6596104,
+          "maxlon": -83.3038664
+        },
+        "tags": {
+          "ele": "288",
+          "gnis:feature_id": "1614690",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "old_name": "Terry Lake Park",
+          "wikidata": "Q49569730"
+        }
+      },
+      {
+        "type": "way",
+        "id": 470072169,
+        "bounds": {
+          "minlat": 42.0252634,
+          "minlon": -82.7433589,
+          "maxlat": 42.0289812,
+          "maxlon": -82.7402791
+        },
+        "tags": {
+          "access": "yes",
+          "addr:city": "Kingsville",
+          "addr:housenumber": "315",
+          "addr:province": "ON",
+          "addr:street": "Queen Street",
+          "dog": "yes",
+          "email": "recreation@kingsville.ca",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "opening_hours": "24/7",
+          "operator": "Town of Kingsville",
+          "operator:type": "government",
+          "phone": "+1-519-733-2123"
+        }
+      },
+      {
+        "type": "way",
+        "id": 472356912,
+        "bounds": {
+          "minlat": 42.5431013,
+          "minlon": -88.2882263,
+          "maxlat": 42.5439174,
+          "maxlon": -88.287192
+        },
+        "tags": {
+          "leisure": "park",
+          "name": "Lakeside Park"
+        }
+      },
+      {
+        "type": "way",
+        "id": 486794913,
+        "bounds": {
+          "minlat": 44.5751231,
+          "minlon": -85.3506005,
+          "maxlat": 44.5762871,
+          "maxlon": -85.3477704
+        },
+        "tags": {
+          "ele": "312",
+          "leisure": "park",
+          "name": "Lakeside Park"
+        }
+      },
+      {
+        "type": "way",
+        "id": 543835541,
+        "bounds": {
+          "minlat": 42.6199321,
+          "minlon": -83.9191603,
+          "maxlat": 42.620436,
+          "maxlon": -83.91844
+        },
+        "tags": {
+          "addr:city": "Howell",
+          "addr:housenumber": "1401",
+          "addr:postcode": "48843",
+          "addr:state": "MI",
+          "addr:street": "Lakeside Drive",
+          "gnis:feature_id": "2630318",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "website": "https://www.howellrecreation.org/parks-trails/",
+          "wikidata": "Q49513980"
+        }
+      },
+      {
+        "type": "way",
+        "id": 543925313,
+        "bounds": {
+          "minlat": 45.4199474,
+          "minlon": -83.8144055,
+          "maxlat": 45.4230176,
+          "maxlon": -83.8098362
+        },
+        "tags": {
+          "ele": "177",
+          "gnis:feature_id": "630036",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "website": "https://www.rogerscity.com/lakeside-park.html",
+          "wikidata": "Q49513986"
+        }
+      },
+      {
+        "type": "way",
+        "id": 544408391,
+        "bounds": {
+          "minlat": 43.0176814,
+          "minlon": -82.4323508,
+          "maxlat": 43.0217428,
+          "maxlon": -82.4282995
+        },
+        "tags": {
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "operator": "City of Port Huron",
+          "operator:type": "public",
+          "operator:wikidata": "Q1000222"
+        }
+      },
+      {
+        "type": "way",
+        "id": 591375296,
+        "bounds": {
+          "minlat": 43.4402661,
+          "minlon": -85.2749063,
+          "maxlat": 43.4415836,
+          "maxlon": -85.272583
+        },
+        "tags": {
+          "leisure": "park",
+          "name": "Lakeside Park"
+        }
+      },
+      {
+        "type": "way",
+        "id": 1121915649,
+        "bounds": {
+          "minlat": 46.5394648,
+          "minlon": -87.3939155,
+          "maxlat": 46.5406859,
+          "maxlon": -87.3928653
+        },
+        "tags": {
+          "ele": "195",
+          "gnis:feature_id": "2336345",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "wikidata": "Q49513982"
+        }
+      },
+      {
+        "type": "relation",
+        "id": 5715596,
+        "bounds": {
+          "minlat": 43.7937814,
+          "minlon": -88.4532434,
+          "maxlat": 43.8006416,
+          "maxlon": -88.4319923
+        },
+        "tags": {
+          "gnis:feature_id": "1567783",
+          "leisure": "park",
+          "name": "Lakeside Park",
+          "type": "multipolygon"
+        }
+      }
+    ]
+  }
+}

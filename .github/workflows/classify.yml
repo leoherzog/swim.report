@@ -1,88 +1,102 @@
-name: Water-body classification
+name: Water-body classification (retained, manual only)
 
-# Offline replacement for the retired in-Worker runWaterClassification
-# ("37 1,7,13,19 * * *") cron. Runs the classify-only half of
-# scripts/discovery-batch.js (--no-discovery --classify-limit N): NO Overpass
-# tiling, NO upserts, NO reconciliation, NO deletes — it reads the current D1
-# snapshot, probes Overpass for the water body next to each beach still needing
-# classification (up to CLASSIFY_LIMIT per run, lowest-attempts-first), and emits
-# ONLY water_class UPDATEs, bulk-loaded into production D1.
+# ============================================================================
+# FOLLOW-UP — THIS FILE IS SCHEDULED FOR DELETION AND IS BLOCKED ON ONE
+# MEASUREMENT. DO NOT DELETE IT UNTIL THAT MEASUREMENT EXISTS.
 #
-# WHY SEPARATE FROM discovery.yml: classification is hundreds of SEQUENTIAL
-# per-beach Overpass probes — the pipeline's long pole. Running it in its own
-# workflow with a bounded per-run limit lets it drain the queue over many short
-# runs on its own cadence, so it can never starve or blow the time budget of the
-# fast, delete-bearing discovery pass. A per-beach probe failure is non-fatal
-# (the row just stays queued for the next run), so this workflow has no
-# all-or-nothing abort. See docs/offline-discovery.md.
+# The FGB layer migration folds water-body classification into discovery.yml:
+# the classification pass is now a LOCAL spatial join over the prebuilt layer
+# set, not hundreds of sequential Overpass probes, so the starvation risk that
+# justified a separate workflow is gone and a beach is classified in the same
+# run that discovers it (the FLAG_WORTHY_WATER_SQL fail-open window drops from
+# hours to zero).
+#
+# The migration contract (section 9.7 / OQ7) makes that deletion conditional on
+# a REAL run, because the "the join takes seconds" claim was never measured, and
+# getting it backwards costs a SIGKILLed daily job that produces no delta at all
+# — including no flag_history retention prune. Delete this file only once ONE
+# real discovery.yml run has printed ALL FOUR of these, all within budget:
+#
+#   1. classification pass wall clock       <= 300 s   ("classification done in <n>ms")
+#   2. whole discovery-batch.js run          <= 900 s   ("run complete ... <n>ms total")
+#   3. peak RSS of the batch                 <= 6000 MB ("Maximum resident set size")
+#   4. lakes segments actually indexed       <= 8e6     ("signals index built in <n>ms: ...")
+#
+# discovery.yml prints all four in its "Run discovery + classification (emit
+# SQL)" step and keeps them in the discovery-batch-log artifact. Until then this
+# file stays, as the escape hatch: if the join turns out to be slow, add
+# --no-classify to discovery.yml's batch invocation and restore a schedule here.
+# ============================================================================
+#
+# WHAT THIS FILE IS NOW. A MANUAL-ONLY, layer-based classify pass:
+# scripts/discovery-batch.js --no-discovery over the same verified layer set
+# discovery.yml uses. NO Overpass, NO upserts, NO reconciliation, NO deletes —
+# it emits ONLY water_class UPDATEs.
+#
+# WHY IT COULD NOT SIMPLY BE LEFT UNTOUCHED. The Overpass transport it used to
+# drive no longer exists (src/clients/overpass.js is deleted), and the CLI flags
+# it used to pass — --classify-limit and --classify-budget-ms — were removed
+# from scripts/discovery-batch.js, whose parseArgs THROWS on an unknown
+# argument. The previous contents of this file would fail on the first line of
+# every run. The workflow-side machinery those flags fed (CLASSIFY_LIMIT,
+# CLASSIFY_BUDGET_MIN, the lastIndexOf(';') torn-tail truncation one-liner, the
+# always()-vs-!cancelled() gating and the empty-delta short-circuit) is retired
+# with them: the batch now writes its whole delta atomically at the end, so
+# there is no torn-tail window for that belt to protect against.
+#
+# WHY THE SCHEDULE IS GONE. discovery.yml classifies the entire queue daily, in
+# the same run that discovers it. An hourly duplicate here would re-download the
+# whole layer set and rewrite the same water_class values 24 times a day for no
+# product benefit. Restoring a schedule is a one-line change if the escape hatch
+# above is ever needed.
 #
 # Requires the same CLOUDFLARE_API_TOKEN repository secret as discovery.yml, and
-# likewise never runs `npm install` (npx --yes wrangler@<pin> only).
+# likewise never runs npm install (npx --yes wrangler@<pin> only). It needs NO
+# R2 credentials: the layers are public data read from https://map.swim.report.
 
 on:
-  # Hourly, small chunks: 25 beaches/run (same ~600/day throughput as the old
-  # 4x-daily 150/run cadence) so each run is a short, polite Overpass burst that
-  # finishes in minutes — an Overpass 504 window is unlikely to span a whole run,
-  # and the budget/truncate machinery below becomes defense-in-depth instead of
-  # load-bearing. Minute 23 is offset from discovery.yml (47 8) and off the
-  # congested top-of-hour slot (GitHub cron is best-effort UTC: runs drift
-  # minutes and occasionally skip — harmless for a queue drain, the next run
-  # picks up). Once the backlog drains, most runs emit zero UPDATEs; the delta-
-  # summary step below tolerates that (grep -c guard) so a no-op run stays green.
-  schedule:
-    - cron: "23 * * * *"
   workflow_dispatch:
     inputs:
       apply:
         description: "Apply the generated SQL to production D1 (false = dry run, artifact only)"
         type: boolean
-        default: true
-      classify_limit:
-        description: "Max beaches to (re)classify this run (0 = all eligible)"
-        type: string
-        default: "150"
-      budget_min:
-        description: "Self-imposed wall-clock cap on the classify loop, minutes (< the 90-min job timeout)"
-        type: string
-        default: "60"
+        default: false
 
 concurrency:
-  # The D1 write is not safely re-entrant — never let two classify runs overlap.
-  # A distinct group from discovery so classification and discovery CAN run
-  # concurrently (they touch disjoint columns: discovery writes name/lat/lon/
-  # park_name + deletes; classify writes only water_class*).
-  group: classify
+  # The SAME group as discovery.yml, deliberately. The old distinct group was
+  # justified by disjoint columns — discovery wrote name/lat/lon/park_name plus
+  # deletes, classify wrote only water_class*. That is no longer true: discovery
+  # now emits water_class UPDATEs too, so the two runs must serialize rather than
+  # race on the same column family and the same non-re-entrant D1 write.
+  group: discovery
   cancel-in-progress: false
 
 permissions:
   contents: read
 
+# Workflow-scoped so it covers EVERY deno invocation in EVERY job and step. The
+# repo-root deno.lock is auto-discovered by Deno for every deno invocation in this
+# repo, and without this Deno also wants a workspace.packageJson block for
+# package.json's npm deps: "deno cache --frozen" then FAILS with "The lockfile is
+# out of date", and a plain "deno run" SILENTLY REWRITES the checked-in deno.lock.
+env:
+  DENO_NO_PACKAGE_JSON: "1"
+
 jobs:
   classify:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Same budget as discovery.yml. This run does strictly less work (no upserts,
+    # no reconciliation, no marine pass) over the same layer set.
+    timeout-minutes: 45
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
       DB_NAME: swim-report
       WRANGLER_VERSION: "4"
-      APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
-      # Scheduled runs drain 25/hour (~600/day); manual runs default to a 150
-      # bulk chunk and can override (0 = all eligible).
-      CLASSIFY_LIMIT: ${{ github.event_name == 'schedule' && '25' || inputs.classify_limit }}
-      # Self-imposed wall-clock budget (minutes) for the classify loop, well under
-      # timeout-minutes: 90. A scheduled 25-probe run finishes in minutes and will
-      # never touch this; it protects MANUAL bulk runs (classify_limit 150 or
-      # 0 = full drain), where under public-Overpass 504 storms 150 sequential
-      # probes once overran 90 min and got CANCELLED — skipping Apply and
-      # persisting zero progress. The budget makes the run return exit 0 with
-      # margin so Apply runs normally (and classify SQL is flushed incrementally
-      # as a SIGKILL net).
-      # 60 (not 70) leaves real headroom: the budget is only checked at the TOP of
-      # each loop iteration, so a probe already in flight can overhang by up to one
-      # full 2-mirror Overpass timeout (~8 min); 60 + ~4 min job setup + ~8 min
-      # overhang + ~2 min apply ≈ 74 min, ~16 min under the 90-min hard cap.
-      CLASSIFY_BUDGET_MIN: ${{ github.event_name == 'schedule' && '60' || inputs.budget_min }}
+      LAYERS_DIR: ${{ runner.temp }}/layers
+      # Defaults to a DRY RUN. This workflow exists to measure and to stand by; a
+      # human who actually wants it to write to D1 says so at dispatch time.
+      APPLY: ${{ inputs.apply }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -97,16 +111,31 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Cache Deno dependencies (frozen lockfile)
+        run: deno cache --lock=deno.lock --frozen scripts/fetch-layers.js scripts/discovery-batch.js
+
       # No npm install (see discovery.yml) — every wrangler call is npx --yes wrangler@<pin>.
 
-      - name: Snapshot current beaches from D1
-        # Read-only. Classification reads water_class/version/attempts to build its
-        # queue, so this SELECT carries them; discovery.yml selects a DIFFERENT,
-        # narrower column set (no water_class*, no osm_id — it never classifies).
-        # The truncation guard below is the same one discovery.yml uses.
+      - name: Fetch and verify the layer set
+        # The only network-touching step, and it reads public data only.
         run: |
+          set -euo pipefail
+          deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
+            scripts/fetch-layers.js --dest "$LAYERS_DIR"
+          cat "$LAYERS_DIR/report.json"
+
+      - name: Snapshot current beaches from D1
+        # Read-only, and NARROWER than discovery.yml's snapshot: a --no-discovery
+        # run reads only what buildClassifyQueue reads (id, osm_id, lat, lon,
+        # water_class, water_class_version, water_class_attempts). name / park_name /
+        # nws_zone / marine_zone are read by reconcileStaleRows and the marine pass,
+        # neither of which runs here, so selecting them would only inflate the
+        # response and raise truncation risk. The truncation guard is the same one
+        # discovery.yml uses.
+        run: |
+          set -euo pipefail
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT id, osm_id, name, lat, lon, park_name, water_class, water_class_version, water_class_attempts FROM beaches" \
+            --command "SELECT id, osm_id, lat, lon, water_class, water_class_version, water_class_attempts FROM beaches" \
             > snapshot.json; then
             echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
             cat snapshot.json
@@ -124,34 +153,32 @@ jobs:
           fi
 
       - name: Run classification (emit SQL)
+        # NO --allow-net, exactly as in discovery.yml: the batch itself makes zero
+        # upstream requests, and the absence of the flag is what proves it.
         run: |
-          deno run --allow-net --allow-read --allow-write \
+          set -euo pipefail
+          # The isolated form of the contract 9.7 benchmark: with discovery off,
+          # "Elapsed (wall clock)" and "Maximum resident set size" here bound the
+          # classification pass ALONE, which is measurement 1 of the four in the
+          # header above.
+          /usr/bin/time -v deno run --lock=deno.lock --frozen \
+            --v8-flags=--max-old-space-size=12288 \
+            --allow-read --allow-write \
             scripts/discovery-batch.js \
+            --layers "$LAYERS_DIR" \
             --snapshot snapshot.json \
             --out classify-delta.sql \
-            --no-discovery \
-            --classify-limit "${CLASSIFY_LIMIT:-150}" \
-            --classify-budget-ms $(( ${CLASSIFY_BUDGET_MIN:-60} * 60000 ))
+            --no-discovery 2>&1 | tee batch-timing.log
+          echo "---- benchmark (contract 9.7) ----"
+          grep -E "Elapsed \(wall clock\)|Maximum resident set size|classification done in|signals index built in|run complete" batch-timing.log || true
           echo "---- delta summary ----"
-          # `grep -c` exits 1 on zero matches and this shell is `bash -eo
-          # pipefail`, so a fully-drained queue (header-only delta, zero
-          # UPDATEs — a SUCCESS) would fail the step without the `|| true`.
-          # (discovery.yml needs no such guard: its delta always carries the
-          # flag_history-retention DELETE + sync_meta statements.)
-          statements=$(grep -c ';' classify-delta.sql || true)
-          echo "statements: ${statements}"
+          # grep -c exits 1 on zero matches and this shell is bash -eo pipefail, so a
+          # fully-drained queue (header-only delta, zero UPDATEs — a SUCCESS) would
+          # fail the step without the || true.
+          { grep -c ';' classify-delta.sql || true; } | xargs echo "statements:"
           head -n 20 classify-delta.sql
 
-      # always() — NOT !cancelled() — because a timeout-minutes job cancel sets the
-      # cancelled() context true, so !cancelled() would SKIP these steps in exactly
-      # the hard-cancel case the incremental flush exists for (the original
-      # zero-progress bug). always() runs within the ~5-min cancellation grace
-      # window — enough for one wrangler apply. It is safe on a genuine unrelated
-      # failure (e.g. a bad CLOUDFLARE_API_TOKEN failing Snapshot leaves no delta
-      # file): if-no-files-found: ignore makes upload a no-op, and the Apply step's
-      # own empty/statement-less guard short-circuits before wrangler.
       - name: Upload SQL delta artifact
-        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: classify-delta-sql
@@ -159,21 +186,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Upload batch log artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: classify-batch-log
+          path: batch-timing.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Apply SQL to production D1
-        if: ${{ always() && env.APPLY == 'true' }}
+        # success()-gated, like discovery.yml: the batch writes its whole delta
+        # atomically at the end, so there is no torn tail to truncate and no reason
+        # for an always() belt. A delta carrying no UPDATEs applies as an idempotent
+        # no-op (every emitted UPDATE sets absolute values).
+        if: ${{ env.APPLY == 'true' }}
         run: |
-          # A SIGKILL landing mid-append can leave a torn trailing fragment with no
-          # closing ';'. wrangler d1 execute --file splits on ';' and would send that
-          # fragment as a statement, failing the WHOLE apply and losing every complete
-          # UPDATE before it. Truncate the delta to its last complete ';'-terminated
-          # statement so a torn tail can never reach wrangler.
-          node -e "const fs=require('fs');const p='classify-delta.sql';if(!fs.existsSync(p)){process.exit(0)}const s=fs.readFileSync(p,'utf8');const i=s.lastIndexOf(';');fs.writeFileSync(p,i>=0?s.slice(0,i+1)+'\n':'')"
-          # A missing/empty/statement-less delta applies as a harmless idempotent
-          # no-op (emitted UPDATEs set absolute values), so guard before wrangler.
-          if [ ! -s classify-delta.sql ] || ! grep -q ';' classify-delta.sql; then
-            echo "no water-class statements — empty/partial no-op, skipping apply"
-            exit 0
-          fi
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file classify-delta.sql; then
             echo "::error::wrangler apply failed (check CLOUDFLARE_API_TOKEN secret and delta SQL)"
             exit 1

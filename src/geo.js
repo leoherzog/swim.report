@@ -197,3 +197,165 @@ export function minEdgeDistanceKm(geometry, lat, lon) {
   }
   return best;
 }
+
+// GeoJSON LineString/MultiLineString -> array of point arrays (each an array of
+// [lon, lat] positions). Anything else -> [] so callers skip it.
+//
+// Deliberately a SIBLING of geometryPolygons rather than an extension of it:
+// teaching geometryPolygons about lines would make pointInGeometry treat an open
+// line as a closed ring, which is wrong (a ray cast against an unclosed line
+// answers a question nobody asked). Keeping the two apart means every existing
+// caller of geometryPolygons — pointInGeometry and minEdgeDistanceKm — is
+// unaffected by the arrival of line support.
+//
+// Why this exists at all, and why it is a correctness fix rather than a nicety:
+// minEdgeDistanceKm returns Infinity for a LineString, SILENTLY, because
+// geometryPolygons returns [] for it. The OSM coastline layer is predominantly
+// LineString, so a nearest-shore probe routed through the polygon-only path
+// would report "no coastline anywhere" for every ocean beach on earth. That
+// failure is invisible in this repo's current data (production has zero ocean
+// rows), which is exactly the kind of bug that ships.
+export function geometryLines(geometry) {
+  if (geometry === null || typeof geometry !== "object" || !Array.isArray(geometry.coordinates)) {
+    return [];
+  }
+  if (geometry.type === "LineString") {
+    return [geometry.coordinates];
+  }
+  if (geometry.type === "MultiLineString") {
+    return geometry.coordinates;
+  }
+  return [];
+}
+
+// Minimum distance (km) from the local-planar origin to any vertex in a list of
+// [lon, lat] positions. Internal helper shared by the line and point branches of
+// minGeometryDistanceKm; malformed positions are SKIPPED, never thrown on, for
+// the same reason minEdgeDistanceKm skips them (layer data is upstream input).
+function minPositionsDistanceKm(positions, lat, lon, cosLat, asLine) {
+  if (!Array.isArray(positions)) {
+    return Infinity;
+  }
+  let best = Infinity;
+  // A line of N positions has N-1 segments; a bag of points has N vertices. The
+  // single loop below handles both by treating a vertex as a degenerate segment
+  // from the position to itself, which pointToSegmentKm evaluates correctly
+  // (len2 === 0 -> t stays 0 -> distance to the point itself).
+  const last = asLine ? positions.length - 1 : positions.length;
+  for (let i = 0; i < last; i = i + 1) {
+    const a = positions[i];
+    const b = asLine ? positions[i + 1] : a;
+    if (!Array.isArray(a) || !Array.isArray(b) ||
+        typeof a[0] !== "number" || typeof a[1] !== "number" ||
+        typeof b[0] !== "number" || typeof b[1] !== "number") {
+      continue;
+    }
+    const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
+    const ay = (a[1] - lat) * KM_PER_DEG;
+    const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
+    const by = (b[1] - lat) * KM_PER_DEG;
+    const d = pointToSegmentKm(ax, ay, bx, by);
+    if (d < best) { best = d; }
+  }
+  return best;
+}
+
+// Minimum distance (km) from (lat, lon) to ANY geometry type: polygon and
+// multipolygon ring edges (delegating to minEdgeDistanceKm, unchanged),
+// linestring and multilinestring segments, point and multipoint vertices, and
+// a GeometryCollection's members (the coastline layer mixes open ways with
+// closed island ways, so a caller handed one geometry cannot assume a family).
+// Returns Infinity when no usable geometry exists — malformed input is skipped,
+// never thrown on.
+//
+// No cap is applied: the caller owns the radius, exactly as with
+// minEdgeDistanceKm. Every branch uses the SAME local equirectangular frame
+// anchored at (lat, lon) that minEdgeDistanceKm uses, so distances stay
+// comparable across geometry families and against the segment grid, which is
+// planar too. (Haversine for the point branch would have been marginally more
+// accurate and would have made a mixed-geometry minimum a comparison between
+// two different metrics.)
+//
+// Used for DIAGNOSTICS, tests and small geometries only. The hot probe path
+// goes through the segment grid (src/layerGrid.js), which never touches whole
+// geometries: this function iterates every edge with no radius short-circuit,
+// which is correct at marine-zone scale and catastrophic against a lakes layer
+// of ~3e6 vertices probed once per beach vertex.
+export function minGeometryDistanceKm(geometry, lat, lon) {
+  if (geometry === null || typeof geometry !== "object") {
+    return Infinity;
+  }
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  let best = minEdgeDistanceKm(geometry, lat, lon);
+  for (const line of geometryLines(geometry)) {
+    const d = minPositionsDistanceKm(line, lat, lon, cosLat, true);
+    if (d < best) { best = d; }
+  }
+  if (geometry.type === "Point" && Array.isArray(geometry.coordinates)) {
+    const d = minPositionsDistanceKm([geometry.coordinates], lat, lon, cosLat, false);
+    if (d < best) { best = d; }
+  } else if (geometry.type === "MultiPoint" && Array.isArray(geometry.coordinates)) {
+    const d = minPositionsDistanceKm(geometry.coordinates, lat, lon, cosLat, false);
+    if (d < best) { best = d; }
+  } else if (geometry.type === "GeometryCollection" && Array.isArray(geometry.geometries)) {
+    for (const member of geometry.geometries) {
+      const d = minGeometryDistanceKm(member, lat, lon);
+      if (d < best) { best = d; }
+    }
+  }
+  return best;
+}
+
+// Point-to-segment distance in the same local-planar frame minEdgeDistanceKm
+// uses, over a PACKED segment buffer rather than a GeoJSON structure. This is
+// what the segment grid (src/layerGrid.js) evaluates.
+//
+//   segs:  Float64Array of [ax, ay, bx, by, ...] in DEGREES — each group of four
+//          is one segment as two (lon, lat) pairs, so segment s occupies
+//          segs[4*s] .. segs[4*s + 3].
+//   idx:   Int32Array (or any indexable) of SEGMENT indices to evaluate, as
+//          handed back by the grid's cell neighbourhood.
+//   count: how many entries of idx are live (the grid's arrays are grown in
+//          blocks, so idx.length is not the answer).
+//
+// Returns true as soon as SOME segment is within maxKm, false if none is. The
+// early exit is the whole point: every probe in this pipeline is a threshold
+// question ("is there coastline within 150 m of any beach vertex?"), never
+// "how far exactly", and the difference between answering it on the first hit
+// and scanning every candidate is the difference between a build that finishes
+// and one that does not.
+export function anySegmentWithinKm(segs, idx, count, lat, lon, maxKm) {
+  if (!segs || !idx || !(count > 0) || !(maxKm >= 0)) {
+    return false;
+  }
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  for (let i = 0; i < count; i = i + 1) {
+    const s = idx[i];
+    const base = s * 4;
+    // Defensive bounds guard: the grid owns idx and segs together, so an
+    // out-of-range entry means a builder bug, not bad data. Skipping keeps a
+    // corrupt index from throwing mid-probe and taking down a whole build.
+    if (!(s >= 0) || base + 3 >= segs.length) {
+      continue;
+    }
+    const ax = (segs[base] - lon) * cosLat * KM_PER_DEG;
+    const ay = (segs[base + 1] - lat) * KM_PER_DEG;
+    const bx = (segs[base + 2] - lon) * cosLat * KM_PER_DEG;
+    const by = (segs[base + 3] - lat) * KM_PER_DEG;
+    // NO cheap axis-aligned pre-reject here, deliberately. The obvious one
+    // ("both endpoints are beyond maxKm on the same axis, so skip") is
+    // mathematically sound but not BIT-exact against pointToSegmentKm, whose
+    // sqrt(px*px + py*py) round-trip can land an ulp below the raw coordinate
+    // it was derived from: an endpoint at exactly -maxKm was rejected by the
+    // comparison while the sqrt reported <= maxKm. Exactness is worth more than
+    // the saved multiply, because the whole safety argument for this evaluator
+    // is that it answers bit-for-bit the same threshold question as
+    // minGeometryDistanceKm(geometry, lat, lon) <= maxKm, and the cross-check
+    // test asserts precisely that. The real pruning is the grid's job — this
+    // function only ever sees one cell neighbourhood's worth of segments.
+    if (pointToSegmentKm(ax, ay, bx, by) <= maxKm) {
+      return true;
+    }
+  }
+  return false;
+}

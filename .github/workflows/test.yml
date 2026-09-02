@@ -1,0 +1,143 @@
+name: Tests
+
+# Runs the vitest suite on every push and pull request. This repo deletes a lot of
+# tested code and adds new spatial-join code in the same migration, which is exactly
+# the change during which a green-on-push signal earns its keep.
+#
+# THE INSTALL IS DELIBERATELY NOT "npm ci". package.json's two RUNTIME dependencies
+# (@web.awesome.me/webawesome-pro and @awesome.me/kit-*) come from private registries
+# whose tokens live in .dev.vars, and .npmrc routes those scopes through
+# ${WEBAWESOME_NPM_TOKEN} / ${FONTAWESOME_NPM_TOKEN}. A plain npm ci here fails E401 —
+# verified, not assumed — and the fix is NOT to hand CI those secrets. Nothing under
+# src/ or test/ imports either package: Web Awesome and Font Awesome are loaded from a
+# version-pinned CDN kit at runtime (see WA_KIT_BASE in src/frontend/render.js), and
+# the local package exists only so a developer can read the bundled Web Awesome agent
+# skill. So the test job drops the two dependencies from the ephemeral checkout's
+# manifest and installs the rest:
+#
+#   npm pkg delete dependencies    (npm's own CLI; touches only the runner's copy)
+#   npm install                    (devDependencies only, still resolved from the
+#                                   committed package-lock.json entries)
+#
+# npm ci cannot be used AFTER that edit because it requires package.json and
+# package-lock.json to agree, and the edit deliberately makes them disagree; npm
+# install reconciles by pruning the two private trees, which is precisely the
+# intended effect. The devDependency versions still come from the lockfile, so the
+# run stays reproducible where it matters.
+#
+# If this job ever starts failing with E401, the cause is a NEW import of a private
+# package from src/ or test/ — fix the import, do not add the secrets.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # One run per ref. A newer push makes an in-flight run's answer irrelevant, so this
+  # is the one workflow in the repo where cancelling in progress is correct — unlike
+  # discovery/classify, it writes nothing anywhere.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Not needed by the vitest job, which never invokes deno — but the deno-lock job below
+# does, and a workflow-scoped value cannot be forgotten when a step is added. Without
+# it Deno auto-discovers the repo-root deno.lock, wants a workspace.packageJson block
+# for package.json's npm deps, and "deno check --frozen" FAILS with "The lockfile is
+# out of date" while a plain "deno run" SILENTLY REWRITES the checked-in lock.
+env:
+  DENO_NO_PACKAGE_JSON: "1"
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          # 24, not the 22 the wrangler jobs use, on purpose: node:sqlite is
+          # unflagged from Node 24, and test/demandOrdering.test.js degrades to a
+          # SKIP with a printed reason when node:sqlite is unavailable rather than
+          # failing. On Node 22 the suite would stay green while quietly testing
+          # less, which is the worst outcome a test workflow can have.
+          node-version: "24"
+          cache: npm
+
+      - name: Install devDependencies without the private registries
+        # See the header. This edits only the runner's ephemeral checkout.
+        run: |
+          set -euo pipefail
+          npm pkg delete dependencies
+          npm install --no-audit --no-fund
+          npx vitest --version
+
+      - name: Run the vitest suite
+        run: npm test
+
+  deno-lock:
+    # The offline batch and the build scripts run on Deno with a FROZEN lockfile, and
+    # both delete-adjacent workflows depend on that staying true. Type-checking them
+    # under --frozen here means lock drift is caught on the commit that causes it,
+    # not at 08:47 UTC inside the only job that can delete production rows.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Check the offline scripts against the frozen lockfile
+        run: |
+          set -euo pipefail
+          deno check --lock=deno.lock --frozen \
+            scripts/discovery-batch.js \
+            scripts/fetch-layers.js \
+            scripts/clip-layers.js \
+            scripts/build-manifest.js \
+            scripts/print-spat-bbox.js
+
+      - name: Assert deno.lock is unchanged
+        # Belt to the --frozen brace: --frozen is the documented refusal, and this is
+        # the observation. If a future Deno relaxes it, the working tree still tells
+        # the truth.
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- deno.lock; then
+            echo "::error::deno.lock was rewritten by a deno invocation in this job — the frozen-lockfile guarantee is not in force"
+            git diff -- deno.lock
+            exit 1
+          fi
+          echo "deno.lock unchanged"
+
+      - name: Assert no --allow-net reaches discovery-batch.js
+        # The machine-enforced form of the offline-path contract: the batch makes zero
+        # upstream requests, and the absence of the permission flag is the proof.
+        # Whole-line YAML comments are stripped first (discovery.yml states the rule in
+        # prose, which would otherwise match), and backslash continuations are joined so
+        # the comparison is per COMMAND rather than per source line — a permission flag
+        # and a script name three lines apart are still one invocation. test.yml is
+        # excluded because this guard's own command line necessarily contains both
+        # tokens.
+        run: |
+          set -euo pipefail
+          joined=$(mktemp)
+          for f in $(ls .github/workflows/*.yml | grep -v "/test\.yml$") package.json; do
+            sed -e "s/^[[:space:]]*#.*$//" "$f" \
+              | sed -e ":a" -e "/\\\\$/{N;s/\\\\[[:space:]]*\\n[[:space:]]*/ /;ta}" >> "$joined"
+          done
+          if grep -n -- "--allow-net" "$joined" | grep -- "discovery-batch"; then
+            echo "::error::a discovery-batch.js invocation was given --allow-net — the offline path makes no upstream requests"
+            exit 1
+          fi
+          echo "no --allow-net on any discovery-batch.js invocation"

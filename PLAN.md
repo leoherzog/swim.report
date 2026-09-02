@@ -79,11 +79,17 @@ cross-module interface.
                                      // 'inland'. Only 'ocean'/'great_lake' are flag-worthy;
                                      // 'inland' is hidden by the FLAG_WORTHY_WATER_SQL gate
                                      // (section 7). Decided by classifyWaterBody
-                                     // (src/waterClass.js) from Overpass signals.
-      water_class_attempts: 0,       // number: per-row count of successful-but-empty
-                                     // classification probes (mirrors enrichment_attempts).
-                                     // Rows at WATER_CLASS_MAX_ATTEMPTS park (hidden). A
-                                     // transient Overpass failure never bumps it.
+                                     // (src/waterClass.js) from local layer signals
+                                     // (src/layerSignals.js) — no upstream query.
+      water_class_attempts: 0,       // number: VESTIGIAL. Was the per-row count of
+                                     // successful-but-empty classification probes
+                                     // (mirrors enrichment_attempts); rows at
+                                     // WATER_CLASS_MAX_ATTEMPTS park (hidden). A local
+                                     // spatial join has no transient-failure mode and no
+                                     // clean-but-empty null path, so nothing bumps this
+                                     // column any more. It is RETAINED ONLY for rows
+                                     // parked before the layers migration, which the
+                                     // legacy re-drain marker re-decides in place.
       water_class_version: 1         // number or null: the WATER_CLASS_VERSION under which
                                      // water_class was decided; bumping the constant
                                      // re-drains rows below it. INDEPENDENT of RULES_VERSION.
@@ -419,20 +425,23 @@ migrations/0009_water_class.sql:
     ALTER TABLE beaches ADD COLUMN water_class_version INTEGER;
 
   Flag-worthy water-body classification. Beach flags exist only for oceans and
-  the Great Lakes, but neither Overpass discovery path checks the adjacent
-  water body, so the table admits hundreds of inland-lake beaches (Fremont Lake
+  the Great Lakes, but discovery itself does not check the adjacent water body,
+  so the table admits hundreds of inland-lake beaches (Fremont Lake
   Park, Clinton Lakes Dog Beach) that can never carry a flag. Each beach's
-  adjacent water body is probed (Overpass vertex recurse-down anchor) and
-  classified by classifyWaterBody (src/waterClass.js); inland rows are hidden
+  adjacent water body is resolved by a LOCAL SPATIAL JOIN over the prebuilt
+  layer set, in the SAME offline batch pass that discovers the beach, anchored
+  on the beach's own member VERTICES exactly as the old recurse-down anchor was
+  (src/layerSignals.js), and classified by classifyWaterBody
+  (src/waterClass.js); inland rows are hidden
   (never deleted) by the FLAG_WORTHY_WATER_SQL gate (section 7). water_class:
   NULL (unclassified) | 'ocean' | 'great_lake' | 'inland'. Any COMPLETE probe now
   DECIDES: a clean-but-empty result (no coastline, no allowlisted lake relation,
   no qualifying water way in range) classifies 'inland' rather than leaving the
-  row NULL, so an unclassified row means "not probed yet / transient failure",
-  never "probed and inconclusive". water_class_attempts is therefore now only
-  vestigially reachable — a transient Overpass failure never bumps it, and the
-  decisive classifier has no clean-but-empty null path left to bump on — but the
-  cap stays in the gate for rows parked before the change. water_class_version is
+  row NULL, so an unclassified row means "not in the layer set at all", never
+  "joined and inconclusive". water_class_attempts is therefore now fully
+  VESTIGIAL: a local join has no transient-failure mode, and the decisive
+  classifier has no clean-but-empty null path left to bump on — but the
+  cap stays in the gate for rows parked before the layers migration. water_class_version is
   the WATER_CLASS_VERSION under which the row was decided; bumping the constant
   re-drains rows below it, BUT NOTE the version clause is ANDed with
   attempts < WATER_CLASS_MAX_ATTEMPTS in buildClassifyQueue, so a bump can never
@@ -480,8 +489,18 @@ migrations/0012_wave_updated.sql:
 - idx_beaches_lon_lat is retained for discovery/reconciliation spatial scans;
   the removed bbox map endpoint no longer range-scans on it (the GeoJSON map
   endpoint does a full flag-worthy-gated scan with no lon/lat predicate).
-- sync_meta rows used: key "last_overpass_sync" (value = ISO timestamp),
-  key "last_overpass_count" (value = String(count)).
+- sync_meta rows used by the offline discovery batch: "last_discovery_sync"
+  (ISO timestamp), "last_discovery_count" (String(count) — a partial run
+  undercounts, which is why the next key exists), "last_discovery_complete"
+  ("true" | "false" — the coverage marker, so a partial run's smaller count is
+  never misread as a shrink), plus "last_layer_build_id" and
+  "last_layer_source_ts", which pin WHICH layer build produced this delta and
+  how old its OSM extract was. The first layers-era delta also emits a ONE-TIME
+  DELETE of the three superseded rows "last_overpass_sync",
+  "last_overpass_count" and "last_overpass_complete"; that DELETE is idempotent
+  and stays in the emitter so a restored-from-backup D1 cannot resurrect them.
+  The marine pass writes "last_marine_zone_pass" / "last_marine_zone_count",
+  unchanged.
 - Beach id derivation (done in the sync code in src/index.js):
   id = "osm-" + type + "-" + String(numericId), osm_id = type + "/" + String(numericId),
   where type is "node", "way", or "relation".
@@ -840,8 +859,9 @@ and return null.
       // opts: { method, headers, body, label, timeoutMs } — all optional; each
       // init field is set only when supplied (a bare GET passes fetch(url, {})).
       // timeoutMs (when > 0) bounds the request via an AbortController: on expiry
-      // fetch aborts and the catch returns null (used by the Overpass mirror
-      // failover so a hung mirror yields to the next). Implements the
+      // fetch aborts and the catch returns null (e.g. NWS_TIMEOUT_MS, 45 s, on
+      // every api.weather.gov request, so one hung socket cannot run a cron to
+      // the 900 s scheduled ceiling). Implements the
       // shared fetch -> ok-check -> await response.json() -> catch pipeline: on a
       // non-2xx status logs label + " fetch failed: HTTP " + status, on any thrown
       // error (network, JSON parse) logs label + " fetch failed: " + err.message;
@@ -932,8 +952,8 @@ verbatim, exactly like src/geo.js and src/discovery.js. It replaces the single
 Michigan/Great-Lakes PILOT_BBOX with a CURATED SET of coastal bounding boxes tracing the
 whole Great Lakes shoreline (US + Canadian shores). Coastal boxes — not one continental
 rectangle — keep the discovery universe to actual coast: a lakes-enclosing rectangle would
-also enclose the continental interior, dense with inland lakes Overpass returns and the
-classifier drops (wasted query volume + inland-beach noise). Expansion is ADDITIVE: append
+also enclose the continental interior, dense with inland lakes the classifier drops
+(wasted layer bytes + inland-beach noise). Expansion is ADDITIVE: append
 boxes for a new coast (a commented Pacific/Gulf/Atlantic placeholder block sits at the
 bottom of the file, NOT in the live array) and everything downstream picks them up.
 
@@ -946,9 +966,15 @@ bottom of the file, NOT in the live array) and everything downstream picks them 
       // Sault; Lake Michigan; Lake Huron + Georgian Bay; Lake St. Clair + St. Clair /
       // Detroit Rivers; Lake Erie; Niagara River; Lake Ontario; Upper St. Lawrence /
       // Thousand Islands. Boxes carry a ~10-20% inland margin so set-back beaches are
-      // captured; box SIZE is not the constraint — the offline batch auto-tiles each
-      // one at TILE_MAX_SPAN_DEG = 2.0 deg (tileBbox in scripts/discovery-batch.js)
-      // before any Overpass query, so a large box just becomes more (cheap) tiles.
+      // captured; box SIZE AND COUNT are both free now. REGIONS drives exactly
+      // three things and nothing else: (a) the layer build's -spat clip mask
+      // (scripts/print-spat-bbox.js), (b) the per-region sanity floors in
+      // data/layer-floors.json and the per-region delete rail, and (c)
+      // pointInAnyRegion delete scoping below. There is NO tiling and no
+      // per-box query cost — the batch does one local scan of a fixed layer
+      // set — which is what makes the North America expansion (TODO.md) cheap
+      // on the discovery side. The coastal-box discipline survives only to keep
+      // continental-interior inland lakes out of the layers.
 
     export function pointInAnyRegion(lat, lon)
       // Pure. Returns true iff (lat, lon) lies inside ANY REGIONS bbox, bounds
@@ -1430,205 +1456,264 @@ entirely when it is unset.
       //   (WEBCAM_FETCH_LIMIT) means the caller must treat a full-length result as
       //   possibly truncated and fall back to per-beach nearby queries.
 
-### src/clients/overpass.js
+### src/osmSelect.js (pure OSM selection semantics — offline batch only, no fetch)
 
-    export const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
-    export const OVERPASS_MIRRORS = [OVERPASS_URL,
-      "https://overpass.private.coffee/api/interpreter"];
-    export const OVERPASS_MIRROR_TIMEOUT_MS = 240000;
-    export const OVERPASS_NAMED_TIMEOUT_MS = 150000;
-      // Per-query transport cap for the named-beach query (fetchBeaches): its
-      // server-side budget is only [timeout:90], so a 150 s transport ceiling
-      // trims a hung named query without waiting out the full mirror cap. The
-      // park (fetchParkBeaches) and water-class probes keep the larger
-      // OVERPASS_MIRROR_TIMEOUT_MS because their server-side [timeout:180]
-      // legitimately runs longer.
+The transport-independent half of what used to live in src/clients/overpass.js: the
+thresholds, the tag predicates, the park-association rule, the pond filter and the probe
+anchor. Imports nothing but src/geo.js, so Deno, workerd and vitest all load it verbatim.
+It is NOT reachable from src/index.js and must never become so.
 
-    // runQuery(query, label, timeoutMs) — internal; the optional third param
-    // is the per-attempt transport timeout passed through to fetchJson's
-    // timeoutMs, DEFAULTING to OVERPASS_MIRROR_TIMEOUT_MS when omitted (park +
-    // water-class callers). fetchBeaches passes OVERPASS_NAMED_TIMEOUT_MS.
+    export const POND_TEST_MAX_BEACH_AREA_DEG2 = 0.001;   // only SMALL beaches get pond-tested
+    export const WATER_MIN_AREA_DEG2 = 0.000005;          // sliver floor for pond evidence
+    export const WATER_MATCH_PADDING_DEG = 0.001;         // envelope pad for water matching
+    export const POND_EVIDENCE_RADIUS_M = 60;             // pond-evidence pooling radius
+    export const OCEAN_RADIUS_M = 150;        // coastline probe (validated safe band)
+    export const GREAT_LAKE_RADIUS_M = 150;   // lake-relation probe
+    export const INLAND_RADIUS_M = 120;       // tighter: the beach's OWN adjacent water only
+      // These three are the radii the retired "around" clauses carried. They are
+      // load-bearing for live rows: widening one RE-CLASSIFIES beaches, and a move in
+      // the flag-worthy -> inland direction HIDES a beach that is served today. Any
+      // change requires a WATER_CLASS_VERSION bump (now cheap — one local re-run).
 
-      // runQuery tries OVERPASS_MIRRORS IN ORDER: the primary is the
-      // official FOSSGIS instance (overpass-api.de; our volume is far under its
-      // < 10k queries/day + < 1 GB/day courtesy limit), and when it is
-      // overloaded — a transport/HTTP failure OR a server-side [timeout]
-      // "remark" (truncated body) — runQuery falls through to Private.coffee's
-      // unlimited public instance. Only when EVERY mirror fails does it return
-      // null (the "null == failed fetch" contract callers rely on is unchanged).
-      // Mirrors are distinct IPs, so failover never breaches any one instance's
-      // 2-slots/IP limit. The VK Maps (Russia-operated) mirror is deliberately
-      // excluded. Each attempt carries a transport-layer timeout (the caller's
-      // timeoutMs — OVERPASS_MIRROR_TIMEOUT_MS by default, OVERPASS_NAMED_TIMEOUT_MS
-      // for the named query — via fetchJson's opt-in timeoutMs + AbortController)
-      // set above that query's server-side [timeout] so a mirror that hangs at
-      // the TCP layer yields to the next instead of blocking an unattended run;
-      // a working-but-slow query is never aborted.
+    export function bboxAreaDeg2(bounds)
+    export function boundsOverlap(a, b)
+      // Pure envelope helpers over { minLon, minLat, maxLon, maxLat }.
 
-    export async function fetchBeaches(bbox)
-      // bbox: { minLon, minLat, maxLon, maxLat } (numbers)
-      // POST OVERPASS_URL, body "data=" + encodeURIComponent(query) where query is
-      // (Overpass bbox order is south,west,north,east):
-      //   [out:json][timeout:90][maxsize:67108864];
-      //   (
-      //     nwr["natural"="beach"]["name"](minLat,minLon,maxLat,maxLon);
-      //     nwr["leisure"="beach_resort"]["name"](minLat,minLon,maxLat,maxLon);
-      //   );
-      //   out center tags;
-      // The [maxsize:N] token (F10) declares a conservative EXECUTION-memory ceiling
-      // below Overpass's 512 MiB default, improving admission odds during a 504 overload
-      // storm on the shared public mirrors (the commons doc: the server "prioritizes
-      // small requests over large ones"). Per-builder values: buildQuery
-      // [maxsize:67108864] (64 MiB), buildParkBeachQuery [timeout:180][maxsize:134217728]
-      // (128 MiB), buildWaterClassQuery [timeout:60][maxsize:268435456] (256 MiB — the
-      // most generous, since its around-on-relations lake probe can pull a Great Lakes
-      // multipolygon's member geometry into execution memory). Tuned timeouts unchanged.
-      // Only elements WITH a name tag are requested (data-quality choice; unnamed beaches
-      // are out of scope for the pilot).
-      // Per element: lat/lon from element.lat/element.lon (nodes) or element.center.lat/.lon
-      //   (ways/relations); skip elements with neither.
-      // Return: array of { osmType: "node"|"way"|"relation", osmId: 123456 (number),
-      //                    name: string, lat: number, lon: number }
-      // Failure -> null (never a partial throw).
+    export function isParkTagged(tags)
+      // Pure. The leisure=park / leisure=nature_reserve / boundary=protected_area
+      // predicate the park association is scoped by.
 
-    export async function fetchParkBeaches(bbox)
-      // Park-containment discovery. Most OSM mappers name the park polygon
-      // (Holland State Park) and leave the beach way inside it unnamed, so the
-      // named-beach query above misses most state park swim beaches.
-      // TWO sequential POSTs (both [timeout:180][maxsize:134217728]).
-      // Query 1 — parks + contained beaches:
-      //   ( way/relation["leisure"="park"]["name"](bbox);
-      //     way/relation["leisure"="nature_reserve"]["name"](bbox);
-      //     way/relation["boundary"="protected_area"]["name"](bbox); )->.parks;
-      //   .parks map_to_area->.pa;
-      //   nwr["natural"="beach"](area.pa)(bbox)->.b;
-      //   .b out tags bb;
-      //   .parks out tags bb;
-      // Query 2 — pond-water evidence, sent ONLY when >= 1 UNNAMED beach has
-      // bbox area < POND_TEST_MAX_BEACH_AREA_DEG2 (1e-3 deg²; skipped
-      // entirely otherwise), seeded by EXPLICIT ids (buildPondWaterQuery over
-      // pondWaterSeeds) — every beach, named too, under that area cutoff:
-      //   ( way(id:...); relation(id:...); node(id:...); )->.b;
-      //   ( way["natural"="water"](around.b:60);
-      //     way["natural"="coastline"](around.b:60); )->.water;
-      //   .water out tags bb;
-      // WHY TWO QUERIES (2026-07-23): around.b:60 with .b = the whole-tile
-      // beach set is pathological when the tile holds multi-km beach
-      // MULTIPOLYGONS (Beaver Islands / Sleeping Bear, bboxes up to ~96 km²):
-      // the server buffers every member way's node geometry against thousands
-      // of water-way candidates, measured > 300 s on the northern Lake
-      // Michigan tile — a hard [timeout:180] kill that took park discovery
-      // AND reconciliation down. Seeded with only small elements the same
-      // around answers in seconds. Oversized (>= cutoff) beaches skip the
-      // pond test entirely — 200x the pond threshold means they cannot sit
-      // ONLY on pond-sized water, so skipping errs toward KEEPING (verified
-      // output-identical against the single query on the southern Lake
-      // Michigan control tile). No bbox on the water statements (the old
-      // query had none; the id seeds bound the search). Water near named
-      // beaches still feeds neighboring unnamed beaches' pond tests, matching
-      // old coverage. A failure of EITHER query fails the whole fetch (null):
-      // pond-filtering without water evidence would ingest pond slivers.
-      // All three park tag filters are REQUIRED (some state parks are mapped as
-      // nature_reserve + protected_area, not leisure=park). Association happens
-      // locally, NOT via Overpass is_in (is_in only accepts nodes) and NEVER via
-      // name-based area lookup (name collisions across states: Silver Lake State
-      // Park exists in MI, NH, and VT).
-      // POND FILTER: an UNNAMED beach under the area cutoff is dropped before
-      // park association when isPondBeach(beach, waters) — at least one water
-      // record overlaps its bbox padded by 0.001 deg (~100 m) AND every
-      // overlapping one is smaller than WATER_MIN_AREA_DEG2 (5e-6 deg² ≈
-      // 4.5 ha at MI latitudes). Beach size alone below the cutoff is NOT a
-      // usable pond signal (sub-100 m² unnamed slivers exist on real Great
-      // Lakes shore).
-      // The water fetch is WAYS ONLY (+ natural=coastline ways as always-large
-      // shoreline evidence): `around` on water RELATIONS loads the Great Lakes
-      // multipolygons' full geometry and is equally pathological. Ponds are
-      // essentially always closed ways, so way-water carries the whole pond
-      // signal; a beach on a relation-mapped lake sees either a coastline way
-      // (Great Lakes) or no nearby water (kept).
-      // Beaches with NO mapped water nearby are KEPT (missing data never drops);
-      // NAMED beaches are never filtered (they also arrive via fetchBeaches).
-      // Rows already in D1 for now-filtered beaches drain via the section-7
-      // reconciliation pass (name = park_name rows no longer produced).
-      // Return: array of { osmType, osmId, name: string|null, locality: string|null,
-      //                    lat, lon, areaDeg2: number (beach bbox area, ranking only),
-      //                    parkName: string|null, parkKey: "relation/8550215"|null }
-      // (lat/lon = bbox center for ways/relations). locality is the beach element's
-      // OWN loc_name tag (a local/unofficial water-body label, e.g. "Hamlin Lake"),
-      // null when absent — consumed by deriveUnnamedSuffix / mergeBeachRows in
-      // src/index.js to distinguish a park's secondary unnamed beaches (section 7).
-      // Never substitutes for name. Failure of either query -> null.
+    export function pondWaterSeeds(beaches)
+      // Pure. SURVIVES the layers migration unchanged: the set of small beaches worth
+      // pond-testing at all, so the pond filter stays O(small beaches), not O(water).
 
-    export function pondWaterSeeds(beaches)  // + export const POND_TEST_MAX_BEACH_AREA_DEG2
-      // Pure, exported for tests. Parsed beach list -> [{ osmType, osmId }]
-      // seed refs for the pond-water query: every beach (named included) with
-      // areaDeg2 < POND_TEST_MAX_BEACH_AREA_DEG2 (1e-3 deg² ≈ 8.7 km² at MI
-      // latitudes). Returns [] when NO unnamed beach is under the cutoff —
-      // nothing can be pond-filtered, so query 2 is skipped.
-
-    export function buildPondWaterQuery(seeds)
-      // Pure, exported for tests. Seed refs -> the query-2 string above
-      // (ids grouped way/relation/node), or null for an empty seed list.
-
-    export function parseParkBeachElements(elements)
-      // Pure, exported for tests. Raw Overpass elements -> { beaches, parks, waters }.
-      // Element with natural=beach -> beach (even when also park-tagged), carrying
-      // its optional locality (loc_name tag); named element with a park tag ->
-      // park (checked BEFORE water so a named protected lake keeps donating its
-      // name — losing its water role only errs toward keeping a beach); remaining
-      // natural=water or natural=coastline -> waters ({ bounds, areaDeg2,
-      // shoreline: bool — true for coastline }); no usable coords -> skipped.
-
-    export function isPondBeach(beach, waters)  // + export const WATER_MIN_AREA_DEG2
-      // Pure, exported for tests. True iff >= 1 water record overlaps the beach
-      // bbox padded by 0.001 deg AND all overlapping ones are below
-      // WATER_MIN_AREA_DEG2 (shoreline records always count as large).
-      // Empty/absent nearby water -> false.
-
-    // runQuery internal note: an HTTP-200 Overpass body carrying a non-empty
-    // "remark" field is a server-side timeout that TRUNCATED the elements array;
-    // both fetchBeaches and fetchParkBeaches treat it as a FAILURE (return null),
-    // never a partial success — a truncated result would make the sync's
-    // reconciliation pass (section 7) read every missing element as deleted.
+    export function isPondBeach(beach, waters)
+      // Pure. True when the only water evidence adjacent to a small beach is a pond
+      // sliver, i.e. the beach must be dropped from discovery.
 
     export function associateParkForBeach(beach, parks)
-      // Pure, exported for tests. Smallest-bbox-area park whose bounding box
-      // OVERLAPS the beach's bounding box (overlap, not center containment —
-      // shoreline beach polygons bulge lakeward past the park boundary), or null.
+      // Pure. Beach -> park name, resolved LOCALLY (never via a remote is_in), with
+      // the smallest-enclosing-park rule and first-seen tie-break on equal area.
 
-    // --- Water-body classification (migration 0009, offline-batch path only) ---
-    export const OCEAN_RADIUS_M = 150;       // coastline probe
-    export const GREAT_LAKE_RADIUS_M = 150;  // lake-relation probe (audit-validated)
-    export const INLAND_RADIUS_M = 120;      // the beach's OWN adjacent water only
+    export function sortLayerFeatures(features)
+      // Pure, TOTAL ORDER by (osmType, osmId). FlatGeobuf stores features in Hilbert
+      // order, which is stable per file but RESHUFFLES on every rebuild; both the
+      // equal-area park tie and mergeBeachRows' duplicate-id rule resolve by first
+      // seen, so scanning unsorted input would flip park names between rebuilds for
+      // no reason a reader could ever diagnose. Every layer array is sorted BEFORE
+      // anything reads it.
 
-    export function buildWaterClassAnchor(osmId)   // + buildWaterClassQuery(osmId)
-      // Pure, exported for tests. Turn a stored osm_id ("way/N" | "relation/N" |
-      // "node/N") into the Overpass recurse-down anchor that seeds the `around`
-      // probe on the element's REAL member vertices — "way(N);>->.a;" /
-      // "relation(N);>->.a;" / "node(N)->.a;" — never the centroid (set-back
-      // beaches miss) and never the bbox rectangle (large polygons like Sleeping
-      // Bear mis-classify). null for an unparseable id. buildWaterClassQuery wraps
-      // it in the full query at 150 m/120 m with `out ids tags bb` — NEVER
-      // `out geom` (Lake Superior's multipolygon geometry is tens of MB).
+    export function envelopeCenter(bounds)
+      // Pure. The coordinate a discovered row is written at.
 
-    export function parseWaterClassElements(elements)
-      // Pure, exported for tests. Raw Overpass elements -> the signals object
-      // classifyWaterBody consumes: any natural=coastline way -> coastlinePresent;
-      // each water=lake RELATION's wikidata -> nearbyLakeQids; any natural=water
-      // WAY whose bb area >= WATER_MIN_AREA_DEG2 -> nearbyWayWater.
+    export function probeVertices(feature)
+      // Pure. Reproduces Overpass's "way(N);>->.a;" recurse-down anchor: the beach
+      // element's own member VERTICES, which is what every classification distance is
+      // measured from — never its centroid and never its bbox. A set-back beach's
+      // centroid sits tens of metres further out than its nearest vertex, and a large
+      // multipolygon (Sleeping Bear) has a centroid well inland of the 150 m coastline
+      // band while its sand is right on it. That is the difference between great_lake
+      // and inland for a whole dune complex.
 
-    export async function fetchWaterClassSignals(beach)
-      // Async, never throws. Builds the query from beach.osm_id and runs it via
-      // runQuery. null = TRANSIENT failure (HTTP error, JSON failure, truncation
-      // remark, or unparseable osm_id) -> caller must NOT bump attempts. A signals
-      // object = a CLEAN answer (even all-empty). The whole attempts semantics:
-      // bump only on a clean-but-empty classification, never on the ~1/3 Overpass
-      // flake rate.
+    export function beachRecord(feature)
+    export function parkRecord(feature)
+    export function waterRecord(feature)
+      // Pure. Layer feature -> the record shapes the rest of the pipeline consumes
+      // ({ osmType, osmId, name, locality, tags, bounds, ... }).
+
+### src/layerGrid.js (pure spatial index — offline batch only, no fetch)
+
+Two indexes, because the two questions have different costs.
+
+    export const GRID_CELL_DEG = 0.05;
+
+    export function buildLayerGrid(features)          // Mode A: ENVELOPE grid
+    export function queryGrid(grid, lat, lon, padDeg)
+    export function queryGridNearVertices(grid, vertices, padDeg)
+    export function queryGridByBounds(grid, bounds)
+      // Pure. Bucketed by envelope, for park containment and water matching.
+
+    export function buildSegmentGrid()                // Mode B: SEGMENT grid
+    export function addFeatureSegments(builder, featureIndex, geometry)
+    export function finishSegmentGrid(builder)
+    export function segmentGridStats(segGrid)
+    export function anySegmentWithinKmOfPoint(segGrid, lat, lon, maxKm)
+    export function featuresWithinKmOfVertices(segGrid, vertices, maxKm)
+      // Pure. Indexes the SEGMENTS, not the envelopes, and keeps only
+      // { osmType, osmId, tags, bounds } per feature afterwards. An envelope grid
+      // prunes NOTHING for the six Great Lake polygons — their bounding boxes contain
+      // essentially every Great Lakes beach, so every probe would return all six and
+      // fall through to a linear scan of millions of ring segments. Mode B is what
+      // lets a ~3e6-vertex lakes layer live in typed arrays instead of multiple
+      // gigabytes of GeoJSON heap, and it answers exactly the threshold question the
+      // "around:R" clauses asked: is any part of this feature within R metres of any
+      // probe vertex.
+
+### src/layerDiscovery.js (pure discovery over layers — offline batch only, no fetch)
+
+    export function classifyLayerFeature(feature)
+      // Pure. Which of the ten layers a feature belongs to / how it is used.
+
+    export function beachInAnyParkPolygon(beach, geometry, parksPoly, parksPolyGrid)
+      // Pure. Point-in-polygon containment, holes honoured (an island in a lagoon
+      // inside a park is NOT in the park).
+
+    export function poolPondWaters(seeds, waterFeatures, radiusM)
+      // Pure. Gathers the water evidence isPondBeach votes on, at
+      // POND_EVIDENCE_RADIUS_M.
+
+    export function discoverFromLayers(layers)
+      // Pure. THE replacement for the tiled fetch + parse + dedupe pipeline. Takes
+      // { beaches, parksPoly, parksName, coastline, water } arrays of layer features
+      // and returns the discovered beach records plus counters.
+      //
+      // Step 0 in BEHAVIOUR (after the sort, which has to happen first) is REGION
+      // SCOPING by pointInAnyRegion. The published layers are cut with ONE -spat
+      // rectangle over the union of REGIONS, and src/regions.js is a written argument
+      // against exactly that rectangle: it encloses the whole continental interior
+      // between and around the lakes, dense with inland-lake beach elements that the
+      // old coastal-tile queries never returned. Admitting them would not merely be
+      // wasteful — each would be UPSERTed, would sit OUTSIDE every REGIONS bbox, and
+      // would therefore be PERMANENTLY UN-DELETABLE, because reconcileStaleRows scopes
+      // its delete candidates with pointInAnyRegion. It would also blow the 11-column
+      // D1 --json snapshot past its size cap, which aborts the only delete path there
+      // is. Applying pointInAnyRegion here is the first time the UPSERT universe and
+      // the DELETE-CANDIDATE universe are the same set.
+
+### src/layerSignals.js (the water-class SIGNAL PROVIDER — offline batch only, no fetch)
+
+Sits at the exact seam fetchWaterClassSignals occupied: scripts/discovery-batch.js passes
+it as classifyQueue's opts.fetchSignals, with the same signature and the same null
+contract, so classifyQueue's body did not change.
+
+    export function beginSignalsIndex()
+    export function addSignalsFeature(index, layerName, feature)
+    export function finishSignalsIndex(builder)
+    export function buildSignalsIndex(layers)
+    export function signalsIndexStats(index)
+      // Pure. Streaming builder + one-shot convenience wrapper. Three segment grids
+      // (coastline, lake relations, way water) plus a beaches lookup keyed by osm id.
+
+    export function beachAbsentFromLayers(index, beach)
+      // Pure. Disambiguates the ONE failure mode Overpass never had — the beach's OSM
+      // element is simply not in the layer set — from a data bug, so the caller can
+      // report it as a single absent_from_layers= counter instead of folding it into
+      // the null.
+
+    export function waterClassSignals(index, beach)
+      // Pure. Returns EXACTLY three keys and no more:
+      //   { coastlinePresent: boolean, nearbyLakeQids: string[], nearbyWayWater: boolean }
+      // which is a transcription of the retired parseWaterClassElements plus the radius
+      // each "around" clause carried:
+      //   coastline way   within OCEAN_RADIUS_M (150)      -> coastlinePresent
+      //   water=lake rel  within GREAT_LAKE_RADIUS_M (150) -> nearbyLakeQids
+      //   natural=water   within INLAND_RADIUS_M (120)     -> nearbyWayWater
+      // Any divergence silently RE-CLASSIFIES live beaches, which is why the module is
+      // written as a transcription rather than a reimplementation.
+      //
+      // THE NULL CONTRACT IS THE WHOLE ATTEMPTS SEMANTICS. null means TRANSIENT — the
+      // caller must NOT bump water_class_attempts and the row stays queued — and is
+      // returned in exactly three cases: an unqueryable/half-built index, an
+      // unparseable osm_id, and no beaches feature indexed under that id. A signals
+      // object, INCLUDING the all-empty one, is a CLEAN, complete answer that
+      // classifyWaterBody DECIDES on (all-empty decides inland). The provider must
+      // therefore NEVER return empty signals in place of null on incompleteness: that
+      // would publish "inland" — i.e. HIDE beaches — on the strength of a data bug.
+
+### src/layerManifest.js (pure manifest verification + the delete gate — no fetch)
+
+    export const LAYER_SCHEMA_VERSION = 1;
+    export const MAX_SOURCE_AGE_DAYS = 21;
+    export const PARKS_PREVIOUS_MIN_RATIO = 0.98;
+    export const EXPECTED_LAYER_KEYS = [ "beaches-point.fgb", "beaches-line.fgb",
+      "beaches-polygon.fgb", "parks-polygon.fgb", "parks-line.fgb",
+      "coastline-line.fgb", "water-line.fgb", "water-polygon.fgb",
+      "lakes-polygon.fgb", "other-relations.fgb" ];
+      // The ten-layer set. The DOWNLOAD list comes from this constant, never from
+      // manifest.layers[].key: a manifest describing nine layers is not a nine-layer
+      // set to consume as-is, it is a set this code cannot decode, and every written
+      // filename stays a compile-time constant of this repo rather than remote input.
+
+    export function classifyManifestFailure(report)
+      // Pure, never throws. -> { tier, reasons }, tier one of
+      // "ok" | "fatal" | "incomplete" | "scope_or_stale", reasons carrying EVERY
+      // failing conjunct ordered fatal-first (an operator wants the whole diagnosis,
+      // and the tier alone does not say which conjunct fired).
+      //   fatal          — schemaVersion, pointerAgreesWithManifest, layersVerified,
+      //                    layersPresent/layersExpected vs EXPECTED_LAYER_KEYS.length.
+      //                    Exit 1, no SQL at all.
+      //   incomplete     — buildStatus, sourcesVerified, buildSanityPassed.
+      //                    Suppresses deletes AND classification.
+      //   scope_or_stale — regionsDigestMatches, sourceAgeDays in
+      //                    [0, MAX_SOURCE_AGE_DAYS]. Suppresses deletes only.
+
+    export function classificationAllowed(report)
+      // Pure. "Is this a COMPLETE view of OSM?" — the only question classification
+      // needs. True for a complete set that is merely stale or out of delete scope.
+
+    export function reconciliationAllowed(report)
+      // Pure. THE DELETE GATE. Replaces reconciliationAllowed(namedComplete,
+      // parkComplete) at the same call site and keeps its single-choke-point role, so
+      // the exported-and-unit-tested invariant "incomplete coverage means no DELETE"
+      // survives with a new input. By construction it is classificationAllowed
+      // && regionsDigestMatches === true && sourceAgeDays in [0, MAX_SOURCE_AGE_DAYS].
+      // Fail-CLOSED on null/malformed input and on every MISSING field — which is why
+      // regionsDigestMatches and sourceAgeDays are absent from the fetch report on
+      // purpose and folded in by scripts/discovery-batch.js: if that fold is ever
+      // dropped, deletes refuse, which is the safe direction.
+
+    export function parksLayerHealthy(report)
+      // Pure. Consumed by the batch as hasPark. "The parks layer is present under a
+      // verified manifest" and "the parks layer is correctly populated" are different
+      // predicates, and this design's thesis is that layer failures are VALID-LOOKING.
+      // hasPark false makes upsertSql emit the five-column variant, leaving park_name
+      // UNTOUCHED; hardcoding true would let a 9%-short parks layer BLANK park_name on
+      // every named row in the missing parks and strand the park-origin rows those
+      // names produced as DELETE candidates. A parks-line count of ZERO is a hard
+      // refusal, never a reading. A bootstrap set (build 1, empty history, unseeded
+      // floor) returns false and self-heals on the next build.
+
+    export function regionsDigestInput(regions)
+      // Pure. The canonical string whose digest ties a layer set to the REGIONS array
+      // that cut it. A digest mismatch means the layers were clipped to a DIFFERENT
+      // scope than this code reconciles against, which is a delete-unsafe condition
+      // and nothing else.
+
+### scripts/lib/fgbReader.js (the ONLY module in the repo with an npm dependency)
+
+Deep-imports flatgeobuf. It is a vitest devDependency, resolved under Deno through the
+committed deno.json import map ("flatgeobuf/": "npm:/flatgeobuf@4.4.0/" — note the LEADING
+SLASH, the canonical Deno form for a trailing-slash directory mapping) with
+nodeModulesDir "none", so CI needs no node_modules. It is NEVER reachable from
+src/index.js and test/workerExports.test.js guards that.
+
+    export const LAYER_TAG_KEYS
+      // The tag columns .github/build/osmconf.ini promotes to first-class fields.
+      // wikidata is one of them: the stock GDAL osmconf.ini buries the QID in an
+      // HSTORE blob, which would silently collapse Great Lake classification to zero.
+
+    export function geometryBounds(geometry)
+    export function toLayerFeature(feature, layerName)
+    export async function readFgb(bytes)
+    export async function readLayerFile(path, layerName)
+    export async function* readFgbStream(path, layerName)
+      // Bytes / path -> layer features { osmType, osmId, name, tags, geometry, bounds }.
+      // The streaming form exists so the multi-million-vertex layers are indexed
+      // incrementally rather than materialised as one array. Corrupt or truncated
+      // input THROWS with an exact message — a reader that half-parses is how a layer
+      // gets silently zeroed, and a zeroed layer is a mass re-classification.
 
 ### src/waterClass.js (pure, versioned; the single home of the classification decision + allowlist DATA)
 
-    export const WATER_CLASS_VERSION = 1;   // bump on allowlist/predicate change; re-drains
+    export const WATER_CLASS_VERSION = 2;   // bump on allowlist/predicate change; re-drains
                                             // rows below it. INDEPENDENT of RULES_VERSION.
+                                            // Bumped 1 -> 2 by the layers migration, which
+                                            // moved the signal provider from a remote query
+                                            // to a local join. A bump now costs SECONDS of
+                                            // local CPU in the next batch run rather than
+                                            // weeks of 25-beach hourly drips, so re-drains
+                                            // are cheap and the whole table re-decides in
+                                            // ONE run.
     export const GREAT_LAKE_QIDS = { "Q1066": "Lake Superior", "Q1169": "Lake Michigan",
       "Q1383": "Lake Huron", "Q5492": "Lake Erie", "Q1062": "Lake Ontario",
       "Q736707": "Lake St. Clair" };   // wikidata QID -> name. Matched by QID, NEVER by name
@@ -1646,10 +1731,11 @@ entirely when it is unset.
       // Pure, never throws. Precedence ocean > great_lake > inland. signals =
       // { coastlinePresent: bool, nearbyLakeQids: [string], nearbyWayWater: bool }.
       // Returns 'ocean' | 'great_lake' | 'inland'; null ONLY for a missing signals
-      // object. Any signals object is a COMPLETE probe (truncated bodies and
-      // transient failures both stop at fetchWaterClassSignals returning null), so
-      // the clean-but-empty case DECIDES 'inland' instead of returning null: the
-      // probe is deterministic, so re-running it could only reach the same answer,
+      // object. Any signals object is a COMPLETE answer (an unreadable index, an
+      // unparseable osm_id and a beach absent from the layer set all stop earlier,
+      // at waterClassSignals returning null), so the clean-but-empty case DECIDES
+      // 'inland' instead of returning null: the join is pure local math over a
+      // verified, immutable layer set, so re-running it could only reach the same answer,
       // and leaving the row NULL kept it VISIBLE under FLAG_WORTHY_WATER_SQL's
       // fail-open for all 5 attempts (the Locklin Pines regression — an inland-lake
       // beach served an estimated flag card because its nearest water way was
@@ -2183,11 +2269,16 @@ named export of src/index.js other than `default` is a function.
 
 Beach discovery and water-body classification are NOT in-Worker crons: the offline
 GitHub Actions batch (scripts/discovery-batch.js on Deno) is the SOLE owner of both. The
-discovery/classification logic still lives in src/discovery.js, src/clients/overpass.js,
-and src/waterClass.js, imported verbatim by the batch (see the offline pipeline note under
-"Discovery pipeline" below). The D1 schema (section 2) and the KV shapes (sections 1, 3)
+discovery/classification logic still lives in src/discovery.js, src/waterClass.js,
+src/geo.js, src/regions.js and src/marineZones.js, plus the offline-only pure modules
+src/osmSelect.js, src/layerGrid.js, src/layerDiscovery.js, src/layerSignals.js and
+src/layerManifest.js, all imported verbatim by the batch (see the offline pipeline note
+under "Discovery pipeline" below). One module is NOT importable here and must never
+become so: scripts/lib/fgbReader.js, the only module in the repo with an npm dependency
+(flatgeobuf). The D1 schema (section 2) and the KV shapes (sections 1, 3)
 are unaffected: the offline batch writes the same D1 rows out-of-band and the request path
-still reads only D1/KV (the two-path rule holds).
+still reads only D1/KV (the two-path rule holds), and the prebuilt layer set in R2 is read
+by the OFFLINE BATCH ONLY — wrangler.toml deliberately carries no r2_buckets binding.
 
 wrangler.toml triggers:
 
@@ -2734,43 +2825,90 @@ follow-up, not shipped.
 
 ### Discovery pipeline (offline batch — GitHub Actions, NOT an in-Worker cron)
 
-Discovery + water classification run ONLY in the offline GitHub Actions batch job that
-bulk-loads D1 (`scripts/discovery-batch.js` on Deno, `docs/offline-discovery.md`). The
-batch reuses the Worker logic verbatim — the merge cluster lives in `src/discovery.js`,
-discovery/classification in `src/clients/overpass.js` + `src/waterClass.js`, the region rail
-in `src/regions.js` — and emits the upsert / reconciliation / `flag_history`-prune /
-classification SQL, bulk-loaded via `wrangler d1 execute --remote --file`. The two-path rule
-holds: the batch writes D1 out-of-band and the request path reads only D1/KV.
+Discovery, water classification and the marine_zone derivation run ONLY in the offline
+GitHub Actions batch job that bulk-loads D1 (`scripts/discovery-batch.js` on Deno,
+`docs/offline-discovery.md`), and all three are PURE LOCAL MATH over a prebuilt
+FlatGeobuf layer set. The batch reuses the Worker logic verbatim — the merge cluster
+lives in `src/discovery.js`, the classification decision in `src/waterClass.js`, the
+region rail in `src/regions.js` — plus the offline-only pure modules `src/osmSelect.js`,
+`src/layerGrid.js`, `src/layerDiscovery.js`, `src/layerSignals.js` and
+`src/layerManifest.js` (section 5), and emits the upsert / reconciliation /
+`flag_history`-prune / classification / marine SQL as ONE idempotent delta, bulk-loaded
+via `wrangler d1 execute --remote --file`. The two-path rule holds and is stronger than
+before: the batch writes D1 out-of-band, the layer set is read by the OFFLINE BATCH ONLY,
+and the request path reads only D1/KV.
 
-The batch runs in one of TWO mutually-exclusive modes, selected by flags parsed
-in parseArgs (whose `discovery` field defaults to true), split across TWO
-GitHub Actions workflows so a slow per-beach classify pass never delays the
-daily discovery upserts:
-- DISCOVERY-ONLY (`--no-classify`, `.github/workflows/discovery.yml`, daily
-  `47 8 * * *`, concurrency group `discovery`, job timeout 120 min): the full runDiscovery()
-  path below — tiling, upserts, stale-row reconciliation, `flag_history` retention prune, and
-  the sync_meta stamps. Emits NO water_class UPDATEs.
-- CLASSIFY-ONLY (`--no-discovery --classify-limit N`, `.github/workflows/classify.yml`,
-  hourly `23 * * * *`, concurrency group `classify`): NO tiling, NO
-  upserts, NO reconciliation, NO deletes — it emits ONLY water_class UPDATEs for
-  the snapshot rows still needing classification, up to `--classify-limit N`
-  (scheduled runs pass 25 — small hourly chunks, ~600/day; manual
-  `workflow_dispatch` runs default to 150 for bulk drains). The delete-safety invariant is therefore PRESERVED
-  by construction: classify-only mode produces zero deletes and zero upserts, and
-  stale-row reconciliation (with its full park query + the proportional safety rail)
-  still runs ONLY in discovery mode. classify.yml also passes
-  `--classify-budget-ms` (a 60-min wall-clock cap under the 90-min job timeout) and
-  flushes each water_class UPDATE to the delta file incrementally, so an Overpass-504
-  timeout-cancel still persists the beaches it finished (Upload+Apply are
-  `always()`-gated — a `timeout-minutes` cancel would SKIP `!cancelled()` steps —
-  and Apply truncates any torn tail; an empty/partial delta applies as an idempotent
-  no-op). The request path / rules / KV / D1 contract is unchanged.
-Either mode may ALSO carry the offline marine_zone derivation (`--marine-zones <path>`,
-which discovery.yml passes; see "Offline marine_zone pass" below). The nothingToDo(args)
-guard errors only when discovery, classify, AND the marine pass are ALL off — passing
-`--no-classify --no-discovery` WITHOUT `--marine-zones` (nothing to do) is the guarded
-error. The mode split is purely operational: the D1 schema (section 2) and the KV
-shapes (sections 1, 3) are UNCHANGED, and the request path still reads only D1/KV.
+**INVARIANT: `scripts/discovery-batch.js` requires NO `--allow-net`.** It runs as
+`deno run --allow-read --allow-write`. Any surviving `--allow-net` on a
+`discovery-batch.js` invocation — in a workflow, in an npm script, anywhere — is a
+leftover upstream call and a bug. This is the machine-enforced form of the claim that the
+only job in this repo that can DELETE production rows cannot talk to the network.
+
+Layer build (`.github/workflows/build-layers.yml`, twice weekly `41 6 * * 0` and
+`41 6 * * 3`, concurrency group `build-layers`, job timeout 180 min). Plain shell on a
+GitHub runner, NOT delete-bearing and NOT a Deno program:
+- Reclaim runner disk and assert a 40 GB floor. Then, per country (us, canada, mexico)
+  SEQUENTIALLY: download the Geofabrik extract, verify its published `.md5`, assert every
+  extract carries the SAME `osmosis_replication_timestamp` (osmium merge is documented as
+  incorrect across differing data vintages), `osmium tags-filter` it to the tag sets in
+  `.github/build/expressions.txt`, and DELETE the `.pbf` before the next country. Peak
+  disk is ~13.3 GB. Reference completion is ON BY DEFAULT and `-R` must NEVER be passed,
+  or the six Great Lake relations cannot be assembled and Great Lake classification
+  silently collapses to zero.
+- `osmium merge`, then ONE `ogr2ogr` OSM read into raw layers with `CPL_TMPDIR` set
+  EXPLICITLY: an exhausted GDAL node-index temp filesystem emits a flood of "Cannot read
+  node" and then returns an EMPTY result with a ZERO exit status, which is exactly the
+  valid-looking failure the sanity floors exist for.
+- `.github/build/osmconf.ini` / `osmconf-lines.ini` promote `wikidata` (and the other
+  `LAYER_TAG_KEYS`) to first-class columns in every layer. The stock GDAL `osmconf.ini`
+  does not, and buries the QID in an HSTORE blob.
+- A Deno proximity clip (`scripts/clip-layers.js`) trims the park / coastline / water
+  layers to within ~1.1 km of the beach set. That clip is what makes the published set
+  O(beaches) rather than O(continent).
+- Output: ten FlatGeobuf files (`EXPECTED_LAYER_KEYS`, section 5) plus a manifest
+  (`scripts/build-manifest.js`) carrying schemaVersion, buildId, per-layer sha256 and
+  featureCount, `oldestSourceTimestamp`, the regionsDigest, the sanity verdict, and a
+  history array of previous builds' counts. Absolute floors come from
+  `data/layer-floors.json`, keyed by regionsDigest.
+- Publication: an IMMUTABLE per-build prefix in the R2 bucket `swim.report`, then the
+  single small `layers/current.json` pointer overwritten LAST, so a reader can never see a
+  torn set. Served publicly at `https://map.swim.report`. Written with the preinstalled AWS
+  CLI over the S3 API using repo secrets `CLOUDFLARE_R2_ACCESS_KEY` /
+  `CLOUDFLARE_R2_SECRET_ACCESS_KEY`; path-style addressing is MANDATORY (the bucket name
+  contains a dot and the wildcard cert covers one label).
+- Failure posture: NOT delete-bearing. A failed or sanity-refused build simply leaves the
+  previous good layer set live, which is delete-SAFE because an older extract is
+  over-inclusive — it can only fail to discover a new beach, never invent a stale one.
+- `osmium-tool` and GDAL are workflow shell dependencies ONLY: never a dependency of the
+  Deno batch, of the Worker, or of the tests.
+
+The batch's flag surface (parsed in parseArgs, whose `discovery` field defaults to true):
+- `--layers <dir>` — the verified local layer set written by `scripts/fetch-layers.js`.
+  REQUIRED for discovery and for classification; a marine-only run does not need it.
+- `--report <path>` — the fetch report; defaults to `<layers>/report.json`.
+- `--no-classify` — skip the classification join.
+- `--no-discovery` — skip discovery, reconciliation and deletes.
+- `--marine-zones <path>` — the offline marine_zone pass, which either mode may carry.
+- `--snapshot <path>`, `--out <path>` — the D1 snapshot in, the SQL delta out.
+The nothingToDo(args) guard errors only when discovery, classify, AND the marine pass are
+ALL off. Discovery and classification now run in the SAME pass over the SAME layer set,
+which is the point of the migration: a beach is classified in the run that discovers it.
+
+DELETED with the Overpass transport, and deliberately not re-created anywhere:
+`backoffDelayMs`, `shouldFastDefer`, `fetchTileWithRetry`, `tileBbox`, `dedupByOsm`,
+`TILE_MAX_SPAN_DEG`, `TILE_OVERLAP_DEG`, and the six `OVERPASS_*` pacing / outage
+constants (`OVERPASS_URL`, `OVERPASS_MIRRORS`, `OVERPASS_MIRROR_TIMEOUT_MS`,
+`OVERPASS_NAMED_TIMEOUT_MS`, `OVERPASS_TILE_ATTEMPTS`,
+`OVERPASS_DISCOVERY_MAX_FAILED_TILES`, `OVERPASS_DISCOVERY_BUDGET_MS`). They existed to
+manage a public mirror's failure modes; there is no mirror. `budgetExhausted` SURVIVES —
+it is a pure wall-clock predicate with other callers. `pondWaterSeeds` SURVIVES in
+`src/osmSelect.js`. The two reconciliation constants were RENAMED, not removed:
+`OVERPASS_RECONCILE_MAX_DELETES` -> `RECONCILE_MAX_DELETES` and
+`OVERPASS_RECONCILE_MAX_DELETE_FRACTION` -> `RECONCILE_MAX_DELETE_FRACTION`, because the
+failure class they guard changed rather than disappeared: they used to guard a truncated
+upstream response, and now guard a valid-looking BAD LAYER SET (a clip-mask bug, a
+short parks layer, a zeroed region) — a failure that is quieter than a 504 and needs a
+tighter number, which is why the fraction moved with the rename (see step 6).
 
 Offline marine_zone pass (`--marine-zones <path>`, discovery.yml) — replaces the retired
 in-Worker runMarineEnrichment cron (up to ~1,360 live api.weather.gov probes/day) with
@@ -2804,99 +2942,73 @@ reconciliationAllowed or the delete path — it only ever appends change-only UP
     AND (marine_zone IS NULL OR marine_zone <> '<zone>');`
 - sync_meta stamps: `last_marine_zone_pass` (nowIso) and `last_marine_zone_count`
   (updates emitted this run).
-- discovery.yml snapshot columns are exactly `id, name, lat, lon, park_name, nws_zone,
-  marine_zone` — the union of what `reconcileStaleRows` (id, name, lat, lon, park_name)
-  and `marineZoneSql` (id, lat, lon, nws_zone, marine_zone) read, and nothing else. It
-  does NOT select `osm_id` / `water_class` / `water_class_version` /
-  `water_class_attempts`: those are read only by `buildClassifyQueue`, gated behind
-  `if (args.classify)` and therefore unreachable on this hardcoded `--no-classify` run.
-  This matters on the delete rail — the snapshot step aborts the ONLY delete-bearing run
-  if D1's `--json` response truncates, and the trimmed list is ~35-40% smaller.
-  classify.yml's snapshot SELECT is a DIFFERENT, wider set (`id, osm_id, name, lat, lon,
-  park_name, water_class, water_class_version, water_class_attempts`) and is unchanged —
-  the asymmetry is deliberate, do not sync them.
+- There is now ONE merged snapshot, because discovery and classification run in the same
+  pass. discovery.yml selects exactly the ELEVEN columns the run reads and nothing else:
+  `id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class,
+  water_class_version, water_class_attempts` — the union of what `reconcileStaleRows`
+  (id, name, lat, lon, park_name), `marineZoneSql` (id, lat, lon, nws_zone, marine_zone)
+  and `buildClassifyQueue` (id, osm_id, water_class, water_class_version,
+  water_class_attempts) read. The old deliberate asymmetry between discovery.yml's
+  seven-column SELECT and classify.yml's wider one is GONE with classify.yml; do not
+  re-introduce a second snapshot. This matters on the delete rail: the snapshot step
+  aborts the ONLY delete-bearing run if D1's `--json` response truncates, and the column
+  set just widened from 7 to 11 — a paginated snapshot is a recorded prerequisite for the
+  North America expansion (TODO.md).
 
-Locally, `npm run seed` runs the batch against local D1 in discovery-only mode
-(`deno run ... scripts/discovery-batch.js --out ./.seed.sql --no-classify` then
-`node scripts/apply-local-sql.js ./.seed.sql`; `npm run seed:classify` runs the
-batch WITH classification). apply-local-sql.js splits the delta into <90 KB
-line-aligned chunks (one statement per line, so a split can never tear a
-statement) and applies each with its own `wrangler d1 execute --local --file`
-call, because wrangler's LOCAL apply passes the whole file to miniflare/workerd
-as one SQL call capped at 100,000 bytes (`SQLITE_TOOBIG`); the workflows'
-`--remote` apply (D1 import API, server-side ingestion) has no such cap and
-keeps its single-file apply. The description below remains the authoritative
-contract for that batch.
+Locally, `npm run seed:layers` fetches and verifies the layer set into `./.layers`, then
+`npm run seed` runs the batch against local D1 over it (`deno run --allow-read
+--allow-write scripts/discovery-batch.js --layers ./.layers --out ./.seed.sql` then
+`node scripts/apply-local-sql.js ./.seed.sql`) — note the absent `--allow-net`.
+Classification is no longer opt-in and the old `npm run seed:classify` is DELETED: a local
+join is cheap enough that there is nothing to opt out of. apply-local-sql.js splits the
+delta into <90 KB line-aligned chunks (one statement per line, so a split can never tear a
+statement) and applies each with its own `wrangler d1 execute --local --file` call, because
+wrangler's LOCAL apply passes the whole file to miniflare/workerd as one SQL call capped at
+100,000 bytes (`SQLITE_TOOBIG`); the workflow's `--remote` apply (D1 import API, server-side
+ingestion) has no such cap and keeps its single-file apply. The description below remains
+the authoritative contract for that batch.
 
 Discovery region — the Great Lakes shoreline, defined as the curated coastal boxes in
-REGIONS (src/regions.js, section 5). The batch tiles every REGIONS bbox at
-TILE_MAX_SPAN_DEG = 2.0 deg (tileBbox) and runs each tile as a separate Overpass query.
-Wherever a step below refers to "the region", read it as the union of the tiled REGIONS
-boxes rather than one rectangle.
+REGIONS (src/regions.js, section 5). REGIONS now feeds exactly three things: the layer
+build's `-spat` clip mask, the per-region sanity floors and delete rail, and
+pointInAnyRegion delete scoping. There is NO tiling and no per-box query cost — the batch
+does ONE local scan of a fixed layer set — so box SIZE and COUNT are free. Wherever a step
+below refers to "the region", read it as the union of the REGIONS boxes.
 
 Nationwide scale-out (adding Pacific / Gulf / Atlantic coasts) is purely ADDITIVE — append
-boxes to REGIONS (section 5) — and is explicitly a TODO.md item; do NOT attempt it now.
+boxes to REGIONS (section 5) — and the per-tile query cost that used to dominate its
+estimate is GONE, so the discovery half is now cheap. It is still explicitly a TODO.md item
+and you should NOT attempt it now: the remaining blockers are the Worker-side
+MAX_BEACHES_PER_RUN cap and the size-capped single-shot D1 `--json` snapshot, both of which
+are recorded there.
 
-runDiscovery() takes NO arguments (the per-attempt retry delay is computed per attempt, see
-below).
+runDiscovery(layers, report) is a LOCAL SCAN. There is no retry, no backoff, no per-tile
+budget and no circuit breaker, because there is no upstream to be flaky:
 
-    export function backoffDelayMs(retry, baseMs, maxMs, rand)
-      // Pure (rand injectable — defaults to Math.random — so tests are
-      // deterministic). Exponential backoff for the per-tile retry: baseMs *
-      // 2^(retry-1), capped at maxMs, with +/-20% jitter. This is the sleep the
-      // tile retry waits between attempts.
+1. Read the ten layer files with `scripts/lib/fgbReader.js` (streaming for the
+   multi-million-vertex layers), verify the manifest through `src/layerManifest.js`, and
+   fold `regionsDigestMatches` and `sourceAgeDays` into the report BEFORE calling the
+   gates. Those two fields are deliberately absent from the fetch report and computed here,
+   because they are facts about THIS code and THIS clock; `reconciliationAllowed` is
+   fail-CLOSED on missing fields, so dropping the fold refuses deletes, which is the safe
+   direction.
+   - A `fatal` tier exits 1 with NO SQL at all.
+   - An `incomplete` tier suppresses BOTH deletes and classification: a partial view of OSM
+     must never read as "gone from OSM", and must never be allowed to decide `inland`,
+     which HIDES beaches.
+   - A `scope_or_stale` tier suppresses deletes only; upserts and classification still run.
+   Unlike the retired 66-way tile conjunction — whose joint success probability decayed as
+   p^(2n) and was simply false in production — every conjunct here is a locally-checkable
+   fact about bytes on disk, so the gate does not decay as the region set grows.
+2. `discoverFromLayers({ beaches, parksPoly, parksName, coastline, water })`
+   (src/layerDiscovery.js, section 5) produces the named + park-associated beach records.
+   Every layer array is sorted by `sortLayerFeatures` FIRST (FlatGeobuf's Hilbert order
+   reshuffles on every rebuild and both the park tie-break and the merge dedupe resolve by
+   first seen), and beach features are scoped by `pointInAnyRegion` BEFORE anything else
+   reads them, so the UPSERT universe and the DELETE-CANDIDATE universe are the same set.
+   `parksLayerHealthy(report)` supplies `hasPark`; when it is false the upsert drops to the
+   five-column variant and leaves `park_name` untouched.
 
-    export function budgetExhausted(startMs, budgetMs, nowMs)
-      // Pure wall-clock predicate (shared with the classify loop): budgetMs <= 0
-      // disables it; otherwise true once (nowMs - startMs) >= budgetMs. The named
-      // + park loops reuse it with OVERPASS_DISCOVERY_BUDGET_MS as the backstop.
-
-    export function shouldFastDefer(okCount, failedCount, maxFailed)
-      // Pure early total-outage circuit breaker for the best-effort named loop:
-      // okCount === 0 && failedCount >= maxFailed. True only while ZERO tiles have
-      // succeeded and maxFailed (OVERPASS_DISCOVERY_MAX_FAILED_TILES = 3) have
-      // failed; any single success disarms it permanently.
-
-1. namedRows = the concatenation of await fetchBeaches(tile) over every tile (the flat
-   tiled-REGIONS list). Each tile is fetched via fetchTileWithRetry(fetchFn, tile, label),
-   which retries up to OVERPASS_TILE_ATTEMPTS = 3 times on null, sleeping
-   backoffDelayMs(retry, ...) between attempts (exported sleep(ms) helper wrapping
-   setTimeout in a Promise). UPSERTS ARE DECOUPLED FROM RECONCILIATION, and the named loop
-   is BEST-EFFORT: a tile still null after its last attempt does NOT abort the run — the
-   loop increments namedTilesFailed, logs the degrade, and CONTINUES to salvage every tile
-   that DID fetch (tracking namedTilesOk), regardless of WHICH tile failed. After the loop
-   namedComplete = (namedTilesOk === tiles.length): any failed, skipped, or budget-stopped
-   tile makes it false. The run emits UPSERTS for the fetched tiles (idempotent
-   INSERT ... ON CONFLICT — a beach in an un-fetched tile simply is not upserted and keeps
-   its row) while SKIPPING reconciliation (step 6 gate) whenever namedComplete is false.
-   Best-effort (rather than break-early) is deliberate: the motivating outage was "32 of 33
-   tiles succeeded" and the observed failure mode is contiguous multi-minute 504 bursts, so
-   a break-early prefix would lose every tile after the burst even once it clears. THREE
-   TOTAL-OUTAGE GUARDS keep a hopeless run cheap: (1) the pure exported predicate
-   shouldFastDefer(okCount, failedCount, maxFailed) => okCount === 0 && failedCount >=
-   maxFailed — an early circuit breaker throwing (no SQL) after
-   OVERPASS_DISCOVERY_MAX_FAILED_TILES = 3 failures while ZERO tiles have succeeded (~4-5
-   min; once any tile succeeds it disarms and the run commits to best-effort); (2) a
-   post-loop namedTilesOk === 0 defer (throws if the loop ended with nothing fetched, e.g.
-   the budget elapsed at zero); (3) OVERPASS_DISCOVERY_BUDGET_MS = 5400000 (90 min, under
-   discovery.yml's 120-min job timeout) — a wall-clock backstop reusing the pure
-   budgetExhausted(startMs, budgetMs, nowMs) helper that breaks the loop at the deadline,
-   leaving coverage incomplete (upserts-only). The null contract is unchanged — an exhausted
-   tile is still null. runDiscovery returns { namedRows, namedComplete, parkBeaches }.
-2. parkBeaches = the concatenation of await fetchParkBeaches(tile) over every tile — fetched
-   ONLY when the named pass completed (namedComplete), since reconciliation (the sole park
-   consumer) is already off under partial named coverage and probing park tiles during an
-   outage is wasted Overpass load; on partial named coverage parkBeaches stays null. Each
-   tile is fetched through the same fetchTileWithRetry (up to OVERPASS_TILE_ATTEMPTS
-   attempts with backoffDelayMs), and the same OVERPASS_DISCOVERY_BUDGET_MS wall-clock
-   backstop (shared startMs) bounds this loop too. If any tile is still null after its last
-   attempt, or the budget elapses, log and DEGRADE: continue with named rows only and leave
-   every existing park_name untouched (so the delete path in step 6 never runs against a
-   region whose park query partly failed).
-   Within a tile the two Overpass queries are strictly sequential — the
-   fetchParkBeaches pass only begins after fetchBeaches has fully resolved — and tiles run
-   one at a time with a polite inter-tile gap, since overpass-api.de allows only 2 slots
-   per IP and 429s beyond that.
 3. mergeBeachRows(namedRows, parkBeaches) — pure; lives in src/discovery.js and is
    imported DIRECTLY by scripts/discovery-batch.js and test/parkContainment.test.js.
    src/index.js no longer imports or re-exports it, so the Worker bundle no longer
@@ -2910,7 +3022,7 @@ below).
      display name (id/name derivation unchanged so existing KV flags stay keyed);
    - each ADDITIONAL unnamed beach in the same park is kept only when
      deriveUnnamedSuffix(beach, primary) yields a distinct, human-meaningful label —
-     (a) beach.locality (the loc_name tag from the Overpass client), else (b) a
+     (a) beach.locality (the loc_name tag from the beaches layer), else (b) a
      compass direction relative to the primary when they are at least
      COMPASS_MIN_SEPARATION_KM (0.2) km apart; that row's display name AND park_name
      both become "<Park> — <suffix>". A beach with no derivable distinction, or one
@@ -2924,43 +3036,72 @@ below).
      INSERT INTO beaches (id, name, lat, lon, osm_id, park_name)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
      ON CONFLICT(id) DO UPDATE SET name = ?2, lat = ?3, lon = ?4, park_name = ?6;
-   (nws_zone / nws_grid_url intentionally untouched on conflict.) When step 2
-   failed OR was skipped (partial named coverage), use the legacy statement WITHOUT
-   park_name so stale associations survive an Overpass outage. Upserts emit for ANY
-   subset of tiles fetched — they are additive/idempotent and safe under partial
-   coverage (unlike the DELETEs in step 6).
-5. Write sync_meta rows last_overpass_sync (nowIso), last_overpass_count (this run's
-   produced-row count, which a partial run undercounts), and last_overpass_complete
-   ("true"/"false" = reconciliationAllowed(namedComplete, parkComplete)) so an operator
-   never reads a partial run's smaller count as a table shrink.
-6. Stale park-beach reconciliation — THE ONLY DELETE PATH — runs ONLY under
-   PROVABLY-COMPLETE coverage, enforced by the single pure gate
-   reconciliationAllowed(namedComplete, parkComplete) (both must be true: EVERY named tile
-   AND EVERY park tile fetched this run), AND a snapshot to diff against, AND this run
-   produced >= 1 park-containment row (a row with r.name === r.parkName). Partial named
-   coverage sets namedComplete=false (and skips park, so parkComplete=false) => the gate is
-   false => UPSERTS ONLY, no deletes. The predicate is exported + unit-tested so the
-   "incomplete coverage => no DELETE" invariant is asserted directly. The upsert never deletes, so when OSM edits make a
-   DIFFERENT unnamed beach the largest in a park the previously-kept row lingers next
-   to the new one. This pass (reconcileStaleRows in scripts/discovery-batch.js) SELECTs
-   existing unnamed-origin park rows (park_name IS NOT NULL AND name = park_name) whose
-   coordinates fall inside ANY REGION — pointInAnyRegion(lat, lon) (src/regions.js), the
-   union of the tiled boxes — and DELETEs any whose id was NOT produced this run. Named
-   beaches (name != park_name) are never candidates. Scoping by pointInAnyRegion fails
-   SAFE: shrinking or removing a box only REMOVES rows from the delete-candidate set (an
-   out-of-region row is left alone, never deleted), so an editing mistake under-deletes
-   rather than mass-deleting enriched rows. A proportional safety rail refuses the whole
-   deletion when the stale set exceeds max(OVERPASS_RECONCILE_MAX_DELETES = 10,
-   ceil(OVERPASS_RECONCILE_MAX_DELETE_FRACTION = 0.25 * candidates)) — a partial
-   upstream response would otherwise mass-delete enriched rows (defense in depth
-   behind runQuery's remark check, section 5). Each deletion is logged (id, name); the
-   sync-complete summary line gains a deleted_stale=<n> field.
+   (nws_zone / nws_grid_url intentionally untouched on conflict.) When
+   parksLayerHealthy(report) is false, use the legacy statement WITHOUT park_name so
+   stale associations survive an under-populated parks layer. Upserts emit under every
+   non-fatal manifest tier — they are additive/idempotent and safe when the DELETEs in
+   step 6 are gated off.
+5. Write sync_meta rows last_discovery_sync (nowIso), last_discovery_count (this run's
+   produced-row count, which a suppressed run undercounts), last_discovery_complete
+   ("true"/"false" = reconciliationAllowed(report)) so an operator never reads a partial
+   run's smaller count as a table shrink, plus last_layer_build_id and
+   last_layer_source_ts, which pin WHICH layer build produced this delta and how old its
+   OSM extract was. The first layers-era delta also emits a ONE-TIME idempotent
+   DELETE of the three superseded rows last_overpass_sync / last_overpass_count /
+   last_overpass_complete.
+6. Stale park-beach reconciliation — THE ONLY DELETE PATH — runs ONLY under a VERIFIED,
+   COMPLETE, IN-SCOPE, FRESH layer set, enforced by the single pure gate
+   reconciliationAllowed(report) (src/layerManifest.js, section 5). That predicate REPLACES
+   reconciliationAllowed(namedComplete, parkComplete) at the same call site and keeps its
+   single-choke-point role, so the exported-and-unit-tested "incomplete coverage => no
+   DELETE" invariant survives with a new input. It additionally requires a snapshot to diff
+   against AND that this run produced >= 1 park-containment row (a row with
+   r.name === r.parkName). The upsert never deletes, so when OSM edits make a DIFFERENT
+   unnamed beach the largest in a park the previously-kept row lingers next to the new one.
+   This pass (reconcileStaleRows in scripts/discovery-batch.js) SELECTs existing
+   unnamed-origin park rows (park_name IS NOT NULL AND name = park_name) whose coordinates
+   fall inside ANY REGION — pointInAnyRegion(lat, lon) (src/regions.js) — and DELETEs any
+   whose id was NOT produced this run. Named beaches (name != park_name) are never
+   candidates. Scoping by pointInAnyRegion fails SAFE: shrinking or removing a box only
+   REMOVES rows from the delete-candidate set (an out-of-region row is left alone, never
+   deleted), so an editing mistake under-deletes rather than mass-deleting enriched rows.
 
-In addition, the batch prunes flag_history (migration 0006) BEFORE the Overpass
-fetches, in its own try/catch (so a pruning failure never costs a discovery run):
+   TWO proportional rails then apply, and each refuses the WHOLE reconciliation rather
+   than deleting a suspicious subset:
+   - GLOBAL: at most max(RECONCILE_MAX_DELETES = 10,
+     ceil(RECONCILE_MAX_DELETE_FRACTION = 0.05 * candidates)) stale rows.
+     THE FRACTION IS 0.05, NOT THE OLD 0.25. 0.25 was calibrated for a per-tile transport
+     where partial coverage was normal and a large legitimate delete set was plausible.
+     Under prebuilt layers coverage is either verified-complete or gated off entirely, so a
+     25%-of-candidates run is never legitimate — and against the measured production table
+     (1669 rows, 982 park-origin candidates) 0.25 permitted 246 silent deletes, ~15% of the
+     table in one run, waving through every regression worth naming: a 9% parks-layer
+     shrink (~88 deletes), a 15% single-region parks loss (~45), a clip-mask bug that
+     zeroes Lake Ontario (80). At 0.05 the global allowance is ~50 and all three refuse.
+     A FALSE refusal costs almost nothing — the row is simply not deleted and
+     reconciliation retries tomorrow — which is what makes the tight number the right trade.
+   - PER-REGION, applied after the global rail: each REGIONS box gets
+     max(REGION_RECONCILE_MIN_DELETES = 2,
+     ceil(REGION_RECONCILE_MAX_DELETE_FRACTION = 0.05 * that region's candidates)), and any
+     single region over its allowance refuses the whole run. The global rail's protection
+     asymptotes toward zero as the number of independently breakable clip masks grows: a
+     bug that zeroes ONE region's parks is a small fraction of the global candidate set and
+     passes. The FLOOR IS 2, NOT 10, because the region tail is tiny — Niagara has 5
+     park-origin candidates and St. Marys 6 — so a floor of 10 would make the rail VACUOUS
+     for exactly the three regions a global rail can never protect. Regions are walked in
+     REGIONS order so the reported offender is deterministic.
+   Each deletion is logged (id, name); the sync-complete summary line gains a
+   deleted_stale=<n> field alongside the per-region tallies.
+
+In addition, the batch prunes flag_history (migration 0006) in its own try/catch (so a pruning failure never costs a discovery run):
 DELETE FROM flag_history WHERE observed_at < nowIso - FLAG_HISTORY_RETENTION_DAYS
 (90 days). Without this the calibration table grows unbounded (~1M rows/year in
 season).
+
+If North America-scale delta generation ever reintroduces incremental flushing of the
+delta file, the always()-gated Upload+Apply + truncate-the-torn-tail belt that used to
+live in classify.yml MOVES to discovery.yml rather than being re-invented from scratch.
+It is not needed today: one local scan produces one delta in one shot.
 
 The batch is discovery + classification ONLY — NWS/ECCC point enrichment and webcam
 hydration run on their own in-Worker cron triggers below, so a failed discovery run never
@@ -3065,58 +3206,98 @@ Summary log reports due / webcams_checked / webcams_found / webcam_failures. The
 player URL is only ever dereferenced by the visitor's BROWSER on the detail page — never
 by the request path.
 
-### Water classification (offline batch classify-only mode)
+### Water classification (local layer join, offline batch)
 
-Owned by the offline batch's CLASSIFY-ONLY mode — its own GitHub Actions workflow
-(`.github/workflows/classify.yml`, hourly "23 * * * *", concurrency group
-`classify`, run with `--no-discovery --classify-limit N`) so per-beach Overpass probing
-never delays the daily discovery upserts. This mode does NO tiling, NO upserts, NO
-reconciliation, and NO deletes — it emits ONLY the water_class UPDATEs below. The
-classification decision + allowlist live in src/waterClass.js. Constants:
-WATER_CLASS_MAX_ATTEMPTS = 5 (from src/waterClass.js). The per-pass row count is set by
-`--classify-limit N` (scheduled classify.yml runs pass 25 — short hourly bursts,
-~600/day; manual runs default to 150) — per-beach Overpass probing is rate-limited on
-the public endpoint, but the pass stays sequential and polite; the steady-state pass
-drains the trickle of newly-discovered rows plus any WATER_CLASS_VERSION re-drain (a
-drained-queue run emits zero UPDATEs and applies as a no-op).
+Owned by the offline batch, and it runs in the SAME pass that discovers the beach. There
+is no separate classification workflow, no hourly cadence and no rationing: the classify
+half is a LOCAL SPATIAL JOIN over the same verified layer set discovery just scanned, so
+`--classify-limit`, `--classify-delay-ms`, the 2-slots-per-IP pacing constraint and the
+~1/3-flake attempts semantics are all gone with the transport that needed them. The
+classify-only MODE survives as a flag (`--no-discovery`), because a re-drain without a
+fresh discovery pass is still a useful operation. `--no-classify` skips the join.
+
+The classification decision + allowlist live in src/waterClass.js
+(WATER_CLASS_VERSION = 2, WATER_CLASS_MAX_ATTEMPTS = 5). The SIGNAL PROVIDER is
+`waterClassSignals` in src/layerSignals.js, passed to classifyQueue as
+`opts.fetchSignals` at exactly the seam `fetchWaterClassSignals` occupied, with the SAME
+signature and the SAME null contract — which is why classifyQueue's body did not change.
+
+THE SIGNALS SEAM CONTRACT (verbatim, and load-bearing):
+- The provider returns EXACTLY { coastlinePresent: boolean, nearbyLakeQids: string[],
+  nearbyWayWater: boolean }, or null.
+- null means TRANSIENT: do NOT bump water_class_attempts, leave the row queued.
+- A signals object — INCLUDING the all-empty one — is a CLEAN, COMPLETE answer that
+  classifyWaterBody DECIDES on, and all-empty decides `inland`.
+- THE PROVIDER MUST RETURN null, NEVER EMPTY SIGNALS, ON INCOMPLETENESS. Empty signals
+  on an unreadable index or a beach missing from the layer set would publish `inland` —
+  i.e. HIDE the beach — on the strength of a data bug. src/layerSignals.js returns null in
+  exactly three cases: an unqueryable/half-built index, an unparseable osm_id, and no
+  beaches feature indexed under that id.
+- `beachAbsentFromLayers(index, beach)` separates the one failure mode Overpass never had
+  (the element is simply not in the layer set) from a data bug, so it is reported as its
+  own absent_from_layers= counter instead of being folded into the null.
+
+CLASSIFICATION IS GATED THE SAME WAY DELETES ARE. It runs only when
+`classificationAllowed(report)` (src/layerManifest.js) is true — a `fatal` or `incomplete`
+manifest tier suppresses it entirely. A `scope_or_stale` set still classifies (a stale or
+out-of-delete-scope set is still a COMPLETE view of OSM). The reason classification needs a
+gate at all is symmetric with deletes: deciding `inland` HIDES a beach, and product loss by
+hiding is the same family as product loss by deleting.
+
+A CLASSIFICATION FLIP RAIL sits on top (classificationFlipRailAllows in
+scripts/discovery-batch.js, CLASSIFY_MAX_HIDE_FLIPS = 10, CLASSIFY_MAX_HIDE_FRACTION =
+0.10). There were four rails on deletes and none at all on mass re-classification, while
+100% of the flag-worthy rows served today classify through a single code path: one broken
+build plus a WATER_CLASS_VERSION bump would re-decide all of them in one delta and empty
+the site, with the row count unchanged and every delete rail green. When the number of
+flag-worthy -> hidden flips exceeds max(10, ceil(0.10 * flag-worthy rows)), the WHOLE
+water_class block is refused rather than partially applied. The run logs the full
+before/after transition matrix either way.
+
+The queue, the version/attempts gate and the legacy re-drain marker are UNCHANGED:
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
-water_class_attempts ASC, RANDOM() LIMIT <--classify-limit N> (fresh-first then random;
-re-drain on a version bump; skip parked), UNION the LEGACY RE-DRAIN set: rows left
-unclassified AT/ABOVE the cap by the pre-decisive classifier, identified by
-water_class_version IS NULL AND water_class IS NULL AND water_class_attempts >= 5. A row
-that ever reached a decision carries a stamped version, so the marker matches only
-pre-change parks; their attempts are deliberately NOT reset, because at the cap they stay
-hidden by FLAG_WORTHY_WATER_SQL and so re-decide quietly instead of ~409 confirmed-inland
-beaches all reappearing on the live site while they drain. Attempts-ASC ordering puts
-them BEHIND fresh rows (the ones visible under the fail-open), and the set drains to
-empty and cannot refill — the decisive classifier never returns null for a complete
-probe, so nothing bumps attempts to the cap again. Per beach SEQUENTIALLY (never overlap
-Overpass calls — respects the 2-slot/IP limit): signals = fetchWaterClassSignals(beach);
+water_class_attempts ASC, RANDOM() LIMIT <--classify-limit N, unbounded by default>
+(fresh-first then random; re-drain on a version bump; skip parked), UNION the LEGACY
+RE-DRAIN set: rows left unclassified AT/ABOVE the cap by the pre-decisive classifier,
+identified by water_class_version IS NULL AND water_class IS NULL AND
+water_class_attempts >= 5. A row that ever reached a decision carries a stamped version,
+so the marker matches only pre-change parks; their attempts are deliberately NOT reset,
+because at the cap they stay hidden by FLAG_WORTHY_WATER_SQL and so re-decide quietly
+instead of ~409 confirmed-inland beaches all reappearing on the live site while they
+drain. Attempts-ASC ordering puts them BEHIND fresh rows (the ones visible under the
+fail-open), and the set drains to empty and cannot refill — the decisive classifier never
+returns null for a complete answer, so nothing bumps attempts to the cap again. Per beach:
+signals = waterClassSignals(index, beach);
 - signals === null (TRANSIENT) → log, continue, NO bump (row stays queued);
 - cls = classifyWaterBody(signals); cls !== null → UPDATE beaches SET water_class = ?,
   water_class_version = ?, water_class_attempts = 0 WHERE id = ? (reset attempts on a
   decision so a later version re-drain has a fresh budget);
-- cls === null → bumpWaterClassAttempts (self-isolating, like bumpAttempts). Now
-  DEFENSIVE ONLY: a complete probe always decides, so this branch is unreachable from
-  classifyQueue and `bumped` should read 0 in every run log. A nonzero bumped means the
-  classifier regressed to a pending state.
-The whole attempts semantics: never bump on the ~1/3 Overpass flake rate. Summary log
-reports attempted / classified / ocean / great_lake / inland (with a no_water=N subset
-count — the rows decided by the clean-but-empty branch rather than a real adjacent water
-way, which is the ONLY way to distinguish "confirmed on an inland lake" from "nothing
-mapped within the probe radii" and what made the old parked pool undiagnosable) / bumped /
-parked (water_class IS NULL AND attempts >= 5) / hidden_inland (water_class = 'inland') —
-a NULL-hide with no metric is silent product loss, so these counts are the required
-visibility. RULES_VERSION is UNAFFECTED by classification (water_class has its own
+- cls === null → bumpWaterClassAttempts (self-isolating, like bumpAttempts). DEFENSIVE
+  ONLY: a complete answer always decides, so this branch is unreachable from classifyQueue
+  and `bumped` should read 0 in every run log. A nonzero bumped means the classifier
+  regressed to a pending state, or the layer set is missing beaches (which is reported
+  separately as absent_from_layers).
+water_class_attempts is therefore fully VESTIGIAL and retained only for rows parked before
+this migration; the column can be retired once those are confirmed drained (TODO.md).
+
+Summary log reports attempted / classified / ocean / great_lake / inland (with a no_water=N
+subset count — the rows decided by the clean-but-empty branch rather than a real adjacent
+water way, which is the ONLY way to distinguish "confirmed on an inland lake" from "nothing
+mapped within the probe radii" and what made the old parked pool undiagnosable) / bumped
+(with an absent_from_layers=N subset) / parked (water_class IS NULL AND attempts >= 5) /
+hidden_inland (water_class = 'inland') — a NULL-hide with no metric is silent product loss,
+so these counts are the required visibility, and that argument is unaffected by the change
+of transport. RULES_VERSION is UNAFFECTED by classification (water_class has its own
 WATER_CLASS_VERSION).
 
-No in-line classification runs during discovery: the two modes are separate (see the
-offline-pipeline note above), so DISCOVERY-ONLY emits zero water_class UPDATEs and newly
-discovered rows are picked up by the next classify-only workflow run (hourly). This keeps
-discovery-only's SQL delta purely upserts + reconciliation + the flag_history prune +
-sync_meta, so the delete-safety invariant is confined to the one mode that can delete.
+Classification runs IN-LINE with discovery, which is the substantive product change here:
+a beach is classified in the run that discovers it, so the FLAG_WORTHY_WATER_SQL fail-open
+window is ZERO rather than up to an hour, and a WATER_CLASS_VERSION bump re-drains the
+whole table in ONE run (seconds of local CPU) instead of weeks of 25-beach hourly drips.
+The delete-safety invariant is unaffected: reconciliation is gated by its own predicate,
+and a classify-only run (`--no-discovery`) still emits zero upserts and zero deletes.
 
 Discovery-upsert centroid-move reset: the discovery ON CONFLICT(id) DO UPDATE (both
 the park and named-only branches) NULLs water_class / water_class_version and zeroes
@@ -3133,7 +3314,9 @@ shared clause, FLAG_WORTHY_WATER_SQL (src/waterClass.js): "(water_class IN
 confirmed keepers PLUS still-pending unclassified rows and hides confirmed inland +
 parked-unresolved. During backfill a still-pending NULL row stays visible so the live
 site is never blanked; post-backfill no pending NULLs remain and the clause collapses to
-the pure "water_class IN ('ocean','great_lake')" state with no second code change. Applied
+the pure "water_class IN ('ocean','great_lake')" state with no second code change. The
+fail-open NULL window is now bounded by a SINGLE batch run rather than a classify cycle,
+because classification happens in the run that discovers the beach. Applied
 at: buildHomeStatement (home list, both branches + ?q=), handleBeachesGeojson (map directory),
 runFlagRecompute, runWaveRefresh, runNwsEnrichment, runEcccEnrichment, runWebcamSync
 (AND-ed into each SELECT); handleDetail and handleApiFlag use the JS mirror
@@ -3789,10 +3972,32 @@ legacy defaults).
 - test/srfParser.test.js — parseRipCurrentRisk cases 1-9 (HIGH/MODERATE/LOW, lowercase prose,
   "high risk of rip currents", first-occurrence-wins, no-mention→null, "LOW TO MODERATE"→LOW,
   null/""→null) and wfoFromGridUrl (case 10). Fixtures built with + and "\n" (no backticks).
-- test/parkContainment.test.js — parseParkBeachElements (beach/park split, coords, skips,
-  dual-tagging); associateParkForBeach (smallest overlapping bbox, overlap not containment,
-  null on none); mergeBeachRows (parkName attach, largest-unnamed-per-park, parkKey distinctness,
-  id/osm_id derivation); rendering (park-name-first title/subtitle, data-name search).
+- test/parkContainment.test.js — mergeBeachRows (parkName attach, largest-unnamed-per-park,
+  parkKey distinctness, id/osm_id derivation, a named park beach missed by the named pass,
+  the compass-separation threshold boundary); rendering (park-name-first title/subtitle,
+  data-name search). The selection primitives it used to cover moved to
+  test/osmSelect.test.js with the code.
+- The FlatGeobuf layer pipeline's nine test files, all fixture-in-memory (no committed
+  binaries, no GDAL on anyone's machine, no pretest step) and modelled structurally on
+  test/buildMarineZones.test.js:
+  test/osmSelect.test.js (the pure selection semantics: tag predicates, park association
+  and its equal-area tie, the pond filter, sortLayerFeatures' total order, probeVertices,
+  the record builders);
+  test/layerGrid.test.js (both grid modes, including the segment grid's within-R-metres
+  answers and its typed-array stats);
+  test/fgbReader.test.js (round-trips plus EXACT throw messages on truncated bytes, a null
+  geometry, a missing required property and an empty layer — a reader that half-parses is
+  how a layer gets silently zeroed);
+  test/layerManifest.test.js (the three failure tiers, every conjunct, fail-CLOSED on null
+  / malformed / missing fields, parksLayerHealthy's floors and ratio, regionsDigestInput);
+  test/layerDiscovery.test.js (classifyLayerFeature, park containment with holes,
+  poolPondWaters, discoverFromLayers' region scoping);
+  test/layerSignals.test.js (the seam: exactly three keys, the null contract in all three
+  cases, beachAbsentFromLayers, the three radii);
+  test/fetchLayers.test.js (pointer pinning, the EXPECTED_LAYER_KEYS download list,
+  checksum refusal, the report fields it does and does not compute);
+  test/clipLayers.test.js and test/buildManifest.test.js (the build-side clip and manifest
+  assembly, including the sanity floors and the history array).
 - test/officialSources.test.js — parseSouthHavenCsv (green/yellow/red, gray omission,
   most-severe rollup, piers ignored, unknown/HTML/empty→null, all-gray→[]); extractSouthHavenCsvUrl;
   southHaven.matches; findScraper; resolveSiteForBeach / scrapeOfficialFlagFromResult

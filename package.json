@@ -7,18 +7,19 @@
   "scripts": {
     "predev": "wrangler d1 migrations apply swim-report --local",
     "dev": "wrangler dev",
-    "seed": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js --out ./.seed.sql --no-classify && node scripts/apply-local-sql.js ./.seed.sql",
+    "seed:layers": "DENO_NO_PACKAGE_JSON=1 deno run --allow-net --allow-read --allow-write scripts/fetch-layers.js --dest ./.layers",
+    "seed": "DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write scripts/discovery-batch.js --layers ./.layers --out ./.seed.sql && node scripts/apply-local-sql.js ./.seed.sql",
     "seed:enrich": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*\"",
     "seed:eccc": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*\"",
-    "seed:marine": "wrangler d1 execute swim-report --local --json --command \"SELECT id, lat, lon, nws_zone, marine_zone FROM beaches\" > .marine-snapshot.json && deno run --allow-read --allow-write scripts/discovery-batch.js --no-discovery --no-classify --marine-zones data/marine-zones-greatlakes.json --snapshot .marine-snapshot.json --out .marine.sql && node scripts/apply-local-sql.js .marine.sql",
+    "seed:marine": "wrangler d1 execute swim-report --local --json --command \"SELECT id, lat, lon, nws_zone, marine_zone FROM beaches\" > .marine-snapshot.json && DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write scripts/discovery-batch.js --no-discovery --no-classify --marine-zones data/marine-zones-greatlakes.json --snapshot .marine-snapshot.json --out .marine.sql && node scripts/apply-local-sql.js .marine.sql",
     "seed:webcams": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*\"",
     "seed:waves": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*\"",
     "seed:flags": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=7+*+*+*+*\"",
-    "seed:classify": "deno run --allow-net --allow-read --allow-write scripts/discovery-batch.js --out ./.seed.sql && node scripts/apply-local-sql.js ./.seed.sql",
     "deploy": "wrangler deploy",
     "test": "vitest run"
   },
   "devDependencies": {
+    "flatgeobuf": "^4.4.0",
     "vitest": "^4.1.11",
     "wrangler": "^4.126.0"
   },

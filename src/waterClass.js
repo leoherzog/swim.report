@@ -4,29 +4,58 @@
 // const/let, string concatenation only (no template literals).
 //
 // Beach flags exist only for oceans and the Great Lakes. This module decides,
-// from three independent OSM signals gathered by src/clients/overpass.js,
+// from three independent OSM signals gathered by src/layerSignals.js,
 // whether a beach's adjacent water body is flag-worthy (ocean / great_lake) or
 // inland. The classification is stored on the beach row (migration 0009) and
 // gates every consumer down to flag-worthy water.
-
-// Bump when the allowlist OR the predicate changes IN A WAY THAT COULD CHANGE AN
-// ALREADY-STORED DECISION. Rows with water_class_version < WATER_CLASS_VERSION are
-// re-drained by the classification cron (like RULES_VERSION-stamped KV). This is
-// INDEPENDENT of src/rules.js RULES_VERSION — it governs water-body
-// classification, NOT flag color, so RULES_VERSION does NOT bump for this feature.
 //
-// Deliberately NOT bumped for the clean-but-empty -> 'inland' change in
-// classifyWaterBody below, because that change is confined to the path that
-// previously returned null: every stored 'ocean'/'great_lake'/'inland' decision
-// came from a POSITIVE signal whose branch is untouched, so no stored answer can
-// differ. Bumping would re-probe every already-decided row for a provably
-// identical result (~1240 rows at 25/run = ~50 h of Overpass) AND would still not
-// reach the rows that actually need re-draining: buildClassifyQueue in
+// This module is PROVIDER-AGNOSTIC and did not change when the signal provider
+// did. The signals used to come from a per-beach radius query against a public
+// OSM query API; they now come from a local spatial join against prebuilt
+// FlatGeobuf layers (src/layerSignals.js, same signature, same null contract).
+// The keys, the types and the precedence below are identical either way — which
+// is the whole point of keeping the DECISION in its own pure module.
+
+// Bump when the allowlist, the predicate, OR THE SIGNAL PROVIDER changes IN A WAY
+// THAT COULD CHANGE AN ALREADY-STORED DECISION. Rows with
+// water_class_version < WATER_CLASS_VERSION are re-drained by the classification
+// pass (like RULES_VERSION-stamped KV). This is INDEPENDENT of src/rules.js
+// RULES_VERSION — it governs water-body classification, NOT flag color, so
+// RULES_VERSION does NOT bump for this feature.
+//
+// 1 -> 2: the PROVIDER changed. classifyWaterBody below is byte-identical and the
+// allowlist is untouched, but every signal it is handed is now measured by a local
+// spatial join over FlatGeobuf layers (src/layerSignals.js) instead of a remote
+// per-beach radius query. The two answer the same threshold question and agree on
+// every clear-cut beach, yet they cannot agree on every MARGINAL one: the old
+// probe matched a target way when one of its NODES fell inside the radius, while
+// the local join measures to the target's full SEGMENT geometry, so a sparsely-
+// vertexed coastline or lake ring now registers at distances the node test missed.
+// That is a wider metric in the ocean/great_lake direction (the safe direction —
+// it reveals beaches rather than hiding them), but it is still a different
+// measurement, and a stored decision made by the old provider must be allowed to
+// re-decide under the new one rather than being grandfathered in forever.
+//
+// WHY THIS CONSTANT CAN NOW MOVE FREELY. A bump used to be prohibitively
+// expensive: it re-probed every already-decided row one request at a time against
+// a rate-limited public API, metered at 25 rows per scheduled run — days of
+// scheduled runs for a table this size, which is why the clean-but-empty ->
+// 'inland' change below was deliberately shipped WITHOUT one. Under layers a full
+// re-drain is a local pass over an in-process index: seconds of CPU on the runner,
+// zero upstream requests. The version is now an ordinary correctness tool rather
+// than a last resort. What makes bumping SAFE rather than merely cheap is
+// classificationFlipRailAllows in scripts/discovery-batch.js: a re-drain that
+// would flip flag-worthy rows to inland past its threshold refuses the whole
+// water_class UPDATE block and prints the confusion matrix, so a bump can never
+// quietly empty the site.
+//
+// The one thing a bump still does NOT reach: buildClassifyQueue in
 // scripts/discovery-batch.js ANDs the version clause with
 // attempts < WATER_CLASS_MAX_ATTEMPTS, so rows parked AT the cap are excluded no
 // matter how high the version goes. Those are re-drained by the version-IS-NULL
-// legacy marker there instead.
-export const WATER_CLASS_VERSION = 1;
+// legacy marker there instead. (That trap is empty in production today — no row
+// is unclassified and none is parked — but it is a real edge and it survives.)
+export const WATER_CLASS_VERSION = 2;
 
 // Data-driven allowlist: wikidata QID -> lake name. Editing this table (adding
 // a lake / rescuing a QID split) plus bumping WATER_CLASS_VERSION is the entire
@@ -97,11 +126,12 @@ export function isFlagWorthyWater(beach) {
 //     nearbyWayWater: boolean      // real inland water WAY (>= WATER_MIN_AREA_DEG2) in range
 //   }
 // Returns 'ocean' | 'great_lake' | 'inland'; null ONLY for a missing signals
-// object. A transient upstream failure never reaches here (fetchWaterClassSignals
-// in src/clients/overpass.js returns null before this call), so ANY signals
-// object we are handed is a COMPLETE, non-truncated probe result — the runQuery
-// remark guard rejects partial bodies. That is what makes the all-empty case
-// decidable rather than pending.
+// object. A provider-level failure never reaches here (waterClassSignals in
+// src/layerSignals.js returns null before this call for a beach the layer set
+// cannot answer for), so ANY signals object we are handed is a COMPLETE probe
+// result over a verified layer set — the manifest gate in src/layerManifest.js
+// refuses to classify at all from an incomplete build. That is what makes the
+// all-empty case decidable rather than pending.
 export function classifyWaterBody(signals) {
   if (!signals) {
     return null;
@@ -126,7 +156,10 @@ export function classifyWaterBody(signals) {
   // fail-open for all WATER_CLASS_MAX_ATTEMPTS rounds while the site showed it an
   // estimated flag card. But the probe is DETERMINISTIC: re-running the identical
   // query returns the identical empty answer, so those retries could only ever
-  // reach the same conclusion, 5x the Overpass cost and 5x the exposure window.
+  // reach the same conclusion, at 5x the cost and 5x the exposure window. (Under
+  // layers the cost is now negligible, but the exposure window is not: a row left
+  // pending is a row FLAG_WORTHY_WATER_SQL fails open on and the site serves an
+  // estimated flag card for. Deciding once is still the right answer.)
   // A beach set back from its water (real case: Locklin Pines Beach Park, Oakland
   // County MI — nearest water way ~150 m out and pond-sized, Cross Lake ~300 m)
   // is not flag-worthy, and saying so once is both cheaper and more honest than

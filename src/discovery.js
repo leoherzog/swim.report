@@ -1,4 +1,4 @@
-// Discovery merge logic — the pure, dependency-light half of runOverpassSync.
+// Discovery merge logic — the pure, dependency-light half of the discovery sync.
 //
 // Extracted from src/index.js so BOTH the in-Worker cron (src/index.js) and the
 // offline batch discovery job (scripts/discovery-batch.js, run from GitHub
@@ -7,6 +7,12 @@
 // dependency-free), so it carries no Worker-only baggage and is safe to import
 // from a plain Deno/Node process — the same reuse pattern src/geo.js established
 // for the distance/units math.
+//
+// It is also entirely PROVIDER-AGNOSTIC and survived the FlatGeobuf migration
+// verbatim: it consumes already-parsed beach/park records and never knows where
+// they were sourced. src/layerDiscovery.js now builds those records from the
+// layer set (src/osmSelect.js beachRecord/parkRecord) and hands them to
+// mergeBeachRows exactly as the previous element parser did.
 //
 // Pure: no fetch, no Date, no env. String concatenation with + only (never
 // template literals), const/let only — the project style rules apply here too.
@@ -40,8 +46,8 @@ function compassDirection(fromLat, fromLon, toLat, toLon) {
 // Derive a human-meaningful suffix that distinguishes a secondary unnamed beach
 // from the park's largest ("primary") unnamed beach, in priority order:
 //   (a) a water-body / locality name carried on the beach element's OWN OSM
-//       tags — the optional string beach.locality, populated by the Overpass
-//       client (parseParkBeachElements) from the element's loc_name tag;
+//       tags — the optional string beach.locality, populated by beachRecord in
+//       src/osmSelect.js from the element's loc_name tag;
 //   (b) a compass-direction label relative to the primary beach, but only when
 //       the two are clearly separated (>= COMPASS_MIN_SEPARATION_KM);
 //   (c) null — no meaningful distinction is derivable, so the caller keeps the

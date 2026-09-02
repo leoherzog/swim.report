@@ -28,7 +28,8 @@ Only **ocean and Great Lakes** beaches are shown. Beach flags exist only for tho
 waters, so every beach is classified by its adjacent water body and inland-lake rows
 (Fremont Lake, Clinton Lakes) are hidden — classified and filtered out, never deleted.
 Discovery and water-body classification both run in the offline GitHub Actions batch
-(`scripts/discovery-batch.js`), not in the Worker; see [Discovery and classification
+(`scripts/discovery-batch.js`), not in the Worker, as a local scan over prebuilt
+OpenStreetMap layers; see [Discovery and classification
 (offline)](#discovery-and-classification-offline).
 
 This is a personal weather-data project, not a lifeguard service. It can be wrong. It
@@ -551,67 +552,95 @@ enrichment/wave/flag crons. `npm run seed:marine` is NOT a cron wrapper — it r
 offline `marine_zone` derivation against local D1 (snapshot `SELECT` →
 `discovery-batch.js --marine-zones` → `apply-local-sql.js`), so run it after
 `seed:enrich` has stamped `nws_zone`.
-While `npm run seed` and `npm run seed:classify` run the offline discovery batch
-against the local D1 (see [Discovery and classification
-(offline)](#discovery-and-classification-offline)). The local database
-starts empty — run
-`npm run seed` once after a fresh checkout (it queries the live Overpass API and takes
-a couple of minutes), then `npm run seed:enrich` a few times to give beaches their NWS
+While `npm run seed:layers` and `npm run seed` run the offline discovery batch against
+the local D1 (see [Discovery and classification
+(offline)](#discovery-and-classification-offline)). The local database starts empty. Run
+`npm run seed:layers` once to download and verify the prebuilt layer set into `./.layers`
+(the only step here that touches the network), then `npm run seed` to scan it — discovery
+AND water-body classification in the same pass, no live API involved and no `--allow-net`
+on the batch itself. Then run `npm run seed:enrich` a few times to give beaches their NWS
 zones (and `npm run seed:eccc` afterwards for the Canadian rows NWS parks — note the
 NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes before
-Canadian rows become ECCC candidates), and `npm run seed:classify` to classify their
-adjacent water bodies. Run `seed:waves` before `seed:flags` so the recompute has wave
-inputs to read.
+Canadian rows become ECCC candidates). There is no `npm run seed:classify` any more:
+classification was opt-in only because it was expensive, and a local spatial join is not.
+Run `seed:waves` before `seed:flags` so the recompute has wave inputs to read.
 
 ### Discovery and classification (offline)
 
 Beach discovery and water-body classification run **outside** the Worker, in an
-offline GitHub Actions batch job (`scripts/discovery-batch.js`, run on Deno). They
-are split across **two independent workflows** so a slow or failing classification
-run never blocks discovery: `.github/workflows/discovery.yml` runs daily (beach
-discovery + stale-row reconciliation) and `.github/workflows/classify.yml` runs
-hourly (water-body classification only, up to 25 beaches/run — ~600/day in short
-Overpass bursts — draining the unclassified queue). This keeps the two-path invariant — the batch writes D1
-out-of-band and the request path still reads only D1/KV — while sidestepping the
+offline GitHub Actions batch job (`scripts/discovery-batch.js`, run on Deno), and both
+are **pure local math over a prebuilt spatial layer set** — the batch makes zero
+upstream data queries and runs with no network permission at all
+(`deno run --allow-read --allow-write`).
+
+Two workflows, with different jobs:
+
+- `.github/workflows/build-layers.yml` (twice weekly) builds the layer set. It
+  downloads the Geofabrik OpenStreetMap extracts for the US, Canada and Mexico one at a
+  time, verifies each against its published `.md5`, filters them to the beach / park /
+  coastline / water tag sets, merges them, converts them with GDAL, clips the park,
+  coastline and water layers to within ~1.1 km of the beach set, and publishes ten
+  **FlatGeobuf** files plus a manifest to an R2 bucket, served at
+  `https://map.swim.report`. Each build lands under an immutable prefix and the small
+  `layers/current.json` pointer is overwritten last, so a reader can never see a torn
+  set.
+- `.github/workflows/discovery.yml` (daily, plus a trigger on each new layer build)
+  consumes it. It downloads and sha256-verifies the layer set, snapshots D1, and runs
+  the batch once: beach discovery, park association, water-body classification,
+  stale-row reconciliation, the `flag_history` prune and the `marine_zone` derivation,
+  all in a single local scan.
+
+This keeps the two-path invariant — the batch writes D1 out-of-band, R2 is read by the
+offline job only, and the request path still reads only D1/KV — while sidestepping the
 Worker's per-invocation subrequest caps. The batch reuses the discovery/classification
-code verbatim (`src/discovery.js`, `src/clients/overpass.js`, `src/waterClass.js`),
-emits one idempotent `.sql` delta, and bulk-loads it into D1 with
-`wrangler d1 execute --remote --file`.
+code verbatim (`src/discovery.js`, `src/waterClass.js`, `src/regions.js`, `src/geo.js`)
+plus the offline-only layer modules (`src/osmSelect.js`, `src/layerGrid.js`,
+`src/layerDiscovery.js`, `src/layerSignals.js`, `src/layerManifest.js` and
+`scripts/lib/fgbReader.js`), emits one idempotent `.sql` delta, and bulk-loads it into D1
+with `wrangler d1 execute --remote --file`.
 
-A **complete** Overpass probe always reaches a decision: finding no coastline, no
-allowlisted Great Lake relation, and no qualifying water way within the probe radii
-classifies the beach `inland`, rather than leaving it unclassified and retrying. Only
-a transient Overpass failure leaves a row pending. This matters for what the site
-serves, because still-unclassified rows stay **visible** (the gate is fail-open for
-them, as noted under [`GET /api/beaches.geojson`](#get-apibeachesgeojson)) — a newly
-discovered beach is listed and served an estimated flag until its first classification,
-so a beach set back from its water used to be published for all five attempts before
-parking. The probe is deterministic, so those
-retries could only ever reach the same answer. Newly discovered beaches are therefore
-visible for at most one classify cycle (~1 h) rather than ~5 h.
+Classification always reaches a decision: finding no coastline, no allowlisted Great
+Lake relation, and no qualifying water way within the probe radii classifies the beach
+`inland`, rather than leaving it unclassified and retrying. There is no transient-failure
+escape hatch left — the join is local math over verified, immutable bytes, so re-running
+it could only reach the same answer. This matters for what the site serves, because
+still-unclassified rows stay **visible** (the gate is fail-open for them, as noted under
+[`GET /api/beaches.geojson`](#get-apibeachesgeojson)) — a newly discovered beach would be
+listed and served an estimated flag until its first classification. That window is now
+**zero**: classification happens in the same run that discovers the beach.
 
-Overpass is fetched defensively: the named query carries a 90 s server-side timeout
-and each per-tile fetch retries with bounded exponential backoff + jitter (3
-attempts) to ride out public-Overpass 504 overload bursts. A tile that still fails is
-simply deferred to the next scheduled run rather than aborting the batch. No extra
-mirrors are used — the regional mirrors return empty for North America (unsafe), and
-kumi shares Private.coffee's backend.
+**Failure posture.** The freshness horizon is the extract cadence — twice weekly, with a
+hard `MAX_SOURCE_AGE_DAYS = 21` refusal — not minutes. A build that fails, or that a
+sanity floor refuses, publishes nothing and leaves the last good layer set live; that is
+delete-safe, because an older extract is over-inclusive and can only fail to discover a
+new beach, never invent a stale one. On the consuming side the batch verifies the
+manifest before it does anything, and the verdict has three tiers: a **fatal** set (wrong
+schema, torn pointer, a failed checksum, a missing layer) exits with no SQL at all; an
+**incomplete** set (the build did not finish, sources unverified, sanity floors failed)
+suppresses **both** deletes and classification, because a partial view of OSM must never
+read as "gone from OSM" and must never be allowed to decide `inland`, which hides
+beaches; a **stale or out-of-scope** set (a `regionsDigest` mismatch, or an extract older
+than the horizon) suppresses deletes only. Deletes additionally pass two proportional
+rails, and mass re-classification passes a rail of its own.
 
 **Coverage.** Discovery is scoped to a curated set of coastal bounding boxes in
 `src/regions.js` (`REGIONS`) that trace the entire Great Lakes shoreline — both the
 US and the Canadian shores. Coastal boxes keep the discovery universe to actual
 shoreline: a continental rectangle would sweep in thousands of inland-lake "beach"
-elements that the classifier just drops, wasting Overpass query budget. Each region
-box is auto-tiled at `TILE_MAX_SPAN_DEG = 2.0` deg before any Overpass query runs, so
-box size is never the constraint — a large box simply becomes more tiles. The batch's
+elements that the classifier just drops, bloating the layer set for nothing. `REGIONS`
+now feeds exactly three things — the layer build's clip mask, the per-region sanity
+floors and delete rail, and the delete scoping below — and there is no tiling and no
+per-box query cost, so box size and count are both free. The batch's
 stale-row reconciliation only treats a D1 row as a delete candidate if
 `pointInAnyRegion(lat, lon)` is true — the **sole delete path** — and that check
 fails safe: shrinking or removing a box can only make the predicate false for more
 rows, which only *removes* delete candidates (an editing mistake under-deletes rather
 than over-deleting a real, enriched beach). **Expansion is additive**: bringing a new
-coast online (Pacific / Gulf / Atlantic) means appending boxes to `REGIONS` —
-discovery, tiling, and reconciliation all iterate the array and pick them up
-automatically (see the placeholder section at the bottom of `src/regions.js`).
+coast online (Pacific / Gulf / Atlantic) means appending boxes to `REGIONS` — the clip
+mask, discovery and reconciliation all iterate the array and pick them up automatically
+(see the placeholder section at the bottom of `src/regions.js`). That is now genuinely
+cheap on the discovery side; the remaining blockers are Worker-side and recorded in
+`TODO.md`.
 
 Classification matches each beach's adjacent water body to an allowlisted Great Lake
 by wikidata QID (never by name), so inland-lake rows can be hidden. Expected
@@ -672,9 +701,10 @@ IDs (see PLAN.md section 8 for the authoritative config).
     npx wrangler tail                                          # live logs
 
 The production database starts empty on a fresh deploy — the offline **GitHub
-Actions** batch (`scripts/discovery-batch.js`, split across
-`.github/workflows/discovery.yml` for discovery and `.github/workflows/classify.yml`
-for water-body classification) populates and classifies beaches (see [Discovery and
+Actions** batch (`scripts/discovery-batch.js`, run daily by
+`.github/workflows/discovery.yml` over the layer set
+`.github/workflows/build-layers.yml` publishes twice weekly) populates and classifies
+beaches in one pass (see [Discovery and
 classification (offline)](#discovery-and-classification-offline)), then the
 `17 3,9,15,21 * * *` enrichment runs drain the NWS-zone queue (with
 `29 4,10,16,22 * * *` picking up the Canadian rows NWS parks) and the hourly cron
@@ -682,9 +712,12 @@ starts writing flags. There is no remote equivalent of the enrichment/wave/flag
 `npm run seed:*` wrappers; either wait for the crons or run a local dev server with
 `remote = true` bindings and trigger the scheduled-handler endpoints manually.
 
-The discovery batch's prerequisites (repo secret `CLOUDFLARE_API_TOKEN`, migration
-0009 applied remotely) and operational notes are in
-[`docs/offline-discovery.md`](docs/offline-discovery.md).
+The pipeline's prerequisites and operational notes are in
+[`docs/offline-discovery.md`](docs/offline-discovery.md): the discovery job needs repo
+secret `CLOUDFLARE_API_TOKEN` and migration 0009 applied remotely, and the layer-build
+job additionally needs the R2 bucket plus repo secrets `CLOUDFLARE_R2_ACCESS_KEY` and
+`CLOUDFLARE_R2_SECRET_ACCESS_KEY`. The discovery job needs **no** R2 credentials — it
+reads the published layers over plain HTTPS from `https://map.swim.report`.
 
 `compatibility_date` is pinned — bump it to the current date occasionally when
 deploying. Structured logs land in the Cloudflare dashboard under

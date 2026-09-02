@@ -11,9 +11,10 @@
 // "nws: alerts for MIZ001" logs as "nws: alerts for MIZ001 fetch failed:
 // HTTP 503". timeoutMs (optional) bounds a request at the transport layer via
 // AbortController — a hung connection aborts and resolves to null instead of
-// blocking forever (used by the Overpass mirror failover so a dead mirror
-// yields to the next one). Returns the parsed JSON on success, null on any
-// failure.
+// blocking forever (e.g. NWS_TIMEOUT_MS in src/clients/nws.js, so one hung
+// api.weather.gov socket cannot run a cron to its wall-clock ceiling). It is
+// armed ONLY when timeoutMs > 0, so a call site that omits it is genuinely
+// unbounded. Returns the parsed JSON on success, null on any failure.
 
 export async function fetchJson(url, opts) {
   const options = opts || {};

@@ -46,10 +46,12 @@ enabled = true
 # beaches.marine_zone is now derived OFFLINE by the GitHub Actions discovery
 # batch (a nearest-marine-zone point-in-polygon pass over the repo-committed NWS
 # marine-zone shapefile geometry in data/marine-zones-greatlakes.json), replacing
-# the retired in-Worker marine enrichment cron. Beach discovery (Overpass) and
+# the retired in-Worker marine enrichment cron. Beach discovery (prebuilt OSM
+# layers, fetched from R2 by the GitHub Actions job — never by this Worker) and
 # water-body classification also run only in that offline batch
 # (scripts/discovery-batch.js), which emits an idempotent SQL delta bulk-loaded
-# into D1 out-of-band. The request path still reads only D1/KV.
+# into D1 out-of-band. The request path still reads only D1/KV — which is why
+# there is deliberately no [[r2_buckets]] binding anywhere in this file.
 [triggers]
 crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 

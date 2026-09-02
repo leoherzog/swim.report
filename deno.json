@@ -1,0 +1,6 @@
+{
+  "nodeModulesDir": "none",
+  "imports": {
+    "flatgeobuf/": "npm:/flatgeobuf@4.4.0/"
+  }
+}

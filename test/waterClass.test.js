@@ -1,12 +1,18 @@
 // test/waterClass.test.js
-// Pure-function coverage for the water-body classifier (src/waterClass.js) and
-// the Overpass water-class element parser + query/anchor builders
-// (src/clients/overpass.js). Matched by QID, never by name; precedence
+// Pure-function coverage for the water-body DECISION layer (src/waterClass.js)
+// alone. The probe that gathers its three signals is the layer pipeline's
+// (src/layerSignals.js#waterClassSignals, covered in test/layerSignals.test.js);
+// the probe radii it uses live in src/osmSelect.js and are pinned in
+// test/osmSelect.test.js. Keeping the decision's tests here, with no probe
+// import at all, is the point: it is what makes their invariance across the
+// WATER_CLASS_VERSION bump real evidence that the decision layer did not move
+// when the transport did. Matched by QID, never by name; precedence
 // ocean > great_lake > inland; a clean-but-empty answer DECIDES inland (a
 // complete probe that finds no water is a real negative), and only a transient
 // failure — which never reaches classifyWaterBody — leaves a row pending.
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   classifyWaterBody,
   isGreatLakeQid,
@@ -16,18 +22,6 @@ import {
   WATER_CLASS_MAX_ATTEMPTS,
   FLAG_WORTHY_WATER_SQL
 } from "../src/waterClass.js";
-import {
-  parseWaterClassElements,
-  buildWaterClassAnchor,
-  buildWaterClassQuery,
-  fetchWaterClassSignals,
-  WATER_MIN_AREA_DEG2,
-  OCEAN_RADIUS_M,
-  GREAT_LAKE_RADIUS_M,
-  INLAND_RADIUS_M,
-  OVERPASS_MIRRORS
-} from "../src/clients/overpass.js";
-import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 describe("classifyWaterBody", () => {
   it("Coney Island: a coastline signal classifies ocean", () => {
@@ -90,6 +84,20 @@ describe("classifyWaterBody", () => {
     expect(classifyWaterBody(null)).toBeNull();
     expect(classifyWaterBody(undefined)).toBeNull();
   });
+
+  it("pins the decision layer's version integer", () => {
+    // Relocated here from the query-text block: WATER_CLASS_VERSION versions
+    // the DECISION this describe block covers, not the probe transport, and a
+    // bump is what re-drains every already-classified row. Its home is beside
+    // the rules it versions.
+    //
+    // 1 -> 2 on the move off Overpass. The rules above are byte-identical
+    // either side of that bump — nothing in this block changed — but the
+    // SIGNALS feeding them are now derived from clipped FlatGeobuf layers
+    // rather than an anchored Overpass around: probe, so every already
+    // classified row has to re-decide once against the new evidence.
+    expect(WATER_CLASS_VERSION).toBe(2);
+  });
 });
 
 describe("isGreatLakeQid", () => {
@@ -112,209 +120,6 @@ describe("isGreatLakeQid", () => {
     // Q9999 is the pond's own distinct QID; the name is irrelevant to the match.
     expect(isGreatLakeQid("Q9999")).toBe(false);
     expect(classifyWaterBody({ nearbyLakeQids: ["Q9999"], nearbyWayWater: true })).toBe("inland");
-  });
-});
-
-describe("parseWaterClassElements", () => {
-  function bb(minLat, minLon, maxLat, maxLon) {
-    return { minlat: minLat, minlon: minLon, maxlat: maxLat, maxlon: maxLon };
-  }
-
-  it("a natural=coastline way sets coastlinePresent", () => {
-    const s = parseWaterClassElements([
-      { type: "way", id: 1, tags: { natural: "coastline" }, bounds: bb(41.0, -87.0, 41.1, -86.9) }
-    ]);
-    expect(s.coastlinePresent).toBe(true);
-    expect(s.nearbyLakeQids).toEqual([]);
-    expect(s.nearbyWayWater).toBe(false);
-  });
-
-  it("a water=lake relation carrying wikidata collects its QID", () => {
-    const s = parseWaterClassElements([
-      { type: "relation", id: 2, tags: { natural: "water", water: "lake", wikidata: "Q1169", name: "Lake Michigan" } }
-    ]);
-    expect(s.nearbyLakeQids).toEqual(["Q1169"]);
-    expect(s.coastlinePresent).toBe(false);
-  });
-
-  it("a water=lake relation with no wikidata contributes no QID", () => {
-    const s = parseWaterClassElements([
-      { type: "relation", id: 3, tags: { natural: "water", water: "lake", name: "Some Lake" } }
-    ]);
-    expect(s.nearbyLakeQids).toEqual([]);
-  });
-
-  it("a natural=water way below WATER_MIN_AREA_DEG2 is NOT counted as inland", () => {
-    // 0.001 x 0.001 = 1e-6 deg^2, below the 5e-6 pond threshold.
-    const s = parseWaterClassElements([
-      { type: "way", id: 4, tags: { natural: "water" }, bounds: bb(43.0, -86.0, 43.001, -85.999) }
-    ]);
-    expect(s.nearbyWayWater).toBe(false);
-  });
-
-  it("a natural=water way at/above WATER_MIN_AREA_DEG2 sets nearbyWayWater", () => {
-    // 0.003 x 0.003 = 9e-6 deg^2, above the 5e-6 pond threshold.
-    const s = parseWaterClassElements([
-      { type: "way", id: 5, tags: { natural: "water" }, bounds: bb(43.0, -86.0, 43.003, -85.997) }
-    ]);
-    expect(s.nearbyWayWater).toBe(true);
-    // Sanity: the threshold constant is the shared pond threshold.
-    expect(WATER_MIN_AREA_DEG2).toBe(0.000005);
-  });
-
-  it("non-array / empty input yields an all-empty signals object", () => {
-    expect(parseWaterClassElements([])).toEqual({
-      coastlinePresent: false, nearbyLakeQids: [], nearbyWayWater: false
-    });
-    expect(parseWaterClassElements(null)).toEqual({
-      coastlinePresent: false, nearbyLakeQids: [], nearbyWayWater: false
-    });
-  });
-
-  it("a mixed element set combines all three signals", () => {
-    const s = parseWaterClassElements([
-      { type: "way", id: 1, tags: { natural: "coastline" }, bounds: bb(41.0, -87.0, 41.1, -86.9) },
-      { type: "relation", id: 2, tags: { natural: "water", water: "lake", wikidata: "Q1383" } },
-      { type: "way", id: 5, tags: { natural: "water" }, bounds: bb(43.0, -86.0, 43.003, -85.997) }
-    ]);
-    expect(s.coastlinePresent).toBe(true);
-    expect(s.nearbyLakeQids).toEqual(["Q1383"]);
-    expect(s.nearbyWayWater).toBe(true);
-  });
-});
-
-describe("buildWaterClassAnchor / buildWaterClassQuery", () => {
-  it("anchors a way and a relation on member vertices (recurse-down)", () => {
-    expect(buildWaterClassAnchor("way/456")).toBe("way(456);>->.a;");
-    expect(buildWaterClassAnchor("relation/2995932")).toBe("relation(2995932);>->.a;");
-  });
-
-  it("anchors a node on the point itself (no recurse-down)", () => {
-    expect(buildWaterClassAnchor("node/123")).toBe("node(123)->.a;");
-  });
-
-  it("returns null for an unparseable id", () => {
-    expect(buildWaterClassAnchor("banana")).toBeNull();
-    expect(buildWaterClassAnchor("way/")).toBeNull();
-    expect(buildWaterClassAnchor(null)).toBeNull();
-    expect(buildWaterClassAnchor(1234)).toBeNull();
-  });
-
-  it("builds the vertex-probe query with the validated radii and out ids tags bb (never out geom)", () => {
-    const q = buildWaterClassQuery("way/456");
-    expect(q).toContain("way(456);>->.a;");
-    expect(q).toContain("way[\"natural\"=\"coastline\"](around.a:" + String(OCEAN_RADIUS_M) + ");");
-    expect(q).toContain("relation[\"natural\"=\"water\"][\"water\"=\"lake\"](around.a:" + String(GREAT_LAKE_RADIUS_M) + ");");
-    expect(q).toContain("way[\"natural\"=\"water\"](around.a:" + String(INLAND_RADIUS_M) + ");");
-    expect(q).toContain("out ids tags bb;");
-    expect(q).not.toContain("out geom");
-  });
-
-  it("declares NO [maxsize] (inherits the 512 MiB default) — the lake-relation probe's execution memory must keep full headroom", () => {
-    const q = buildWaterClassQuery("way/456");
-    expect(q).toContain("[out:json][timeout:60];");
-    expect(q).not.toContain("maxsize");
-  });
-
-  it("returns null when the id cannot be anchored", () => {
-    expect(buildWaterClassQuery("nonsense")).toBeNull();
-  });
-
-  it("exposes the validated radius constants and a version integer", () => {
-    expect(OCEAN_RADIUS_M).toBe(150);
-    expect(GREAT_LAKE_RADIUS_M).toBe(150);
-    expect(INLAND_RADIUS_M).toBe(120);
-    expect(WATER_CLASS_VERSION).toBe(1);
-  });
-});
-
-describe("fetchWaterClassSignals (transient null vs clean signals contract)", () => {
-  // null = TRANSIENT (caller must NOT bump water_class_attempts, row stays
-  // queued); a signals object = a CLEAN, complete answer, which now always
-  // DECIDES (all-empty signals classify inland). This boundary is what makes the
-  // empty case safe to decide on: partial/truncated bodies are rejected upstream
-  // and surface as null here, never as an empty signals object.
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  const EMPTY_SIGNALS = {
-    coastlinePresent: false,
-    nearbyLakeQids: [],
-    nearbyWayWater: false
-  };
-
-  it("unparseable osm_id -> null with ZERO upstream fetches", async () => {
-    const calls = installFetch(() => {
-      return Promise.resolve(jsonResponse({ elements: [] }));
-    });
-    const result = await fetchWaterClassSignals({ id: 1, osm_id: "banana" });
-    expect(result).toBeNull();
-    expect(calls.length).toBe(0);
-  });
-
-  it("every mirror failing (HTTP 504) -> null after trying each mirror once", async () => {
-    const calls = installFetch(() => {
-      return Promise.resolve({
-        ok: false,
-        status: 504,
-        json: () => { return Promise.resolve({}); }
-      });
-    });
-    const result = await fetchWaterClassSignals({ id: 2, osm_id: "way/456" });
-    expect(result).toBeNull();
-    expect(calls.length).toBe(OVERPASS_MIRRORS.length);
-    expect(calls.map((c) => { return c.url; })).toEqual(OVERPASS_MIRRORS);
-  });
-
-  it("a clean HTTP-200 body with elements: [] -> the all-empty signals OBJECT, not null", async () => {
-    // The whole contract: clean-but-empty is a real answer (decides inland
-    // downstream), distinct from the transient-null no-bump path.
-    const calls = installFetch(() => {
-      return Promise.resolve(jsonResponse({ elements: [] }));
-    });
-    const result = await fetchWaterClassSignals({ id: 3, osm_id: "way/456" });
-    expect(result).toEqual(EMPTY_SIGNALS);
-    expect(result).not.toBeNull();
-    // First mirror answered cleanly, so no failover happened.
-    expect(calls.length).toBe(1);
-    // And the clean-but-empty answer is exactly what classifyWaterBody now
-    // DECIDES as inland — no attempts bump, no lingering visible pending row.
-    expect(classifyWaterBody(result)).toBe("inland");
-  });
-
-  it("a truncation remark on every mirror -> null (partial data reads as transient)", async () => {
-    const calls = installFetch(() => {
-      return Promise.resolve(jsonResponse({
-        remark: "runtime error: Query timed out",
-        elements: [{ type: "way", id: 9, tags: { natural: "coastline" } }]
-      }));
-    });
-    const result = await fetchWaterClassSignals({ id: 4, osm_id: "relation/2995932" });
-    expect(result).toBeNull();
-    // The remark made each mirror fall through in order before giving up.
-    expect(calls.map((c) => { return c.url; })).toEqual(OVERPASS_MIRRORS);
-  });
-
-  it("a remark on the primary but a clean fallback -> the fallback's signals win", async () => {
-    const calls = installFetch((url) => {
-      if (url === OVERPASS_MIRRORS[0]) {
-        return Promise.resolve(jsonResponse({ remark: "timed out", elements: [] }));
-      }
-      return Promise.resolve(jsonResponse({
-        elements: [
-          { type: "relation", id: 2, tags: { natural: "water", water: "lake", wikidata: "Q1169" } }
-        ]
-      }));
-    });
-    const result = await fetchWaterClassSignals({ id: 5, osm_id: "way/456" });
-    expect(result).toEqual({
-      coastlinePresent: false,
-      nearbyLakeQids: ["Q1169"],
-      nearbyWayWater: false
-    });
-    expect(calls.map((c) => { return c.url; })).toEqual(OVERPASS_MIRRORS);
   });
 });
 
@@ -363,5 +168,64 @@ describe("isFlagWorthyWater / FLAG_WORTHY_WATER_SQL (request-path 404 gate)", ()
     expect(FLAG_WORTHY_WATER_SQL).toContain(
       "water_class_attempts < " + String(WATER_CLASS_MAX_ATTEMPTS)
     );
+  });
+});
+
+// The CLASSIFICATION half of the golden fixture.
+//
+// test/fixtures/overpass-golden.json carries 13 real water-class captures taken
+// against the live Overpass mirrors before the layer migration: for each beach,
+// the raw elements, the {coastlinePresent, nearbyLakeQids, nearbyWayWater}
+// signals derived from them, and the verdict classifyWaterBody returned.
+//
+// The park/pond half of that fixture is replayed in test/osmSelect.test.js. This
+// half had no replay at all, which left the fixture's classification captures as
+// dead data — and classification is the side where a wrong answer HIDES a beach
+// from the site (FLAG_WORTHY_WATER_SQL serves only ocean/great_lake plus
+// under-cap NULLs), so it is the half that most needed a mechanical pin.
+//
+// SCOPE, stated honestly: this replays SIGNALS -> VERDICT, so it proves the
+// decision tree is unchanged across the migration and across the
+// WATER_CLASS_VERSION bump (which exists because the signals PROVIDER changed,
+// not because the rules did). It does NOT prove ELEMENTS -> SIGNALS parity
+// between the Overpass probe and the layer join — those two derivations read
+// different inputs, and the contract's 9.3 dry-run diff over the full table is
+// the intended proof of that half.
+describe("overpass-golden fixture replay (water classification)", function () {
+  const golden = JSON.parse(
+    readFileSync(new URL("./fixtures/overpass-golden.json", import.meta.url), "utf8")
+  );
+
+  it("reproduces every recorded verdict from the real captured signals", function () {
+    let replayed = 0;
+    const mismatches = [];
+    for (const capture of golden.waterClass) {
+      if (!capture || !capture.signals || typeof capture.verdict !== "string") {
+        continue;
+      }
+      replayed = replayed + 1;
+      const got = classifyWaterBody(capture.signals);
+      if (got !== capture.verdict) {
+        mismatches.push(
+          (capture.caseKey || capture.osmId || capture.name || "?") +
+          ": expected " + capture.verdict + ", got " + String(got)
+        );
+      }
+    }
+    expect(mismatches).toEqual([]);
+    // Guard against a silently emptied or restructured fixture making the loop
+    // above vacuous — the same discipline the park-half replay uses.
+    expect(replayed).toBe(13);
+  });
+
+  it("covers all three classes, so the replay is not one-branch coverage", function () {
+    const seen = new Set();
+    for (const capture of golden.waterClass) {
+      if (capture && typeof capture.verdict === "string") {
+        seen.add(capture.verdict);
+      }
+    }
+    expect(seen.has("great_lake")).toBe(true);
+    expect(seen.has("inland")).toBe(true);
   });
 });
