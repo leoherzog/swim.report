@@ -83,30 +83,28 @@
   "floors": {
     "sha256:b206bbdc0ded40457dfeb046221ad69e44eef71f22ab297e69df0735828907c3": {
       "_comment": [
-        "BOOTSTRAP ENTRY for the Great Lakes footprint - the nine REGIONS boxes of src/regions.js as",
-        "of the FlatGeobuf migration. Every floor below is null because build 1 has not run: build 1 is",
-        "what SEEDS these numbers, under the published mask, and a human commits them here afterwards",
-        "(see _readme, HOW TO SEED A NEW DIGEST). Until then no absolute or per-region floor applies",
-        "and the layers/current.json pointer must be written only by an explicit workflow_dispatch.",
-        "",
-        "The digest key was computed as sha256 over regionsDigestInput(REGIONS) from",
-        "src/layerManifest.js. VERIFY IT against the regionsDigest the first manifest actually carries",
-        "before seeding: if the two disagree the build refuses to auto-publish, which is the safe",
-        "direction, but the fix is to correct this key rather than to loosen the check.",
+        "SEEDED from build 20260902T120332Z-efd1d42 (the first real build under this mask), at 0.75x each measured count, rounded down. Cross-checked against D1 truth before commit:",
+        "the layer set drives scripts/discovery-batch.js to 1721 merged rows against D1's 1669, with",
+        "classification parity hide=0/102 (great_lake->great_lake 1008, inland->inland 642) and",
+        "lakes-polygon exactly 6 features carrying exactly the six lakesIdentity QIDs.",
         "",
         "coastline is legitimately null-and-zero at Great Lakes scope: the lakes are mapped as water",
         "relations, not natural=coastline ways, which is why 100% of the served Great Lakes rows",
         "classify through the wikidata QID path. It becomes structurally REQUIRED the moment a",
         "saltwater box lands - and that box changes the digest, so it needs a fresh entry anyway.",
         "",
-        "parks-line has one extra rule that is not a ratio: a count of ZERO is a hard REFUSAL even",
-        "while the floor here is null. Named park ways exist unconditionally in this scope, so zero",
-        "means the carve is broken, and the visible consequence is unnamed beaches plus DELETED",
-        "park-origin rows - which is the majority of the table (982 of 1669 rows are park-origin)."
+        "parks-line, beaches-line, water-line and other-relations all measured ZERO here, and a floor of",
+        "zero is correct rather than a broken carve. GDAL routes every closed area-tagged way to its",
+        "multipolygons layer and leaves only UNCLOSED ways in lines, so Overpass's way[leisure=park]",
+        "[name] selector (which returns closed AND unclosed ways) has no equivalent here: every mapped",
+        "Great Lakes park is a closed way or a relation and lands in parks-polygon, measured at 6457.",
+        "An earlier revision treated parks-line zero as a hard REFUSAL on the Overpass-era reasoning and",
+        "it blocked an entirely correct build; the hard zero refusal now sits on parks-polygon, where",
+        "membership - and therefore every delete candidate - actually comes from."
       ],
-      "status": "bootstrap",
-      "seededFromBuildId": null,
-      "seededAt": null,
+      "status": "seeded",
+      "seededFromBuildId": "20260902T120332Z-efd1d42",
+      "seededAt": "2026-09-02T12:03:33.152Z",
       "regionCount": 9,
       "regionNames": [
         "Lake Erie",
@@ -120,89 +118,89 @@
         "Upper St. Lawrence / Thousand Islands"
       ],
       "layers": {
-        "beaches-point.fgb": null,
-        "beaches-line.fgb": null,
-        "beaches-polygon.fgb": null,
-        "parks-polygon.fgb": null,
-        "parks-line.fgb": null,
-        "coastline-line.fgb": null,
-        "water-line.fgb": null,
-        "water-polygon.fgb": null,
-        "lakes-polygon.fgb": null,
-        "other-relations.fgb": null
+        "beaches-point.fgb": 107,
+        "beaches-line.fgb": 0,
+        "beaches-polygon.fgb": 3021,
+        "parks-polygon.fgb": 4842,
+        "parks-line.fgb": 0,
+        "coastline-line.fgb": 0,
+        "water-line.fgb": 0,
+        "water-polygon.fgb": 17925,
+        "lakes-polygon.fgb": 4,
+        "other-relations.fgb": 0
       },
       "regions": {
         "Lake Superior": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 890,
+          "parks-polygon": 328,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 2064,
+          "other-relations": 0
         },
         "St. Marys River / Sault": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 85,
+          "parks-polygon": 36,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 177,
+          "other-relations": 0
         },
         "Lake Michigan": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 803,
+          "parks-polygon": 2104,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 5766,
+          "other-relations": 0
         },
         "Lake Huron + Georgian Bay": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 637,
+          "parks-polygon": 1004,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 4052,
+          "other-relations": 0
         },
         "Lake St. Clair + St. Clair / Detroit Rivers": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 186,
+          "parks-polygon": 437,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 3118,
+          "other-relations": 0
         },
         "Lake Erie": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 676,
+          "parks-polygon": 1035,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 6568,
+          "other-relations": 0
         },
         "Niagara River": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 28,
+          "parks-polygon": 98,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 204,
+          "other-relations": 0
         },
         "Lake Ontario": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 254,
+          "parks-polygon": 892,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 1422,
+          "other-relations": 0
         },
         "Upper St. Lawrence / Thousand Islands": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 102,
+          "parks-polygon": 168,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 449,
+          "other-relations": 0
         }
       }
     }

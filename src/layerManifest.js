@@ -393,11 +393,27 @@ export function parksLayerHealthy(report) {
       return false;
     }
   }
-  // A parks-line count of ZERO is a hard refusal, never a legitimate reading:
-  // named park ways exist unconditionally in this scope, so zero means the carve
-  // that produces them is broken. The visible consequence is unnamed beaches and
-  // deleted park-origin rows.
-  if (parks.polygonCount <= 0 || parks.lineCount <= 0) {
+  // A parks-POLYGON count of zero is a hard refusal: membership comes from that
+  // layer alone, membership produces park-origin rows, and park-origin rows are
+  // the entire delete-candidate set.
+  //
+  // A parks-LINE count of zero is NOT a refusal, though it used to be here on the
+  // grounds that "named park ways exist unconditionally in this scope". That is an
+  // Overpass-era invariant and it does not survive the move to a GDAL-derived
+  // layer set: Overpass's way[leisure=park][name] selector returns closed AND
+  // unclosed ways, while GDAL routes every closed area-tagged way to multipolygons
+  // and leaves only UNCLOSED ways in its lines layer. Verified on GDAL 3.12.4.
+  // Essentially every mapped Great Lakes park is closed or a relation, so the
+  // first real build measured parks-line 0 against parks-polygon 6457 — and this
+  // predicate returned false, which would have meant park_name never refreshing
+  // and (because reconciliation requires it) deletes NEVER running at all.
+  //
+  // The floor and previous-count ratio checks below still apply to lineCount and
+  // are the right guards for it: they are no-ops at 0 against a 0 floor and a 0
+  // previous count, and they still fire if a layer that HAD named park lines
+  // empties. That case is genuinely delete-bearing, because parks-line feeds the
+  // parksName tier and a beach that loses its park name loses its row.
+  if (parks.polygonCount <= 0) {
     return false;
   }
   if (parks.polygonCount < parks.polygonFloor || parks.lineCount < parks.lineFloor) {

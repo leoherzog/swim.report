@@ -476,18 +476,40 @@ describe("parksLayerHealthy is the hasPark valve", function () {
     }))).toBe(false);
   });
 
-  it("is false when parks-line is ZERO — a broken carve, never a real reading", function () {
-    // Named park ways exist unconditionally at this scope. Zero means the carve
-    // that produces them broke, and the consequence is unnamed beaches plus
-    // deleted park-origin rows.
-    const zeroLine = makeReport({
-      parks: makeParks({ lineCount: 0, lineFloor: 0, previousLineCount: 0 })
-    });
-    expect(parksLayerHealthy(zeroLine)).toBe(false);
+  it("is false when parks-POLYGON is ZERO — membership, and every delete candidate, comes from it", function () {
     const zeroPolygon = makeReport({
       parks: makeParks({ polygonCount: 0, polygonFloor: 0, previousPolygonCount: 0 })
     });
     expect(parksLayerHealthy(zeroPolygon)).toBe(false);
+  });
+
+  // GDAL routes every closed area-tagged way to multipolygons, so only UNCLOSED
+  // ways reach its lines layer. Great Lakes parks are closed ways or relations,
+  // and the first real build measured parks-line 0 against parks-polygon 6457.
+  // Treating that as a refusal meant park_name never refreshed and — because
+  // reconciliation requires this valve — deletes could never run at all.
+  it("is TRUE when parks-line is legitimately zero against a zero floor and zero history", function () {
+    const zeroLine = makeReport({
+      parks: makeParks({ lineCount: 0, lineFloor: 0, previousLineCount: 0 })
+    });
+    expect(parksLayerHealthy(zeroLine)).toBe(true);
+  });
+
+  // But a line layer that HAD content and emptied is still delete-bearing:
+  // parks-line feeds the parksName tier, and a beach that loses its park name
+  // loses its row. The ratio and floor checks must still catch that.
+  it("is false when a previously populated parks-line collapses to zero", function () {
+    const collapsed = makeReport({
+      parks: makeParks({ lineCount: 0, lineFloor: 0, previousLineCount: 214 })
+    });
+    expect(parksLayerHealthy(collapsed)).toBe(false);
+  });
+
+  it("is false when parks-line falls below its seeded floor", function () {
+    const belowFloor = makeReport({
+      parks: makeParks({ lineCount: 3, lineFloor: 150, previousLineCount: 0 })
+    });
+    expect(parksLayerHealthy(belowFloor)).toBe(false);
   });
 
   it("is false when any parks field is missing, non-numeric or negative", function () {
