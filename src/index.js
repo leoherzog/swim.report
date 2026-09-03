@@ -40,7 +40,7 @@ import {
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
 import { findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
 import { waveSources, resolveSupplementalWaveFt } from "./waveSources/index.js";
-import { nearestStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
+import { nearestWaterTempStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
 import { updateScraperHealth } from "./scraperHealth.js";
 import { HOT_VIEW_WINDOW_MS } from "./demandWindow.js";
 import { makeDeadline, runPool } from "./pool.js";
@@ -1402,12 +1402,22 @@ async function runWaveRefresh(env) {
     // pass over the beaches already SELECTed this run: never reads or mutates
     // waveResults / windResults / the wave KV, and never feeds src/rules.js (it
     // colors no flag and bumps no RULES_VERSION). Many beaches share one nearest
-    // NDBC buoy, so dedup by station id (exactly like the step-2b supplemental
+    // station, so dedup by station id (exactly like the step-2b supplemental
     // memo): fetch each unique station's realtime2 file ONCE via stationWaterTemp
     // and fan the parsed reading to every beach under it. It is fine that this
-    // may re-fetch a couple of station files the wave fallback also touched
-    // (<=10 unique stations total) — the pass is kept isolated on purpose rather
-    // than sharing a cache across passes.
+    // may re-fetch a station file the wave fallback also touched — the pass is
+    // kept isolated on purpose rather than sharing a cache across passes.
+    //
+    // Selection goes through nearestWaterTempStation, NOT the wave selector.
+    // This pass used to call the capability-agnostic nearestStation and so read
+    // the WAVE station list, which is why beaches with a NOS water-level gauge a
+    // few hundred metres away got no reading at all. The temp-capable set is ~7x
+    // the wave set (72 stations vs 10), so this loop can now touch ~60 unique
+    // stations rather than <=10; stationWaterTemp Range-limits each fetch to
+    // NDBC_HEAD_BYTES to keep that affordable, and the loop stays sequential
+    // under the SAME gatherDeadline, which already ends the pass rather than the
+    // invocation. It remains LAST in the gather on purpose: if the deadline
+    // bites, display-only data is the correct thing to sacrifice.
     //
     // This pass ran AFTER the write loop until now, which is why not one
     // "watertemp:" key has ever existed in production: the sequential ~1450-put
@@ -1421,7 +1431,7 @@ async function runWaveRefresh(env) {
     try {
       const stationBeaches = new Map();
       for (const beach of beaches) {
-        const station = nearestStation(beach.lat, beach.lon);
+        const station = nearestWaterTempStation(beach.lat, beach.lon);
         if (station === null) {
           continue;
         }

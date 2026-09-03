@@ -450,9 +450,9 @@ and neither is `marine_zone` (the sixth bullet below records the retired probe).
   The write pass writes three KV shapes per beach at a 7 h TTL — `waveinput:` + beachId
   (the wave height + wind fallback the hourly estimate reads), `waves:` + beachId (the
   detail page's 24 h forecast strip, only when a real hourly series exists), and
-  `watertemp:` + beachId (the nearest NOAA NDBC realtime2 buoy's WTMP water temperature,
-  deduped by station id so each buoy file is fetched once and fanned to every beach sharing
-  it) — through the same bounded-concurrency pool. The water-temp write is independent of
+  `watertemp:` + beachId (the WTMP water temperature from the nearest station able to serve
+  that reading — see "Water temperature stations" below — deduped by station id so each
+  station file is fetched once and fanned to every beach sharing it) — through the same bounded-concurrency pool. The water-temp write is independent of
   the wave skip guards: a failed marine fetch says nothing about a buoy reading. That
   reading is **display-only**: the detail page appends it to the beach subtitle (e.g.
   "Ottawa Beach • 72°F Water") when it is fresh, but it never feeds `src/rules.js` and
@@ -564,6 +564,53 @@ NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes befo
 Canadian rows become ECCC candidates). There is no `npm run seed:classify` any more:
 classification was opt-in only because it was expensive, and a local spatial join is not.
 Run `seed:waves` before `seed:flags` so the recompute has wave inputs to read.
+
+### Water temperature stations
+
+`src/waveSources/ndbcBuoys.js` holds one curated table of Great Lakes stations served by
+NDBC's `realtime2` endpoint. Every row declares which readings it may serve:
+
+| Capability | Constant | Stations | Cap | Consumer |
+| --- | --- | --- | --- | --- |
+| Wave height | `CAP_WAVES` | 10 (frozen) | `NDBC_MAX_DISTANCE_KM` = 40 km | `src/rules.js` — moves flag colors |
+| Water temperature | `CAP_WATER_TEMP` | 72 | `NDBC_WATER_TEMP_MAX_DISTANCE_KM` = 25 km | detail-page subtitle — display only |
+
+Select with `nearestWaveStation(lat, lon)` or `nearestWaterTempStation(lat, lon)`. There is
+no capability-agnostic selector and no default capability, on purpose: the list originally
+admitted stations on a wave criterion ("reports standard-met WVHT") because wave height was
+its only consumer, and when water temperature was added as a second consumer it silently
+inherited that filter. That excluded the entire NOAA **National Ocean Service** water-level
+network — gauges that report WTMP on a 6-minute cadence, frequently a few hundred metres from
+a served beach, and no wave height at all. 913 of 1102 beaches had no water-temp station in
+range, some of them with a live NOS gauge 300 m offshore. Coverage is now 519 of 1102 (47%).
+
+NDBC serves those files under UPPERCASE names while the master station table spells the NOS
+stations lowercase, and the path is case-sensitive, so `stationUrl` upcases (a no-op for the
+numeric buoy ids). A lowercase request 404s, which degrades to null and is indistinguishable
+from the winter gap — the beach silently loses its temperature rather than anything failing
+loudly, so `test/ndbcBuoys.test.js` asserts the built filename for every row in the table.
+
+The two caps differ deliberately. A wave height is consumed through coarse ≥2 ft / ≥4 ft
+thresholds, so 40 km of extrapolation rarely changes the answer; a temperature is printed
+next to the beach name as a precise number, and both cross-lake attribution (Lake Erie's
+central basin is ~57 km wide) and summer upwelling (the thermal front sits 5–15 km offshore
+and can put 15–20 °F between a beach and open water) bound how far one may honestly travel.
+
+Adding a station is a hand-curated change, because the exclusions that matter are judgment
+calls a rule cannot encode — river-mouth and navigation-channel gauges reading a different
+water body, platforms whose WTMP trace tracks air temperature, two ids for one buoy. Verify
+against `https://www.ndbc.noaa.gov/data/stations/station_table.txt` for coordinates and
+`https://www.ndbc.noaa.gov/station_page.php?station=<id>` for siting and sensor depth, then
+confirm the station's `realtime2` file actually carries a non-`MM` value in the column you
+are admitting it for. Most moored buoys are seasonal (pulled roughly Nov–Apr); that is not a
+reason to reject one, since a missing reading already degrades to null — but it is why winter
+coverage rests on the handful of stations that overwinter: 15 of the 72 have January/February
+readings in the 2025 archive (13 NOS gauges plus the buoys 45213 and 45215), which is not the
+same set as the 15 NOS gauges, and covers ~153 beaches rather than 519.
+
+Wave capability is a separate decision with a larger blast radius: it feeds `src/rules.js`,
+so adding one requires a `RULES_VERSION` discussion. `test/ndbcBuoys.test.js` asserts the ten
+wave ids literally, so that cannot happen by accident.
 
 ### Discovery and classification (offline)
 

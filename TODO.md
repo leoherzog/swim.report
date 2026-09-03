@@ -439,6 +439,26 @@ coverage gaps, not wrong-color risks):
   leaving false stale warnings in place. Note also that a `staleMs` that never trips
   makes a silently-dead source indistinguishable from a healthy one — the
   `scraperhealth:` counter, not the horizon, is what catches that.
+- **Widen the NDBC wave set** — the 2026-09-02 station audit found 40 stations within 60 km
+  of a served beach reporting a fresh WVHT, of which 36 are not among the ten `CAP_WAVES`
+  ids. They were deliberately left wave-ineligible: wave height feeds `src/rules.js`, so
+  admitting them moves flag colors and needs a `RULES_VERSION` discussion plus a review of
+  how each new platform's readings compare with the Open-Meteo/GLOS values it would be
+  filling in for. The capability table in `src/waveSources/ndbcBuoys.js` makes the change
+  itself a one-word edit per row; the analysis is the work.
+- **Water-temp coverage is 47%, and 14% in winter** — 519 of 1102 beaches have a
+  `CAP_WATER_TEMP` station inside the 25 km cap, falling to ~153 when the seasonal buoys are
+  pulled and only the 15 year-round NOS gauges remain. The gap is a real sensor-density
+  limit on the Great Lakes, not a list problem: even at a 75 km cap winter coverage only
+  reaches ~36%. GLOS Seagull (already integrated in `src/clients/glerl.js` for waves) exposes
+  `sea_water_temperature` on a denser network and is the obvious next source; it would need
+  the same siting review this list got.
+- **Station-list rot has no trip-wire** — station 45161 (Muskegon) went off-air 2026-08-18
+  and nothing noticed; it was found by hand. The 12 h freshness window correctly degrades a
+  dark station to null, which is exactly why the failure is invisible. Step 3b knows, per
+  run, how many unique stations it consulted and how many returned a reading, so logging
+  `stations=<n> live=<n>` would make a station family going dark visible in the observability
+  query without anyone auditing anything.
 - **NDBC-vs-GLOS double-count audit** — `ndbc-buoys` is the first NDBC ingestion and
   is a *fallback* consulted only for beaches still wave-null after Open-Meteo + the
   GLOS/GLERL buoy pass, so it is by design non-additive. Audit that no NDBC buoy is

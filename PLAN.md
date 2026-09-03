@@ -250,9 +250,9 @@ either way.
 
     {
       "beachId": "osm-node-123456",
-      "tempF": 72.14,                // number (°F): the beach's nearest NDBC buoy water temp
+      "tempF": 72.14,                // number (°F): the beach's nearest water-temp station reading
       "tempC": 22.3,                 // number (°C): the raw realtime2 WTMP reading before convert
-      "station": {                   // the nearest curated NDBC buoy that supplied the reading
+      "station": {                   // the nearest CAP_WATER_TEMP station that supplied the reading
         "id": "45161",
         "name": "Muskegon, MI",
         "distanceKm": 5.02
@@ -262,9 +262,15 @@ either way.
     }
 
 DISPLAY-ONLY. Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data
-TTL (WAVE_DATA_TTL_SECONDS = 25200) from the nearest curated NDBC realtime2 buoy's WTMP
-column (src/waveSources/ndbcBuoys.js, parseNdbcWaterTempF — the freshest non-"MM" reading
-inside the NDBC_WATER_TEMP_MAX_OBS_AGE_MS = 12 h window and the sanity band, else null). Read
+TTL (WAVE_DATA_TTL_SECONDS = 25200) from the WTMP column of the nearest station carrying the
+CAP_WATER_TEMP capability, selected by nearestWaterTempStation within
+NDBC_WATER_TEMP_MAX_DISTANCE_KM = 25 km (src/waveSources/ndbcBuoys.js, parseNdbcWaterTempF —
+the freshest non-"MM" reading inside the NDBC_WATER_TEMP_MAX_OBS_AGE_MS = 12 h window and the
+sanity band, else null). The 25 km temp cap is deliberately TIGHTER than the 40 km wave cap
+(NDBC_MAX_DISTANCE_KM): a wave height is consumed through coarse ≥2 ft / ≥4 ft thresholds,
+while a temperature is displayed as a precise number next to the beach name, and both
+cross-lake attribution (Erie's central basin is ~57 km wide) and summer upwelling (the
+thermal front sits 5-15 km offshore) bound how far one may travel. Read
 by handleDetail and passed to renderDetailPage, which appends a fresh reading to the
 .beach-subtitle ("Ottawa Beach • 72°F Water") ONLY when tempF is finite and observedIso is
 within WATER_TEMP_STALE_MS (12 h) of now. This value NEVER feeds src/rules.js — it colors no
@@ -535,8 +541,8 @@ Binding name: FLAGS (single namespace for both key families).
   here, NOT a live fetch. Absent key → the estimate has no wave input this run.
 - Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly wave cron
   (runWaveRefresh — fetched in step 3b, put in step 4) with { expirationTtl: 25200 }, and
-  ONLY when the beach's nearest NDBC buoy produced a valid recent water-temp reading
-  (section 1). Read ONLY by the detail route (like "waves:", the list page must not gain
+  ONLY when the beach's nearest CAP_WATER_TEMP station (within 25 km) produced a valid recent
+  water-temp reading (section 1). Read ONLY by the detail route (like "waves:", the list page must not gain
   per-row reads) and passed to renderDetailPage as the .beach-subtitle temp fragment.
   DISPLAY-ONLY — never feeds src/rules.js. Absent key → the subtitle omits the temp fragment.
 - "waves:", "waveinput:" and "watertemp:" are all written from the SAME bounded-concurrency
@@ -2680,16 +2686,23 @@ Setup (before step 1): const startedMs = Date.now() — taken BEFORE the SELECT 
    "unknown", which is a product regression, not a performance fix.
 3b. NDBC water temperature — FETCH HALF (DISPLAY-ONLY). A self-contained pass over the SAME
    beaches SELECTed this run (no extra query) that never reads or mutates
-   waveResults/windResults or the wave KV. Dedup by nearest station id (nearestStation,
-   exactly like the step-2b supplemental memo): fetch each unique station's realtime2 file
+   waveResults/windResults or the wave KV. Dedup by nearest station id
+   (nearestWaterTempStation — the CAP_WATER_TEMP pool and the 25 km temp cap, NOT the wave
+   selector; exactly like the step-2b supplemental memo): fetch each unique station's realtime2 file
    ONCE via stationWaterTemp(stationId, nowIso, env) → parseNdbcWaterTempF and fan the parsed
    reading to every beach under it, building waterTempByBeach (beach.id -> the complete
    WaterTemp record of section 1). A null reading records nothing for that station's beaches,
    so their old keys expire on their own. Per-station failures are isolated; the step never
    throws out. NEVER feeds src/rules.js (colors no flag, does not bump RULES_VERSION). May
-   re-fetch a couple of station files the step-2b fallback also touched (≤10 unique stations
-   total) — the pass is kept isolated on purpose rather than sharing a cache. The station
-   loop is gated by gatherDeadline, and this step is LAST in the gather on purpose: if the
+   re-fetch a station file the step-2b fallback also touched — the pass is kept isolated on
+   purpose rather than sharing a cache. The temp-capable set is ~7x the wave set (72 stations
+   vs 10), so this loop can touch ~60 unique stations rather than ≤10; stationWaterTemp
+   Range-limits every fetch to NDBC_HEAD_BYTES = 32768 bytes (rows are newest-first, so ~34 h
+   of a 6-minute NOS gauge — far more than the 12 h window can accept), because the NOS
+   water-level gauges that dominate the temp set publish ~1 MB realtime2 files and pulling
+   them whole would put tens of megabytes into the last step of the gather. waveFt is
+   deliberately NOT Range-limited, keeping the COLOR path's bytes identical. The station loop
+   is gated by gatherDeadline, and this step is LAST in the gather on purpose: if the
    deadline bites, display-only data is the correct thing to sacrifice.
    THIS BLOCK USED TO SAY the pass ran "AFTER the step-4 wave-input writes". That sentence
    WAS THE BUG: sitting behind a ~1450-put sequential write loop that consumed the whole
@@ -2756,7 +2769,8 @@ Subrequest budget: ≤12 paced marine batches (100/batch over ≤1200 beaches) +
 cost is typically ≤60 deduped platform obs fetches) + supplemental fallback fetches for the
 still-wave-null remainder (step 2b — key-shared sources dedup, so cost is roughly the number
 of distinct gridpoint/marine-zone/buoy keys, not one per beach; ≤664 in a fully wave-null
-winter run) + ≤12 paced wind batches + ≤10 NDBC station fetches + ≤3600 waveinput/waves/
+winter run) + ≤12 paced wind batches + ≤72 NDBC station fetches (one per CAP_WATER_TEMP
+station, Range-limited to 32 KB) + ≤3600 waveinput/waves/
 watertemp KV puts + ≤12 wave_updated D1 batches + 1 SELECT ≈ 4,360 worst case at the 1200-row
 LIMIT — well under the paid-plan 10,000/invocation ceiling.
 WALL CLOCK, NOT SUBREQUEST COUNT, IS THE BINDING LIMIT. The run that failed used ~1,470

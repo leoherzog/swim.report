@@ -8,16 +8,32 @@ import { describe, it, expect } from "vitest";
 import {
   parseNdbcWaveFt,
   parseNdbcWaterTempF,
-  nearestStation,
+  nearestStationFor,
+  nearestWaveStation,
+  nearestWaterTempStation,
+  stationsWithCapability,
   stationUrl,
   matches,
   ndbcBuoySource,
   ndbcWaveSource,
   NDBC_MODEL,
   NDBC_STATIONS,
+  NDBC_CAPABILITIES,
+  CAP_WAVES,
+  CAP_WATER_TEMP,
   NDBC_MAX_DISTANCE_KM,
+  NDBC_WATER_TEMP_MAX_DISTANCE_KM,
   NDBC_WATER_TEMP_MAX_OBS_AGE_MS
 } from "../src/waveSources/ndbcBuoys.js";
+
+// The ten ids the COLOR path may use. Frozen: wave height feeds src/rules.js,
+// so a change here is a RULES_VERSION discussion, and this literal is the CI
+// guard that one cannot happen by accident (e.g. by pasting CAP_WAVES onto a
+// row while adding water-temp stations).
+const FROZEN_WAVE_IDS = [
+  "45001", "45002", "45004", "45005", "45012",
+  "45013", "45161", "45164", "45165", "45167"
+];
 
 const METERS_TO_FEET = 3.28084;
 
@@ -246,30 +262,143 @@ describe("parseNdbcWaterTempF", function () {
   });
 });
 
-describe("nearestStation", function () {
-  it("picks the nearest curated station within the cap", function () {
+describe("station capabilities", function () {
+  it("freezes the wave-capable set to exactly the ten color-path ids", function () {
+    const ids = stationsWithCapability(CAP_WAVES).map(function (st) { return st.id; }).sort();
+    expect(ids).toEqual(FROZEN_WAVE_IDS.slice().sort());
+  });
+
+  it("declares a known, non-empty capability set on every row", function () {
+    for (let i = 0; i < NDBC_STATIONS.length; i++) {
+      const st = NDBC_STATIONS[i];
+      expect(Array.isArray(st.caps)).toBe(true);
+      expect(st.caps.length).toBeGreaterThan(0);
+      for (let j = 0; j < st.caps.length; j++) {
+        expect(NDBC_CAPABILITIES.indexOf(st.caps[j])).not.toBe(-1);
+      }
+    }
+  });
+
+  it("has no duplicate station ids", function () {
+    const seen = {};
+    for (let i = 0; i < NDBC_STATIONS.length; i++) {
+      const key = NDBC_STATIONS[i].id.toLowerCase();
+      expect(seen[key]).toBe(undefined);
+      seen[key] = true;
+    }
+  });
+
+  it("carries many more temp-capable stations than wave-capable ones", function () {
+    // Guards the whole point of the split: the NOS water-level network reports
+    // WTMP and no WVHT, so a wave-shaped filter used to exclude all of it.
+    expect(stationsWithCapability(CAP_WATER_TEMP).length)
+      .toBeGreaterThan(stationsWithCapability(CAP_WAVES).length * 3);
+  });
+});
+
+describe("nearestWaveStation", function () {
+  it("picks the nearest wave-capable station within the cap", function () {
     // Point next to the Cleveland buoy (45164 @ 41.748,-81.698).
-    const st = nearestStation(41.75, -81.70);
+    const st = nearestWaveStation(41.75, -81.70);
     expect(st).not.toBe(null);
     expect(st.id).toBe("45164");
     expect(st.distanceKm).toBeLessThan(5);
+    expect(st.capability).toBe(CAP_WAVES);
   });
 
   it("returns null when no station is within NDBC_MAX_DISTANCE_KM", function () {
     // Middle of the Atlantic — far from every Great Lakes buoy.
-    expect(nearestStation(30.0, -40.0)).toBe(null);
+    expect(nearestWaveStation(30.0, -40.0)).toBe(null);
   });
 
   it("returns null for invalid coordinates", function () {
-    expect(nearestStation(null, -81.7)).toBe(null);
-    expect(nearestStation(41.7, undefined)).toBe(null);
-    expect(nearestStation(NaN, NaN)).toBe(null);
+    expect(nearestWaveStation(null, -81.7)).toBe(null);
+    expect(nearestWaveStation(41.7, undefined)).toBe(null);
+    expect(nearestWaveStation(NaN, NaN)).toBe(null);
   });
 
   it("chooses the closer of two nearby stations", function () {
     // Toledo (45165 @ 41.704,-83.264) vs West Erie (45005 @ 41.677,-82.398).
-    const st = nearestStation(41.70, -83.20);
+    const st = nearestWaveStation(41.70, -83.20);
     expect(st.id).toBe("45165");
+  });
+
+  it("never returns a temp-only station, however close it sits", function () {
+    // Ottawa Beach, Holland MI: the NOS gauge hlnm4 is 0.3 km away and reports
+    // no wave height at all. This is the regression the capability split exists
+    // to prevent — a temp station leaking onto the color path.
+    const st = nearestWaveStation(42.77545, -86.2113193);
+    expect(st).toBe(null);
+  });
+});
+
+describe("nearestWaterTempStation", function () {
+  it("resolves the NOS gauge next to a beach the wave list could never reach", function () {
+    // The bug in one assertion. Ottawa Beach's nearest WAVE station is 47 km
+    // away (and has been off-air since 2026-08-18), so the page showed no water
+    // temperature while a live NOS gauge sat 0.3 km offshore.
+    const st = nearestWaterTempStation(42.77545, -86.2113193);
+    expect(st).not.toBe(null);
+    expect(st.id).toBe("hlnm4");
+    expect(st.distanceKm).toBeLessThan(1);
+    expect(st.capability).toBe(CAP_WATER_TEMP);
+  });
+
+  it("applies its own tighter cap, not the wave cap", function () {
+    expect(NDBC_WATER_TEMP_MAX_DISTANCE_KM).toBeLessThan(NDBC_MAX_DISTANCE_KM);
+    // Due west of the Cleveland buoy (41.748,-81.698) by ~33 km: inside the
+    // 40 km wave cap, outside the 25 km water-temp cap. The nearest station is
+    // the same platform for both readings, so only the cap can separate them.
+    const lonOffset = 33 / (111.32 * Math.cos(41.748 * Math.PI / 180));
+    const lat = 41.748;
+    const lon = -81.698 - lonOffset;
+    const wave = nearestWaveStation(lat, lon);
+    expect(wave).not.toBe(null);
+    expect(wave.distanceKm).toBeGreaterThan(NDBC_WATER_TEMP_MAX_DISTANCE_KM);
+    const temp = nearestWaterTempStation(lat, lon);
+    if (temp !== null) {
+      expect(temp.distanceKm).toBeLessThanOrEqual(NDBC_WATER_TEMP_MAX_DISTANCE_KM);
+    }
+  });
+
+  it("returns null for invalid coordinates", function () {
+    expect(nearestWaterTempStation(null, -81.7)).toBe(null);
+    expect(nearestWaterTempStation(41.7, undefined)).toBe(null);
+    expect(nearestWaterTempStation(NaN, NaN)).toBe(null);
+  });
+
+  it("returns a station only from the temp-capable pool", function () {
+    const pool = {};
+    const temps = stationsWithCapability(CAP_WATER_TEMP);
+    for (let i = 0; i < temps.length; i++) {
+      pool[temps[i].id] = true;
+    }
+    for (let i = 0; i < NDBC_STATIONS.length; i++) {
+      const st = NDBC_STATIONS[i];
+      const got = nearestWaterTempStation(st.lat, st.lon);
+      if (got !== null) {
+        expect(pool[got.id]).toBe(true);
+      }
+    }
+  });
+});
+
+describe("nearestStationFor", function () {
+  it("returns null and never a station for an unknown capability", function () {
+    // A default capability here would have rebuilt the exact defect this module
+    // was fixing — a call site inheriting an eligibility rule it never asked
+    // for — so an unrecognised one must yield nothing at all.
+    expect(nearestStationFor(undefined, 41.75, -81.70)).toBe(null);
+    expect(nearestStationFor("", 41.75, -81.70)).toBe(null);
+    expect(nearestStationFor("air_temp", 41.75, -81.70)).toBe(null);
+    expect(nearestStationFor(CAP_WAVES + "x", 41.75, -81.70)).toBe(null);
+  });
+
+  it("is what the two named wrappers delegate to", function () {
+    expect(nearestStationFor(CAP_WAVES, 41.75, -81.70))
+      .toEqual(nearestWaveStation(41.75, -81.70));
+    expect(nearestStationFor(CAP_WATER_TEMP, 42.77545, -86.2113193))
+      .toEqual(nearestWaterTempStation(42.77545, -86.2113193));
   });
 });
 
@@ -319,7 +448,33 @@ describe("ndbcBuoySource object", function () {
     }
   });
 
-  it("keeps the distance cap positive", function () {
+  it("keeps both distance caps positive", function () {
     expect(NDBC_MAX_DISTANCE_KM).toBeGreaterThan(0);
+    expect(NDBC_WATER_TEMP_MAX_DISTANCE_KM).toBeGreaterThan(0);
+  });
+
+  it("upcases an alphanumeric id for the case-sensitive realtime2 path", function () {
+    // NDBC serves realtime2 files under UPPERCASE names while the master
+    // station table spells the NOS stations lowercase. A lowercase request 404s,
+    // which degrades to null and is indistinguishable from the winter gap — so
+    // the beach silently loses its temperature. This assertion is the guard.
+    expect(stationUrl("hlnm4")).toBe("https://www.ndbc.noaa.gov/data/realtime2/HLNM4.txt");
+    expect(stationUrl("HLNM4")).toBe("https://www.ndbc.noaa.gov/data/realtime2/HLNM4.txt");
+  });
+
+  it("leaves numeric buoy ids untouched, so the color path is byte-identical", function () {
+    expect(stationUrl("45164")).toBe("https://www.ndbc.noaa.gov/data/realtime2/45164.txt");
+    expect(stationUrl("4403585")).toBe("https://www.ndbc.noaa.gov/data/realtime2/4403585.txt");
+  });
+
+  it("builds an uppercase realtime2 filename for every station in the table", function () {
+    // Class guard: the duplicate-id test lowercases before comparing, so it can
+    // never surface a case problem. This one asserts the URL actually requested.
+    for (let i = 0; i < NDBC_STATIONS.length; i++) {
+      const url = stationUrl(NDBC_STATIONS[i].id);
+      const file = url.slice(url.lastIndexOf("/") + 1, url.length - ".txt".length);
+      expect(file).toBe(file.toUpperCase());
+      expect(file.length).toBeGreaterThan(0);
+    }
   });
 });

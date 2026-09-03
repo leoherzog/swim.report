@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
 import { HOT_VIEW_WINDOW_MS } from "../src/demandWindow.js";
+import { NDBC_HEAD_BYTES } from "../src/waveSources/ndbcBuoys.js";
 import { runScheduledCron } from "./helpers/cron.js";
 
 function makeBeachRow(overrides) {
@@ -2231,7 +2232,8 @@ describe("runWaveRefresh water temperature (watertemp: KV)", function () {
     vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
 
     let ndbcCalls = 0;
-    vi.stubGlobal("fetch", function (url) {
+    const ndbcRangeHeaders = [];
+    vi.stubGlobal("fetch", function (url, init) {
       const target = typeof url === "string" ? url : (url && url.url) || "";
       if (target.indexOf(MARINE_HOST) !== -1) {
         // A real wave height for every beach, so none is wave-null and the
@@ -2243,6 +2245,7 @@ describe("runWaveRefresh water temperature (watertemp: KV)", function () {
       }
       if (target === NDBC_CLEVELAND_URL) {
         ndbcCalls = ndbcCalls + 1;
+        ndbcRangeHeaders.push(init && init.headers ? init.headers.Range : undefined);
         return ndbcTextResponse(ndbcFile([ndbcRow("2026 07 15 15 50", "1.2", "24.6")]));
       }
       return Promise.reject(new Error("network disabled in test"));
@@ -2253,6 +2256,12 @@ describe("runWaveRefresh water temperature (watertemp: KV)", function () {
     await runWaveCron(made.env);
 
     expect(ndbcCalls).toBe(1);
+    // The temp-capable station set is ~7x the wave set and is dominated by NOS
+    // gauges publishing every 6 minutes (~1 MB realtime2 files), so the fetch is
+    // Range-limited to the newest-first head rather than pulling whole files
+    // into the last step of the gather.
+    expect(ndbcRangeHeaders.length).toBe(1);
+    expect(ndbcRangeHeaders[0]).toBe("bytes=0-" + String(NDBC_HEAD_BYTES - 1));
 
     let temps = 0;
     for (const key of made.kvPuts.keys()) {
@@ -2604,7 +2613,7 @@ describe("runWaveRefresh wall-clock budgets", function () {
     // skipped the entire write pass and the run persisted nothing at all — the
     // most expensive possible failure for a 6-hourly cron. Simulated with a
     // throwing accessor armed only after the marine pass has read the row, so
-    // the throw lands in the water-temp step (nearestStation(beach.lat, ...))
+    // the throw lands in the water-temp step (nearestWaterTempStation(beach.lat, ...))
     // with a full set of wave results already gathered.
     let armed = false;
     vi.stubGlobal("fetch", function (url) {
