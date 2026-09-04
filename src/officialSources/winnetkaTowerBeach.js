@@ -38,7 +38,7 @@
 // name-substring-within-bbox gate; register it ahead of any broad regional
 // scraper whose bbox might otherwise also cover this beach. This source is
 // independent of wave/rip/alert signal already gathered elsewhere (SRF, NWS,
-// Open-Meteo/GLOS) — it is a distinct posted-closure override, not a fallback
+// NOAA waves) — it is a distinct posted-closure override, not a fallback
 // for any of them, and must never be duplicated as a wqFloor source (a
 // water-quality closure here already returns null so it cannot masquerade as
 // a hazard override).

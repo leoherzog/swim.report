@@ -6,3 +6,7 @@ dist/
 .seed.sql
 .marine-snapshot.json
 .marine.sql
+.wavegrids/
+.wavekv/
+.wave-snapshot.json
+coverage/

@@ -1199,7 +1199,9 @@ async function readReportFile(path) {
   }
 }
 
-async function main() {
+// Exported so the three argument guards below are reachable from a test; they all
+// fire before a single layer byte is read.
+export async function main() {
   const runStartMs = Date.now();
   const args = parseArgs(Deno.args);
   // The batch runs discovery and classification in ONE pass over ONE verified

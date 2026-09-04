@@ -8,13 +8,12 @@
 // the entry module is the wrong place to grow a general-purpose helper.
 // Precedent: src/demandWindow.js.
 //
-// The problem these solve: runWaveRefresh wrote ~1450 KV keys with a SEQUENTIAL
-// await env.FLAGS.put(...) per beach and had no budget of any kind, so at
-// ~0.45 s per put the write phase alone was ~700 s and the invocation was
-// SIGKILLed at 899.989 s of its 900 s scheduled ceiling — mid-loop, with no
-// cursor, no partial-progress record and no completion log. runPool bounds the
-// fan-out; makeDeadline lets a phase YIELD before the platform kills it, so a
-// truncated run persists a prefix instead of losing the whole invocation.
+// The problem these solve: a sequential per-beach await env.FLAGS.put(...) fan-out
+// costs ~0.45 s per put, so a few thousand keys exceed the 900 s scheduled
+// invocation ceiling and the run is SIGKILLed mid-loop, with no cursor, no
+// partial-progress record and no completion log. runPool bounds the fan-out;
+// makeDeadline lets a phase YIELD before the platform kills it, so a truncated
+// run persists a prefix instead of losing the whole invocation.
 
 // A wall-clock budget measured from a fixed start instant.
 //

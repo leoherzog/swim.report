@@ -5,6 +5,8 @@
 import { describe, it, expect } from "vitest";
 import { distanceMi, resolveUserLocation, escapeLike, handleRequest } from "../src/router.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
+import { PAGE_STYLES } from "../src/frontend/styles.js";
+import { COLOR_SCHEME_SCRIPT } from "../src/frontend/colorSchemeScript.js";
 
 // Minimal D1/KV stand-in: records every prepared statement (sql + bound params)
 // so tests can assert on the query the router built. all()/first() resolve to
@@ -438,6 +440,14 @@ describe("document shell color scheme", () => {
     });
     expect(html).toContain("<html lang=\"en\" class=\"wa-theme-matter wa-palette-mild wa-cloak\" data-fa-kit-code=\"ddd41b2d81\">");
   });
+
+  it("carries no closing tag in either raw-injected string", function () {
+    // render.js injects both verbatim between <style>/<script> open and close tags,
+    // so a '</' anywhere inside either one breaks the document out of the element.
+    // A property of the injection site, not of the CSS or the script.
+    expect(PAGE_STYLES).not.toContain("</");
+    expect(COLOR_SCHEME_SCRIPT).not.toContain("</");
+  });
 });
 
 describe("renderListPage proximity output", () => {
@@ -486,7 +496,7 @@ describe("renderListPage proximity output", () => {
         rules_version: "1.1.0",
         official: false,
         sources: [
-          { label: "ECMWF Wave Forecast", url: "https://open-meteo.com/en/docs/marine-weather-api" },
+          { label: "NOAA Great Lakes Wave Model", url: "https://polar.ncep.noaa.gov/waves/" },
           { label: "NWS Surf Zone Forecast" },
           "https://api.weather.gov/alerts/active?zone=MIZ071"
         ],
@@ -498,10 +508,10 @@ describe("renderListPage proximity output", () => {
     expect(html).toContain("with-header-actions");
     expect(html).toContain("<div slot=\"header-actions\">");
     // Labels render as quiet badge chips — the source url is never hyperlinked in
-    // the card. (The one allowed occurrence of the docs url is the footer's own
-    // Open-Meteo attribution link, unrelated to this beach's sources.)
-    expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>ECMWF Wave Forecast</wa-badge>");
-    expect(html.split("https://open-meteo.com/en/docs/marine-weather-api").length - 1).toBe(1);
+    // the card, and the footer credits NOAA/NWS rather than the wave-model page,
+    // so a provenance url must not appear in the document at all.
+    expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>NOAA Great Lakes Wave Model</wa-badge>");
+    expect(html.split("https://polar.ncep.noaa.gov/waves/").length - 1).toBe(0);
     expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>NWS Surf Zone Forecast</wa-badge>");
     // Legacy bare-string sources render as their hostname, unlinked.
     expect(html).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>api.weather.gov</wa-badge>");
@@ -625,8 +635,8 @@ describe("handleDetail waves: KV read", () => {
       beachId: "b-1",
       startIso: "2026-07-15T16:00:00.000Z",
       hoursFt: [1.6, 1.7, 1.8],
-      models: ["ecmwf_wam025"],
-      sources: [{ label: "ECMWF Wave Forecast", url: "https://open-meteo.com/en/docs/marine-weather-api" }],
+      models: ["noaa_glwu"],
+      sources: [{ label: "NOAA Great Lakes Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }],
       updated: "2026-07-15T16:20:33.000Z"
     };
     const { env } = detailEnv(beach, series);
@@ -1567,7 +1577,6 @@ describe("footer disclaimer on the list page", () => {
     expect(html).toContain("<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a>");
     expect(html).toContain("<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a>");
     expect(html).toContain("<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a>");
-    expect(html).toContain("<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a>");
     expect(html).toContain("<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a>");
   });
 

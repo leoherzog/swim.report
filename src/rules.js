@@ -4,7 +4,7 @@
 // complete FlagEstimate object out. This is the ONLY place in the codebase
 // where a flag color is decided for an estimate.
 
-export const RULES_VERSION = "1.5.0";
+export const RULES_VERSION = "1.5.1";
 
 // Flag color severity ordering. The raise-only water-quality floor (step 7)
 // uses this to compare an advisory's floor color against the already-decided
@@ -267,7 +267,7 @@ export function estimateFlag(inputs) {
     }
   }
 
-  // Step 3: wave height from Open-Meteo Marine API (already converted to feet).
+  // Step 3: wave height from the NOAA wave grids (already converted to feet).
   // Color comes from waveColorForHeight (the single home of the 2/4 ft thresholds);
   // the per-branch reason strings are built here and are unchanged.
   if (color === null && waveHeightFt !== null) {
@@ -320,7 +320,7 @@ export function estimateFlag(inputs) {
       trigger = "rip-current-low";
     } else {
       color = "unknown";
-      reason = "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models";
+      reason = "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models";
       trigger = "no-data";
     }
   }

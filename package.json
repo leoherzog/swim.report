@@ -13,12 +13,17 @@
     "seed:eccc": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*\"",
     "seed:marine": "wrangler d1 execute swim-report --local --json --command \"SELECT id, lat, lon, nws_zone, marine_zone FROM beaches\" > .marine-snapshot.json && DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write scripts/discovery-batch.js --no-discovery --no-classify --marine-zones data/marine-zones-greatlakes.json --snapshot .marine-snapshot.json --out .marine.sql && node scripts/apply-local-sql.js .marine.sql",
     "seed:webcams": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*\"",
-    "seed:waves": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*\"",
+    "seed:wavegrids": "DENO_NO_PACKAGE_JSON=1 deno run --allow-net --allow-read --allow-write scripts/fetch-wave-grids.js --dest ./.wavegrids",
+    "seed:waveplanes": "find ./.wavegrids -name '*.grib2' -print | sort | while read -r f; do gdalinfo -json \"$f\" > \"$f.info.json\"; done && DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write scripts/sample-waves.js --mode plan --dest ./.wavegrids --out ./.wavegrids/band-plan.json && node -e \"const fs=require('fs'),cp=require('child_process');const dir='./.wavegrids/planes';const p=JSON.parse(fs.readFileSync('./.wavegrids/band-plan.json','utf8'));fs.mkdirSync(dir,{recursive:true});for(const e of p.entries){const img=dir+'/'+e.key+'.img';if(e.warp){const vrt=dir+'/'+e.key+'.vrt';cp.execFileSync('gdal_translate',['-q','-of','VRT','-b',String(e.band),e.sourceFile,vrt],{stdio:'inherit'});cp.execFileSync('gdalwarp',['-q','-overwrite','-t_srs',e.warp.targetSrs,'-te'].concat(e.warp.te.map(String),['-tr'],e.warp.tr.map(String),['-r',e.warp.resample,'-dstnodata',String(e.nodata),'-ot','Float32','-of','ENVI',vrt,img]),{stdio:'inherit'});}else{cp.execFileSync('gdal_translate',['-q','-of','ENVI','-ot','Float32','-b',String(e.band),e.sourceFile,img],{stdio:'inherit'});}fs.writeFileSync(dir+'/'+e.key+'.info.json',cp.execFileSync('gdalinfo',['-json','-stats',img]));}console.log('extracted '+p.entries.length+' plane(s)');\"",
+    "seed:waves": "wrangler d1 execute swim-report --local --json --command \"SELECT id, lat, lon, water_class, last_viewed FROM beaches WHERE $(DENO_NO_PACKAGE_JSON=1 deno run --allow-read scripts/print-flag-worthy-sql.js) ORDER BY id\" > .wave-snapshot.json && DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write scripts/sample-waves.js --mode sample --dest ./.wavegrids --planes ./.wavegrids/planes --snapshot .wave-snapshot.json --out ./.wavegrids/out && DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write --allow-env=ImageOS,ImageVersion scripts/build-wave-manifest.js --sample ./.wavegrids/out --grids-report ./.wavegrids/grids-report.json --expect data/wave-grids.json --floors data/wave-floors.json --cycle-id local --out ./.wavegrids/out/manifest.json && node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('./.wavegrids/out/manifest.json','utf8'));fs.writeFileSync('./.wavegrids/current.json',JSON.stringify({cycleId:m.cycleId,prefix:'waves/'+m.cycleId}))\" && DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write scripts/build-wave-kv.js --mode emit --dir ./.wavegrids/out --pointer ./.wavegrids/current.json --out ./.wavekv && for f in ./.wavekv/wave-kv-*.json; do wrangler kv bulk put \"$f\" --local --binding FLAGS; done",
+    "seed:watertemp": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*\"",
     "seed:flags": "curl \"http://localhost:8787/cdn-cgi/handler/scheduled?cron=7+*+*+*+*\"",
     "deploy": "wrangler deploy",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "4.1.11",
     "flatgeobuf": "^4.4.0",
     "vitest": "^4.1.11",
     "wrangler": "^4.126.0"

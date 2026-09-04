@@ -81,7 +81,7 @@
 //
 // INTEGRATOR DEDUP NOTE: this is the ONLY Ontario Parks beach-posting source
 // in the project; it does not overlap with any existing hazard scraper or
-// wave/alert client (SRF rip, NWS/ECCC alerts, Open-Meteo/GLOS wave are all
+// wave/alert client (SRF rip, NWS/ECCC alerts, NOAA wave are all
 // weather/hazard axis, not bacteria). Register ONLY in
 // src/wqFloor/index.js's wqFloorSources array (raise-only), never in
 // src/officialSources/index.js's scrapers array (hazard-override) -- a

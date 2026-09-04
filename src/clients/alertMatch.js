@@ -37,9 +37,12 @@ export function pickIsoString(primary, fallback) {
 // silently dropping alerts.
 export function matchedAlerts(alerts, matches) {
   const events = [];
-  const seen = {};
+  // Prototype-less: an event name that is an Object.prototype key ('constructor',
+  // 'toString', '__proto__') reads back truthy on first sighting from a {} literal,
+  // which drops it from events while details still carries it.
+  const seen = Object.create(null);
   const details = [];
-  const seenDetails = {};
+  const seenDetails = Object.create(null);
   const list = Array.isArray(alerts) ? alerts : [];
   for (const alert of list) {
     if (alert === null || typeof alert !== "object" || typeof alert.event !== "string") {

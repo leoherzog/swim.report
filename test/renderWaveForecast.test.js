@@ -25,8 +25,8 @@ function wavesWith(extra) {
       beachId: "osm-way-505668572",
       startIso: NOW_ISO,
       hoursFt: representativeHours(),
-      models: ["ecmwf_wam025"],
-      sources: [{ label: "ECMWF Wave Forecast" }],
+      models: ["noaa_glwu"],
+      sources: [{ label: "NOAA Great Lakes Wave Model" }],
       updated: NOW_ISO
     },
     extra
@@ -90,9 +90,9 @@ function modelHours(v) {
 function threeModelWaves() {
   return wavesWith({
     byModel: {
-      ecmwf_wam025: modelHours(2.63),
-      ncep_gfswave025: modelHours(2.44),
-      meteofrance_wave: modelHours(2.9)
+      noaa_glwu: modelHours(2.63),
+      noaa_gfswave: modelHours(2.44),
+      noaa_gfswave_arctic: modelHours(2.9)
     }
   });
 }
@@ -221,7 +221,7 @@ describe("wave-forecast section", () => {
   });
 
   it("shows the stale-data warning when waves.updated is more than 8 h old", () => {
-    // The wave strip refreshes on the 6-hourly wave cron, so its staleness
+    // The wave strip refreshes on the offline NOAA wave cycle, so its staleness
     // threshold is 8 h (a clearly-missed cycle), not the flag's 2 h.
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
@@ -287,8 +287,7 @@ describe("wave-forecast section", () => {
       "<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
       "for beach locations, " +
       "<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a> + " +
-      "<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a> + " +
-      "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a> " +
+      "<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a> " +
       "for marine and weather data, and " +
       "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> " +
       "for webcams.");
@@ -304,7 +303,7 @@ describe("wave-forecast model comparison", () => {
     });
     expect(html).toContain(
       "<p class=\"wave-model-now wa-caption-s\">" +
-      "ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft</p>");
+      "NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft · NOAA GFS Arctic 2.9 ft</p>");
   });
 
   it("renders a collapsed 'Compare wave models' disclosure (no open attribute)", () => {
@@ -342,7 +341,7 @@ describe("wave-forecast model comparison", () => {
     // slotted config must not restate it.
     expect(modelConfig.type).toBeUndefined();
     expect(modelConfig.data.datasets.map(function (d) { return d.label; }))
-      .toEqual(["ECMWF", "NOAA GFS", "Météo-France"]);
+      .toEqual(["NOAA Great Lakes", "NOAA GFS", "NOAA GFS Arctic"]);
     expect(modelConfig.data.labels[0]).toBe("Now");
     expect(modelConfig.data.labels).toHaveLength(24);
     // 2.63 / 2.44 / 2.9 rounded to a single decimal.
@@ -382,8 +381,8 @@ describe("wave-forecast model comparison", () => {
       official: null,
       waves: threeModelWaves()
     });
-    const summary = "Wave height by model, next 24 hours — ECMWF now 2.6 ft, " +
-      "NOAA GFS now 2.4 ft, Météo-France now 2.9 ft.";
+    const summary = "Wave height by model, next 24 hours — NOAA Great Lakes now 2.6 ft, " +
+      "NOAA GFS now 2.4 ft, NOAA GFS Arctic now 2.9 ft.";
     expect(html).toContain("label=\"Wave height by forecast model\" description=\"" + summary + "\"");
     expect(html).toContain("<p class=\"wave-chart-fallback wa-caption-s\">" + summary + "</p></wa-line-chart></wa-details>");
   });
@@ -392,7 +391,7 @@ describe("wave-forecast model comparison", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
-      waves: wavesWith({ byModel: { ecmwf_wam025: modelHours(2.6) } })
+      waves: wavesWith({ byModel: { noaa_glwu: modelHours(2.6) } })
     });
     // The class names ship in the stylesheet regardless — match rendered markers.
     expect(html).not.toContain("<p class=\"wave-model-now");

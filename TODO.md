@@ -82,15 +82,46 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     relation member ways, not `natural=coastline`). Harmless: ocean and
     great_lake are both flag-worthy and pass the gate identically — only inland
     vs {ocean, great_lake} must be reliable, and it is.
-- **GLCFS gridded wave source is still down.** The Great Lakes wave gap-fill
-  (`fetchGlcfsWaveHeightsFt` in `src/clients/glerl.js`) uses nearest-GLOS-
-  Seagull-buoy observations because the true gridded GLCFS source
-  (erddap.axiomdatascience.com) is hard-down — 100% HTTP 502. If it recovers,
-  true grid interpolation could replace nearest-buoy behind the same
-  `fetchGlcfsWaveHeightsFt` export. Known limits of the buoy approach: coverage
-  collapses in winter when GLOS pulls buoys (beaches then fall back to
-  wind/unknown by design), and the meters unit for Seagull wave values rests on
-  out-of-band research, not an in-band units field.
+- **GitHub Actions cron skipping is the wave pipeline's largest unclosed risk.** The
+  scheduler skips occurrences rather than deferring them, and 8 slots a day against a 7 h
+  absolute key expiration tolerates only two consecutive misses. The permanent fix is to
+  carry `hoursFt` and `startIso` in `waveinput:` and have `runFlagRecompute` index the
+  current hour, which turns one landed cycle into 24 h of coverage; it is out of scope here
+  because it changes the hourly cron's read contract.
+- **A grid that sampled but under-covers its seeded per-grid floor still refuses the whole
+  cycle**, so a present-but-under-covering GLWU takes the ocean down with it; dropping that
+  grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside
+  the build, and the exposure is dormant only while every floor in `data/wave-floors.json`
+  is null.
+- **The permission guard in `.github/workflows/test.yml` checks `--allow-net` only.** No
+  Deno script in the wave pipeline may carry `--allow-run` (GDAL runs in the workflow
+  shell), but nothing enforces that machine-side; extend the same loop to `--allow-run`.
+- **Measure the slot hit rate before trusting the cadence.** No second wave source is left
+  to shadow against, so read the hit rate from `waves.yml`'s own run history and the
+  per-beach coverage from `manifest.beaches.resolved` across consecutive cycles. A run of
+  missed slots is the trigger for the `hoursFt`/`startIso` fix above.
+- **Arctic 9 km spiral is unvalidated against real Alaska coordinates.** Ring geometry on a
+  polar-stereographic grid differs from a lat/lon one, and `gfswave.global.0p16` stops at
+  52.583°N, so every Alaskan beach depends on that path. Check a handful of real rows before
+  the first publish.
+- **The identity gate proves the TARGET raster of a warped grid, never its source.** For
+  `noaa_glwu` and `noaa_gfswave_arctic` the plane is produced by `gdalwarp` at a fixed
+  `te`/`tr`, so a displaced source resamples into a raster whose header matches
+  `data/wave-grids.json` exactly and passes. `planFor` already reads each source file's
+  `gdalinfo`, so carrying a second identity record — the source header — on every plan
+  entry and gating on both is the natural fix.
+- **A seeded absolute `validPercent` floor per grid** (`floors[<digest>].validPercent[<gridId>]`)
+  is the eventual shape: the ratio rails catch a slide from a known-good cycle, an absolute
+  floor catches a grid that has been thin since the first accepted cycle. It cannot be
+  seeded yet — `data/wave-floors.json` is status `bootstrap` with every floor null, and no
+  accepted cycle exists to observe a number from.
+- **`PERPW`, `DIRPW`, `SWELL` and `WVHGT` arrive in the GRIB messages already being
+  fetched.** They are the natural second series for the currently dormant multi-model
+  comparison chart, and a capability the previous source did not offer.
+- **GFS atmos `GUST:surface` would restore `windGustMph`.** It is a second upstream product
+  family (`gfs.tHHz.pgrb2.0p25`) for a branch that only fires when wave data is entirely
+  absent, and GFS surface gust is not the same quantity as a 10 m gust, so the output
+  distribution would shift and must be measured first.
 - **Windy webcam caveats** (`src/clients/windyWebcams.js`, daily
   `runWebcamSync`). (1) The Windy free tier publishes **no daily request
   quota** — 100 lookups/night is polite guesswork; watch the daily-run logs for
@@ -253,7 +284,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 - **Demand-priority recompute rotation — mechanism landed, cold-tier tuning
   deferred.** The request path stamps `beaches.last_viewed` (migration 0007;
   detail page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`), and
-  it now has real consumers: `runFlagRecompute`/`runWaveRefresh` split their
+  it now has real consumers: `runFlagRecompute`/`runWaterTempRefresh` split their
   rotation into a hot tier (`last_viewed` within `HOT_VIEW_WINDOW_MS`, 7 days —
   always fully covered every run) and a cold tier that rotates through the
   remaining `MAX_BEACHES_PER_RUN` budget on the existing
@@ -282,19 +313,13 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   if Canadian beaches are included), regardless of zone count. A separate
   queue-based stale-refresh (request path enqueues, consumer fetches) only if
   flagless gaps show up in practice.
-- **Open-Meteo daily weighted-call budget (accounting landed, throttle deferred).**
-  Open-Meteo's free tier caps at **10,000 weighted calls/day**, and a batched
-  multi-location request is weighted by its location count (a 100-coordinate batch ≈ 100
-  weighted calls), so HTTP-level batching saves connections but NOT daily quota.
-  `runWaveRefresh` now LOGS a per-run weighted-call estimate (via `batchByBeach`'s return
-  value, counting each attempt including the one backoff retry) against
-  `OPEN_METEO_DAILY_WEIGHTED_CEILING = 10000` — visibility only, no behavioral throttling
-  on the DAILY budget yet (existing pacing guards only the per-MINUTE limit). Today a full
-  run stays well under the ceiling, but it **binds first** — before the Workers subrequest
-  limit — once nationwide pagination removes the `MAX_BEACHES_PER_RUN = 1000` cap (the
-  pagination item above). Add a real per-day cap/throttle (or cap the wind-fallback
-  location set per day, or reduce from 4 runs/day given the 6–12 h marine model cadence)
-  BEFORE pagination ships.
+- **NDBC `latest_obs.txt` would replace the hardcoded water-temp table.** One ~106 KB file
+  carries 886 stations, against today's 72 committed rows and 72 per-station Range fetches.
+  Display-only and a separate change, because it feeds a different key family on a
+  per-station time basis. Once it lands in Actions, `"15 */6 * * *"`,
+  `runWaterTempRefresh`, `beaches.wave_updated`, `ROTATION_COLUMNS.wave` and the rest of
+  `src/waveSources/ndbcBuoys.js` all become removable together in one coherent commit, and
+  `migrations/0013_drop_wave_updated.sql` becomes the honest follow-up.
 - **NWS marine-zone shapefile refresh (~biannual chore).** `beaches.marine_zone` is derived
   offline from `data/marine-zones-greatlakes.json`, generated from the NWS coastal
   marine-zone shapefile. NWS republishes it ~1–2×/year on a schedule announced on
@@ -319,12 +344,15 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     live gap right now, not a future NA blocker — the hot/cold demand-priority
     rotation mitigates it (a beach in active demand is always covered) but does not
     close it. Growth needs real pagination or multiple invocations, or a
-    TTL/cadence change to match. Note the Open-Meteo daily weighted-call ceiling
-    binds here too (see README).
+    TTL/cadence change to match. No upstream per-day request quota binds here any
+    more: wave data is sampled offline and bulk-written, so the beach count is
+    independent of it.
   - **The D1 `--json` snapshot is size-capped and single-shot**, and the
     delete-bearing snapshot just widened from 7 to 11 columns (discovery and
     classification now share one). A truncated snapshot aborts the only delete path
-    there is. A **paginated snapshot is required before NA**, not after.
+    there is. A **paginated snapshot is required before NA**, not after. Pagination is
+    implemented in the wave workflow, which reaches 16k rows first; `discovery.yml`
+    still needs it.
 
 ## Official-scraper fragility
 
@@ -382,9 +410,7 @@ never lower it — see README "Water-quality advisory floor"). Registered:
 `evanston-statusfy`, `usgs-great-lakes-nowcast`. Authored and tested but
 **deliberately NOT registered** (see the follow-up below): `chautauqua-county-ny`,
 `erie-county-pa-kml`, `illinois-beachguard`.
-**Supplemental fallback wave sources** (`src/waveSources/`, wave-height only, used
-only where Open-Meteo + GLOS are null): `nws-gridpoint-waves`, `nws-nsh-nearshore`,
-`uw-sea-caves-watch`, `toronto-beach-obs`, `ndbc-buoys`. **ECCC marine warnings**
+**ECCC marine warnings**
 (`src/clients/ecccMarine.js`) are wired into the Canadian alert path (rules step
 1b/6b). Nothing was punted — every surveyed source above is authored; three wqFloor
 sources are held OUT of the registry pending gate confirmation (see the follow-up
@@ -439,32 +465,18 @@ coverage gaps, not wrong-color risks):
   leaving false stale warnings in place. Note also that a `staleMs` that never trips
   makes a silently-dead source indistinguishable from a healthy one — the
   `scraperhealth:` counter, not the horizon, is what catches that.
-- **Widen the NDBC wave set** — the 2026-09-02 station audit found 40 stations within 60 km
-  of a served beach reporting a fresh WVHT, of which 36 are not among the ten `CAP_WAVES`
-  ids. They were deliberately left wave-ineligible: wave height feeds `src/rules.js`, so
-  admitting them moves flag colors and needs a `RULES_VERSION` discussion plus a review of
-  how each new platform's readings compare with the Open-Meteo/GLOS values it would be
-  filling in for. The capability table in `src/waveSources/ndbcBuoys.js` makes the change
-  itself a one-word edit per row; the analysis is the work.
 - **Water-temp coverage is 47%, and 14% in winter** — 519 of 1102 beaches have a
   `CAP_WATER_TEMP` station inside the 25 km cap, falling to ~153 when the seasonal buoys are
   pulled and only the 15 year-round NOS gauges remain. The gap is a real sensor-density
   limit on the Great Lakes, not a list problem: even at a 75 km cap winter coverage only
-  reaches ~36%. GLOS Seagull (already integrated in `src/clients/glerl.js` for waves) exposes
-  `sea_water_temperature` on a denser network and is the obvious next source; it would need
-  the same siting review this list got.
+  reaches ~36%. GLOS Seagull exposes `sea_water_temperature` on a denser network and is the
+  obvious next source; it would need the same siting review this list got.
 - **Station-list rot has no trip-wire** — station 45161 (Muskegon) went off-air 2026-08-18
   and nothing noticed; it was found by hand. The 12 h freshness window correctly degrades a
-  dark station to null, which is exactly why the failure is invisible. Step 3b knows, per
+  dark station to null, which is exactly why the failure is invisible. The gather knows, per
   run, how many unique stations it consulted and how many returned a reading, so logging
   `stations=<n> live=<n>` would make a station family going dark visible in the observability
   query without anyone auditing anything.
-- **NDBC-vs-GLOS double-count audit** — `ndbc-buoys` is the first NDBC ingestion and
-  is a *fallback* consulted only for beaches still wave-null after Open-Meteo + the
-  GLOS/GLERL buoy pass, so it is by design non-additive. Audit that no NDBC buoy is
-  double-counting a beach the GLOS Seagull pass already covers (the ordered
-  registry breaks on the first finite reading, but confirm the GLOS pass runs first
-  and the wave-null set is recomputed between passes).
 
 ### Registered scrapers — live caveats
 
@@ -594,10 +606,9 @@ partnership-gated — see `docs/swimsmart-outreach-draft.md`.
 - The cron subrequest budgets assume the Workers **Paid** plan (10,000
   subrequests/invocation, no daily KV-write cap). The hourly `runFlagRecompute`
   runs alert + SRF + scraper fetches plus up to ~700 `flag:`/`official:` KV
-  writes (it no longer fetches waves),
-  and the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine + GLOS buoy
-  + wind fetches plus up to ~1200 `waveinput:`/`waves:` KV writes (per PLAN.md
-  section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
+  writes (it does not fetch waves), and the 6-hourly `runWaterTempRefresh` runs one
+  Range-limited read per distinct station plus its `watertemp:` KV writes (per
+  PLAN.md section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
   quota are not sufficient at this cadence and beach count. For a free-plan demo,
   drop `MAX_BEACHES_PER_RUN` way down (e.g. 10-15 beaches) and/or reduce cron
   frequency before deploying without a paid plan.

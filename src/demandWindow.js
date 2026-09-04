@@ -18,8 +18,8 @@
 //
 // 7-day window: >> the 2 h flag KV TTL so hotness never flaps with the flag
 // lifecycle, and it spans weekly visit periodicity. Consumed by
-// runFlagRecompute (hourly) and runWaveRefresh (6-hourly) to order their reads
-// hot-first — a beach with a `last_viewed` demand stamp inside this window is
-// always covered every run, ahead of the oldest-recompute_updated cold
-// remainder.
+// runFlagRecompute (hourly) and runWaterTempRefresh (6-hourly) to order their
+// reads hot-first — a beach with a `last_viewed` demand stamp inside this window
+// is always covered every run, ahead of the cold remainder that rotates on the
+// run's own cursor column.
 export const HOT_VIEW_WINDOW_MS = 7 * 86400000;
