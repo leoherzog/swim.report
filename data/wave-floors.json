@@ -45,12 +45,28 @@
   ],
   "floors": {
     "sha256:c4eafd4a4b0045968b45b70dfcace999395cb3f1af218a69167cb9cef2d7be9b": {
-      "status": "bootstrap",
-      "seededFromCycleId": null,
-      "waveinputRecords": null,
-      "wavesRecords": null,
+      "_comment": [
+        "SEEDED from cycle 20260904T1600Z-g20260904T12Z-6dce772 at 0.75x each measured count,",
+        "rounded down. Cross-checked against D1 before commit: 1102 flag-worthy rows, every one",
+        "water_class great_lake, matching the manifest's beaches.total 1102 and resolved 1102.",
+        "GLWU resolved every beach with ring0Fraction 0.79, median search 0.84 km and max search",
+        "8.33 km against its 10 km cap, so no beach reached the search ceiling.",
+        "",
+        "noaa_gfswave and noaa_gfswave_arctic are null because the table carries no ocean beach:",
+        "both measured zero assigned beaches, and a floor of zero would read as a measured",
+        "baseline while being satisfied by every possible cycle. They become structurally",
+        "required the moment a saltwater box lands in src/regions.js.",
+        "",
+        "That expansion will NOT re-withhold auto-publish. gridsDigest covers the GRID SET, not",
+        "the beach set, so adding ocean beaches leaves this entry matching and seeding those two",
+        "floors is a manual follow-up no refusal will prompt for."
+      ],
+      "status": "seeded",
+      "seededFromCycleId": "20260904T1600Z-g20260904T12Z-6dce772",
+      "waveinputRecords": 826,
+      "wavesRecords": 826,
       "grids": {
-        "noaa_glwu": null,
+        "noaa_glwu": 826,
         "noaa_gfswave": null,
         "noaa_gfswave_arctic": null
       }
