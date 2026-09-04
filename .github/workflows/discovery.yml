@@ -21,8 +21,7 @@ name: Beach discovery
 # proposed delete set: the global max(10, 5% of candidates) and the per-region rail.
 #
 # Requires one repository secret:
-#   CLOUDFLARE_API_TOKEN — value = the CLOUDFLARE_TOKEN in .dev.vars (D1 edit scope
-#                          on the swim-report database).
+#   CLOUDFLARE_D1_EDIT_TOKEN — D1 edit scope on the swim-report database.
 # It needs NO R2 credentials: the layers are public data read from
 # https://map.swim.report. That is a deliberate blast-radius reduction — this is the
 # only job in the repo that can DELETE production rows.
@@ -82,7 +81,7 @@ jobs:
     # backoff; the typical run drops from 85 min to about 10.
     timeout-minutes: 45
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_EDIT_TOKEN }}
       # A minimal D1-only API token cannot enumerate GET /accounts to auto-discover
       # the account, so wrangler needs it handed over explicitly. Account IDs are not
       # secret (they ship in wrangler.toml and dashboard URLs).
@@ -166,7 +165,7 @@ jobs:
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
             --command "SELECT id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class, water_class_version, water_class_attempts FROM beaches" \
             > snapshot.json; then
-            echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_API_TOKEN secret) — response below"
+            echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_D1_EDIT_TOKEN secret) — response below"
             cat snapshot.json
             exit 1
           fi
@@ -255,6 +254,6 @@ jobs:
         if: ${{ env.APPLY == 'true' }}
         run: |
           if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --file discovery-delta.sql; then
-            echo "::error::wrangler apply failed (check CLOUDFLARE_API_TOKEN secret and delta SQL)"
+            echo "::error::wrangler apply failed (check CLOUDFLARE_D1_EDIT_TOKEN secret and delta SQL)"
             exit 1
           fi

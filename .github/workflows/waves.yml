@@ -41,7 +41,7 @@ name: Wave cycle
 # write production KV cannot write R2:
 #   sample:     CLOUDFLARE_R2_ACCESS_KEY / CLOUDFLARE_R2_SECRET_ACCESS_KEY (S3-API keys
 #               on the swim-report bucket) and CLOUDFLARE_D1_READ_TOKEN (a READ-scoped
-#               D1 token, NOT the edit-scoped CLOUDFLARE_API_TOKEN discovery.yml uses).
+#               D1 token, NOT the edit-scoped CLOUDFLARE_D1_EDIT_TOKEN discovery.yml uses).
 #   publish-kv: CLOUDFLARE_KV_WRITE_TOKEN (Workers KV Storage: Edit) and no AWS keys.
 # OPERATOR PREREQUISITE THAT CANNOT BE VERIFIED FROM CODE: both tokens must be
 # provisioned before the first run, or the first bulk put fails after every other step
