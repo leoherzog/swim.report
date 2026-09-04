@@ -1,12 +1,7 @@
-// src/wqFloor/lakeCountyOhBeaches.js
+// src/wqFloor/lakeCountyOhBeaches.js — a raise-only water-quality floor source;
+// see src/wqFloor/index.js for the floor contract.
 //
-// KIND: wq (src/wqFloor raise-only water-quality floor source). Feeds
-// rules.js estimateFlag's "waterQualityAdvisory" input (step 7): it may only
-// RAISE a flag UP (worst-of by SEVERITY_RANK) — never pull a hazard estimate
-// down, and it is NOT an official override (official:false). A clean/absent
-// reading is the ABSENCE of a site (resolves to null -> zero effect).
-//
-// SOURCE: Lake County General Health District (Ohio) Beach Water Quality
+// Source: Lake County General Health District (Ohio) Beach Water Quality
 // Program, https://www.lcghd.org/beaches/ — a single server-rendered page
 // carrying a daily bacteria-quality PREDICTION for Lake County's two Lake
 // Erie public beaches:
@@ -17,7 +12,7 @@
 //   "Headlands Beach State Park - Water Bacteria Quality Prediction: GOOD"
 //   "Fairport Harbor Lakefront Park - Water Bacteria Quality Prediction: POOR"
 //
-// FLOOR MAPPING (RAISE-ONLY, per spec):
+// FLOOR MAPPING (raise-only, per spec):
 //   - "Poor" / "Advisory" / "Unsafe" / "Closed" prediction -> floorColor
 //     "yellow" (never red or double-red for a water-quality-only signal).
 //   - "Good" / "Safe" / "Open" prediction, OR the beach's status simply
@@ -51,11 +46,11 @@
 // automated fetches, obtain a permitted access path (documented API, feed,
 // or a pre-cleared User-Agent) before wiring scrape() into production.
 //
-// DEDUP: this is a NEW axis (Lake County, OH bacteria prediction), disjoint
+// DEDUP: this is a New axis (Lake County, OH bacteria prediction), disjoint
 // from the SRF rip lane, NWS/ECCC alert lane, and the NOAA wave lane.
 // No overlap with any other registered source for these two beaches.
 //
-// scrape() runs CRON-SIDE ONLY (one fetch per run). extractStatusForBeach,
+// scrape() runs CRON-SIDE only (one fetch per run). extractStatusForBeach,
 // floorColorForStatus, parseLakeCountyOhBeaches, and isInLakeCountyBeachSeason
 // are pure and exported for unit tests (no network).
 
@@ -163,7 +158,7 @@ export function floorColorForStatus(word) {
 // Pure, exported for tests. Full page HTML (+ the cron's ISO timestamp) ->
 // an array of Site objects (possibly empty on an all-clean page), or null
 // when the page cannot be positively recognized as a Lake County beach
-// report AT ALL (neither curated beach name appears anywhere in the text --
+// report AT all (neither curated beach name appears anywhere in the text --
 // an unusable/redesigned page). A page that names the beaches but reports
 // "good" for both is a legitimate CLEAN result: [] (not null).
 export function parseLakeCountyOhBeaches(html, nowIso) {
@@ -278,9 +273,9 @@ export const lakeCountyOhBeaches = {
     }
     return inLakeCountyOhBox(beach);
   },
-  // CRON-SIDE ONLY. Off-season: returns a clean EMPTY perBeach result (a
+  // CRON-SIDE only. Off-season: returns a clean EMPTY perBeach result (a
   // deliberate schedule skip, never a failure). In-season: fetches the page
-  // once and emits sites ONLY for beaches with an affirmatively-recognized
+  // once and emits sites only for beaches with an affirmatively-recognized
   // "poor"-class prediction. Returns null only when the fetch itself failed
   // or the page could not be positively recognized as the Lake County beach
   // report at all.

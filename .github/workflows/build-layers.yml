@@ -3,33 +3,28 @@ name: Build layers
 # Builds the prebuilt OSM spatial layers that scripts/discovery-batch.js consumes,
 # and publishes them to the swim-report R2 bucket (public at https://map.swim.report).
 #
-# NOT DELETE-BEARING. This job never touches D1. A failed or refused build simply
-# leaves the previous good layer set as the live one, and discovery keeps running on
-# slightly older OSM data — which is delete-SAFE, because an older extract is
-# over-inclusive: it still contains beaches OSM has since removed and lacks only
-# beaches OSM has since added, which D1 also lacks.
+# Not delete-bearing: this job never touches D1. A failed or refused build leaves the
+# previous good layer set live and discovery keeps running on slightly older OSM data,
+# which is delete-safe because an older extract is over-inclusive — it still contains
+# beaches OSM has since removed and lacks only beaches OSM has since added, which D1
+# also lacks.
 #
 # Publication is atomic by construction: every layer is written under an immutable
 # per-build prefix that nobody is reading, and only then is the single small
 # layers/current.json pointer overwritten. A reader can never see a torn set.
 #
-# Requires two repository secrets (S3-API keys on the swim-report bucket):
-#   CLOUDFLARE_R2_ACCESS_KEY
-#   CLOUDFLARE_R2_SECRET_ACCESS_KEY
-# It needs NO Cloudflare API token and NO npm registry tokens: it never runs
-# npm install / npm ci in the repo root (which would reify package.json's private
-# @web.awesome.me / @fortawesome deps and fail E401).
+# Requires two repository secrets, the S3-API key pair on the swim-report bucket:
+# CLOUDFLARE_R2_ACCESS_KEY and CLOUDFLARE_R2_SECRET_ACCESS_KEY. It needs no
+# Cloudflare API token and no npm registry tokens, since it never runs npm install in
+# the repo root, which would reify package.json's private deps and fail E401.
 
 on:
-  # TWICE WEEKLY. Geofabrik publishes daily and beaches change slowly, so this
-  # loses at most a few days of OSM freshness while downloading ~38 GB per week
-  # instead of ~133 from a free service the project depends on.
-  # It is twice weekly rather than weekly because GitHub does not merely DEFER
-  # this repo's crons by 17 min to 11 h — it SKIPS occurrences (the retired hourly
-  # classification workflow fired 4-6 of its 24 daily slots, measured over a week).
-  # On a WEEKLY cron one skipped occurrence
-  # is a 14-day gap, which is exactly MAX_SOURCE_AGE_DAYS. Two slots plus a 21-day
-  # horizon means a single miss can never trip the staleness tripwire.
+  # Twice weekly. Geofabrik publishes daily and beaches change slowly, so this loses
+  # at most a few days of freshness while downloading a fraction of the bytes from a
+  # free service the project depends on. Two slots rather than one because GitHub
+  # skips cron occurrences rather than merely deferring them: on a weekly cron one
+  # skipped occurrence is a 14-day gap, exactly MAX_SOURCE_AGE_DAYS. Two slots
+  # against a 21-day horizon means a single miss can never trip the tripwire.
   schedule:
     - cron: "41 6 * * 0"
     - cron: "41 6 * * 3"
@@ -56,39 +51,37 @@ concurrency:
 permissions:
   contents: read
 
-# Workflow-scoped so it covers EVERY deno invocation in EVERY job and step, present
-# and future. The repo-root deno.lock is auto-discovered by Deno for every deno
-# invocation here, and without this Deno also wants a workspace.packageJson block
-# for package.json's npm deps: "deno check --frozen" then FAILS with "The lockfile
-# is out of date", and a plain "deno run" SILENTLY REWRITES the checked-in
-# deno.lock — which would quietly retire the frozen-lock guarantee that keeps the
-# only DELETE-adjacent pipeline off an unpinned transitive npm tree.
+# Workflow-scoped so it covers every deno invocation in every job and step. Deno
+# auto-discovers the repo-root deno.lock, and without this it also wants a
+# workspace.packageJson block for package.json's npm deps: "deno check --frozen" then
+# fails with "The lockfile is out of date", and a plain "deno run" silently rewrites
+# the checked-in lock, retiring the frozen-lock guarantee that keeps the only
+# delete-adjacent pipeline off an unpinned transitive npm tree.
 env:
   DENO_NO_PACKAGE_JSON: "1"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Budget: df guard 5 s + apt 1-3 min + 19.2 GB download 15-60 min + md5 2 min +
-    # tags-filter ~26 min + merge ~2 min + ogr2ogr ~23 min + clip ~3 min +
-    # FGB carve ~2 min + upload ~3 min. Realistic 60-120 min. 180 leaves clean
-    # margin under the 6 h job cap without letting a hung download burn hours.
+    # A realistic run is 60-120 minutes, dominated by the extract download and the
+    # osmium/ogr2ogr passes. 180 leaves margin under the 6 h job cap without letting
+    # a hung download burn hours.
     timeout-minutes: 180
     env:
-      # The bucket is swim-report with a HYPHEN. The zone is swim.report with a
-      # dot and the public R2 domain is map.swim.report, so the dotted form reads
-      # naturally and is wrong: R2 returns AccessDenied (never NoSuchBucket) for a
-      # bucket the token cannot see, so the wrong name looks exactly like a bad
-      # secret. Verified against the live account: swim.report 403, swim-report 200.
+      # The bucket is swim-report with a hyphen. The zone is swim.report with a dot
+      # and the public R2 domain is map.swim.report, so the dotted form reads
+      # naturally and is wrong: R2 answers AccessDenied rather than NoSuchBucket for
+      # a bucket a token cannot see, so the wrong name looks exactly like a bad
+      # secret.
       R2_BUCKET: swim-report
       R2_PUBLIC_BASE: https://map.swim.report
       AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: auto
       AWS_ENDPOINT_URL: https://0e01552527359dfcce6edc27ebedb530.r2.cloudflarestorage.com
-      # The AWS CLI has defaulted to sending CRC32 integrity headers since 2.23;
-      # R2 has historically answered "not implemented". when_required is
-      # Cloudflare's documented mitigation.
+      # The AWS CLI defaults to sending CRC32 integrity headers, which R2 has
+      # answered "not implemented"; when_required is Cloudflare's documented
+      # mitigation.
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
       AWS_MAX_ATTEMPTS: "5"
@@ -96,12 +89,11 @@ jobs:
       AWS_PAGER: ""
       PUBLISH: ${{ github.event_name == 'schedule' && 'true' || inputs.publish }}
       ALLOW_SHRINK: ${{ github.event_name == 'schedule' && 'false' || inputs.allow_shrink }}
-      # NEVER settable on a schedule. Auto-publish is withheld by
-      # scripts/build-manifest.js exactly when the evidence for publishing is
-      # missing (no previous manifest to run ratio checks against, or a floors
-      # entry that is absent / still status "bootstrap" for this regionsDigest).
-      # A human reads the manifest and dispatches with this on; a scheduler never
-      # decides that on its own.
+      # Never settable on a schedule. scripts/build-manifest.js withholds
+      # auto-publish exactly when the evidence for publishing is missing: no previous
+      # manifest to ratio against, or a floors entry that is absent or still status
+      # "bootstrap" for this regionsDigest. A human reads the manifest and dispatches
+      # with this on; a scheduler never decides that.
       FORCE_PUBLISH: ${{ github.event_name == 'schedule' && 'false' || inputs.force_publish }}
     steps:
       - name: Checkout
@@ -112,25 +104,21 @@ jobs:
         with:
           deno-version: v2.x
 
-      # Resolve the flatgeobuf tree from the COMMITTED deno.lock, once, explicitly,
-      # and fail loudly if it drifts — rather than letting a pipeline that feeds the
-      # delete path resolve an unpinned transitive npm tree from the network on
-      # every invocation. --frozen refuses any lockfile change.
+      # Resolve the flatgeobuf tree from the committed deno.lock once, explicitly,
+      # and fail loudly if it drifts, rather than letting a pipeline that feeds the
+      # delete path resolve an unpinned transitive npm tree on every invocation.
       - name: Cache Deno dependencies (frozen lockfile)
         run: deno cache --lock=deno.lock --frozen scripts/clip-layers.js scripts/build-manifest.js scripts/print-spat-bbox.js
 
-      # Reclaim runner disk. The peak of the per-country sequential plan is
-      # 13.28 GB (the us extract 12.12 GB resident while its 1.16 GB of filtered
-      # output accumulates) against a DOCUMENTED 14 GB — but that is only the PBF
-      # stage. $WORK/raw, $WORK/raw-lines and $WORK/gdaltmp are the stage that grows
-      # continentally, and every ogr2ogr step below prints df immediately before and
-      # after so the real peak becomes a measurement rather than an assumption. The
-      # 40 GB floor asserted below is sized for both stages. Public-repo 4-core
-      # runners have observably had ~87 GB free, but Actions maintainers state only
-      # the 14 GB is committed and anything above it is best effort, so this step
-      # buys the margin rather than betting on the observation.
-      # tool-cache is deliberately NOT reclaimed: it holds the Node/Deno the later
-      # steps need.
+      # Reclaim runner disk. The per-country sequential plan peaks around 13.3 GB in
+      # the PBF stage, against a documented 14 GB, and $WORK/raw, $WORK/raw-lines and
+      # $WORK/gdaltmp are a second stage that grows continentally; every ogr2ogr step
+      # prints df before and after so the real peak stays a measurement. The 40 GB
+      # floor asserted below is sized for both stages: Actions commits only the 14 GB
+      # and anything above it is best effort, so this step buys the margin rather
+      # than betting on an observation.
+      # tool-cache is deliberately not reclaimed: it holds the Node and Deno the
+      # later steps need.
       - name: Reclaim disk
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -156,11 +144,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          # Timed so the apt cost is a measurement in the log rather than an
-          # estimate. --no-install-recommends is deliberate and pinned by this
-          # comment: GDAL's recommends carry extra format drivers we do not use; if
-          # a future "unsupported format" error appears at ogr2ogr time, drop the
-          # flag first.
+          # Timed so the apt cost stays visible in the log. --no-install-recommends
+          # is deliberate: GDAL's recommends carry extra format drivers this pipeline
+          # does not use, so if an "unsupported format" error ever appears at ogr2ogr
+          # time, drop the flag first.
           time sudo apt-get install -y --no-install-recommends osmium-tool gdal-bin
           osmium --version
           ogrinfo --version
@@ -169,14 +156,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/.aws
-          # PATH-STYLE, pinned deliberately. The bucket name (swim-report) carries
-          # no dot, so the wildcard certificate for *.r2.cloudflarestorage.com
-          # would in fact cover virtual-hosted addressing today. It is pinned
-          # anyway because this is the only publish path and path-style is what
-          # R2 documents: a future rename to a DOTTED bucket would otherwise
-          # produce <bucket>.<account>.r2.cloudflarestorage.com, which that
-          # wildcard does NOT cover, and the failure would be a TLS error at
-          # upload time rather than anything resembling a naming mistake.
+          # Path-style, pinned deliberately. swim-report carries no dot, so the
+          # wildcard certificate for *.r2.cloudflarestorage.com would cover
+          # virtual-hosted addressing today. It is pinned anyway because this is the
+          # only publish path and path-style is what R2 documents: a future rename to
+          # a dotted bucket would produce a host that wildcard does not cover, and
+          # the failure would be a TLS error at upload time rather than anything
+          # resembling a naming mistake.
           cat > ~/.aws/config <<'AWSCFG'
           [default]
           s3 =
@@ -186,43 +172,39 @@ jobs:
               max_concurrent_requests = 8
           AWSCFG
           aws --version
-          # Cheap Class B fail-fast so a bad secret surfaces now, not after an hour
-          # of osmium work.
+          # Cheap fail-fast so a bad secret surfaces now, not after an hour of
+          # osmium work.
           aws s3api list-objects-v2 --bucket "$R2_BUCKET" --max-items 1 > /dev/null
           echo "R2 credentials and endpoint verified"
 
       - name: Prepare workspace and fetch the previous manifest
         run: |
           set -euo pipefail
-          # WORK is resolved HERE, not in the job-level env block. The runner
-          # context is not available to jobs.<id>.env — only to steps — so
-          # "WORK: ${{ runner.temp }}/osm" up there made the whole workflow file
-          # invalid and GitHub failed the run in 0s with "workflow file issue"
-          # before creating a single job. RUNNER_TEMP is a default environment
-          # variable present in every step, and $GITHUB_ENV carries the resolved
-          # value to every later step (a job-level env value is never re-expanded
-          # by the shell, so the literal string would not have worked either).
+          # WORK is resolved here, not in the job-level env block: the runner
+          # context is unavailable to jobs.<id>.env, so a ${{ runner.temp }} value
+          # there makes the whole workflow file invalid and the run fails in 0s with
+          # "workflow file issue" before a job exists. RUNNER_TEMP is present in every
+          # step, and $GITHUB_ENV carries the resolved value onward, where a job-level
+          # env literal would never be re-expanded by the shell.
           WORK="$RUNNER_TEMP/osm"
           echo "WORK=$WORK" >> "$GITHUB_ENV"
-          # NOTE: $WORK/raw and $WORK/raw-lines are deliberately NOT created here.
-          # A suffix-less FlatGeobuf output path makes the driver write a DIRECTORY
-          # of one .fgb per layer, and it CREATES that directory itself — if the path
-          # already exists it refuses with "It seems a file system object called
-          # '<path>' already exists" / "FlatGeobuf driver failed to create <path>"
-          # and ogr2ogr exits non-zero in about a tenth of a second. Reproduced on
-          # GDAL 3.12.4, the same version the runner installs.
+          # $WORK/raw and $WORK/raw-lines are deliberately not created here. A
+          # suffix-less FlatGeobuf output path makes the driver write a directory of
+          # one .fgb per layer and create that directory itself; if the path already
+          # exists it refuses with "It seems a file system object called '<path>'
+          # already exists" and ogr2ogr exits non-zero immediately.
           mkdir -p "$WORK/pbf" "$WORK/filtered" "$WORK/layers" "$WORK/verify" "$WORK/gdaltmp"
-          # The GDAL OSM driver's node index temp file is created in the CURRENT
-          # WORKING DIRECTORY when CPL_TMPDIR is unset, and is unlinked immediately
-          # after creation — so du, ls and df -k all report nothing while it eats
-          # gigabytes. When it runs out of space GDAL emits a flood of
-          # "ERROR 1: Cannot read node <id>" and then returns an EMPTY result with a
-          # ZERO exit status. Setting CPL_TMPDIR explicitly is not optional.
+          # With CPL_TMPDIR unset, the GDAL OSM driver creates its node index temp
+          # file in the current working directory and unlinks it immediately, so du,
+          # ls and df report nothing while it eats gigabytes. When it runs out of
+          # space GDAL emits a flood of "ERROR 1: Cannot read node <id>" and then
+          # returns an empty result with a zero exit status. Setting CPL_TMPDIR
+          # explicitly is not optional.
           echo "CPL_TMPDIR=$WORK/gdaltmp" >> "$GITHUB_ENV"
           echo "OSM_COMPRESS_NODES=YES" >> "$GITHUB_ENV"
           # Previous manifest, for the shrink-ratio and per-region floors. Absent on
-          # the very first build; build-manifest.js then skips the ratio checks and
-          # withholds auto-publish (see the Publish step).
+          # the first build, where build-manifest.js skips the ratio checks and
+          # withholds auto-publish.
           if curl -sfL --retry 3 "$R2_PUBLIC_BASE/layers/current.json?cb=$GITHUB_RUN_ID" -o "$WORK/prev-current.json"; then
             prev_prefix=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prefix)" "$WORK/prev-current.json")
             echo "previous prefix: $prev_prefix"
@@ -231,18 +213,18 @@ jobs:
             echo "no previous pointer — this is a bootstrap build"
           fi
 
-      # Per-country SEQUENTIAL download -> md5 verify -> tags-filter -> delete.
-      # Deleting each source .pbf before the next download is what keeps the peak
-      # at one source file plus the accumulated ~9.5% of filtered output.
+      # Per-country sequential download, md5 verify, tags-filter, delete. Deleting
+      # each source .pbf before the next download is what keeps the peak at one source
+      # file plus the accumulated filtered output.
       - name: Download, verify and filter extracts
         run: |
           set -euo pipefail
           cd "$WORK/pbf"
           BASE=https://download.geofabrik.de/north-america
-          # Resolve ONE dated, IMMUTABLE snapshot for every country. -latest is
-          # mutable and Geofabrik regenerates around 21:00 CET; an 11-hour scheduler
-          # deferral plus a 19 GB sequential download can straddle that boundary and
-          # leave the .pbf and its .md5 from different snapshots.
+          # Resolve one dated, immutable snapshot for every country. -latest is
+          # mutable and Geofabrik regenerates around 21:00 CET; a scheduler deferral
+          # plus a many-hour sequential download can straddle that boundary and leave
+          # the .pbf and its .md5 from different snapshots.
           DATE=""
           for back in 0 1 2; do
             d=$(date -u -d "-$back day" +%y%m%d)
@@ -257,22 +239,22 @@ jobs:
           for c in us canada mexico; do
             f="$c-$DATE.osm.pbf"
             # -f fails the step on an HTTP error instead of writing an HTML error
-            # page into a .pbf. -L is MANDATORY: download.geofabrik.de 302-redirects
+            # page into a .pbf. -L is mandatory: download.geofabrik.de 302-redirects
             # to mirrors and a request without it returns no body.
-            # --speed-limit/--speed-time detect a STALLED stream, which --retry
-            # cannot: --retry acts on completed transfers that errored, so without
-            # this a hung socket burns the whole 180-minute job timeout. -C - resumes
-            # rather than restarting an 11 GB transfer from zero.
+            # --speed-limit/--speed-time detect a stalled stream, which --retry
+            # cannot, since --retry acts on completed transfers that errored; without
+            # them a hung socket burns the whole job timeout. -C - resumes rather
+            # than restarting a multi-gigabyte transfer from zero.
             curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -C - \
               --speed-limit 102400 --speed-time 120 --max-time 5400 \
               -o "$f" "$BASE/$f"
             curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f.md5" "$BASE/$f.md5"
             # The sidecar carries a bare basename, hence the cd above.
             md5sum -c "$f.md5"
-            # The md5 pair is not merely CHECKED here, it is RECORDED. Anything but
+            # The md5 pair is not merely checked here, it is recorded. Anything but
             # an explicit sourcesVerified true in the manifest makes
-            # src/layerManifest.js treat the published set as an INCOMPLETE view of
-            # OSM, which stops reconciliation deletes AND classification — so this
+            # src/layerManifest.js treat the published set as an incomplete view of
+            # OSM, stopping both reconciliation deletes and classification, so this
             # evidence file is what lets the layer set decide anything at all.
             published=$(cut -d' ' -f1 < "$f.md5")
             observed=$(md5sum "$f" | cut -d' ' -f1)
@@ -281,8 +263,8 @@ jobs:
             bytes=$(stat -c '%s' "$f")
             echo "$ts" >> "$WORK/timestamps.raw"
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c" "$f" "$published" "$observed" "$ts" "$bytes" >> "$WORK/sources.tsv"
-            # $GITHUB_WORKSPACE-absolute. A relative path resolves under $WORK/pbf,
-            # not the checkout, and the step dies on country 1.
+            # $GITHUB_WORKSPACE-absolute: a relative path resolves under $WORK/pbf
+            # rather than the checkout, and the step dies on the first country.
             osmium tags-filter -v --overwrite \
               --expressions="$GITHUB_WORKSPACE/.github/build/expressions.txt" \
               -o "$WORK/filtered/$f" "$f"
@@ -296,16 +278,15 @@ jobs:
             exit 1
           fi
           SNAP=$(cat "$WORK/timestamps.txt")
-          # Without this, an absent header option prints the literal string
-          # "undefined", the single-line assertion above PASSES, and sourceAgeDays
-          # becomes NaN — which makes every future discovery run permanently unable
-          # to delete or to classify.
+          # Without this, an absent header option prints the literal "undefined",
+          # the single-line assertion above passes, and sourceAgeDays becomes NaN,
+          # which makes every future discovery run unable to delete or classify.
           case "$SNAP" in
             [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*) : ;;
             *) echo "::error::osmosis_replication_timestamp is not ISO-8601: '$SNAP'"; exit 1 ;;
           esac
           # Emit the download-completeness evidence scripts/build-manifest.js
-          # verifies. Built from a TSV rather than appended JSON so a mid-loop
+          # verifies. Built from a TSV rather than appended JSON, so a mid-loop
           # failure can never leave a half-written array that parses.
           node -e "
             const fs = require('fs');
@@ -331,10 +312,9 @@ jobs:
       - name: Merge filtered extracts
         run: |
           set -euo pipefail
-          # Merge AFTER filtering, never before: this merges ~1.8 GB of filtered
-          # data instead of 19.2 GB of raw extracts. Inputs must be sorted by
-          # type/id/version (Geofabrik files are, and tags-filter preserves order),
-          # and objects present in two extracts appear exactly once.
+          # Merge after filtering, never before: an order of magnitude less data.
+          # Inputs must be sorted by type/id/version, which Geofabrik files are and
+          # tags-filter preserves, and objects in two extracts appear exactly once.
           osmium merge --overwrite -o "$WORK/merged.osm.pbf" "$WORK"/filtered/*.osm.pbf
           rm -rf "$WORK/filtered"
           osmium fileinfo -e -j "$WORK/merged.osm.pbf" > "$WORK/merged-fileinfo.json"
@@ -345,17 +325,15 @@ jobs:
           SPAT=$(deno run --lock=deno.lock --frozen --allow-read scripts/print-spat-bbox.js)
           echo "spat mask: $SPAT"
           echo "SPAT=$SPAT" >> "$GITHUB_ENV"
-          # The output path has NO .fgb suffix, which is what makes the driver write
-          # a DIRECTORY of one .fgb per layer. NOTE: FlatGeobuf does not support
-          # random layer writing, so GDAL re-reads the source once per layer — this
-          # is FOUR passes, not one. Budget accordingly.
-          # 2> capture is not optional: an exhausted CPL_TMPDIR makes the OSM driver
-          # emit a flood of "Cannot read node <id>" and then return an EMPTY result
-          # with a ZERO exit status.
+          # The output path has no .fgb suffix, which makes the driver write a
+          # directory of one .fgb per layer. FlatGeobuf does not support random layer
+          # writing, so GDAL re-reads the source once per layer: four passes, not
+          # one. Budget accordingly. The 2> capture is not optional — an exhausted
+          # CPL_TMPDIR makes the OSM driver emit a flood of "Cannot read node <id>"
+          # and then return an empty result with a zero exit status.
           df -h "$WORK" | tail -1
-          # The 2> capture is required for the "Cannot read node" grep below, but it
-          # also means a FAILING ogr2ogr prints nothing at all to the CI log — set -e
-          # kills the step before the cat further down. Surface it explicitly.
+          # The 2> capture also means a failing ogr2ogr prints nothing to the CI log,
+          # because set -e kills the step before the cat below. Surface it explicitly.
           if ! OSM_CONFIG_FILE=$GITHUB_WORKSPACE/.github/build/osmconf.ini \
             ogr2ogr -f FlatGeobuf "$WORK/raw" "$WORK/merged.osm.pbf" \
               -spat $SPAT points lines multipolygons other_relations 2> "$WORK/ogr-main.log"; then
@@ -364,9 +342,9 @@ jobs:
             exit 1
           fi
           df -h "$WORK" | tail -1
-          # Second pass with closed_ways_are_polygons=building so closed
-          # natural=coastline ways (islands) do not get routed into multipolygons.
-          # This pass is the SOLE source of coastline features.
+          # Second pass with closed_ways_are_polygons=building, so closed
+          # natural=coastline ways (islands) are not routed into multipolygons. This
+          # pass is the sole source of coastline features.
           if ! OSM_CONFIG_FILE=$GITHUB_WORKSPACE/.github/build/osmconf-lines.ini \
             ogr2ogr -f FlatGeobuf "$WORK/raw-lines" "$WORK/merged.osm.pbf" \
               -spat $SPAT lines 2> "$WORK/ogr-lines.log"; then
@@ -379,8 +357,8 @@ jobs:
             echo "::error::GDAL node index exhausted (CPL_TMPDIR out of space) — the result is silently EMPTY with exit 0"
             exit 1
           fi
-          # Relation geometry-assembly failures are warnings. Count them and carry
-          # the count into the manifest so a rise is a build alarm.
+          # Relation geometry-assembly failures are warnings; count them into the
+          # manifest so a rise is a build alarm.
           RELWARN=$(grep -c "Cannot assemble\|Invalid geometry\|Geometry of relation" "$WORK/ogr.log" || true)
           echo "REL_ASSEMBLY_WARNINGS=$RELWARN" >> "$GITHUB_ENV"
           echo "relation assembly warnings: $RELWARN"
@@ -392,36 +370,29 @@ jobs:
           set -euo pipefail
           cd "$WORK/layers"
           # Only lakes-polygon is carved straight to a published layer here; every
-          # other layer is produced by clip-layers.js, which owns BOTH the region
-          # filter and the proximity clip.
+          # other layer comes from clip-layers.js, which owns both the region filter
+          # and the proximity clip.
           #
-          # SIMPLIFICATION. Two real failures happened here, in order:
+          # Three simplification rules, each of which GDAL enforces the hard way:
           #
-          # 1. ogr2ogr has NO -simplifyPreserveTopology flag. That name is the
-          #    GEOS/PostGIS function ST_SimplifyPreserveTopology; ogr2ogr offers only
-          #    -simplify <tolerance> and -makevalid. GDAL rejected the whole
-          #    invocation with "ERROR 6: Unknown option name".
-          # 2. Replacing it with "-simplify 0.0001 -makevalid" then failed with
-          #    "ICreateFeature: Mismatched geometry type / Unable to write feature
-          #    115114 from layer multipolygons". The source layer is uniformly
-          #    MultiPolygon so the output layer is created MultiPolygon, and a
-          #    geometry that comes back as a plain Polygon (or a GeometryCollection,
-          #    which makevalid can return) cannot be written into it.
-          #
-          # -makevalid is dropped: it was a speculative addition and is the variable
-          # that introduced failure 2. Its motivation — DP can self-intersect a
-          # megapolygon — is mild at this tolerance (0.0001 deg is ~11 m on lake
-          # shorelines) and the downstream consumers are point-in-polygon and
-          # nearest-edge distance, which tolerate it. -nlt PROMOTE_TO_MULTI makes the
-          # output type explicit so a collapsed Polygon is promoted rather than
-          # rejected.
-          #
-          # -skipfailures is deliberately NOT used: it would silently DROP the
-          # offending feature, and losing one of the six lake relations is the
-          # catastrophic case — every served beach classifies through the QID lake
-          # path. The count assertion below fails the build instead. It duplicates
-          # lakesIdentityRefusals() in build-manifest.js on purpose: that backstop is
-          # three steps later, and this is the step that can break the invariant.
+          # - There is no -simplifyPreserveTopology flag. That name belongs to the
+          #   GEOS function; ogr2ogr offers -simplify <tolerance> and -makevalid, and
+          #   rejects the whole invocation with "ERROR 6: Unknown option name".
+          # - No -makevalid. The source layer is uniformly MultiPolygon so the output
+          #   layer is created MultiPolygon, and a geometry that comes back a plain
+          #   Polygon or a GeometryCollection, which makevalid can return, cannot be
+          #   written into it. Its motivation — Douglas-Peucker can self-intersect a
+          #   megapolygon — is mild at ~11 m on lake shorelines, and the downstream
+          #   consumers are point-in-polygon and nearest-edge distance, which tolerate
+          #   it. -nlt PROMOTE_TO_MULTI instead makes the output type explicit so a
+          #   collapsed Polygon is promoted rather than rejected.
+          # - No -skipfailures: it would silently drop the offending feature, and
+          #   losing one of the six lake relations is the catastrophic case, since
+          #   every served beach classifies through the QID lake path. The count
+          #   assertion below fails the build instead. It duplicates
+          #   lakesIdentityRefusals() in build-manifest.js on purpose: that backstop
+          #   is three steps later, and this is the step that can break the
+          #   invariant.
           ogr2ogr -f FlatGeobuf lakes-polygon.fgb "$WORK/raw/multipolygons.fgb" -nln lakes_polygon \
             -simplify 0.0001 -nlt PROMOTE_TO_MULTI \
             -where "natural='water' AND water='lake' AND wikidata IN ('Q1066','Q1169','Q1383','Q5492','Q1062','Q736707')"
@@ -434,10 +405,9 @@ jobs:
           fi
 
       # Proximity clip: every remaining layer is reduced to features within
-      # WATER_CLIP_PAD_DEG (0.01 deg, ~1.1 km) of a beach envelope. This is an
-      # order of magnitude beyond the widest probe radius (150 m), so it cannot
-      # change any decision — and it makes the layer set O(beaches) instead of
-      # O(continent), which is what makes the North America expansion tractable.
+      # WATER_CLIP_PAD_DEG (0.01 deg, ~1.1 km) of a beach envelope. That is an order
+      # of magnitude beyond the widest probe radius, so it cannot change a decision,
+      # and it makes the layer set O(beaches) rather than O(continent).
       - name: Clip parks, coastline and water to the beach neighbourhood
         run: |
           set -euo pipefail
@@ -450,24 +420,23 @@ jobs:
             ogr2ogr -f FlatGeobuf "$n.fgb" "$WORK/clipped/$n.geojsonseq" -nln "$(echo $n | tr - _)"
           done
           rm -rf "$WORK/raw" "$WORK/raw-lines"
-          # clipped/*.count sidecars stay: build-manifest.js compares each against
-          # ogrinfo's feature count and hard-refuses on a mismatch.
+          # The clipped/*.count sidecars stay: build-manifest.js compares each
+          # against ogrinfo's feature count and hard-refuses on a mismatch.
           ls -la "$WORK/layers"
 
       - name: Sanity floors, shrink-ratio refusal and manifest
         run: |
           set -euo pipefail
           # Emits manifest.json and SHA256SUMS, or exits 1 with a specific reason.
-          # Absolute floors, per-REGION floors, and shrink ratios all live in the
-          # script, not in this YAML, so they are unit-tested.
+          # The absolute floors, per-region floors and shrink ratios live in the
+          # script rather than this YAML, so they are unit-tested.
           #
-          # PERMISSIONS. --allow-run is needed for the ogrinfo feature-count /
-          # schema probe and the osmium+ogrinfo version stamps, and --allow-env for
-          # the two runner-image env vars the manifest records; both are scoped to
-          # exactly what the script touches, so adding a third tool or a third env
-          # var fails here, loudly, rather than widening this job's reach in silence.
-          # Without --allow-env the script dies at manifest-assembly time with a
-          # NotCapable throw after every expensive step has already run.
+          # --allow-run covers the ogrinfo feature-count and schema probe plus the
+          # version stamps, and --allow-env the two runner-image vars the manifest
+          # records. Both are scoped to exactly what the script touches, so adding a
+          # third tool or env var fails here rather than widening this job's reach in
+          # silence. Without --allow-env the script dies at manifest-assembly time
+          # with a NotCapable throw, after every expensive step has run.
           deno run --lock=deno.lock --frozen \
             --allow-read --allow-write \
             --allow-run=ogrinfo,osmium \
@@ -502,11 +471,11 @@ jobs:
           " "$WORK/layers/manifest.json"
 
       - name: Refuse to publish an unverified-source set
-        # sourcesVerified false is not a build failure — the artifacts are still
-        # honest and worth keeping for inspection — but a set that cannot prove its
-        # downloads completed is a set that src/layerManifest.js will refuse to
-        # delete or classify from, so making it LIVE would silently park the whole
-        # pipeline. Fail here instead, where the reason is one line.
+        # sourcesVerified false is not a build failure — the artifacts are honest and
+        # worth keeping — but a set that cannot prove its downloads completed is one
+        # src/layerManifest.js refuses to delete or classify from, so making it live
+        # would silently park the whole pipeline. Fail here, where the reason is one
+        # line.
         if: ${{ env.SOURCES_VERIFIED != 'true' }}
         run: |
           echo "::error::manifest sourcesVerified is false — the md5 download-completeness proof is missing, so this set could never delete or classify. Not publishing."
@@ -533,64 +502,65 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORK/verify"
-          # SHA256SUMS covers the .fgb files and NOTHING ELSE. It cannot cover
-          # LICENSE.txt (copied in after build-manifest.js runs) and it must not
-          # cover manifest.json (which would make this check fail every run for a
-          # file we do not download here). build-manifest.js pins that scope.
+          # SHA256SUMS covers the .fgb files and nothing else. It cannot cover
+          # LICENSE.txt, copied in after build-manifest.js runs, and must not cover
+          # manifest.json, which would fail this check every run for a file not
+          # downloaded here. build-manifest.js pins that scope.
           cp "$WORK/layers/SHA256SUMS" .
           # --retry-all-errors so a few seconds of edge propagation on a
-          # just-written key reads as "retry", not as a failed build. Plain --retry
-          # would not retry the 404 that lag produces.
+          # just-written key reads as a retry rather than a failed build; plain
+          # --retry would not retry the 404 that lag produces.
           for f in $(cd "$WORK/layers" && ls *.fgb); do
             curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/$f" -o "$f"
           done
-          # A torn or mis-signed upload must never become the live set. Note that
-          # ETag is useless for this: a multipart object's ETag is not a content MD5.
+          # A torn or mis-signed upload must never become the live set. ETag is
+          # useless for this: a multipart object's ETag is not a content MD5.
           sha256sum -c SHA256SUMS
-          # manifest.json is the sole INPUT to the delete gate, so it is read back
+          # manifest.json is the sole input to the delete gate, so it is read back
           # and byte-compared rather than trusted.
           curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/manifest.json" -o manifest.json
           cmp manifest.json "$WORK/layers/manifest.json"
 
       - name: Explain a withheld publish
-        # Loud, and NOT a failure: the prefix is uploaded and complete, it simply is
-        # not live. This is the bootstrap path (seed data/layer-floors.json from
-        # this manifest, commit it, then re-dispatch with force_publish) and the
-        # unseeded-regionsDigest path (someone added a region to src/regions.js).
+        # Loud, and not a failure: the prefix is uploaded and complete, it is simply
+        # not live. This is the bootstrap path — seed data/layer-floors.json from this
+        # manifest, commit it, then re-dispatch with force_publish — and the
+        # unseeded-regionsDigest path, where someone added a region to src/regions.js.
         if: ${{ env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
         run: |
           echo "::warning::build-manifest.js withheld auto-publish (bootstrap build, or no seeded floors entry for this regionsDigest). The set is uploaded at $PREFIX but layers/current.json was NOT moved. Read the manifest above, seed data/layer-floors.json, commit it, then re-dispatch with force_publish true."
 
       - name: Publish the pointer
-        # Two conjuncts, both required. PUBLISH is the operator's intent; AUTO_PUBLISH
-        # is build-manifest.js's verdict on whether the evidence supports going live.
-        # FORCE_PUBLISH is the human override for the bootstrap deadlock (the first
-        # build has no previous manifest, and without a published pointer the next
-        # build would not have one either) and is unavailable on a scheduled run.
+        # Two conjuncts, both required. PUBLISH is the operator's intent;
+        # AUTO_PUBLISH is build-manifest.js's verdict on whether the evidence supports
+        # going live. FORCE_PUBLISH is the human override for the bootstrap deadlock,
+        # where the first build has no previous manifest and without a published
+        # pointer the next build would not have one either; it is unavailable on a
+        # scheduled run.
         if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
         run: |
           set -euo pipefail
           printf '{"buildId":"%s","prefix":"%s"}\n' "$BUILD_ID" "$PREFIX" > current.json
           # no-store, and JSON is not in Cloudflare's default-cached extension set,
           # so the pointer is never served stale. Every object it names is immutable,
-          # so caching those is a pure win.
+          # so caching those is a win.
           aws s3 cp current.json "s3://$R2_BUCKET/layers/current.json" \
             --cache-control "no-store" --content-type application/json --only-show-errors
           echo "published $BUILD_ID"
 
       - name: Prune old layer sets
         # Same gate as Publish, deliberately: a run that did not move the pointer has
-        # left an extra non-live prefix behind, and pruning on that run would be
-        # deleting sets to make room for one nobody is reading. Withheld builds
-        # therefore accumulate prefixes until the next successful publish prunes them.
+        # left an extra non-live prefix behind, and pruning there would delete sets to
+        # make room for one nobody is reading. Withheld builds accumulate prefixes
+        # until the next successful publish prunes them.
         if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
         run: |
           set -euo pipefail
-          # Retain 8 sets (~1 month of twice-weekly builds). buildId sorts
-          # chronologically, so "newest 8" is a plain sort window. The live prefix
-          # is skipped unconditionally so pruning can never orphan the pointer.
-          # An age-based R2 lifecycle rule is deliberately NOT used for this: if the
-          # build broke for longer than the rule's age it would delete the LIVE set.
+          # Retain 8 sets, about a month of twice-weekly builds. buildId sorts
+          # chronologically, so "newest 8" is a plain sort window, and the live prefix
+          # is skipped unconditionally so pruning can never orphan the pointer. An
+          # age-based R2 lifecycle rule is deliberately not used: if the build broke
+          # for longer than the rule's age it would delete the live set.
           LIVE_PREFIX=$(curl -sfL "$R2_PUBLIC_BASE/layers/current.json?cb=$GITHUB_RUN_ID" \
             | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.parse(s).prefix)})")
           echo "live prefix: $LIVE_PREFIX"
@@ -598,10 +568,9 @@ jobs:
             --query 'CommonPrefixes[].Prefix' --output text \
             | tr '\t' '\n' | sed '/^$/d' | sort | head -n -8 \
             | while read -r p; do
-                # Skip the LIVE prefix as named by current.json, not merely this
+                # Skip the live prefix as named by current.json, not merely this
                 # run's BUILD_ID. They coincide only because this step is
-                # publish-gated; if anyone ever ungates it, the pointer could be
-                # orphaned.
+                # publish-gated; ungating it could orphan the pointer.
                 case "$p" in *"$LIVE_PREFIX"*) continue ;; esac
                 case "$p" in *"$BUILD_ID"*) continue ;; esac
                 echo "pruning $p"

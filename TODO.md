@@ -5,83 +5,56 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 
 ## Data quality / coverage
 
-- **Pond filter covers unnamed park beaches only.** Discovery drops unnamed
-  park-contained beaches whose adjacent `natural=water` is all below ~4.5 ha bbox
-  (`isPondBeach`). NAMED pond beaches are deliberately untouched — someone mapping a
-  name is treated as intent. If named pond beaches turn out to be noise too, apply
-  the same `isPondBeach` test to them. Known residual of the WAYS-ONLY water
-  evidence (see PLAN.md §5): an unnamed beach on a relation-mapped INLAND lake (no
-  coastline tagging) whose only nearby way-water is a small pond would be wrongly
-  dropped — no confirmed real instance yet. This is kept as-is only for parity with
-  the pre-layers behaviour; the fix is now **cheap** (consult the lakes-polygon
-  layer, a local lookup) rather than the pathologically slow `relation(around...)`
-  query it used to imply. See the Scale-out section.
-- **Flag-worthy water classification** (migration 0009, `src/waterClass.js`).
-  Runs only in the offline GitHub Actions batch (`scripts/discovery-batch.js`,
-  Deno). Each beach's adjacent water body is resolved by a **local spatial join**
-  over the prebuilt FlatGeobuf layers (`src/layerSignals.js`), anchored on the same
-  member vertices and at the same 150 m / 120 m radii the old remote probe used,
-  and classified ocean / great_lake / inland by the pure `classifyWaterBody` (Great
-  Lakes matched by wikidata QID, never by name). The join ALWAYS decides — a
-  clean-but-empty result classifies `inland`, and there is no transient-failure
-  mode left, so an unclassified row now means only "not in the layer set". Inland + parked rows are hidden by
-  the shared `FLAG_WORTHY_WATER_SQL` gate on every consumer (never deleted);
-  still-unclassified NULL rows stay visible (fail-open), which is why deciding on
-  the first complete probe matters — a pending row is a published row. The offline
-  discovery batch classifies its own new-beach delta synchronously and NULLs
-  `water_class` when a re-discovered centroid moves > ~100 m. Open residuals:
-  - **Node-only beaches** (`osm_id` = "node/N") have no polygon geometry, so
-    only the point can be probed; a node set back from shore can miss (now
-    classified inland/hidden rather than parked/hidden — same end state, one
-    attempt instead of five). Accepted residual — most set-back beaches are
-    ways/relations, which the vertex probe handles.
-  - **Probe radii are the remaining lever for set-back beaches.** Now that a
-    complete-but-empty probe DECIDES `inland` (instead of leaving the row pending
-    and visible), a genuine Great Lakes beach whose polygon sits beyond
-    `GREAT_LAKE_RADIUS_M` from any mapped shoreline is labeled inland on the first
-    attempt. Its end state is unchanged (it parked hidden at the cap before), so
-    this added no false negatives — but the fix for that whole class is widening
-    the radii, NOT restoring a pending state. Note the asymmetry: ocean/great_lake
-    probe at 150 m while inland probes at 120 m, so a beach whose only water sits
-    in the 120–150 m band can be confirmed flag-worthy but never confirmed on
-    inland water. Widening `INLAND_RADIUS_M` to 150 m would close it. **This is now
-    ACTIONABLE rather than deferred**: the cost argument that parked it was the
-    per-beach remote probe volume a re-drain implied, and a re-drain is now a
-    `WATER_CLASS_VERSION` bump plus one local re-run that re-decides the whole table
-    in seconds. It still changes stored decisions, so it needs the version bump, a
-    measured before/after distribution, and a look at the classification flip rail
-    (`CLASSIFY_MAX_HIDE_FLIPS` / `CLASSIFY_MAX_HIDE_FRACTION`) before it lands.
-  - ~~**The fail-open window.**~~ **CLOSED by the layers migration.**
-    Classification now runs in the SAME batch pass that discovers a beach, so the
-    gap between a row appearing and being decided is zero, not ~1 h. The structural
-    objection that kept this open — daily discovery injects new NULL rows forever,
-    and the centroid-move reset re-NULLs existing ones — no longer holds, because
-    the run that inserts or re-NULLs a row also decides it. Nothing needs hiding.
-  - ~~**Per-beach relation-`around` cost.**~~ **CLOSED.** There is no remote
-    relation probe any more; the lake join is a local segment-grid lookup.
-  - **Parked rows** sit at `WATER_CLASS_MAX_ATTEMPTS = 5` (matches the
-    enrichment caps). A version bump does NOT un-park them — `buildClassifyQueue`
-    ANDs the version clause with `attempts < cap`, so no version value can reach a
-    parked row (this bit an earlier diagnosis; the cap, not the version, is the
-    gate). The ~409 rows the pre-decisive classifier parked are re-drained once by
-    the `water_class_version IS NULL` legacy marker in `buildClassifyQueue`,
-    deliberately WITHOUT resetting attempts so they stay hidden while they
-    re-decide. Do NOT reach for
-    `UPDATE beaches SET water_class_attempts = 0 WHERE water_class IS NULL` —
-    it un-parks them into the fail-open gate and republishes every one as a
-    visible beach with an estimated flag card until it drains. Under the decisive
-    classifier nothing can newly reach the cap (only transient failures leave a row
-    unclassified, and those never bump), so a rising parked count now means the
-    classifier regressed to a pending state.
+- **Pond filter covers unnamed park beaches only.** Discovery drops unnamed park-contained
+  beaches whose adjacent `natural=water` is all below ~4.5 ha bbox (`isPondBeach`). Named pond
+  beaches are deliberately untouched — someone mapping a name is treated as intent. If named
+  pond beaches turn out to be noise too, apply the same test to them. Known residual of the
+  ways-only water evidence (PLAN.md §5): an unnamed beach on a relation-mapped inland lake with
+  no coastline tagging, whose only nearby way-water is a small pond, would be wrongly dropped.
+  No confirmed real instance yet. The fix is cheap — consult the lakes-polygon layer, a local
+  lookup. See the Scale-out section.
+- **Flag-worthy water classification** (migration 0009, `src/waterClass.js`). Runs only in the
+  offline GitHub Actions batch (`scripts/discovery-batch.js`, Deno). Each beach's adjacent water
+  body is resolved by a **local spatial join** over the prebuilt FlatGeobuf layers
+  (`src/layerSignals.js`), anchored on member vertices at 150 m / 120 m radii, and classified
+  ocean / great_lake / inland by the pure `classifyWaterBody` (Great Lakes matched by wikidata
+  QID, never by name). The join always decides: a clean-but-empty result classifies `inland`,
+  and there is no transient-failure mode, so an unclassified row means only "not in the layer
+  set". Inland and parked rows are hidden by the shared `FLAG_WORTHY_WATER_SQL` gate on every
+  consumer, never deleted; still-unclassified NULL rows stay visible (fail-open), which is why
+  deciding on the first complete probe matters — a pending row is a published row. The batch
+  classifies its own new-beach delta synchronously and NULLs `water_class` when a re-discovered
+  centroid moves > ~100 m. Open residuals:
+  - **Node-only beaches** (`osm_id` = "node/N") have no polygon geometry, so only the point can
+    be probed; a node set back from shore can miss and is classified inland and hidden. Accepted
+    residual — most set-back beaches are ways or relations, which the vertex probe handles.
+  - **Probe radii are the remaining lever for set-back beaches.** A complete-but-empty probe
+    decides `inland`, so a genuine Great Lakes beach whose polygon sits beyond
+    `GREAT_LAKE_RADIUS_M` from any mapped shoreline is labeled inland on the first attempt. The
+    fix for that whole class is widening the radii, not restoring a pending state. Note the
+    asymmetry: ocean and great_lake probe at 150 m while inland probes at 120 m, so a beach
+    whose only water sits in the 120–150 m band can be confirmed flag-worthy but never
+    confirmed on inland water; widening `INLAND_RADIUS_M` to 150 m would close it. This is
+    **actionable**: a re-drain is a `WATER_CLASS_VERSION` bump plus one local re-run that
+    re-decides the whole table in seconds. It still changes stored decisions, so it needs the
+    version bump, a measured before/after distribution, and a look at the classification flip
+    rail (`CLASSIFY_MAX_HIDE_FLIPS` / `CLASSIFY_MAX_HIDE_FRACTION`) before it lands.
+  - **Parked rows** sit at `WATER_CLASS_MAX_ATTEMPTS = 5`, matching the enrichment caps. A
+    version bump does **not** un-park them: `buildClassifyQueue` ANDs the version clause with
+    `attempts < cap`, so the cap, not the version, is the gate. Rows the pre-decisive classifier
+    parked are re-drained once by the `water_class_version IS NULL` legacy marker, deliberately
+    without resetting attempts so they stay hidden while they re-decide. Do **not** reach for
+    `UPDATE beaches SET water_class_attempts = 0 WHERE water_class IS NULL`: it un-parks them
+    into the fail-open gate and republishes every one as a visible beach with an estimated flag
+    card until it drains. Under the decisive classifier nothing can newly reach the cap, so a
+    rising parked count means the classifier regressed to a pending state.
   - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches
     linger in D1 (their KV flags self-expire at the 7200 s TTL). Harmless and
     cheap — left in place.
-  - **The `ocean` branch stays dormant** until `REGIONS` gains a saltwater box
-    (Pacific / Gulf / Atlantic boxes stubbed in `src/regions.js`); in the
-    current Great Lakes regions every keeper is a Great Lake (shorelines are
-    relation member ways, not `natural=coastline`). Harmless: ocean and
-    great_lake are both flag-worthy and pass the gate identically — only inland
-    vs {ocean, great_lake} must be reliable, and it is.
+  - **The `ocean` branch stays dormant** until `REGIONS` gains a saltwater box. In the current
+    Great Lakes regions every keeper is a Great Lake, since shorelines are relation member ways
+    rather than `natural=coastline`. Harmless: ocean and great_lake are both flag-worthy and
+    pass the gate identically — only inland versus {ocean, great_lake} must be reliable.
 - **GitHub Actions cron skipping is the wave pipeline's largest unclosed risk.** The
   scheduler skips occurrences rather than deferring them, and 8 slots a day against a 7 h
   absolute key expiration tolerates only two consecutive misses. The permanent fix is to
@@ -89,222 +62,169 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   current hour, which turns one landed cycle into 24 h of coverage; it is out of scope here
   because it changes the hourly cron's read contract.
 - **A grid that sampled but under-covers its seeded per-grid floor still refuses the whole
-  cycle**, so a present-but-under-covering GLWU takes the ocean down with it; dropping that
-  grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside
-  the build, and the exposure is dormant only while every floor in `data/wave-floors.json`
-  is null.
+  cycle**, so a present-but-under-covering GLWU takes the ocean down with it. Dropping that
+  grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside the
+  build. The exposure is dormant while every floor in `data/wave-floors.json` is null.
 - **The permission guard in `.github/workflows/test.yml` checks `--allow-net` only.** No
   Deno script in the wave pipeline may carry `--allow-run` (GDAL runs in the workflow
   shell), but nothing enforces that machine-side; extend the same loop to `--allow-run`.
-- **Measure the slot hit rate before trusting the cadence.** No second wave source is left
-  to shadow against, so read the hit rate from `waves.yml`'s own run history and the
-  per-beach coverage from `manifest.beaches.resolved` across consecutive cycles. A run of
-  missed slots is the trigger for the `hoursFt`/`startIso` fix above.
+- **Measure the slot hit rate before trusting the cadence.** No second wave source is left to
+  shadow against, so read the hit rate from `waves.yml`'s run history and the per-beach coverage
+  from `manifest.beaches.resolved` across consecutive cycles. A run of missed slots is the
+  trigger for the `hoursFt`/`startIso` fix above.
 - **Arctic 9 km spiral is unvalidated against real Alaska coordinates.** Ring geometry on a
   polar-stereographic grid differs from a lat/lon one, and `gfswave.global.0p16` stops at
   52.583°N, so every Alaskan beach depends on that path. Check a handful of real rows before
   the first publish.
-- **The identity gate proves the TARGET raster of a warped grid, never its source.** For
-  `noaa_glwu` and `noaa_gfswave_arctic` the plane is produced by `gdalwarp` at a fixed
-  `te`/`tr`, so a displaced source resamples into a raster whose header matches
-  `data/wave-grids.json` exactly and passes. `planFor` already reads each source file's
-  `gdalinfo`, so carrying a second identity record — the source header — on every plan
-  entry and gating on both is the natural fix.
+- **The identity gate proves the target raster of a warped grid, never its source.** For
+  `noaa_glwu` and `noaa_gfswave_arctic` the plane is produced by `gdalwarp` at a fixed `te`/`tr`,
+  so a displaced source resamples into a raster whose header matches `data/wave-grids.json`
+  exactly and passes. `planFor` already reads each source file's `gdalinfo`, so carrying the
+  source header on every plan entry and gating on both is the natural fix.
 - **A seeded absolute `validPercent` floor per grid** (`floors[<digest>].validPercent[<gridId>]`)
-  is the eventual shape: the ratio rails catch a slide from a known-good cycle, an absolute
-  floor catches a grid that has been thin since the first accepted cycle. It cannot be
-  seeded yet — `data/wave-floors.json` is status `bootstrap` with every floor null, and no
-  accepted cycle exists to observe a number from.
-- **`PERPW`, `DIRPW`, `SWELL` and `WVHGT` arrive in the GRIB messages already being
-  fetched.** They are the natural second series for the currently dormant multi-model
-  comparison chart, and a capability the previous source did not offer.
+  is the eventual shape: the ratio rails catch a slide from a known-good cycle, while an
+  absolute floor catches a grid that has been thin since the first accepted cycle. It cannot be
+  seeded while `data/wave-floors.json` carries null floors.
+- **`PERPW`, `DIRPW`, `SWELL` and `WVHGT` arrive in the GRIB messages already being fetched.**
+  They are the natural second series for the currently dormant multi-model comparison chart.
 - **GFS atmos `GUST:surface` would restore `windGustMph`.** It is a second upstream product
-  family (`gfs.tHHz.pgrb2.0p25`) for a branch that only fires when wave data is entirely
-  absent, and GFS surface gust is not the same quantity as a 10 m gust, so the output
-  distribution would shift and must be measured first.
-- **Windy webcam caveats** (`src/clients/windyWebcams.js`, daily
-  `runWebcamSync`). (1) The Windy free tier publishes **no daily request
-  quota** — 100 lookups/night is polite guesswork; watch the daily-run logs for
-  429s. (2) The free-tier embed player **shows ads**; the ad-free tier is
-  €9,990/yr, so ads stay. (3) "Nearest active cam within 5 km" is a proximity
-  heuristic — the cam may face a marina, not the beach; the UI labels it
-  "Nearby webcam" honestly, but a curated per-beach override column is the
-  eventual fix if bad matches show up. (4) Cams flip between active/inactive; a
-  beach keeps a stored player URL up to 14 days after its cam dies (the player
-  page itself degrades gracefully). (5) The site-wide footer now carries Windy's
-  required Terms credit and same-grid-cell due beaches share one bbox `/webcams`
-  request (F14 clustering landed). (6) The F13-secondary **data** half is DONE, not
-  open: both `/webcams` queries request `&include=player,location,urls`,
-  `src/clients/windyWebcams.js` returns `detailUrl` (`urls.detail`, null when absent),
-  migration 0011 added `beaches.webcam_detail_url`, and the daily cron writes it
-  (`src/index.js` — set on a hit, NULLed on a miss).
-  **OPEN DECISION (not pending work):** nothing READS `webcam_detail_url`. The
-  render-side per-cam anchor shipped in `42c6a07` and was deliberately removed in
-  `26e9051` when Windy attribution moved to the site-wide footer, so the column is
-  written every night and never displayed. Two coherent resolutions — pick one, do
-  not leave it as-is: (a) restore the per-caption deep link in `render.js` so each
-  cam links its OWN Windy detail page, or (b) stop writing the column (drop it from
-  the cron write and from the client's return shape) and let the footer credit stand
-  alone. Note that migration `0011_webcam_detail_url.sql`'s stated rationale — the
-  Windy Terms line "Link every image with either our webcam page or timelapse player
-  for full view", to be satisfied by `renderWebcam`'s caption — is **currently unmet**:
-  that caption link no longer exists. `src/clients/windyWebcams.js`'s header comment
-  and migration 0011's comment both still describe the removed `renderWebcam`
-  fallback. Whoever decides should confirm with Windy's current Terms whether the
-  footer credit alone suffices.
-- **Threshold calibration against real flag history.** The `flag_history` table
-  (migration 0006, PLAN.md sections 2 and 7) accumulates estimated-vs-official
-  pairs for beaches with a scraped official flag (South Haven, Chicago, the NWS
-  GRR beach report, Winnetka, Presque Isle, and NWS Marine Beach Forecast publish
-  official hazard colors; the raise-only wqFloor water-quality sources are NOT
-  official and do not feed calibration — see the official-source coverage section).
-  Once enough history exists, revisit the wave/wind
-  thresholds in `src/rules.js` (2 ft / 4 ft wave, 15/25 mph wind, 25/35 mph
-  gust) against how often the estimate matches the posted flag, and bump
-  `RULES_VERSION` if thresholds move — cached `FlagEstimate` objects carry their
-  own `rules_version`, so this is safe to do incrementally. Also revisit the
-  flat 90-day retention window (`FLAG_HISTORY_RETENTION_DAYS = 90`) once
-  calibration data collection is complete — a tighter policy or downsampling may
-  fit better. The same pass should decide the multi-model derivation question:
-  the flag currently uses the composite first-finite-model wave series, and the
-  per-model data stored in the `waves:` KV payloads (`byModel`) exists precisely
-  so mean / max / calibrated-blend alternatives can be evaluated retroactively
-  against official flags. Note the safety asymmetry before reaching for a mean:
-  averaging dilutes whichever model saw the hazard (a 4.5 ft + 2.5 ft
-  disagreement averages to yellow, not red); any derivation change must ride a
-  `RULES_VERSION`-style bump to keep calibration cohorts comparable.
-- **Secondary unnamed park beaches need a derivable label to survive.**
-  `mergeBeachRows` keeps a park's largest unnamed beach under the bare park
-  name, and additional unnamed beaches only when `deriveUnnamedSuffix` finds a
-  distinguishing label (the element's own `loc_name` tag, else a compass
-  direction at ≥0.2 km separation); indistinguishable or coincident polygons
-  still drop (logged `skipped_unnamed`). Follow-up: merge their geometries, or
-  derive richer locality labels (a nearby named water feature, etc.).
-- **Park association is bbox-overlap, not polygon containment.** The worker
-  associates each beach to the smallest park whose bounding box overlaps the
-  beach's (fetching full polygon geometry for ~9k parks nightly is not worth
-  it). An L-shaped or diagonal park could claim an adjacent beach. Verified
-  accurate on the pilot region's state parks; revisit if wrong pairings show up.
-- **Only named beaches/parks are discoverable — by design, current and future
-  queries.** Every discovery path requires a name somewhere: query 1 takes only
-  named `natural=beach` / `leisure=beach_resort` elements, and query 2's park
-  containment only rescues unnamed beaches inside a NAMED park polygon. An
-  unnamed beach outside any named park never enters the dataset, and any future
-  query (a nationwide layer set included) should keep this constraint — a row with no
-  human-searchable name can't be displayed, searched, or trusted as a real swim
-  spot. The excluded set is large (roughly three-quarters of US `natural=beach`
-  elements are unnamed) and intentionally out of scope unless a future pass
-  invents names from other containment/proximity signals (nearest named road
-  end, `addr:*` tags, GNIS, etc.).
+  family (`gfs.tHHz.pgrb2.0p25`) for a branch that fires only when wave data is entirely absent,
+  and GFS surface gust is not the same quantity as a 10 m gust, so the output distribution would
+  shift and must be measured first.
+- **Windy webcam caveats** (`src/clients/windyWebcams.js`, daily `runWebcamSync`). The free
+  tier publishes **no daily request quota**, so 100 lookups a night is polite guesswork; watch
+  the daily-run logs for 429s. The free-tier embed player shows ads, and the ad-free tier is
+  €9,990/yr, so ads stay. "Nearest active cam within 5 km" is a proximity heuristic — the cam
+  may face a marina rather than the beach; the UI labels it "Nearby webcam" honestly, and a
+  curated per-beach override column is the eventual fix if bad matches show up. Cams flip
+  between active and inactive, so a beach keeps a stored player URL up to 14 days after its cam
+  dies.
+
+  **Open decision (not pending work):** nothing reads `webcam_detail_url`. Both `/webcams`
+  queries request `&include=player,location,urls`, the client returns `detailUrl`, migration
+  0011 added the column, and the daily cron writes it — but the render-side per-cam anchor was
+  removed when Windy attribution moved to the site-wide footer, so the column is written every
+  night and never displayed. Two coherent resolutions; pick one rather than leaving it as-is:
+  (a) restore the per-caption deep link in `render.js` so each cam links its own Windy detail
+  page, or (b) stop writing the column and let the footer credit stand alone. Migration 0011's
+  stated rationale — the Windy Terms line "Link every image with either our webcam page or
+  timelapse player for full view", satisfied by `renderWebcam`'s caption — is currently unmet,
+  and both `src/clients/windyWebcams.js`'s header and migration 0011's comment still describe
+  that removed fallback. Whoever decides should confirm against Windy's current Terms whether
+  the footer credit alone suffices.
+- **Threshold calibration against real flag history.** The `flag_history` table (migration
+  0006, PLAN.md sections 2 and 7) accumulates estimated-versus-official pairs for beaches with a
+  scraped official flag; the raise-only wqFloor water-quality sources are not official and do
+  not feed calibration. Once enough history exists, revisit the wave and wind thresholds in
+  `src/rules.js` against how often the estimate matches the posted flag, and bump
+  `RULES_VERSION` if thresholds move — cached `FlagEstimate` objects carry their own
+  `rules_version`, so this is safe to do incrementally. Revisit the flat 90-day retention window
+  (`FLAG_HISTORY_RETENTION_DAYS = 90`) in the same pass. That pass should also decide the
+  multi-model derivation question: the flag uses the composite first-finite-model wave series,
+  and the per-model data in the `waves:` payloads (`byModel`) exists precisely so mean, max or
+  calibrated-blend alternatives can be evaluated retroactively against official flags. Note the
+  safety asymmetry before reaching for a mean: averaging dilutes whichever model saw the hazard
+  — a 4.5 ft plus 2.5 ft disagreement averages to yellow, not red — so any derivation change
+  must ride a `RULES_VERSION`-style bump to keep calibration cohorts comparable.
+- **Secondary unnamed park beaches need a derivable label to survive.** `mergeBeachRows` keeps
+  a park's largest unnamed beach under the bare park name, and additional unnamed beaches only
+  when `deriveUnnamedSuffix` finds a distinguishing label (the element's own `loc_name` tag,
+  else a compass direction at ≥0.2 km separation); indistinguishable or coincident polygons drop
+  and are logged `skipped_unnamed`. Follow-up: merge their geometries, or derive richer locality
+  labels.
+- **Park association is bbox-overlap, not polygon containment.** Each beach associates to the
+  smallest park whose bounding box overlaps the beach's. An L-shaped or diagonal park could
+  claim an adjacent beach. Verified accurate on the pilot region's state parks; revisit if wrong
+  pairings show up.
+- **Only named beaches and parks are discoverable — by design.** Every discovery path requires
+  a name somewhere: the first pass takes only named `natural=beach` / `leisure=beach_resort`
+  elements, and park containment only rescues unnamed beaches inside a **named** park polygon.
+  An unnamed beach outside any named park never enters the dataset, and any future pass should
+  keep that constraint, because a row with no human-searchable name cannot be displayed,
+  searched or trusted as a real swim spot. The excluded set is large — roughly three-quarters of
+  US `natural=beach` elements are unnamed — and intentionally out of scope unless a future pass
+  invents names from other containment or proximity signals.
 - **Beaches OSM simply hasn't mapped stay invisible.** Park containment only
   rescues beach polygons that exist. P.J. Hoffmaster State Park has a park
   polygon but no `natural=beach` element inside it, so it still doesn't appear.
   Fixing OSM is the fix.
-- **Canadian beaches: alerts + marine warnings supported, no rip/surf signal.**
-  Ontario shoreline beaches get Environment Canada land alert coverage (ECCC zone
-  enrichment cron + the hourly national GeoMet `weather-alerts` fetch matched per
-  beach by alert-region polygon, `src/clients/eccc.js` — rules step 1b) AND marine
-  warnings (the `marineweather-realtime` GeoMet collection, `src/clients/ecccMarine.js`,
-  matched per beach by marine-zone polygon and concatenated into the same alerts
-  list — Storm/Gale Warning short-circuit, Strong Wind Warning / Marine Weather
-  Advisory as a yellow floor at step 6b). But ECCC issues no rip current / high surf /
-  beach hazards product, so Canadian estimates still have no step-2 rip analog and
-  lean on the curated warning set plus wave/wind. Possible future refinements: the
-  ECCC colour-coded tier (`risk_colour_en`) as a severity signal, and pairing with a
-  Canadian official source. **WARNING:** several land warning literal API strings
-  ("waterspout warning" / "storm surge warning" / "tornado warning") are inferred
-  from ECCC's product list but not yet observed live in `alert_name_en` — verify the
-  exact strings when one fires; a mismatch fails safe (event ignored). The marine
-  event names (`storm warning` / `gale warning` / `strong wind warning` / `marine
-  weather advisory`) are lowercased from the live `marineweather-realtime` payload.
+- **Canadian beaches: alerts and marine warnings supported, no rip or surf signal.** Ontario
+  shoreline beaches get Environment Canada land alert coverage (ECCC zone enrichment plus the
+  hourly national GeoMet `weather-alerts` fetch matched by alert-region polygon,
+  `src/clients/eccc.js`, rules step 1b) and marine warnings (`marineweather-realtime`,
+  `src/clients/ecccMarine.js`, matched by marine-zone polygon and concatenated into the same
+  alerts list). ECCC issues no rip current, high surf or beach hazards product, so Canadian
+  estimates have no step-2 rip analog and lean on the curated warning set plus wave and wind.
+  Possible refinements: the ECCC colour-coded tier (`risk_colour_en`) as a severity signal, and
+  pairing with a Canadian official source. **Warning:** the land warning literal strings
+  ("waterspout warning", "storm surge warning", "tornado warning") are inferred from ECCC's
+  product list and not yet observed live in `alert_name_en` — verify the exact strings when one
+  fires; a mismatch fails safe, ignoring the event. The marine event names are lowercased from
+  the live `marineweather-realtime` payload.
 - **ECCC zone enrichment: consider a conservative shoreline-nearest fallback.**
-  `runEcccEnrichment` now does one bulk `fetchEcccForecastZones()` polygon fetch per run +
-  local exact point-in-polygon (`ecccZoneNameForPoint`). A beach centroid that sits just
-  OFFSHORE of its forecast-region polygon (a shoreline point nudged into the lake) resolves
-  to null and parks, exactly like a US point. A conservative nearest-region-within-a-small-
-  distance fallback could rescue those centroids — deliberately NOT implemented now to avoid
-  a wrong region assignment; revisit if parked-Canadian counts climb.
-- **SwimSmart / Michigan DNR partnership outreach.** Michigan's SwimSmart
-  program and DNR-managed state park beaches are the ONLY path to Michigan's
-  statewide official data: every EGLE BeachGuard/MiEnviro access route is a
-  React/Angular SPA shell with no beach data in raw HTML and no discoverable
-  unauthenticated API in the shipped JS bundles, and a dozen-plus county health
-  pages just defer to it. The partnership gates ~70+ beaches' worth of official
-  data. A ready-to-send outreach email draft lives at
-  `docs/swimsmart-outreach-draft.md` — send it.
+  `runEcccEnrichment` does one bulk `fetchEcccForecastZones()` polygon fetch per run plus local
+  exact point-in-polygon. A beach centroid sitting just offshore of its forecast-region polygon
+  resolves to null and parks, exactly like a US point. A conservative
+  nearest-region-within-a-small-distance fallback could rescue those centroids; it is
+  deliberately not implemented, to avoid a wrong region assignment. Revisit if parked Canadian
+  counts climb.
+- **SwimSmart / Michigan DNR partnership outreach.** Michigan's SwimSmart program and
+  DNR-managed state park beaches are the only path to Michigan's statewide official data: every
+  EGLE BeachGuard/MiEnviro route is an SPA shell with no beach data in raw HTML and no
+  discoverable unauthenticated API, and a dozen-plus county health pages just defer to it. The
+  partnership gates 70+ beaches' worth of official data. A ready-to-send outreach email draft
+  lives at `docs/swimsmart-outreach-draft.md`.
 
 ## Scale-out
 
-- **Offline discovery + classification (live residuals).** Discovery and
-  water-body classification run in one daily GitHub Actions workflow that scans a
-  prebuilt FlatGeobuf layer set and bulk-loads D1, over layers a second workflow
-  builds twice weekly from the Geofabrik OSM extracts — see
-  `docs/offline-discovery.md` for the full design. The old residual here (chronic
-  public-mirror 504 flakiness, and a self-hosted query instance as the real fix) is
-  **CLOSED**: there is no query API in the pipeline at all. The NEW residuals are
-  different in kind:
-  - **Freshness is now the extract cadence, not minutes.** A beach mapped in OSM
-    today appears after the next twice-weekly build, and `MAX_SOURCE_AGE_DAYS = 21`
-    is a hard refusal, not a warning. For a directory of beaches this is the right
-    trade, but it is a real regression in latency and should be stated plainly
-    rather than discovered.
-  - **The dangerous failure is a SUCCESSFUL build of a WRONG layer set** — a
-    clip-mask bug, a short parks layer, an `ogr2ogr` node-index exhaustion that
-    returns empty with exit status 0. These are quiet in a way a 504 never was. The
-    defenses are the absolute floors in `data/layer-floors.json`, the previous-build
-    ratio checks, the manifest's three-tier gate, the two proportional delete rails
-    and the classification flip rail. Every one of those numbers was calibrated
-    against a 1669-row table; re-derive them when the table changes scale.
-  - **Layer-set size at North America scale.** The published set is O(beaches)
-    because of the ~1.1 km proximity clip, but the pre-clip intermediate is not, and
-    the build's peak disk (~13.3 GB) sits inside a runner's budget with less headroom
-    than is comfortable. Measure before adding coasts.
-  - **`beaches-line` and `water-line` may be droppable.** Both are carried because
-    the first build had not yet reported their counts; if they turn out to
-    contribute nothing to discovery or classification, dropping them shrinks the set
-    and the download. Decide from a real build's manifest, not from reasoning.
-  - **Retire the vestigial classification columns.** `water_class_attempts` can no
-    longer be bumped by anything, and `parkedPreDecisive` / the attempts cap in
-    `buildClassifyQueue` exist only for rows parked before this migration. Once a
-    run reports zero such rows, delete the cap, the marker and (in a migration) the
-    column.
-  - **The relation-mapped-inland-lake pond filter is now cheap to fix.** The
-    known-correct-but-narrow residual at the top of this file (ways-only water
-    evidence, kept for parity with the old query) can be closed by consulting the
-    lakes-polygon layer directly — a local lookup, not a new upstream probe. Kept as
-    is for now only to avoid changing discovery output in the same change that
-    changed its transport.
-- **Every `deno` step in every workflow must set `DENO_NO_PACKAGE_JSON=1`.** The
-  repo-root `deno.lock` is auto-discovered for all Deno commands here; without that env
-  var Deno folds `package.json`'s npm tree into the lockfile it expects, `deno check
-  --frozen` fails with "The lockfile is out of date", and a plain `deno run` silently
-  REWRITES the checked-in lock. The npm scripts already set it. Do not "fix" this by
-  regenerating the lock without the env var — that trades a loud failure for a silent
-  drift in the only delete-bearing job in the repo.
-- **Demand-priority recompute rotation — mechanism landed, cold-tier tuning
-  deferred.** The request path stamps `beaches.last_viewed` (migration 0007;
-  detail page + `/api/flag`, throttled to 1/h per beach, `ctx.waitUntil`), and
-  it now has real consumers: `runFlagRecompute`/`runWaterTempRefresh` split their
-  rotation into a hot tier (`last_viewed` within `HOT_VIEW_WINDOW_MS`, 7 days —
-  always fully covered every run) and a cold tier that rotates through the
-  remaining `MAX_BEACHES_PER_RUN` budget on the existing
-  `recompute_updated`-oldest-first order; `runNwsEnrichment`/
-  `runEcccEnrichment`/`runWebcamSync` add `last_viewed DESC NULLS LAST` as a
-  tiebreak in their candidate queues so a viewed beach's enrichment/recheck gap
-  fills before an equally-eligible never-viewed one's. At pilot scale both tiers
-  still fit inside one run, so the split is a no-op in practice today; it only
-  starts mattering once beach count approaches `MAX_BEACHES_PER_RUN`. Deferred
-  residue: (1) a longer KV TTL for the cold tier specifically, so a cold beach's
-  flag doesn't expire to "no data" every time it misses a rotation turn once hot
-  and cold no longer both fit in one run; (2) stamping `last_viewed` from the
-  home list view too (currently only the two single-beach routes stamp it, so a
-  beach that's only ever seen on the list page never reads as hot); (3) a real
-  split-query implementation (today's is a single ORDER BY guard, not two
-  separate queries) plus the migration 0012-class indexes real pagination will
-  need at nationwide scale; (4) real pagination itself. Caveat unchanged:
-  Workers Cache means cache HITs don't run the Worker, so `last_viewed`
-  undercounts popular beaches slightly (stamps land on misses/revalidations
-  only) — fine for a coarse priority signal.
+- **Offline discovery + classification (live residuals).** Discovery and water-body
+  classification run in one daily GitHub Actions workflow that scans a prebuilt FlatGeobuf
+  layer set and bulk-loads D1, over layers a second workflow builds twice weekly from the
+  Geofabrik OSM extracts — see `docs/offline-discovery.md`. The live residuals:
+  - **Freshness is the extract cadence, not minutes.** A beach mapped in OSM today appears
+    after the next twice-weekly build, and `MAX_SOURCE_AGE_DAYS = 21` is a hard refusal, not
+    a warning.
+  - **The dangerous failure is a successful build of a wrong layer set** — a clip-mask bug, a
+    short parks layer, an `ogr2ogr` node-index exhaustion that returns empty with exit status
+    0. The defenses are the absolute floors in `data/layer-floors.json`, the previous-build
+    ratio checks, the manifest's three-tier gate, the two proportional delete rails and the
+    classification flip rail. Every one of those numbers was calibrated against a 1669-row
+    table; re-derive them when the table changes scale.
+  - **Layer-set size at North America scale.** The published set is O(beaches) because of the
+    ~1.1 km proximity clip, but the pre-clip intermediate is not, and the build's peak disk
+    (~13.3 GB) sits inside a runner's budget with less headroom than is comfortable. Measure
+    before adding coasts.
+  - **`beaches-line` and `water-line` may be droppable.** If they contribute nothing to
+    discovery or classification, dropping them shrinks the set and the download. Decide from a
+    real build's manifest, not from reasoning.
+  - **Retire the vestigial classification columns.** Nothing can bump `water_class_attempts`,
+    and `parkedPreDecisive` plus the attempts cap in `buildClassifyQueue` exist only for rows
+    parked before the layer migration. Once a run reports zero such rows, delete the cap, the
+    marker and (in a migration) the column.
+  - **The relation-mapped-inland-lake pond filter is cheap to fix.** The narrow residual at
+    the top of this file (ways-only water evidence) can be closed by consulting the
+    lakes-polygon layer directly, a local lookup rather than a new upstream probe.
+- **Every `deno` step in every workflow must set `DENO_NO_PACKAGE_JSON=1`.** The repo-root
+  `deno.lock` is auto-discovered for all Deno commands here; without that env var Deno folds
+  `package.json`'s npm tree into the lockfile it expects, `deno check --frozen` fails with "The
+  lockfile is out of date", and a plain `deno run` silently rewrites the checked-in lock. The
+  npm scripts already set it. Do not "fix" this by regenerating the lock without the env var —
+  that trades a loud failure for silent drift in the only delete-bearing job in the repo.
+- **Demand-priority recompute rotation — mechanism landed, cold-tier tuning deferred.** The
+  request path stamps `beaches.last_viewed` (migration 0007; detail page and `/api/flag`,
+  throttled to 1/h per beach, `ctx.waitUntil`). `runFlagRecompute` and `runWaterTempRefresh`
+  split their rotation into a hot tier (`last_viewed` within `HOT_VIEW_WINDOW_MS`, always
+  fully covered) and a cold tier rotating through the remaining `MAX_BEACHES_PER_RUN` budget;
+  the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue tiebreak. At
+  pilot scale both tiers fit inside one run, so the split only starts mattering once beach
+  count approaches `MAX_BEACHES_PER_RUN`. Deferred residue: (1) a longer KV TTL for the cold
+  tier, so a cold beach's flag does not expire to "no data" every time it misses a rotation
+  turn; (2) stamping `last_viewed` from the home list view too, since only the two
+  single-beach routes stamp it today; (3) a real split-query implementation — today's is a
+  single ORDER BY guard, not two queries — plus the migration 0012-class indexes real
+  pagination will need; (4) real pagination itself. Workers Cache means cache hits do not run
+  the Worker, so `last_viewed` undercounts popular beaches slightly, which is fine for a
+  coarse priority signal.
 - **Alerts-only fast cron (not yet built).** A `*/10`-ish alerts-only cron — NWS
   alerts are the one event-driven input; a High Surf Warning issued at :05
   currently waits up to 55 min for the hourly recompute. Since alerts are a
@@ -356,38 +276,31 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 
 ## Official-scraper fragility
 
-- All scrapers parse third-party pages/APIs that can change without notice.
-  Every parser degrades to `null` (never a guessed color) on unexpected markup,
-  and health monitoring surfaces a scraper that goes quiet — but a source that
-  changes *semantics* while staying parseable (e.g. repurposing a status string)
-  would still need a human to notice. Re-verify sources occasionally.
-- **Scraper health alerting is log-only.** `src/scraperHealth.js` logs a LOUD
-  `ALERT:` line once a matched scraper has returned null for 24 consecutive
-  hourly runs, but nothing pages a human — wiring the alert to email/push is a
-  possible follow-up.
-- **Not every scraper implements empty-success yet.** The contract (PLAN.md §6)
-  distinguishes "parsed cleanly, nothing to report" (empty `sites: []` result, a
-  health success) from `null` (genuine fetch/parse failure). metroparks complies;
-  south-haven and chicago-park-district still return
-  `null` when they parse fine but no site survives their gates — rare in season,
-  but off-season or stale-only data would log a false failure streak. Migrate
-  them the same way.
-- **Deferred: tier-2 HTML entity-decoder consolidation.** `decodeCellText` now lives
-  in `src/officialSources/util.js` and the two byte-identical copies
-  (`greyBruceRecWater.js`, `ontarioParksBeachPostings.js`) were folded into it. Five
-  near-variants were deliberately LEFT ALONE: `kenoshaBeachConditions.js` `htmlToText`,
+- All scrapers parse third-party pages and APIs that can change without notice. Every parser
+  degrades to `null` on unexpected markup, never a guessed color, and health monitoring surfaces
+  a scraper that goes quiet — but a source that changes *semantics* while staying parseable, for
+  example by repurposing a status string, still needs a human to notice.
+- **Scraper health alerting is log-only.** `src/scraperHealth.js` logs a loud `ALERT:` line once
+  a matched scraper has returned null for 24 consecutive hourly runs, but nothing pages a human.
+- **Not every scraper implements empty-success yet.** The contract (PLAN.md §6) distinguishes
+  "parsed cleanly, nothing to report" (an empty `sites: []` result, a health success) from
+  `null` (a genuine fetch or parse failure). metroparks complies; south-haven and
+  chicago-park-district still return `null` when they parse fine but no site survives their
+  gates, which off-season or stale-only data would log as a false failure streak.
+- **Deferred: tier-2 HTML entity-decoder consolidation.** `decodeCellText` lives in
+  `src/officialSources/util.js`, with the two byte-identical copies folded into it. Five
+  near-variants are deliberately left alone: `kenoshaBeachConditions.js` `htmlToText`,
   `paDcnrPresqueIsle.js` `htmlToText`, `chautauquaCountyNy.js` `htmlToPlainText`,
-  `evanstonStatusfy.js` `stripTags` and `lakeCountyOhBeaches.js` `stripTags`. Folding
-  them into a union decoder is **behavior-changing**, not a cleanup: evanston and
-  lakeCountyOh strip *full-page* HTML into a bounded character window (400 / 600 chars)
-  that GATES a red and a yellow floor, and decoding one more entity demonstrably changes
-  whether a floor is raised (`prediction&mdash;poor` currently fails
-  `lakeCountyOhBeaches`'s regex and raises NO floor; under a union decoder it would match
-  and raise yellow). Both test suites use entity-free synthetic fixtures, so a green run
-  proves nothing — this needs real captured page samples and its own reviewed commit.
-  `erieCountyPaKml.js` `decodeAndStrip` is PERMANENTLY excluded from any such
-  consolidation: it decodes `&amp;` LAST on purpose (decoding it first would
-  double-decode) and it unwraps CDATA.
+  `evanstonStatusfy.js` `stripTags` and `lakeCountyOhBeaches.js` `stripTags`. Folding them into
+  a union decoder is **behavior-changing**, not a cleanup: evanston and lakeCountyOh strip
+  full-page HTML into a bounded character window (400 / 600 chars) that **gates** a red and a
+  yellow floor, and decoding one more entity demonstrably changes whether a floor is raised
+  (`prediction&mdash;poor` currently fails `lakeCountyOhBeaches`'s regex and raises no floor;
+  under a union decoder it would match and raise yellow). Both test suites use entity-free
+  synthetic fixtures, so a green run proves nothing — this needs real captured page samples and
+  its own reviewed commit. `erieCountyPaKml.js` `decodeAndStrip` is permanently excluded from
+  any such consolidation: it decodes `&amp;` last on purpose, since decoding it first would
+  double-decode, and it unwraps CDATA.
 
 ## Official-source coverage
 
@@ -400,250 +313,189 @@ gaps appear.
 
 ### Newly integrated sources (shipped) + human-verify follow-ups
 
-A batch of new data sources landed across three registries. **Official HAZARD
-scrapers** (`src/officialSources/`, may override the estimate): `nws-omr-grr`,
-`winnetka-tower-beach`, `pa-dcnr-presque-isle`, `nws-marine-beach-forecast`.
-**Raise-only water-quality FLOOR sources** (`src/wqFloor/`, may only lift a flag,
-never lower it — see README "Water-quality advisory floor"). Registered:
-`ny-oprhp-beach-status`, `lake-county-oh-beaches`, `kenosha-beach-conditions`,
-`mn-beaches`, `grey-bruce-rec-water`, `ontario-parks-beach-postings`,
-`evanston-statusfy`, `usgs-great-lakes-nowcast`. Authored and tested but
-**deliberately NOT registered** (see the follow-up below): `chautauqua-county-ny`,
-`erie-county-pa-kml`, `illinois-beachguard`.
-**ECCC marine warnings**
-(`src/clients/ecccMarine.js`) are wired into the Canadian alert path (rules step
-1b/6b). Nothing was punted — every surveyed source above is authored; three wqFloor
-sources are held OUT of the registry pending gate confirmation (see the follow-up
-below).
+Sources landed across three registries. **Official hazard scrapers**
+(`src/officialSources/`, may override the estimate): `nws-omr-grr`, `winnetka-tower-beach`,
+`pa-dcnr-presque-isle`, `nws-marine-beach-forecast`. **Raise-only water-quality floor sources**
+(`src/wqFloor/`, may only lift a flag, never lower it): `ny-oprhp-beach-status`,
+`lake-county-oh-beaches`, `kenosha-beach-conditions`, `mn-beaches`, `grey-bruce-rec-water`,
+`ontario-parks-beach-postings`, `evanston-statusfy`, `usgs-great-lakes-nowcast`. **ECCC marine
+warnings** (`src/clients/ecccMarine.js`) are wired into the Canadian alert path (rules steps 1b
+and 6b).
 
-Follow-ups a human must verify (parsers fail safe to `null`/no-effect, so these are
-coverage gaps, not wrong-color risks):
+Follow-ups a human must verify. Parsers fail safe to `null` or no effect, so these are coverage
+gaps, not wrong-color risks.
 
-- **`erie-county-pa-kml` KML URL is UNCONFIRMED** — the module ships with an empty
-  `ERIE_COUNTY_PA_KML_URL`, so it fails closed (resolves to null, no floor) before
-  fetching. It is therefore **unregistered** pending URL confirmation and is not
-  consulted at all on a run — see the next bullet for why, and for how to re-insert
-  it safely. Several other wqFloor source URLs are best-effort and should be
-  re-verified live before their coverage is relied on; `grey-bruce-rec-water` is
-  flagged low-confidence in its own header.
-- **Three wqFloor sources are authored, tested, and DELIBERATELY UNREGISTERED** —
-  `chautauqua-county-ny` and `erie-county-pa-kml` (fetch URL still `""`) and
-  `illinois-beachguard` (`ILLINOIS_BEACHGUARD_CONFIRMED === false`, placeholder
-  BeachIDs). All three fail closed before fetching, so they stayed permanently inert
-  while sitting AHEAD of working sources in the first-match-wins `wqFloorSources`
-  registry — and because the cron resolves exactly ONE source per beach, an inert
-  source silently SUPPRESSED the working source behind it: `erie-county-pa-kml`'s
-  `ERIE_BOX` is strictly inside `usgs-great-lakes-nowcast`'s region bbox, and
-  `illinois-beachguard`'s box overlaps `kenosha-beach-conditions` coverage around
-  lat 42.517–42.55. The modules remain on disk with their full test suites.
-  **WHEN A GATE IS CONFIRMED**, re-insert that source into `wqFloorSources` in
-  `src/wqFloor/index.js` **ABOVE** `usgsGreatLakesNowcast` — and, for
-  `illinois-beachguard`, also ABOVE `kenoshaBeachConditions` — never below, or it
-  will shadow nothing and be shadowed itself. Unregistering them restored real
-  coverage: Erie County PA / Presque Isle beaches now reach USGS Great Lakes
-  NowCast, beaches around lat 42.517–42.55 near lon −87.79 now reach Kenosha
-  County WI, and the four curated Chautauqua County NY named beaches now fall
-  through to whichever registered source claims them (NY OPRHP first, else
-  NowCast's coarse Lake Erie/Ontario bbox). If any doc still says these areas
-  have no water-quality coverage, it is out of date.
-- **`nws-marine-beach-forecast` ArcGIS layer enumeration** — only layers verified
-  live (CLE = 19, BUF = 7, Lake Erie/Ontario) are enabled. Enumerate the MapServer
-  for additional Great Lakes Day-1 layers (e.g. other WFOs) and enable each ONLY
-  after confirming it returns features live — a wrong layer id silently yields no
-  features (safe-fail).
+- **Three wqFloor sources are authored, tested and deliberately unregistered** —
+  `chautauqua-county-ny`, `erie-county-pa-kml` (fetch URL still `""`) and
+  `illinois-beachguard` (`ILLINOIS_BEACHGUARD_CONFIRMED === false`, placeholder BeachIDs). All
+  three fail closed before fetching, so while sitting ahead of working sources in the
+  first-match-wins `wqFloorSources` registry they were permanently inert — and because the cron
+  resolves exactly **one** source per beach, an inert source silently **suppressed** the working
+  source behind it: `erie-county-pa-kml`'s `ERIE_BOX` is strictly inside
+  `usgs-great-lakes-nowcast`'s region bbox, and `illinois-beachguard`'s box overlaps
+  `kenosha-beach-conditions` coverage around lat 42.517–42.55. The modules remain on disk with
+  their full test suites. **When a gate is confirmed**, re-insert that source into
+  `wqFloorSources` in `src/wqFloor/index.js` **above** `usgsGreatLakesNowcast` — and, for
+  `illinois-beachguard`, also above `kenoshaBeachConditions` — never below, or it will shadow
+  nothing and be shadowed itself. Several other wqFloor source URLs are best-effort and should
+  be re-verified live before their coverage is relied on; `grey-bruce-rec-water` is flagged
+  low-confidence in its own header.
+- **`nws-marine-beach-forecast` ArcGIS layer enumeration** — only layers verified live (CLE =
+  19, BUF = 7, Lake Erie/Ontario) are enabled. Enumerate the MapServer for additional Great
+  Lakes Day-1 layers and enable each only after confirming it returns features live; a wrong
+  layer id silently yields no features, which is safe-fail.
 - **`pa-dcnr-presque-isle` hazard-keyword mapping is PROVISIONAL** — the live DCNR
   advisory feed is currently 100% off-axis boilerplate, so the swimming-hazard →
   red mapping is verified only against synthetic fixtures. Re-verify against a real
   Danger-tier swimming-hazard advisory when one appears.
-- **`winnetka-tower-beach` `staleMs` rests on a single-day sample** — its 72 h
-  staleness horizon is reasoned from one observation of the rainoutline page (all four
-  Winnetka beach extensions stamped in one 7/21/26 4:43-4:46 pm human batch, still
-  unchanged and still accurate ~29 h later; dormant extensions holding 2019-2021
-  stamps prove there is no auto-refresh), plus the ~63 h Friday-post/Monday-read
-  weekend bound — not a measured distribution. Re-verify the real in-season posting
-  cadence; if genuine holds routinely run longer, raise the horizon rather than
-  leaving false stale warnings in place. Note also that a `staleMs` that never trips
-  makes a silently-dead source indistinguishable from a healthy one — the
-  `scraperhealth:` counter, not the horizon, is what catches that.
+- **`winnetka-tower-beach` `staleMs` rests on a thin sample** — its 72 h staleness horizon is
+  reasoned from one observation of the posting page plus the ~63 h Friday-post / Monday-read
+  weekend bound, not a measured distribution. Re-verify the real in-season posting cadence; if
+  genuine holds routinely run longer, raise the horizon rather than leaving false stale warnings
+  in place. Note also that a `staleMs` that never trips makes a silently-dead source
+  indistinguishable from a healthy one — the `scraperhealth:` counter, not the horizon, is what
+  catches that.
 - **Water-temp coverage is 47%, and 14% in winter** — 519 of 1102 beaches have a
   `CAP_WATER_TEMP` station inside the 25 km cap, falling to ~153 when the seasonal buoys are
-  pulled and only the 15 year-round NOS gauges remain. The gap is a real sensor-density
-  limit on the Great Lakes, not a list problem: even at a 75 km cap winter coverage only
-  reaches ~36%. GLOS Seagull exposes `sea_water_temperature` on a denser network and is the
-  obvious next source; it would need the same siting review this list got.
-- **Station-list rot has no trip-wire** — station 45161 (Muskegon) went off-air 2026-08-18
-  and nothing noticed; it was found by hand. The 12 h freshness window correctly degrades a
-  dark station to null, which is exactly why the failure is invisible. The gather knows, per
-  run, how many unique stations it consulted and how many returned a reading, so logging
-  `stations=<n> live=<n>` would make a station family going dark visible in the observability
-  query without anyone auditing anything.
+  pulled and only the year-round NOS gauges remain. The gap is a real sensor-density limit on
+  the Great Lakes, not a list problem: even at a 75 km cap winter coverage only reaches ~36%.
+  GLOS Seagull exposes `sea_water_temperature` on a denser network and is the obvious next
+  source; it would need the same siting review this list got.
+- **Station-list rot has no trip-wire** — station 45161 (Muskegon) went off-air and nothing
+  noticed; it was found by hand. The 12 h freshness window correctly degrades a dark station to
+  null, which is exactly why the failure is invisible. The gather knows, per run, how many
+  unique stations it consulted and how many returned a reading, so logging `stations=<n>
+  live=<n>` would make a station family going dark visible in the observability query.
 
 ### Registered scrapers — live caveats
 
-Three scrapers are registered in `src/officialSources/index.js` (contract v2,
-multi-site, one test file each) — hazard/flag/closure sources only. An official
-color OVERRIDES the estimate wherever shown, so water-quality (E. coli / bacteria)
-sources are deliberately excluded: a clean-water "green" is a different axis from
-surf hazard and would mask a genuine hazard estimate (e.g. a gale-driven red).
-Six water-quality scrapers were REMOVED for this reason (`lenawee-mi`,
-`michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`, `bldhd-mi`,
-`wisconsin-dnr`) — modules, tests, and doc entries deleted. Do not re-add a source
-whose "clean" reading would downgrade a hazard flag. Caveats for the survivors:
+Seven scrapers are registered in `src/officialSources/index.js` (contract v2, multi-site, one
+test file each) — hazard, flag and closure sources only. An official color overrides the
+estimate wherever shown, so water-quality (E. coli / bacteria) sources are deliberately
+excluded: a clean-water green is a different axis from surf hazard and would mask a genuine
+hazard estimate such as a gale-driven red. Six water-quality scrapers were removed for this
+reason (`lenawee-mi`, `michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`, `bldhd-mi`,
+`wisconsin-dnr`) — modules, tests and doc entries deleted. Do not re-add a source whose clean
+reading would downgrade a hazard flag. Caveats for the registered set:
 
-- **South Haven CSV** (`south-haven-mi`) — real flag colors, ~9 sites. CSV URL
-  is re-discovered from the flag page each run (hardcoded fallback); Gray =
-  unmonitored → no data; colored output is gated to the monitored season/hours
-  (America/Detroit); same-named flag poles roll up to most severe (double-red
-  recognized as the top tier).
-- **Chicago Park District `/flag-status` JSON** (`chicago-park-district`) — ~23
-  lakefront beaches, real flags. Payload mixes in stale prior-season rows — the
-  36 h per-record staleness gate is load-bearing, and GREEN additionally
-  requires the beach's own Surf row to be fresh; "Afterhours" → red
-  (lifeguards-off closure, noted in reason). Undocumented/unversioned API;
-  off-season behavior still unverified.
-- **Huron-Clinton Metroparks** (`huron-clinton-metroparks`) — closure-only
-  (Closed → red, Open → no assertion); parsing strictly scoped to the
-  Kensington/Stony Creek panel ids; name-only site resolution so an open sibling
-  beach can't inherit its neighbor's red; Lake St. Clair Metropark excluded
-  (defers to EGLE).
-- **Windsor-Essex County Health Unit** (`wechu.org/beaches/beach-water-testing`,
-  Ontario) — NOT built (US focus; Canadian beaches lack NWS enrichment anyway).
-  Still the most feasible CA source when that becomes relevant.
+- **South Haven CSV** (`south-haven-mi`) — the CSV URL is re-discovered from the flag page each
+  run, with a hardcoded fallback; Gray means unmonitored, so no data; colored output is gated to
+  the monitored season and hours (America/Detroit); same-named flag poles roll up to most
+  severe.
+- **Chicago Park District `/flag-status` JSON** (`chicago-park-district`) — the payload mixes in
+  stale prior-season rows, so the 36 h per-record staleness gate is load-bearing, and green
+  additionally requires the beach's own Surf row to be fresh. "Afterhours" maps to red, a
+  lifeguards-off closure noted in the reason. Undocumented and unversioned API; off-season
+  behavior still unverified.
+- **Huron-Clinton Metroparks** (`huron-clinton-metroparks`) — closure-only; parsing strictly
+  scoped to the Kensington and Stony Creek panel ids; name-only site resolution, so an open
+  sibling beach cannot inherit its neighbour's red; Lake St. Clair Metropark excluded, deferring
+  to EGLE.
+- **Windsor-Essex County Health Unit** (`wechu.org/beaches/beach-water-testing`, Ontario) — not
+  built, but still the most feasible Canadian source when that becomes relevant.
 
 ### Tier 2 — worth building, with caveats
 
-- **Algoma Public Health** (CA) — status is inline plain-text JS in raw HTML,
-  but match by lat/lon proximity, not name ("Old Mill Beach" appears twice at
-  different locations; 3 of 5 claimed names never appear on the page).
-- **City of Muskegon WP REST feed**
-  (`muskegon-mi.gov/wp-json/wp/v2/posts?categories=8`) — clean JSON but
-  event-only press releases: absence of a post is NOT an affirmative all-clear.
-- **Grand Traverse County** (`gtcountymi.gov/814`) — static + dated, but only 5
-  claimed beach names appear and entries aggregate ("four beaches Level 2...");
-  only the unambiguous "all GTC beaches Level 1" case is trustworthy.
+- **Algoma Public Health** (CA) — status is inline plain-text JS in raw HTML, but match by
+  lat/lon proximity rather than name: "Old Mill Beach" appears twice at different locations, and
+  3 of 5 claimed names never appear on the page.
+- **City of Muskegon WP REST feed** (`muskegon-mi.gov/wp-json/wp/v2/posts?categories=8`) — clean
+  JSON, but event-only press releases: the absence of a post is not an affirmative all-clear.
+- **Grand Traverse County** (`gtcountymi.gov/814`) — static and dated, but only 5 claimed beach
+  names appear and entries aggregate ("four beaches Level 2…"); only the unambiguous "all GTC
+  beaches Level 1" case is trustworthy.
 - **Michigan DNR closures feed** (Sitecore search JSON behind
-  `michigan.gov/dnr/about/newsroom/closures`) — real open endpoint but generic
-  park-facility closures, not flags; sparse "day-use closed" override at best.
-- **Swim Guide Indiana pages** (`theswimguide.org/beach/{id}`) — Nuxt SSR with
-  literal `waterQuality:{description:...}` in raw HTML, but it's a mirror one hop
-  from IDEM and needs a hardcoded numeric-ID table.
-- **Ontario Parks** (`ontarioparks.ca/beachresults`, CA) — NOW SHIPPED as the
-  `ontario-parks-beach-postings` raise-only wqFloor source (binary posted/open, so
-  a posting raises the floor; open is no-effect).
-- **Barry-Eaton DHD** — parseable dated bulletins, but only 1 of 3 claimed
-  beaches has entries; absence isn't a clear signal.
-- **Kalamazoo County CivicAlerts** (`kalcounty.gov/m/newsflash?cat=9`) —
-  server-rendered, stable DOM, but event-only advisory posts inside general
-  county news; zero current entries mid-season.
+  `michigan.gov/dnr/about/newsroom/closures`) — a real open endpoint, but generic park-facility
+  closures rather than flags.
+- **Swim Guide Indiana pages** (`theswimguide.org/beach/{id}`) — Nuxt SSR with literal
+  `waterQuality:{description:...}` in raw HTML, but it is a mirror one hop from IDEM and needs a
+  hardcoded numeric-ID table.
+- **Barry-Eaton DHD** — parseable dated bulletins, but only 1 of 3 claimed beaches has entries,
+  so absence is not a clear signal.
+- **Kalamazoo County CivicAlerts** (`kalcounty.gov/m/newsflash?cat=9`) — server-rendered and
+  stable, but event-only advisory posts inside general county news.
 
 ### Statewide/aggregator plays
 
-- **Michigan EGLE BeachGuard / MiEnviro: hard scraping dead end** (see the
-  SwimSmart partnership bullet under Data quality — partnership is the only path;
-  it gates 70+ beaches).
-- **Indiana IDEM BeachAlert** (`portal.idem.in.gov/BeachAlert`) — the natural IN
-  statewide play but NOT implementable: Power Pages anonymous role is
-  permission-denied and it sits behind Cloudflare Bot Management.
-- The flag/closure integrations (South Haven, Huron-Clinton Metroparks, Chicago
-  Park District, NWS GRR beach report, Winnetka, Presque Isle, NWS Marine Beach
-  Forecast) are hazard sources — the kind that may safely override the estimate.
-  The statewide water-quality registries that were removed as *overrides* (Wisconsin
-  DNR, Ohio BeachGuard) are exactly the "clean → green masks a hazard" case — and the
-  raise-only floor anticipated here is now BUILT (`src/wqFloor/` + rules step 7): a
-  water-quality source may RAISE a flag but never lower one, so bacteria/HAB feeds
-  (Illinois BeachGuard, Lake County OH, and the rest of the wqFloor registry) are
-  now admissible on that basis. Illinois BeachGuard shipped as `illinois-beachguard`
-  — authored and tested, but currently held OUT of the registry pending BeachID
-  confirmation (see the unregistered-sources follow-up above); a reworked
-  Ohio/Wisconsin floor source could be added the same way.
+- **Michigan EGLE BeachGuard / MiEnviro: hard scraping dead end** — see the SwimSmart
+  partnership bullet under Data quality. Partnership is the only path, and it gates 70+ beaches.
+- **Indiana IDEM BeachAlert** (`portal.idem.in.gov/BeachAlert`) — the natural Indiana statewide
+  play, but not implementable: the Power Pages anonymous role is permission-denied and it sits
+  behind Cloudflare Bot Management.
+- The flag and closure integrations are hazard sources, the kind that may safely override the
+  estimate. Statewide water-quality registries are the "clean → green masks a hazard" case, so
+  they belong on the raise-only floor (`src/wqFloor/` plus rules step 7), where a source may
+  raise a flag but never lower one.
 
-### Dead ends (verified — don't re-investigate without new info)
+### Dead ends (verified — do not re-investigate without new info)
 
-- **EGLE MiEnviro / nSITE / ncore portals** (+ legacy `egle.state.mi.us/beach/...`
-  links, which 301 into the same SPAs) — no data in raw HTML, no public API in
-  any shipped JS bundle, repeated attempts.
-- **Every Facebook page checked** (St. Clair Co. Beaches, Genesee/Isabella Co.
-  Parks, Sanilac Co. HD, Marquette Park Gary, City of Marquette, East Tawas,
-  Livingston Co. HD, Weko Beach, Ludington SP) — bot-blocked or empty shell to
-  both curl and JS-rendering fetch; no public JSON/RSS exists. Same for
-  **x.com/chicagoparks**.
-- **Ottawa County Beachwatch** — data is inside a session-token-gated Power BI
-  Embedded iframe; base page also UA-filters bots.
-- **Akamai/Cloudflare-blocked county sites** — Oakland Co. Health, Allegan Co.
-  Health, Grosse Pointe Farms parks (522/403), PHSD Sudbury (CA).
-- **Chicago per-beach facility pages** (widget broken sitewide, flag set
-  client-side), **Chicago Socrata E. coli predictions** (`xvsz-3xcj`, zero 2026
-  rows — program paused) and **automated sensors** (`qmqz-2xku`, frozen at March
-  2025 readings).
-- **Swim Guide Michigan** — SSR is fine but the upstream Michigan feed
-  (`translate.theswimguide.org/michigan/json`) returns HTTP 500 and every MI
-  beach shows "No Data Available"; broken platform-wide.
-- **NPS Indiana Dunes `status.htm`** — real raw-HTML alerts but years-stale
-  (2021 "until further notice" items); not a maintained daily feed.
-- **Program-description-only pages that defer to BeachGuard** — DHD2, DHD10,
-  St. Clair Co., Mid-Michigan DHD, Ingham Co., Muskegon Co. monitoring page,
-  gtbay.org (pure link farm).
-- **404s / no content** — MI DNR `dnrclosures` URL, michigandnr.com Pontiac Lake
-  page, Chippewa Co. HD beach subpage (full sitemap sweep: no beach content),
-  Mecosta Co. Parks (static Weebly), Manistee webcams (video only), USDA FS
-  Hiawatha alerts (target beaches never named), MI DNR beach-safety page (legend
-  images + `javascript:void(0)` park links).
+- **EGLE MiEnviro / nSITE / ncore portals**, including legacy `egle.state.mi.us/beach/...` links
+  that 301 into the same SPAs — no data in raw HTML, no public API in any shipped JS bundle.
+- **Every Facebook page checked** (St. Clair Co. Beaches, Genesee/Isabella Co. Parks, Sanilac
+  Co. HD, Marquette Park Gary, City of Marquette, East Tawas, Livingston Co. HD, Weko Beach,
+  Ludington SP) — bot-blocked or an empty shell to both curl and a JS-rendering fetch, with no
+  public JSON or RSS. Same for **x.com/chicagoparks**.
+- **Ottawa County Beachwatch** — data sits inside a session-token-gated Power BI Embedded
+  iframe, and the base page UA-filters bots.
+- **Akamai/Cloudflare-blocked county sites** — Oakland Co. Health, Allegan Co. Health, Grosse
+  Pointe Farms parks, PHSD Sudbury (CA).
+- **Chicago per-beach facility pages** (widget broken sitewide, flag set client-side), **Chicago
+  Socrata E. coli predictions** (`xvsz-3xcj`, program paused) and **automated sensors**
+  (`qmqz-2xku`, frozen readings).
+- **Swim Guide Michigan** — SSR is fine, but the upstream Michigan feed
+  (`translate.theswimguide.org/michigan/json`) returns HTTP 500 and every MI beach shows "No
+  Data Available".
+- **NPS Indiana Dunes `status.htm`** — real raw-HTML alerts, but years-stale items rather than a
+  maintained daily feed.
+- **Program-description-only pages that defer to BeachGuard** — DHD2, DHD10, St. Clair Co.,
+  Mid-Michigan DHD, Ingham Co., Muskegon Co. monitoring page, gtbay.org.
+- **404s and no content** — MI DNR `dnrclosures` URL, michigandnr.com Pontiac Lake page,
+  Chippewa Co. HD beach subpage, Mecosta Co. Parks, Manistee webcams (video only), USDA FS
+  Hiawatha alerts (target beaches never named), MI DNR beach-safety page.
 
 ### Coverage math
 
-Site capacity by registered scraper: South Haven ~9 sites, Metroparks 4,
-Chicago ~23. Within the current Michigan-centric `REGIONS` coverage that
-translates to official (hazard/flag) status for a few dozen of ~613 DB beaches in
-season — actual counts depend on per-beach resolution (name/proximity) and each
-source's staleness gates, and shrink off-season by design. (The six removed
-water-quality scrapers previously added ~90 monitored sites of E. coli status,
-but that is a different signal from hazard flags and was masking hazard estimates
-where it overrode them.) The 70+-beach prize (Michigan EGLE BeachGuard) remains
-partnership-gated — see `docs/swimsmart-outreach-draft.md`.
+Site capacity by registered scraper: South Haven ~9 sites, Metroparks 4, Chicago ~23. Within
+the current Michigan-centric `REGIONS` coverage that translates to official hazard status for a
+few dozen beaches in season; actual counts depend on per-beach resolution and each source's
+staleness gates, and shrink off-season by design. The 70+-beach prize (Michigan EGLE BeachGuard)
+remains partnership-gated.
 
 ## Free vs. paid Workers plan
 
-- The cron subrequest budgets assume the Workers **Paid** plan (10,000
-  subrequests/invocation, no daily KV-write cap). The hourly `runFlagRecompute`
-  runs alert + SRF + scraper fetches plus up to ~700 `flag:`/`official:` KV
-  writes (it does not fetch waves), and the 6-hourly `runWaterTempRefresh` runs one
-  Range-limited read per distinct station plus its `watertemp:` KV writes (per
-  PLAN.md section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
-  quota are not sufficient at this cadence and beach count. For a free-plan demo,
-  drop `MAX_BEACHES_PER_RUN` way down (e.g. 10-15 beaches) and/or reduce cron
-  frequency before deploying without a paid plan.
+- The cron subrequest budgets assume the Workers **Paid** plan (10,000 subrequests per
+  invocation, no daily KV-write cap). The hourly `runFlagRecompute` runs alert, SRF and scraper
+  fetches plus its `flag:`/`official:` KV writes, and does not fetch waves; the 6-hourly
+  `runWaterTempRefresh` runs one Range-limited read per distinct station plus its `watertemp:`
+  writes (PLAN.md section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
+  quota are not sufficient at this cadence and beach count. For a free-plan demo, drop
+  `MAX_BEACHES_PER_RUN` well down and reduce cron frequency before deploying.
 
 ## Frontend
 
-- **Wave-forecast strip: hour ticks are relative, not local time.** The detail
-  page's 24 h wave strip labels its ticks "Now / +6 h / … / +N h" because D1 has
-  no per-beach timezone column and the series is UTC-indexed. A small
-  progressive-enhancement inline script (pattern of `src/frontend/searchScript.js`)
-  could rewrite the ticks to the *viewer's* browser-local clock time with a
-  "times shown in your local time" note. Deferred from the initial build.
-- **Wave-forecast strip: no hover tooltips.** Chart.js tooltip callbacks are
-  functions, which the slotted-JSON config can't encode (and a slotted config
-  shadows the element's `config` property, so the two can't mix). If per-hour
-  hover values are wanted: move the JSON to an adjacent
-  `<script type="application/json" id=…>`, add a small `waveChartScript.js` that
-  parses it, attaches callbacks, and assigns `el.config` before upgrade. Trades
-  away works-without-our-JS, which is why v1 ships `without-tooltip` +
-  `events: []` instead.
+- **Wave-forecast strip: hour ticks are relative, not local time.** The detail page's 24 h
+  strip labels its ticks "Now / +6 h / … / +N h" because D1 has no per-beach timezone column and
+  the series is UTC-indexed. A progressive-enhancement inline script (pattern of
+  `src/frontend/searchScript.js`) could rewrite the ticks to the viewer's browser-local clock
+  with a "times shown in your local time" note.
+- **Wave-forecast strip: no hover tooltips.** Chart.js tooltip callbacks are functions, which
+  the slotted-JSON config cannot encode, and a slotted config shadows the element's `config`
+  property, so the two cannot mix. If per-hour hover values are wanted: move the JSON to an
+  adjacent `<script type="application/json" id=…>`, add a small `waveChartScript.js` that
+  parses it, attaches callbacks and assigns `el.config` before upgrade. That trades away
+  works-without-our-JS, which is why v1 ships `without-tooltip` plus `events: []`.
 - **List-page pagination.** `GET /` renders at most the first 100 beaches
-  (`ORDER BY COALESCE(park_name, name), name LIMIT 100`) with no pagination
-  controls or `?page=` param (the server-side `?q=` search is the way to reach
-  beaches past the cap). Fine while the pilot region has well under 100 named
-  beaches; needs real pagination once nationwide scale-out lands. (The homepage
-  map is already the whole-directory view: it fetches every flag-worthy beach
-  once from the cacheable `GET /api/beaches.geojson` and renders them via native
-  MapLibre clustering — no per-viewport paging. That single-fetch model is
-  comfortable to ~5–10k features; beyond that the GeoJSON endpoint itself needs
-  server-side clustering / tiling before the 10k–100k North America target.)
-  Cross-reference, out of scope here: a browser-fetched static tiled artifact in the
-  same R2 bucket the layer build already writes would solve both this and the map's
-  scale problem without the Worker ever touching R2. But such an artifact MUST be
-  generated **from D1** — post-classification truth — and never from the OSM layers,
-  or the map would show beaches the pipeline rejected as inland.
+  (`ORDER BY COALESCE(park_name, name), name LIMIT 100`) with no pagination controls or `?page=`
+  param; the server-side `?q=` search is the way to reach beaches past the cap. Real pagination
+  is needed once nationwide scale-out lands. The homepage map is already the whole-directory
+  view — it fetches every flag-worthy beach once from the cacheable `GET /api/beaches.geojson`
+  and renders them via native MapLibre clustering — and that single-fetch model is comfortable
+  to roughly 5–10k features; beyond that the GeoJSON endpoint itself needs server-side
+  clustering or tiling. Cross-reference, out of scope here: a browser-fetched static tiled
+  artifact in the R2 bucket the layer build already writes would solve both this and the map's
+  scale problem without the Worker ever touching R2. Such an artifact **must** be generated from
+  D1, post-classification truth, and never from the OSM layers, or the map would show beaches
+  the pipeline rejected as inland.
 
 ## Explicitly deferred by PLAN.md (not gaps, just out of scope for this pass)
 

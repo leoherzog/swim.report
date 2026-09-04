@@ -1,22 +1,21 @@
-// src/wqFloor/index.js
-// Registry of RAISE-ONLY water-quality advisory floor sources. Modeled on
-// src/officialSources/index.js, but a fundamentally different axis: these
-// sources feed rules.js estimateFlag's "waterQualityAdvisory" input (step 7),
-// where an active E. coli / bacteria / HAB advisory can RAISE a flag UP to
-// yellow/red (worst-of by SEVERITY_RANK) but can NEVER pull a hazard estimate
-// down. A clean/absent reading is modeled as the ABSENCE of an advisory
-// (resolves to null -> zero effect), so a clean-water "green" can never mask a
-// wave/rip/alert red. This is precisely why water quality must NOT live in
-// src/officialSources/ (an official color OVERRIDES the estimate everywhere):
-// it lives INSIDE the estimate (official:false), lifting only.
+// src/wqFloor/index.js — the registry of raise-only water-quality advisory floor
+// sources. Modeled on src/officialSources/index.js but a different axis: these
+// feed rules.js estimateFlag's waterQualityAdvisory input (step 7), where an
+// active E. coli, bacteria or HAB advisory can raise a flag to yellow or red
+// (worst-of by SEVERITY_RANK) but can never pull a hazard estimate down. A clean
+// or absent reading is modeled as the absence of an advisory, resolving to null
+// with no effect, so a clean-water green can never mask a wave, rip or alert red.
 //
-// Runs cron-side ONLY. The fetch handler never calls any source.scrape(); the
-// request path reads the already-computed "wqfloor:" + beachId KV.
+// That is why water quality must not live in src/officialSources/, where an
+// official color overrides the estimate everywhere: this lives inside the estimate
+// (official: false) and lifts only.
 //
-// Registering a source: author the source module, import it here, and append it
-// to wqFloorSources. The scaffolding (this file, the cron gather in src/index.js,
-// and the rules.js step-7 floor) does the rest — resolve per beach, write the
-// "wqfloor:" KV, and apply the raise-only floor.
+// Cron-side only. The fetch handler never calls any source.scrape(); the request
+// path reads the already-computed "wqfloor:" + beachId KV.
+//
+// Registering a source: author the module, import it here, and append it to
+// wqFloorSources. The cron gather in src/index.js and the rules.js step-7 floor do
+// the rest.
 
 import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
 import { nyOprhpBeachStatus } from "./nyOprhpBeachStatus.js";
@@ -28,14 +27,13 @@ import { ontarioParksBeachPostings } from "./ontarioParksBeachPostings.js";
 import { evanstonStatusfy } from "./evanstonStatusfy.js";
 import { usgsGreatLakesNowcast } from "./usgsGreatLakesNowcast.js";
 
-// The ONLY colors a water-quality floor may carry. green/double-red/unknown are
-// INVALID: a clean reading must never appear as a green floor (its absence IS
-// the "no floor"), and double-red is reserved for the hazard axis. Two gates on
-// purpose — this resolver rejects anything outside the set, and rules.js step 7
-// independently only honors "yellow"/"red".
+// The only colors a water-quality floor may carry. green, double-red and unknown
+// are invalid: a clean reading must never appear as a green floor, since its
+// absence is the "no floor", and double-red is reserved for the hazard axis. Two
+// gates on purpose — this resolver rejects anything outside the set, and rules.js
+// step 7 independently only honors "yellow" and "red".
 const WQ_FLOOR_COLORS = ["yellow", "red"];
 
-// Ordered most-specific-match first, mirroring the official-scrapers registry.
 // Each source object:
 //   {
 //     id:    stable kebab string. Used for log lines and the cron's per-run
@@ -46,34 +44,32 @@ const WQ_FLOOR_COLORS = ["yellow", "red"];
 //            { label, url } source entry (the cron reads it reflectively).
 //     matches(beach): pure boolean, first-match-wins. beach has
 //            { id, name, park_name, lat, lon, ... }.
-//     scrape(nowIso): async, CRON-SIDE ONLY. Returns a perBeach result
-//            { perBeach: true, sites: Site[], source, updated } or null on ANY
+//     scrape(nowIso): async, CRON-SIDE only. Returns a perBeach result
+//            { perBeach: true, sites: Site[], source, updated } or null on any
 //            failure/empty. Called ONCE per source per run, not per beach.
 //   }
-// Site shape (note floorColor, NOT color):
+// Site shape (note floorColor, not color):
 //   { siteId, floorColor: "yellow"|"red", names?: string[], lat?, lon?,
 //     radiusMi?, reason?: string, updated?: string }
 // Per-beach resolution reuses resolveSiteForBeach (names win over proximity),
 // exactly like the official scrapers.
-// Ordered most-specific-first (findWqFloorSource is first-match-wins). The
-// curated single-region sources (NY OPRHP state parks, Lake County OH, Kenosha
-// WI, Duluth MN, Grey Bruce ON, Ontario Parks, Evanston IL) come before
-// usgsGreatLakesNowcast, whose matches() is a COARSE Lake Erie/Ontario US-shore
-// bbox — placing it last means a beach that a curated source covers is resolved
-// by that curated source, and only beaches no curated source claims fall
-// through to the NowCast prediction.
 //
-// DELIBERATELY NOT REGISTERED (the modules stay on disk, fully tested and ready
-// to re-insert): chautauquaCountyNy and erieCountyPaKml (fetch URL still "" —
-// they fail closed before fetching) and illinoisBeachGuard
-// (ILLINOIS_BEACHGUARD_CONFIRMED === false — its BeachIDs are placeholders).
-// Because matches() runs first-match-wins and the cron resolves exactly ONE
-// source per beach, registering a permanently-inert source SUPPRESSES the
-// working source behind it: erieCountyPaKml's ERIE_BOX sits strictly inside
-// usgsGreatLakesNowcast's region box, and illinoisBeachGuard's box overlaps
-// kenoshaBeachConditions coverage around lat 42.517-42.55. Re-insert each one
-// ABOVE usgsGreatLakesNowcast (and, for Illinois, ABOVE kenoshaBeachConditions)
-// once its URL / BeachID gate is confirmed — never below.
+// Ordered most-specific-first, since findWqFloorSource is first-match-wins: the
+// curated single-region sources precede usgsGreatLakesNowcast, whose matches() is
+// a coarse Lake Erie/Ontario US-shore bbox, so a beach a curated source covers is
+// resolved by that source and only unclaimed beaches fall through to the NowCast
+// prediction.
+//
+// Deliberately not registered, though the modules stay on disk and fully tested:
+// chautauquaCountyNy and erieCountyPaKml (fetch URL still "", so they fail closed
+// before fetching) and illinoisBeachGuard (ILLINOIS_BEACHGUARD_CONFIRMED is false,
+// its BeachIDs placeholders). Because matches() is first-match-wins and the cron
+// resolves exactly one source per beach, registering a permanently-inert source
+// suppresses the working source behind it: erieCountyPaKml's ERIE_BOX sits
+// strictly inside usgsGreatLakesNowcast's region box, and illinoisBeachGuard's box
+// overlaps kenoshaBeachConditions coverage around lat 42.517-42.55. Re-insert each
+// above usgsGreatLakesNowcast, and Illinois above kenoshaBeachConditions, once its
+// URL or BeachID gate is confirmed — never below.
 export const wqFloorSources = [
   nyOprhpBeachStatus,
   lakeCountyOhBeaches,
@@ -96,17 +92,15 @@ export function findWqFloorSource(beach) {
   return null;
 }
 
-// Pure (no fetch). Resolves an already-fetched perBeach scrape result to ONE
-// beach's advisory, or null (no site resolved / invalid floor color /
-// malformed / clean run). Returns EXACTLY the shape rules.js estimateFlag's
-// "waterQualityAdvisory" input consumes — { color, reason, source } plus the
-// stamped beachId/updated the request path persists. estimateFlag reads only
-// .color, .reason, .source; beachId/updated ride along for the KV payload.
+// Pure. Resolves an already-fetched perBeach scrape result to one beach's
+// advisory, or null when no site resolved, the floor color is invalid, the result
+// is malformed, or the run was clean. Returns the shape rules.js estimateFlag's
+// waterQualityAdvisory input consumes — { color, reason, source } — plus the
+// stamped beachId and updated the request path persists.
 //
-// Note the field name flip: the Site carries "floorColor", the emitted advisory
-// carries "color" (what estimateFlag reads). Never throws — a schema change on
-// a source degrades to null (no floor), never a wrong color, per the
-// error-isolation rule.
+// Note the field name flip: the Site carries floorColor, the emitted advisory
+// carries color. Never throws: a schema change on a source degrades to null, never
+// to a wrong color.
 export function scrapeWqFloorFromResult(beach, source, result) {
   try {
     if (!result || result.perBeach !== true) {
@@ -150,8 +144,7 @@ export function scrapeWqFloorFromResult(beach, source, result) {
   }
 }
 
-// Alias for the R3-design name, so either import spelling resolves to the same
-// resolver.
+// Alias, so either import spelling resolves to the same resolver.
 export { scrapeWqFloorFromResult as scrapeFloorFromResult };
 
 // Re-exported for the cron and tests (kept in officialSources/util.js to avoid

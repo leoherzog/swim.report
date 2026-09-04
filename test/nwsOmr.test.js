@@ -1,10 +1,8 @@
 // test/nwsOmr.test.js
 // Unit tests for the NWS Grand Rapids OMR "Lake Michigan Beach Reports" official
 // scraper. Pure parsers (parseOmrBeachReport, normalizeOmrFlagColor,
-// newestOmrProductId) are exercised against inline fixtures — no network. The
-// scrape() network path is exercised with a stubbed global fetch. Project style:
-// ES modules, NO template literals, string concat with +, function () {}
-// callbacks.
+// newestOmrProductId) are exercised against inline fixtures, with no network.
+// The scrape() path is exercised with a stubbed global fetch.
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   nwsOmr,

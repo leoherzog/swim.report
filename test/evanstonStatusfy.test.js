@@ -1,7 +1,6 @@
 // test/evanstonStatusfy.test.js
 // Pure-parser unit tests for the Evanston Statusfy water-quality floor source.
-// No network: fixtures are built inline. Project style — ES modules, NO
-// template literals (string concat with +), function () {} callbacks.
+// No network: fixtures are built inline.
 //
 // The safety-critical property under test: a status-3 "Closed" floors to RED
 // ONLY when the reason names a whitelisted surf hazard; the nightly after-hours

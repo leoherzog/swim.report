@@ -1,33 +1,23 @@
-// Pure module: exports the literal text of the inline, client-side helper that
-// merges a freshly server-rendered home-list document into the LIVE page in
-// place. This code RUNS IN THE BROWSER, not in the Worker. It still follows
-// project style rules: const/let only, never var, no template literals /
-// backticks, console.log for logging.
+// Exports the literal text of the inline helper that merges a freshly
+// server-rendered home-list document into the live page. It runs in the
+// browser, not in the Worker.
 //
-// Both the geolocation upgrade (geoScript.js) and the live search
-// (searchScript.js) fetch the same server-rendered "/" page for a new
-// query/near and need to swap in exactly the pieces the parameters change. This
-// helper single-sources that swap so the two callers can never diverge on the
-// invariants: the #beach-list-empty and #list-active-query nodes are updated by
-// reference (innerHTML + style), NEVER replaced — searchScript.js captured
-// #beach-list-empty at load, and replacing the node would strand that
-// reference. The #home-map node is deliberately NOT touched here; the map has
-// its own live MapLibre instance and its callers update it (its data-center
-// attribute) or leave it alone as appropriate.
+// The geolocation upgrade (geoScript.js) and the live search (searchScript.js)
+// both fetch the same server-rendered "/" page, so the swap is single-sourced
+// here. #beach-list-empty and #list-active-query are updated by reference
+// (innerHTML + style) and never replaced: searchScript.js captured
+// #beach-list-empty at load, and replacing the node strands that reference.
+// #home-map is deliberately not touched. The map holds its own live MapLibre
+// instance and its callers update it or leave it alone.
 //
-// window.__swimReportSwapList(doc) applies doc's #beach-list-items,
-// #beach-list-empty (content + inline style), and #list-active-query (the
-// stable always-present container holding the "Showing results for ..." line)
-// onto the current page. Returns true on success, false when the core list
-// nodes are missing so the caller can fall back (a full navigation).
+// window.__swimReportSwapList(doc) returns true on success, false when the core
+// list nodes are missing so the caller can fall back to a full navigation.
 
 const SCRIPT_LINES = [
   "(function () {",
-  // Monotonic generation counter, bumped on every successful swap. The two
-  // callers (geo upgrade, live search) each capture it before their fetch and
-  // drop/re-run a response whose generation is stale, so a slow fetch from one
-  // can never overwrite a newer swap from the other (e.g. the geolocation
-  // upgrade landing on top of a search the user typed while it was pending).
+  // Monotonic generation counter, bumped on every successful swap. Each caller
+  // captures it before its fetch and drops a stale response, so a slow fetch
+  // from one can never overwrite a newer swap from the other.
   "  window.__swimReportListGen = window.__swimReportListGen || 0;",
   "  window.__swimReportSwapList = function (doc) {",
   "    const nextList = doc.getElementById('beach-list-items');",
@@ -36,8 +26,8 @@ const SCRIPT_LINES = [
   "      return false;",
   "    }",
   "    currentList.innerHTML = nextList.innerHTML;",
-  // Update the empty state IN PLACE (innerHTML + inline style), never replace
-  // the node: searchScript.js captured #beach-list-empty by reference at load.
+  // Update the empty state in place, never replace the node: searchScript.js
+  // captured #beach-list-empty by reference at load.
   "    const nextEmpty = doc.getElementById('beach-list-empty');",
   "    const currentEmpty = document.getElementById('beach-list-empty');",
   "    if (nextEmpty && currentEmpty) {",
@@ -49,9 +39,8 @@ const SCRIPT_LINES = [
   "        currentEmpty.removeAttribute('style');",
   "      }",
   "    }",
-  // The active-query line ("Showing results for X. Clear search") is a stable,
-  // always-present container so it can be swapped in place — its inner markup is
-  // empty on the default listing and populated on a q-filtered page.
+  // A stable, always-present container, so it swaps in place; its inner markup
+  // is empty on the default listing and populated on a q-filtered page.
   "    const nextActive = doc.getElementById('list-active-query');",
   "    const currentActive = document.getElementById('list-active-query');",
   "    if (nextActive && currentActive) {",

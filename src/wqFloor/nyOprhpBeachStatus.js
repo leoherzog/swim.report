@@ -1,16 +1,7 @@
-// src/wqFloor/nyOprhpBeachStatus.js
+// src/wqFloor/nyOprhpBeachStatus.js — a raise-only water-quality floor source
+// (E. coli / Enterococci / HAB); see src/wqFloor/index.js for the floor contract.
 //
-// KIND: wq — RAISE-ONLY water-quality FLOOR source (src/wqFloor registry, NOT an
-// official scraper). Its site colors feed rules.js estimateFlag's
-// "waterQualityAdvisory" input (step 7), where an active advisory can RAISE a
-// flag UP to yellow/red (worst-of by SEVERITY_RANK) but can NEVER pull a hazard
-// estimate down. A clean/open reading is modeled as the ABSENCE of a site
-// (resolves to null -> zero color effect), so a clean-water "green" can never
-// mask a wave/rip/alert red. This is water quality (E. coli / Enterococci / HAB),
-// a DIFFERENT axis from the posted-flag hazard sources — it must live here, not
-// in src/officialSources/ (an official color OVERRIDES the estimate everywhere).
-//
-// SOURCE: New York OPRHP (State Parks) Beach Status View — an unauthenticated
+// Source: New York OPRHP (State Parks) Beach Status View — an unauthenticated
 // ArcGIS FeatureServer. GET
 //   https://services.arcgis.com/1xFZPtKn1wKC6POA/arcgis/rest/services/
 //     2025_Beach_Status_view/FeatureServer/0/query?where=1=1&outFields=*&f=json
@@ -22,7 +13,7 @@
 //
 // NOTE: the version YEAR in the layer path ("2025_...") rolls each season. When
 // it rolls, the pinned URL 404s -> fetchJson returns null -> scrape returns null
-// (fail closed to no-floor, never a wrong color). The URL below MUST be
+// (fail closed to no-floor, never a wrong color). The URL below must be
 // re-confirmed / bumped when NYS publishes the next season's view. The live
 // response shape was confirmed 2026-07; the parser degrades to null on any
 // shape change (missing features array, unrecognized status).
@@ -33,7 +24,7 @@
 //   Beach_status "Open with Advisory"                         -> floorColor "yellow"
 //   Open / Reopened / clean / Off-Season / Closed-for-any-
 //     other-reason (e.g. off-season closure)                 -> NO site (null)
-// Only the two water-quality closure reasons floor a "Closed" — a generic /
+// only the two water-quality closure reasons floor a "Closed" — a generic /
 // off-season closure must never raise a flag to red.
 //
 // CURATION: NY has many inland + ocean beaches; this floor is scoped to the
@@ -42,8 +33,8 @@
 // lat/lon. matches() and the emitted sites cover only those.
 //
 // INTEGRATOR / DEDUP NOTE: register in src/wqFloor/index.js "wqFloorSources"
-// (append; there is no ordering conflict — it is the only NY source). Do NOT add
-// it to src/officialSources/index.js. Water quality is a NEW axis, disjoint from
+// (append; there is no ordering conflict — it is the only NY source). Do Not add
+// it to src/officialSources/index.js. Water quality is a New axis, disjoint from
 // every hazard source (wave / rip / NWS+ECCC alerts) — no dedup concern. Its
 // color effect is entirely inside the estimate (official:false).
 
@@ -51,17 +42,17 @@ import { fetchJson } from "../clients/http.js";
 import { perBeachResult, matchesAnyAlias, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
 import { distanceMi } from "../geo.js";
 
-export const NY_OPRHP_QUERY_URL =
+const NY_OPRHP_QUERY_URL =
   "https://services.arcgis.com/1xFZPtKn1wKC6POA/arcgis/rest/services/" +
   "2025_Beach_Status_view/FeatureServer/0/query?where=1%3D1&outFields=*&f=json";
 
 export const NY_OPRHP_LABEL =
   "New York State Parks (OPRHP) Beach Water Quality";
 
-export const NY_OPRHP_INFO_URL = "https://parks.ny.gov/";
+const NY_OPRHP_INFO_URL = "https://parks.ny.gov/";
 
 // Great Lakes NYS-park beaches this floor covers. "aliases" are lowercase
-// substrings matched BOTH against the ArcGIS StateParkBeach field (to pick the
+// substrings matched both against the ArcGIS StateParkBeach field (to pick the
 // feature) and, as resolveSiteForBeach "names", against a swim.report beach's
 // park_name + name. Keep them tight so a namesake elsewhere can never inherit a
 // site's color. lat/lon anchor the proximity fallback and the emitted site.
@@ -128,7 +119,7 @@ function normalizeText(value) {
 }
 
 // Pure. Map ONE feature's attributes to { floorColor, reason } or null (no
-// floor). RAISE-ONLY: only "Open with Advisory" (yellow) and a "Closed" whose
+// floor). raise-only: only "Open with Advisory" (yellow) and a "Closed" whose
 // reason is a water-quality exceedance/HAB (red) produce a floor. Every other
 // status — Open, Reopened, Off-Season, or a Closed for a non-water-quality
 // reason — degrades to null so a benign/administrative state never raises a

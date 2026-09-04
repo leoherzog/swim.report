@@ -1,17 +1,11 @@
-// Tests for scripts/fetch-layers.js and scripts/print-spat-bbox.js — the two
-// build/fetch-side Deno scripts of the FlatGeobuf layer pipeline. Both guard
-// their entrypoint with import.meta.main (falsy under vitest/node), so importing
-// their pure exports here is safe: no Deno access, no network, no file writes.
+// Tests for scripts/fetch-layers.js and scripts/print-spat-bbox.js, the two
+// fetch-side Deno scripts of the FlatGeobuf layer pipeline. Importing their pure
+// exports touches no Deno, no network and no file writes. print-spat-bbox.js has
+// no test file of its own, so its exports are exercised in the final describe
+// block below.
 //
-// print-spat-bbox.js has no test file of its own (work unit U8 owns exactly one)
-// so its exports are exercised in the final describe block below.
-//
-// Every fixture is built IN MEMORY from readable primitives by one named helper
-// per artifact — makePointerText, makeManifest, makeFloors — each carrying
-// explicit MALFORMATION knobs rather than being hand-corrupted per test. That is
-// the same discipline test/buildMarineZones.test.js uses and for the same
-// reason: this pipeline's characteristic failure is a VALID-LOOKING artifact,
-// and the assertions that matter are the exact refusal messages on the
+// This pipeline's characteristic failure is a valid-looking artifact, so the
+// assertions that matter are the exact refusal messages on the
 // artifact-is-corrupt paths.
 
 import { describe, it, expect } from "vitest";

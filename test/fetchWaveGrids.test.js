@@ -1,18 +1,14 @@
-// Tests for scripts/fetch-wave-grids.js — the only network-touching script in the
-// wave pipeline. Its entrypoint is guarded by import.meta.main (falsy under
-// vitest/node), so importing its pure exports here touches no Deno, no network and
-// no filesystem.
+// Tests for scripts/fetch-wave-grids.js, the only network-touching script in the
+// wave pipeline. Importing its pure exports touches no Deno, no network and no
+// filesystem.
 //
-// The failure these guard is a SILENT WRONG SLICE. A byte range computed one byte
-// wide, or an element matched by prefix, yields a GRIB2 message that GDAL decodes
-// cleanly and that describes the wrong variable: a period field arrives where the
-// sampler reads wave height, and a plausible number colors a flag with no error
-// anywhere. Cycle selection has the same shape — a candidate whose forecast window
-// runs past the published series downloads a short cycle that samples as gaps.
-//
-// Every fixture is built IN MEMORY by one named helper, makeIdx, carrying explicit
-// malformation knobs rather than being hand-corrupted per test, the way
-// test/fetchLayers.test.js builds its pointer/manifest/floors fixtures.
+// The failure these guard is a silent wrong slice. A byte range computed one
+// byte wide, or an element matched by prefix, yields a GRIB2 message that GDAL
+// decodes cleanly and that describes the wrong variable: a period field arrives
+// where the sampler reads wave height, and a plausible number colors a flag with
+// no error anywhere. Cycle selection has the same shape, since a candidate whose
+// forecast window runs past the published series downloads a short cycle that
+// samples as gaps.
 
 import { describe, it, expect } from "vitest";
 import {

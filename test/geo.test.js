@@ -58,17 +58,12 @@ describe("metersToFeet", function () {
   });
 });
 
-// --- FlatGeobuf layer migration: the line-geometry extension (contract 3.1) ---
+// --- The line-geometry extension -------------------------------------------
 //
-// geometryLines / minGeometryDistanceKm / anySegmentWithinKm are additive: every
-// existing export above keeps its exact behaviour, and the tests above are
-// unmodified. No import.meta.main guard is relevant here — src/geo.js is a pure
-// src module with no Deno, no fs, no fetch and no npm dependency, which is the
-// placement rule the whole migration is checked against; importing it under
-// vitest performs no I/O at all.
+// src/geo.js is a pure src module with no Deno, no fs, no fetch and no npm
+// dependency, so importing it under vitest performs no I/O.
 //
-// Fixtures are built in memory from readable coordinate literals (contract
-// 8.16). Every expected distance below was computed by hand in the same local
+// Every expected distance below was computed by hand in the same local
 // equirectangular frame the implementation uses (x = dLon * cos(lat) * 111.195,
 // y = dLat * 111.195), never by calling the function under test.
 
@@ -78,6 +73,7 @@ import {
   anySegmentWithinKm,
   geometryPolygons,
   minEdgeDistanceKm,
+  pointToSegmentKm,
   KM_PER_DEG
 } from "../src/geo.js";
 
@@ -364,5 +360,65 @@ describe("anySegmentWithinKm", function () {
       const reference = minGeometryDistanceKm(line, lat, lon) <= maxKm;
       expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat, lon, maxKm)).toBe(reference);
     }
+  });
+});
+
+// --- pointToSegmentKm ------------------------------------------------------
+//
+// The segment evaluator every distance helper in this module bottoms out in.
+// Both bit-exactness arguments elsewhere in the codebase hang on its behaviour:
+// src/geo.js#anySegmentWithinKm forbids a cheap axis-aligned pre-reject because
+// such a reject is not bit-exact against this function, and
+// src/layerGrid.js#SEGMENT_BBOX_EPSILON_DEG exists because the grid's rejection
+// is in degrees while the decision it guards is the projected km this returns.
+// So it is pinned directly, and pinned to agree exactly with
+// minGeometryDistanceKm on the same segment.
+
+describe("pointToSegmentKm", function () {
+  it("measures a perpendicular foot that lands inside the segment", function () {
+    // Segment from (3,-2) to (3,5): the origin's nearest point is (3,0).
+    expect(pointToSegmentKm(3, -2, 3, 5)).toBeCloseTo(3, 12);
+  });
+
+  it("clamps to the near endpoint when the projection falls before the segment", function () {
+    // Segment from (3,4) to (6,8) heads away from the origin, so t clamps to 0.
+    expect(pointToSegmentKm(3, 4, 6, 8)).toBeCloseTo(5, 12);
+  });
+
+  it("clamps to the far endpoint when the projection falls past the segment", function () {
+    // Segment from (-9,-12) to (-3,-4) approaches the origin but stops short,
+    // so t clamps to 1 and the answer is the distance to (-3,-4).
+    expect(pointToSegmentKm(-9, -12, -3, -4)).toBeCloseTo(5, 12);
+  });
+
+  it("treats a zero-length segment as the point itself", function () {
+    // len2 === 0 keeps t at 0 rather than dividing by zero, which is what lets
+    // minPositionsDistanceKm feed bare vertices through as degenerate segments.
+    expect(pointToSegmentKm(6, 8, 6, 8)).toBe(10);
+    expect(Number.isFinite(pointToSegmentKm(0, 0, 0, 0))).toBe(true);
+    expect(pointToSegmentKm(0, 0, 0, 0)).toBe(0);
+  });
+
+  it("is zero when the origin lies on the segment", function () {
+    expect(pointToSegmentKm(-4, 0, 4, 0)).toBe(0);
+  });
+
+  it("agrees exactly with minGeometryDistanceKm on the same projected segment", function () {
+    // minGeometryDistanceKm projects each position into the local
+    // equirectangular frame and then calls this function, so reproducing that
+    // projection by hand must reproduce its answer bit for bit. An
+    // approximation swapped in here would break this equality, which is the
+    // whole reason the pre-reject is forbidden.
+    const lat = 42.0;
+    const lon = -86.0;
+    const cosLat = Math.cos((lat * Math.PI) / 180);
+    const a = [-85.99, 42.004];
+    const b = [-85.97, 42.02];
+    const line = { type: "LineString", coordinates: [a, b] };
+    const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
+    const ay = (a[1] - lat) * KM_PER_DEG;
+    const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
+    const by = (b[1] - lat) * KM_PER_DEG;
+    expect(minGeometryDistanceKm(line, lat, lon)).toBe(pointToSegmentKm(ax, ay, bx, by));
   });
 });

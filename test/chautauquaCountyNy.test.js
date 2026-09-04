@@ -1,9 +1,7 @@
 // test/chautauquaCountyNy.test.js
 // Unit tests for the Chautauqua County (NY) Health Department raise-only
 // water-quality FLOOR source (src/wqFloor/chautauquaCountyNy.js). Pure parse
-// functions are exercised against INLINE synthetic HTML fixtures — no
-// network. Project style: ES modules, NO template literals, string concat
-// with +, function () {} callbacks.
+// functions are exercised against inline synthetic HTML fixtures, no network.
 import { describe, it, expect, vi } from "vitest";
 import {
   parseChautauquaBeachStatus,

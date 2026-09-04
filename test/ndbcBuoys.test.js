@@ -1,8 +1,6 @@
 // test/ndbcBuoys.test.js
 // Pure-parser + station-selection tests for the NDBC water-temperature source.
-// No network: every realtime2 fixture is built inline. Project style: ES
-// modules, NO template literals (string concat with +), function () {}
-// callbacks.
+// No network: every realtime2 fixture is built inline.
 
 import { describe, it, expect } from "vitest";
 import {

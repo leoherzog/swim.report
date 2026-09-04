@@ -1,4 +1,4 @@
-// scripts/clip-layers.js — the build-side REGION FILTER and PROXIMITY CLIP.
+// scripts/clip-layers.js — the build-side region filter and proximity clip.
 //
 // Runs on Deno inside .github/workflows/build-layers.yml, between the raw
 // ogr2ogr conversion and the per-layer FlatGeobuf carve:
@@ -7,57 +7,45 @@
 //     scripts/clip-layers.js --raw "$WORK/raw" --raw-lines "$WORK/raw-lines" \
 //     --out "$WORK/clipped"
 //
-// It reads the FOUR raw GDAL layers (points, lines, multipolygons,
+// It reads the four raw GDAL layers (points, lines, multipolygons,
 // other_relations) plus the lines-only second pass that carries coastline, and
-// writes NINE line-delimited GeoJSONSeq files — one per published layer except
-// lakes-polygon.fgb, which is carved straight from the raw multipolygons by
-// ogr2ogr and is exempt from both predicates here (its six polygons span the
-// whole mask by construction, and the proximity predicate would clip away
-// exactly the shoreline the 150 m probe needs).
+// writes nine line-delimited GeoJSONSeq files, one per published layer except
+// lakes-polygon.fgb. That one is carved straight from the raw multipolygons by
+// ogr2ogr and is exempt from both predicates here: its six polygons span the
+// whole mask by construction, and the proximity predicate would clip away exactly
+// the shoreline the 150 m probe needs.
 //
-// WHY THIS SCRIPT EXISTS AT ALL — two independent reasons, neither optional.
+// Predicate A, the region filter. The ogr2ogr -spat mask is the union bounding box
+// of src/regions.js REGIONS, and a single rectangle enclosing all five Great Lakes
+// also encloses the continental interior between them, which is dense with inland
+// lakes and their beaches. The consequence is not merely wasted bytes: a row
+// upserted from the interior sits outside every REGIONS bbox, so
+// pointInAnyRegion-scoped reconciliation can never consider it a delete candidate
+// and it is permanently un-deletable. Predicate A makes the upsert universe and
+// the delete-candidate universe the same set.
 //
-// PREDICATE A, the region filter (contract 1.5 / D18). The ogr2ogr -spat mask is
-// the UNION bounding box of src/regions.js REGIONS, and a single rectangle
-// enclosing all five Great Lakes also encloses the entire continental interior
-// between them — Wisconsin, lower Michigan, Ontario, upstate New York — which is
-// dense with INLAND lakes and their beaches. src/regions.js:11-22 is a written
-// argument against exactly that. The consequence is not merely wasted bytes: a
-// row upserted from the interior sits OUTSIDE every REGIONS bbox, so
-// pointInAnyRegion-scoped reconciliation can never consider it a delete
-// candidate and it is permanently un-deletable. Predicate A makes the upsert
-// universe and the delete-candidate universe the same set, which under Overpass
-// they never were.
+// Predicate B, the proximity clip. Every layer except the beach layers is reduced
+// to features within WATER_CLIP_PAD_DEG (0.01 deg, ~1.1 km) of a beach envelope.
+// That is an order of magnitude beyond the widest probe radius in the pipeline
+// (OCEAN_RADIUS_M, 150 m) and beyond the pond padding, so it cannot change a
+// classification or park-association decision, and it makes every layer
+// O(beaches) rather than O(continent). Deliberately not an area filter on water:
+// an MbrArea threshold would delete exactly the sub-threshold ponds isPondBeach
+// needs as evidence, silently disabling the pond filter in the hide direction.
 //
-// PREDICATE B, the proximity clip (contract 1.5 / D8). Every layer except the
-// beach layers themselves is reduced to features within WATER_CLIP_PAD_DEG
-// (0.01 deg, ~1.1 km) of a beach envelope. That is an order of magnitude beyond
-// the widest probe radius in the pipeline (OCEAN_RADIUS_M, 150 m) and beyond the
-// pond padding (WATER_MATCH_PADDING_DEG 0.001 plus the 60 m evidence radius), so
-// it cannot change any classification or park-association decision — and it
-// makes every layer O(beaches) instead of O(continent), which is the single
-// change that makes the North America expansion tractable. Deliberately NOT an
-// area filter on water: the geofabrik survey's MbrArea >= 5e-6 filter would
-// delete exactly the sub-threshold ponds isPondBeach needs as EVIDENCE, silently
-// disabling the pond filter in the hide direction.
-//
-// STREAMING, ALWAYS. Every raw layer is consumed through readFgbStream, never
+// Streaming, always. Every raw layer is consumed through readFgbStream, never
 // readLayerFile: the raw water layer is ~120 MB packed and GeoJSON coordinate
 // pairs cost roughly 10-20x their FlatGeobuf footprint in a JS heap. The only
-// thing this script retains across a pass is the BEACH ENVELOPE SET — four
-// numbers per beach — which is what predicate B indexes.
+// thing retained across a pass is the beach envelope set, four numbers per beach,
+// which is what predicate B indexes.
 //
-// OUTPUT INTEGRITY (contract 1.5, MJ-7/MJ-9). GeoJSONSeq is line-delimited and
-// ogr2ogr on a truncated final line WARNS and exits 0, silently dropping the
-// tail. So each layer is written to a .tmp path and atomically renamed, and each
-// gets a sidecar recording the kept count that scripts/build-manifest.js
-// cross-checks against ogrinfo's own count of the re-converted .fgb. A torn tail
-// is spatially contiguous (FlatGeobuf is Hilbert-ordered), which is precisely
-// the shape the proportional delete rails are worst at catching, so it has to be
-// caught here by an exact equality instead.
-//
-// Project style: ES modules, const/let only, string concatenation with + (never
-// template literals), console for logging.
+// Output integrity. GeoJSONSeq is line-delimited and ogr2ogr on a truncated final
+// line warns and exits 0, silently dropping the tail. So each layer is written to
+// a .tmp path and atomically renamed, and each gets a sidecar recording the kept
+// count that scripts/build-manifest.js cross-checks against ogrinfo's own count of
+// the re-converted .fgb. A torn tail is spatially contiguous, because FlatGeobuf
+// is Hilbert-ordered, which is the shape the proportional delete rails are worst
+// at catching, so it has to be caught here by an exact equality.
 
 import { REGIONS } from "../src/regions.js";
 import { buildLayerGrid, queryGridByBounds } from "../src/layerGrid.js";
@@ -66,23 +54,22 @@ import { readFgbStream } from "./lib/fgbReader.js";
 // --- constants ----------------------------------------------------------------
 
 // Predicate A's padding, and the same value scripts/print-spat-bbox.js pads the
-// UNION rectangle by. The two scripts each hold their own copy on purpose: they
-// are separate entrypoints with no shared module, and a shared constant module
-// would exist solely to hold one number. If this ever moves, move both.
+// union rectangle by. Each script holds its own copy because they are separate
+// entrypoints with no shared module. If this moves, move both.
 export const REGION_SPAT_PAD_DEG = 0.05;
 
 // Predicate B's padding. ~1.1 km at these latitudes. See the header for why this
 // is an order of magnitude beyond every probe radius rather than tight.
 export const WATER_CLIP_PAD_DEG = 0.01;
 
-// The tag keys osmconf.ini promotes for each GDAL SOURCE layer. A published
-// layer carries every attribute its source promotes (contract 1.4: "no ogr2ogr
-// invocation in this pipeline ever passes -select"), so this table is the
-// starting point for each layer's emitted property set — never a subset of it.
+// The tag keys osmconf.ini promotes for each GDAL source layer. No ogr2ogr
+// invocation in this pipeline passes -select, so a published layer carries every
+// attribute its source promotes and this table is the starting point for each
+// layer's emitted property set, never a subset of it.
 //
-// protect_class is promoted by osmconf.ini's [multipolygons] section but is
-// absent here because it is absent from fgbReader's LAYER_TAG_KEYS: no consumer
-// branches on it, and the reader is the only thing that could carry it across.
+// protect_class is promoted by osmconf.ini's [multipolygons] section but is absent
+// here because it is absent from fgbReader's LAYER_TAG_KEYS: no consumer branches
+// on it, and the reader is the only thing that could carry it across.
 export const SOURCE_TAG_KEYS = {
   points: ["name", "loc_name", "natural", "leisure", "wikidata"],
   lines: ["name", "loc_name", "natural", "leisure", "boundary", "water", "wikidata"],
@@ -90,22 +77,20 @@ export const SOURCE_TAG_KEYS = {
   other_relations: ["name", "type", "natural", "water", "wikidata"]
 };
 
-// The fields the CONSUMER branches on, per published layer — the "fields" column
-// of contract 1.4. Every one of these is emitted on EVERY feature of its layer,
-// as an explicit JSON null when the tag is absent.
+// The fields the consumer branches on, per published layer. Every one is emitted
+// on every feature of its layer, as an explicit JSON null when the tag is absent.
 //
-// THE NULLS ARE THE POINT (B3/m10). GDAL infers a GeoJSONSeq schema by scanning
-// features, so a field that no early feature carries is simply not created — and
-// a dropped wikidata or natural column is the silent mass-hide of every Great
-// Lakes beach, since src/waterClass.js matches shoreline by QID. Emitting the
-// key unconditionally makes the column exist regardless of which features happen
-// to sort first under Hilbert ordering. scripts/build-manifest.js then asserts
-// the same table against ogrinfo's reported schema and hard-refuses on a miss.
+// The nulls are the point. GDAL infers a GeoJSONSeq schema by scanning features,
+// so a field no early feature carries is never created, and a dropped wikidata or
+// natural column silently mass-hides every Great Lakes beach, since
+// src/waterClass.js matches shoreline by QID. Emitting the key unconditionally
+// makes the column exist regardless of which features sort first under Hilbert
+// ordering. scripts/build-manifest.js then asserts the same table against
+// ogrinfo's reported schema and hard-refuses on a miss.
 //
-// This table is DUPLICATED in scripts/build-manifest.js, deliberately. That
-// script is the gate; a gate that imported its expectations from the thing it
-// gates would be checking the producer against itself. Both copies cite contract
-// 1.4 and both must move together.
+// This table is duplicated in scripts/build-manifest.js deliberately: that script
+// is the gate, and a gate importing its expectations from the thing it gates would
+// be checking the producer against itself. Both copies must move together.
 export const PUBLISHED_LAYER_FIELDS = {
   "beaches-point.fgb": ["osm_id", "name", "loc_name", "natural", "leisure"],
   "beaches-line.fgb": ["osm_id", "name", "loc_name", "natural", "leisure"],
@@ -124,12 +109,10 @@ function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-// One bbox grown by padDeg on every edge. Degrees on BOTH axes, with no
-// cos(lat) correction, exactly like every other envelope threshold in this
-// pipeline (contract 1.4: "a raw degree product with no cos(lat) and no
-// projection"). A longitude degree is shorter than a latitude degree at these
-// latitudes, so the padding is CONSERVATIVE east-west, which is the direction a
-// KEEP predicate must err in.
+// One bbox grown by padDeg on every edge. Degrees on both axes with no cos(lat)
+// correction, like every other envelope threshold in this pipeline. A longitude
+// degree is shorter than a latitude degree at these latitudes, so the padding is
+// conservative east-west, which is the direction a keep predicate must err in.
 export function padBox(bbox, padDeg) {
   const box = normalizeBox(bbox);
   if (box === null) {
@@ -166,10 +149,10 @@ function normalizeBox(box) {
   };
 }
 
-// INCLUSIVE rectangle overlap — edge-touching counts as intersecting, matching
+// Inclusive rectangle overlap: edge-touching counts as intersecting, matching
 // src/layerGrid.js queryGridByBounds and src/osmSelect.js boundsOverlap byte for
-// byte. A feature straddling a region boundary must be KEPT by both boxes it
-// touches; a strict inequality here would drop a park that sits exactly on the
+// byte. A feature straddling a region boundary must be kept by both boxes it
+// touches; a strict inequality here would drop a park sitting exactly on the
 // padded edge and, through it, the park-origin rows that park names.
 export function boxesIntersect(a, b) {
   const boxA = normalizeBox(a);
@@ -181,10 +164,10 @@ export function boxesIntersect(a, b) {
     boxA.minLat <= boxB.maxLat && boxA.maxLat >= boxB.minLat;
 }
 
-// The padded REGIONS boxes predicate A tests against. This is the same list
-// scripts/print-spat-bbox.js --boxes prints; it is computed here rather than
-// shelled out for so that the clip has no dependency on another script's stdout
-// formatting, and so the predicate stays testable with synthetic boxes.
+// The padded REGIONS boxes predicate A tests against, the same list
+// scripts/print-spat-bbox.js --boxes prints. Computed here rather than shelled out
+// for, so the clip depends on no other script's stdout formatting and the
+// predicate stays testable with synthetic boxes.
 export function regionBoxes(regions, padDeg) {
   const source = Array.isArray(regions) ? regions : REGIONS;
   const pad = isFiniteNumber(padDeg) ? padDeg : REGION_SPAT_PAD_DEG;
@@ -203,13 +186,13 @@ export function regionBoxes(regions, padDeg) {
   return out;
 }
 
-// PREDICATE A. Keep a feature only if its envelope intersects at least one
-// PADDED REGIONS bbox. boxes is the output of regionBoxes(). Pure.
+// Predicate A: keep a feature only if its envelope intersects at least one padded
+// REGIONS bbox. boxes is the output of regionBoxes(). Pure.
 //
-// A feature with unusable bounds is DROPPED rather than kept: the reader already
-// skips features it cannot derive an envelope for, so anything reaching here
-// with bad bounds is corrupt, and a corrupt feature that cannot be placed in a
-// region cannot be proven in scope either.
+// A feature with unusable bounds is dropped rather than kept. The reader already
+// skips features it cannot derive an envelope for, so anything reaching here with
+// bad bounds is corrupt, and a corrupt feature that cannot be placed in a region
+// cannot be proven in scope either.
 export function regionEnvelopeKeep(bounds, boxes) {
   const feature = normalizeBox(bounds);
   if (feature === null || !Array.isArray(boxes)) {
@@ -227,14 +210,14 @@ export function regionEnvelopeKeep(bounds, boxes) {
   return false;
 }
 
-// The index predicate B queries: every beach envelope, PADDED by padDeg, in a
-// src/layerGrid.js envelope grid. The padding lives in the index rather than in
-// the query so that "padded by the same amount on both sides" (contract 1.5) is
-// expressed once and cannot drift between the two halves.
+// The index predicate B queries: every beach envelope, padded by padDeg, in a
+// src/layerGrid.js envelope grid. The padding lives in the index rather than the
+// query so that padding both sides by the same amount is expressed once and cannot
+// drift between the halves.
 //
-// The grid is Mode A (envelope candidacy) and that is exactly right here: the
-// decision IS the envelope test, so the candidate set the grid returns is the
-// answer, not a prefilter for a finer one.
+// The grid is in envelope-candidacy mode, which is right here: the decision is the
+// envelope test, so the candidate set the grid returns is the answer rather than a
+// prefilter for a finer one.
 export function buildBeachIndex(beachBoundsList, padDeg) {
   const pad = isFiniteNumber(padDeg) ? padDeg : WATER_CLIP_PAD_DEG;
   const list = Array.isArray(beachBoundsList) ? beachBoundsList : [];
@@ -256,14 +239,13 @@ export function buildBeachIndex(beachBoundsList, padDeg) {
   return { grid: buildLayerGrid(features), padDeg: pad, count: features.length };
 }
 
-// PREDICATE B. Keep a candidate feature iff its envelope, padded by the index's
-// padDeg, intersects some PADDED beach envelope. Pure given the index.
+// Predicate B: keep a candidate feature iff its envelope, padded by the index's
+// padDeg, intersects some padded beach envelope. Pure given the index.
 //
-// An EMPTY index keeps nothing, and that is deliberate: zero beaches in scope
-// means every proximity layer is legitimately empty, and inventing a keep rule
-// for that case would publish a full continental water layer the moment the
-// beach carve broke. The empty layers it produces instead are caught by
-// build-manifest.js's floors, which is where a broken carve belongs.
+// An empty index keeps nothing, deliberately. Zero beaches in scope means every
+// proximity layer is legitimately empty, and inventing a keep rule for that case
+// would publish a full continental water layer the moment the beach carve broke.
+// The empty layers it produces instead are caught by build-manifest.js's floors.
 export function proximityKeep(bounds, index) {
   if (index === null || typeof index !== "object" || index.grid === undefined) {
     return false;
@@ -280,7 +262,7 @@ export function proximityKeep(bounds, index) {
   }).length > 0;
 }
 
-// --- pure attribute predicates (the -where column of contract 1.4) -------------
+// --- pure attribute predicates ------------------------------------------------
 
 function tagOf(tags, key) {
   if (tags === null || typeof tags !== "object") {
@@ -312,31 +294,31 @@ export function isCoastlineTags(tags) {
   return tagOf(tags, "natural") === "coastline";
 }
 
-// natural='water'. NO area filter — see D8 and the header.
+// natural='water'. No area filter — see the header.
 export function isWaterTags(tags) {
   return tagOf(tags, "natural") === "water";
 }
 
-// other-relations carries BOTH halves: beach relations (which become rows) and
-// named park relations (which are NAMING ONLY — membership never comes from
-// here, because GDAL yields GeometryCollection for other_relations and those
-// features have no reliable ring structure).
+// other-relations carries both halves: beach relations, which become rows, and
+// named park relations, which are naming only. Membership never comes from here,
+// because GDAL yields GeometryCollection for other_relations and those features
+// have no reliable ring structure.
 export function isOtherRelationTags(tags) {
   return isBeachTags(tags) || isNamedParkTags(tags);
 }
 
 // --- the layer plan ------------------------------------------------------------
 
-// Every published layer except lakes-polygon.fgb, in two PHASES.
+// Every published layer except lakes-polygon.fgb, in two phases: A on the beach
+// layers first, then A and B on everything else.
 //
-// Phase 1 is the beach layers plus other-relations: predicate A only. It also
-// accumulates the beach envelope set that phase 2 indexes — which is why the
-// phases cannot be merged into one pass per source file. Contract 1.5 states the
-// order explicitly: "A on the beach layers first, then A+B on everything else."
+// Phase 1 is the beach layers plus other-relations under predicate A alone. It
+// also accumulates the beach envelope set phase 2 indexes, which is why the phases
+// cannot be merged into one pass per source file.
 //
 // beachEnvelope says which phase-1 features contribute an envelope to that set:
-// "always" for the three beach layers, "beachOnly" for other-relations (its park
-// half is a naming source and must not widen the proximity neighbourhood).
+// "always" for the three beach layers, "beachOnly" for other-relations, whose park
+// half is a naming source and must not widen the proximity neighbourhood.
 export const LAYER_PLAN = [
   { key: "beaches-point.fgb", name: "beaches-point", source: "points", raw: "raw",
     phase: 1, select: isBeachTags, beachEnvelope: "always", region: "beaches" },
@@ -354,11 +336,11 @@ export const LAYER_PLAN = [
     phase: 2, select: isWaterTags, beachEnvelope: null, region: "water" },
   { key: "water-polygon.fgb", name: "water-polygon", source: "multipolygons", raw: "raw",
     phase: 2, select: isWaterTags, beachEnvelope: null, region: "water" },
-  // The SOLE source of coastline features (D19): the second GDAL pass reads with
-  // osmconf-lines.ini, whose reduced closed_ways_are_polygons list keeps CLOSED
+  // The sole source of coastline features: the second GDAL pass reads with
+  // osmconf-lines.ini, whose reduced closed_ways_are_polygons list keeps closed
   // coastline ways (islands) in the lines layer instead of routing them into
-  // multipolygons. Reading coastline from the main pass instead would both
-  // duplicate island coastlines and double-count them in the build floors.
+  // multipolygons. Reading coastline from the main pass would both duplicate
+  // island coastlines and double-count them in the build floors.
   { key: "coastline-line.fgb", name: "coastline-line", source: "lines", raw: "rawLines",
     phase: 2, select: isCoastlineTags, beachEnvelope: null, region: "coastline" }
 ];
@@ -367,21 +349,19 @@ export const LAYER_PLAN = [
 
 // The id fields a published layer carries, by GDAL source layer. osm_id vs
 // osm_way_id is the way/relation discriminator and it is load-bearing: the id
-// feeds "osm-" + osmType + "-" + osmId, which is BOTH the D1 primary key and the
+// feeds "osm-" + osmType + "-" + osmId, which is both the D1 primary key and the
 // KV flag key, so getting it wrong silently orphans every stored flag. Only the
-// multipolygons layer has both columns; points and lines features are always
-// nodes and ways and carry osm_id alone, and other_relations features are always
-// relations.
+// multipolygons layer has both columns; points and lines features carry osm_id
+// alone, and other_relations features are always relations.
 function idFieldsFor(source) {
   return source === "multipolygons" ? ["osm_id", "osm_way_id"] : ["osm_id"];
 }
 
 // The full emitted property key list for a layer: its source layer's promoted
-// tags, unioned with the fields contract 1.4 says the consumer branches on, plus
-// the id fields. The union is what makes other-relations carry loc_name /
-// leisure / boundary keys even though osmconf.ini's [other_relations] section
-// does not promote them (see the note in the file header of build-manifest.js);
-// they serialize as null today and become real the moment that section grows.
+// tags, unioned with the fields the consumer branches on, plus the id fields. The
+// union is what makes other-relations carry loc_name, leisure and boundary keys
+// even though osmconf.ini's [other_relations] section does not promote them; they
+// serialize as null and become real the moment that section grows.
 export function layerPropertyKeys(entry) {
   const keys = [];
   const push = function (key) {
@@ -408,11 +388,11 @@ export function layerPropertyKeys(entry) {
   return keys;
 }
 
-// One LayerFeature -> one GeoJSON Feature object with a FIXED property key set.
-// Ids are emitted as STRINGS because that is how the GDAL OSM driver types
-// osm_id / osm_way_id, and fgbReader coerces with Number() on the way back in;
-// keeping the type identical to the raw layer means the published schema and the
-// raw schema agree field for field.
+// One LayerFeature -> one GeoJSON Feature object with a fixed property key set.
+// Ids are emitted as strings because that is how the GDAL OSM driver types osm_id
+// and osm_way_id, and fgbReader coerces with Number() on the way back in; keeping
+// the type identical means the published schema and the raw schema agree field for
+// field.
 export function toGeoJsonFeature(record, keys) {
   const properties = {};
   for (let i = 0; i < keys.length; i = i + 1) {
@@ -440,9 +420,8 @@ export function toGeoJsonFeature(record, keys) {
 
 // --- Deno I/O ------------------------------------------------------------------
 
-// Deno is reached through globalThis so that merely IMPORTING this module stays
-// legal under Node (vitest imports it to exercise the pure predicates above).
-// Same discipline as scripts/lib/fgbReader.js.
+// Deno is reached through globalThis so importing this module stays legal under
+// Node, where vitest exercises the pure predicates above.
 function requireDeno(what) {
   const runtime = globalThis.Deno;
   if (!runtime || typeof runtime.open !== "function") {
@@ -452,28 +431,23 @@ function requireDeno(what) {
 }
 
 // A buffered line writer. GeoJSONSeq is one JSON object per line, and a per-line
-// write syscall on a multi-hundred-thousand-feature layer is minutes of pure
-// syscall overhead, so lines accumulate until the buffer passes the flush
-// threshold.
+// write syscall on a layer this size is minutes of syscall overhead, so lines
+// accumulate until the buffer passes the flush threshold.
 const WRITE_FLUSH_BYTES = 1 << 20;
 
-// What a ZERO-FEATURE layer is written as, and it is not an empty file.
+// What a zero-feature layer is written as, and it is not an empty file. GDAL
+// cannot identify a zero-byte or newline-only .geojsonseq at all ("not recognized
+// as being in a supported file format"), so the workflow's ogr2ogr conversion loop
+// would die under set -euo pipefail. A zero-feature layer is not hypothetical:
+// coastline-line.fgb is legitimately empty at Great Lakes scope, because the lakes
+// are mapped as water relations rather than natural=coastline ways. A single empty
+// FeatureCollection line is opened by GDAL's GeoJSON driver and converts to a real
+// 0-feature FlatGeobuf.
 //
-// MEASURED, and it is a day-one build failure otherwise: GDAL cannot IDENTIFY a
-// zero-byte (or newline-only) .geojsonseq at all — "not recognized as being in a
-// supported file format" — so the workflow's ogr2ogr conversion loop dies under
-// set -euo pipefail. And a zero-feature layer is not hypothetical here:
-// coastline-line.fgb is LEGITIMATELY EMPTY at Great Lakes scope, because the
-// lakes are mapped as water relations rather than natural=coastline ways (which
-// is why 100% of the served Great Lakes rows classify through the wikidata QID
-// path). A single empty FeatureCollection line is opened by GDAL's GeoJSON
-// driver and converts to a real 0-feature FlatGeobuf.
-//
-// It is NOT counted in the sidecar: the sidecar says zero, ogrinfo reads zero,
-// and build-manifest.js's MJ-7 equality holds. The layer's SCHEMA is empty too,
-// which is why that script skips the required-field assertion for a layer whose
-// feature count is zero — GDAL cannot infer fields from no features, and an
-// empty layer contributes to no decision anyway.
+// It is not counted in the sidecar: the sidecar says zero, ogrinfo reads zero, and
+// build-manifest.js's equality holds. The layer's schema is empty too, which is
+// why that script skips the required-field assertion for a layer whose feature
+// count is zero.
 const EMPTY_LAYER_LINE = "{\"type\":\"FeatureCollection\",\"features\":[]}";
 
 function makeWriter(runtime, path) {
@@ -491,7 +465,7 @@ function makeWriter(runtime, path) {
       await this.writeRaw(text);
       this.count = this.count + 1;
     },
-    // A line that is NOT a kept feature and must not move the count — the
+    // A line that is not a kept feature and must not move the count; the
     // zero-feature placeholder above is the only caller.
     writeRaw: async function (text) {
       this.pending.push(text);
@@ -552,14 +526,13 @@ function sourcePathFor(args, entry) {
 
 // --- the pass ------------------------------------------------------------------
 
-// Region tallies are counted against the SAME padded boxes predicate A uses, so
-// "kept by region R" and "counted in region R" can never disagree. Boxes overlap
+// Region tallies are counted against the same padded boxes predicate A uses, so
+// "kept by region R" and "counted in region R" cannot disagree. Boxes overlap
 // where two lakes meet, so a feature may be counted in more than one region and
-// the per-region sum can exceed the global count. That is correct for a FLOOR
-// (build-manifest.js Level 2 asks "did region R lose features", never "do the
-// regions partition the layer") and stating it here is cheaper than a reader
-// later "fixing" it into a first-match partition, which would make a feature's
-// region depend on REGIONS array order.
+// the per-region sum can exceed the global count. That is correct for a floor,
+// which asks whether region R lost features rather than whether the regions
+// partition the layer; turning it into a first-match partition would make a
+// feature's region depend on REGIONS array order.
 function emptyRegionTally(boxes) {
   const tally = {};
   for (let i = 0; i < boxes.length; i = i + 1) {
@@ -576,15 +549,14 @@ function tallyRegions(tally, boxes, bounds) {
   }
 }
 
-// One streaming pass over one raw source file, feeding every plan entry that
-// reads it. Grouping by file matters: the raw lines layer feeds FOUR published
-// layers (beaches-line, parks-line, water-line in the main pass) and re-reading
-// a multi-gigabyte layer once per output would dominate the build.
+// One streaming pass over one raw source file, feeding every plan entry that reads
+// it. Grouping by file matters: the raw lines layer feeds several published layers
+// and re-reading a multi-gigabyte layer once per output would dominate the build.
 async function runSourcePass(sourcePath, entries, context) {
   let read = 0;
   for await (const record of readFgbStream(sourcePath, null)) {
     read = read + 1;
-    // Predicate A is evaluated ONCE per feature rather than once per entry: it
+    // Predicate A is evaluated once per feature rather than once per entry: it
     // does not depend on the layer, and it is the cheap rejection that keeps the
     // continental interior out of every downstream test.
     if (!regionEnvelopeKeep(record.bounds, context.boxes)) {
@@ -630,11 +602,11 @@ function groupBySource(args, entries) {
   return groups;
 }
 
-// The sidecar build-manifest.js reads. JSON rather than a bare integer because
-// it carries the per-REGION tallies as well as the global count, and those
-// tallies are the ONLY place in the pipeline where per-region counts are
-// computed from feature envelopes — build-manifest.js has no geometry access.
-// The global "count" field is the one MJ-7 cross-checks against ogrinfo.
+// The sidecar build-manifest.js reads. JSON rather than a bare integer because it
+// carries the per-region tallies as well as the global count, and those tallies
+// are the only place in the pipeline where per-region counts are computed from
+// feature envelopes; build-manifest.js has no geometry access. The global "count"
+// field is the one cross-checked against ogrinfo.
 function sidecarText(entry, state) {
   return JSON.stringify({
     layer: entry.name,
@@ -675,7 +647,7 @@ async function main() {
     beachIndex: null
   };
 
-  // PHASE 1 — predicate A on the beach layers and other-relations, accumulating
+  // Phase 1 — predicate A on the beach layers and other-relations, accumulating
   // the beach envelope set.
   const phase1 = LAYER_PLAN.filter(function (e) { return e.phase === 1; });
   const groups1 = groupBySource(args, phase1);
@@ -686,16 +658,15 @@ async function main() {
   console.log("clip-layers: beach envelope set: " + String(context.beachIndex.count) +
     " envelope(s), padded by " + String(WATER_CLIP_PAD_DEG) + " deg");
 
-  // PHASE 2 — predicate A then predicate B on parks, coastline and water.
+  // Phase 2 — predicate A then predicate B on parks, coastline and water.
   const phase2 = LAYER_PLAN.filter(function (e) { return e.phase === 2; });
   const groups2 = groupBySource(args, phase2);
   for (let i = 0; i < groups2.length; i = i + 1) {
     await runSourcePass(groups2[i].path, groups2[i].entries, context);
   }
 
-  // Close, then atomically rename. Every reader downstream (ogr2ogr, and
-  // build-manifest.js reading the sidecar) sees either the previous absence or
-  // the finished file, never a half-written one.
+  // Close, then atomically rename. Every downstream reader sees either the
+  // previous absence or the finished file, never a half-written one.
   for (let i = 0; i < LAYER_PLAN.length; i = i + 1) {
     const entry = LAYER_PLAN[i];
     const state = states[entry.key];

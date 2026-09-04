@@ -1,15 +1,14 @@
-// test/waterClass.test.js
-// Pure-function coverage for the water-body DECISION layer (src/waterClass.js)
-// alone. The probe that gathers its three signals is the layer pipeline's
-// (src/layerSignals.js#waterClassSignals, covered in test/layerSignals.test.js);
-// the probe radii it uses live in src/osmSelect.js and are pinned in
-// test/osmSelect.test.js. Keeping the decision's tests here, with no probe
-// import at all, is the point: it is what makes their invariance across the
-// WATER_CLASS_VERSION bump real evidence that the decision layer did not move
-// when the transport did. Matched by QID, never by name; precedence
-// ocean > great_lake > inland; a clean-but-empty answer DECIDES inland (a
-// complete probe that finds no water is a real negative), and only a transient
-// failure — which never reaches classifyWaterBody — leaves a row pending.
+// Pure-function coverage for the water-body decision layer (src/waterClass.js)
+// alone. The probe that gathers its three signals lives in src/layerSignals.js
+// and its radii in src/osmSelect.js, each covered in its own file. Testing the
+// decision here with no probe import at all is the point: it makes the tests'
+// invariance across a WATER_CLASS_VERSION bump real evidence that the decision
+// layer did not move when the transport did.
+//
+// Matched by QID, never by name; precedence ocean > great_lake > inland; a
+// clean-but-empty answer decides inland, because a complete probe that finds no
+// water is a real negative, and only a transient failure, which never reaches
+// classifyWaterBody, leaves a row pending.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -91,11 +90,8 @@ describe("classifyWaterBody", () => {
     // bump is what re-drains every already-classified row. Its home is beside
     // the rules it versions.
     //
-    // 1 -> 2 on the move off Overpass. The rules above are byte-identical
-    // either side of that bump — nothing in this block changed — but the
-    // SIGNALS feeding them are now derived from clipped FlatGeobuf layers
-    // rather than an anchored Overpass around: probe, so every already
-    // classified row has to re-decide once against the new evidence.
+    // A bump makes every already-classified row re-decide once against the
+    // current evidence, even when the rules themselves are unchanged.
     expect(WATER_CLASS_VERSION).toBe(2);
   });
 });
@@ -171,26 +167,18 @@ describe("isFlagWorthyWater / FLAG_WORTHY_WATER_SQL (request-path 404 gate)", ()
   });
 });
 
-// The CLASSIFICATION half of the golden fixture.
+// The classification half of the golden fixture.
 //
-// test/fixtures/overpass-golden.json carries 13 real water-class captures taken
-// against the live Overpass mirrors before the layer migration: for each beach,
-// the raw elements, the {coastlinePresent, nearbyLakeQids, nearbyWayWater}
-// signals derived from them, and the verdict classifyWaterBody returned.
+// test/fixtures/overpass-golden.json carries real water-class captures: for each
+// beach, the raw elements, the {coastlinePresent, nearbyLakeQids,
+// nearbyWayWater} signals derived from them, and the verdict classifyWaterBody
+// returned. The park/pond half is replayed in test/osmSelect.test.js.
+// Classification is the side where a wrong answer hides a beach from the site,
+// since FLAG_WORTHY_WATER_SQL serves only ocean and great_lake plus under-cap
+// NULLs.
 //
-// The park/pond half of that fixture is replayed in test/osmSelect.test.js. This
-// half had no replay at all, which left the fixture's classification captures as
-// dead data — and classification is the side where a wrong answer HIDES a beach
-// from the site (FLAG_WORTHY_WATER_SQL serves only ocean/great_lake plus
-// under-cap NULLs), so it is the half that most needed a mechanical pin.
-//
-// SCOPE, stated honestly: this replays SIGNALS -> VERDICT, so it proves the
-// decision tree is unchanged across the migration and across the
-// WATER_CLASS_VERSION bump (which exists because the signals PROVIDER changed,
-// not because the rules did). It does NOT prove ELEMENTS -> SIGNALS parity
-// between the Overpass probe and the layer join — those two derivations read
-// different inputs, and the contract's 9.3 dry-run diff over the full table is
-// the intended proof of that half.
+// The scope is signals to verdict, so it pins the decision tree. It does not
+// pin elements to signals, because those two derivations read different inputs.
 describe("overpass-golden fixture replay (water classification)", function () {
   const golden = JSON.parse(
     readFileSync(new URL("./fixtures/overpass-golden.json", import.meta.url), "utf8")

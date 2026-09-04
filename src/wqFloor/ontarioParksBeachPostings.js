@@ -1,12 +1,7 @@
-// src/wqFloor/ontarioParksBeachPostings.js
+// src/wqFloor/ontarioParksBeachPostings.js — a raise-only water-quality floor
+// source; see src/wqFloor/index.js for the floor contract.
 //
-// KIND: wq (src/wqFloor raise-only water-quality floor source). Feeds
-// rules.js estimateFlag's "waterQualityAdvisory" input (step 7): it may only
-// RAISE a flag UP (worst-of by SEVERITY_RANK) -- never pull a hazard estimate
-// down, and it is NOT an official override (official:false). A clean/absent
-// reading is the ABSENCE of a site (resolves to null -> zero effect).
-//
-// SOURCE: Ontario Parks (ontarioparks.ca) publishes a per-park "Alerts" page
+// Source: Ontario Parks (ontarioparks.ca) publishes a per-park "Alerts" page
 // with a server-rendered "Beach Postings" table for its Great Lakes
 // provincial-park beaches, e.g.
 //   https://www.ontarioparks.ca/park/sandbanks/alerts    (Lake Ontario)
@@ -15,16 +10,15 @@
 // Each table has three columns -- "Beach Name", "Sample Date", "Posted" --
 // and the page itself explains: A "posting" is an indication of elevated
 // bacteria levels in the water, not intended as an indication of operational
-// status. (verified live, 2026-07-22, via a direct curl fetch of all three
-// pages above -- the raw HTML for the Posted cell is:
+// status. The raw HTML for the Posted cell is:
 //   <td><div ...><img class="alert-icon-list-55"
 //       src="/images/icons/alerts/beach-posting-no.png"
 //       alt="Beach Posting Results"/></div></td>
 // for every beach observed, all currently un-posted.)
 //
-// FLOOR MAPPING (RAISE-ONLY):
+// FLOOR MAPPING (raise-only):
 //   Posted icon filename indicates an active posting  -> yellow floor.
-//   Posted icon filename indicates NOT posted ("...-no.png", confirmed live)
+//   Posted icon filename indicates not posted ("...-no.png")
 //     -> NO SITE (the page itself says a posting is not an operational
 //        status, so "not posted" carries no hazard signal either way).
 //   Icon filename unrecognized / row unparseable                -> NO SITE
@@ -33,10 +27,9 @@
 // not-posted advisory, so it can only ever raise a clean or unknown estimate
 // to yellow, exactly like the project's other wqFloor sources.
 //
-// *** ICON-FILENAME CONFIRMATION NOTE (integrator: please re-verify before
-// enabling in the registry) *** -- every beach observed across all three
-// curated parks during authoring (2026-07-22) reads "not posted", so a LIVE
-// "posted" row's icon filename has never actually been seen. This module
+// Icon-filename caveat, to re-verify before enabling in the registry: every beach
+// observed across all three curated parks reads "not posted", so a live "posted"
+// row's icon filename has never been seen. This module
 // infers the posted-state filename to be "beach-posting-yes.png" purely by
 // symmetry with the confirmed "beach-posting-no.png" not-posted filename; if
 // the true filename differs (e.g. a different token, or the "Posted"
@@ -73,16 +66,16 @@
 // section/table, reordered/renamed columns, unrecognized Posted icon)
 // degrades a ROW to being skipped; a page whose table cannot be located at
 // all degrades that PARK's fetch to null (the other parks are unaffected --
-// each park page is fetched and parsed independently). Only if EVERY
+// each park page is fetched and parsed independently). Only if every
 // curated park page fails does scrape() itself return null.
 // parseOntarioParksBeachPostings and isPostedFromCell are pure and exported
 // for tests; scrape() is the only network-touching, cron-side-only piece and
 // never throws across the module boundary.
 //
-// INTEGRATOR DEDUP NOTE: this is the ONLY Ontario Parks beach-posting source
+// INTEGRATOR DEDUP NOTE: this is the only Ontario Parks beach-posting source
 // in the project; it does not overlap with any existing hazard scraper or
 // wave/alert client (SRF rip, NWS/ECCC alerts, NOAA wave are all
-// weather/hazard axis, not bacteria). Register ONLY in
+// weather/hazard axis, not bacteria). Register only in
 // src/wqFloor/index.js's wqFloorSources array (raise-only), never in
 // src/officialSources/index.js's scrapers array (hazard-override) -- a
 // clean/not-posted reading here says nothing about surf hazard and must
@@ -163,7 +156,7 @@ export const SITE_DEFS = [
 // <td>...</td> contents, containing the status <img>) -> true (posted),
 // false (confirmed not posted), or null (unrecognized icon filename --
 // fail closed, never guess). Keys off the icon filename, the only part of
-// the confirmed live markup that actually varies with status (the <img>
+// the markup that actually varies with status (the <img>
 // alt text is the same generic "Beach Posting Results" regardless of
 // status, so it carries no usable signal).
 export function isPostedFromCell(cellHtml) {
@@ -190,7 +183,7 @@ export function isPostedFromCell(cellHtml) {
 //   { beach, sampleDate, posted: true|false }
 // (rows whose posted state could not be recognized are simply omitted, not
 // fatal to the whole page), or null when the "Beach Postings" table cannot
-// be located AT ALL (unusable/redesigned page for this park).
+// be located AT all (unusable/redesigned page for this park).
 export function parseOntarioParksBeachPostings(html) {
   if (typeof html !== "string" || html.length === 0) {
     return null;
@@ -311,10 +304,10 @@ export const ontarioParksBeachPostings = {
   label: ONTARIO_PARKS_LABEL,
   infoUrl: ONTARIO_PARKS_INFO_URL,
   matches: matchesOntarioParksCoverage,
-  // CRON-SIDE ONLY. Fetches each of the three curated park pages
+  // CRON-SIDE only. Fetches each of the three curated park pages
   // independently (one park's failure never nulls the others) and merges
   // every recognized "posted" row into a single site list. Returns null only
-  // when EVERY park page failed to fetch or parse -- a partial success (at
+  // when every park page failed to fetch or parse -- a partial success (at
   // least one park's table read cleanly) still returns a valid perBeach
   // result, even if that result's sites array ends up empty (a genuinely
   // clean run across the readable parks).

@@ -1,58 +1,49 @@
-// src/waveManifest.js — the CONSUMER GATE for the NOAA GRIB2 wave pipeline: the one
-// place that decides whether a published wave cycle may be written into production
-// KV. Pure, fail-closed, and never imported by the Worker (it runs inside
-// scripts/build-wave-kv.js on Deno).
+// src/waveManifest.js — the consumer gate for the NOAA GRIB2 wave pipeline: the
+// one place that decides whether a published wave cycle may be written into
+// production KV. Pure, fail-closed, and never imported by the Worker; it runs
+// inside scripts/build-wave-kv.js on Deno, and is modelled on
+// src/layerManifest.js.
 //
-// It is modelled directly on src/layerManifest.js, including the traps that module
-// paid for. Read that file first if this one looks over-built.
-//
-// WHY A GATE AT ALL
-// -----------------
-// The keys this pipeline writes are the ONLY wave input src/rules.js sees, and
-// runFlagRecompute never reads waveinput.updated — expiration is the entire
-// staleness control on the color path. So a cycle that is merely well-formed is not
+// The keys this pipeline writes are the only wave input src/rules.js sees, and
+// runFlagRecompute never reads waveinput.updated, so expiration is the entire
+// staleness control on the color path. A merely well-formed cycle is therefore not
 // enough: every checksum can match while the numbers describe a garbage plane, a
-// sentinel, or an hour that has already aged out. The gate's job is to answer "do I
-// have PROOF this cycle is decodable, intact, identity-checked and still fresh?" and
-// to answer NO whenever the proof is missing, malformed, or merely absent.
+// sentinel, or an hour that has already aged out. The gate answers "do I have
+// proof this cycle is decodable, intact, identity-checked and still fresh?" and
+// answers no whenever the proof is missing, malformed or merely absent.
 //
-// THE FAIL-CLOSED RULE
-// --------------------
-// Every conjunct is a STRICT !== true against the value that means "proven", so a
-// MISSING field refuses exactly as an explicitly false one does. That is the
-// realistic failure: the report is assembled by two separate scripts and one of them
-// deliberately leaves two fields ABSENT (see below), so a dropped fold must refuse
+// Fail-closed: every conjunct is a strict !== true against the value that means
+// "proven", so a missing field refuses exactly as an explicit false does. That is
+// the realistic failure — the report is assembled by two separate scripts and one
+// of them deliberately leaves two fields absent — so a dropped fold must refuse
 // rather than sail through.
 //
-// THREE TIERS ON ONE CONJUNCT WALK
-// --------------------------------
+// Three tiers on one conjunct walk:
 //   fatal    — nothing about this cycle can be trusted. Write no KV at all.
 //   expired  — decodable and intact, but the lease it would grant is worthless.
 //              Write no KV. A cycle with 40 minutes of life left costs a full bulk
 //              write, buys almost nothing, and means the pipeline is more than six
-//              hours late — which the operator must see, not have papered over.
-//   degraded — write, and warn. Less data than a clean cycle, but every number in it
-//              passed the identity and sentinel gates.
+//              hours late, which the operator must see rather than have papered
+//              over.
+//   degraded — write, and warn. Less data than a clean cycle, but every number in
+//              it passed the identity and sentinel gates.
 //
-// The split matches the failure framing of the workflow: everything that could
-// produce a WRONG NUMBER refuses, everything that is merely LESS DATA warns.
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with +
-// (never template literals), console.log for logging.
+// The split matches the workflow's failure framing: anything that could produce a
+// wrong number refuses, anything that is merely less data warns.
 
 // Bump only alongside a breaking change to the manifest shape written by
-// scripts/build-wave-manifest.js. A cycle written under a different schemaVersion is
-// FATAL, not degraded: this code cannot claim to understand it at all.
+// scripts/build-wave-manifest.js. A cycle written under a different schemaVersion
+// is fatal, not degraded: this code cannot claim to understand it at all.
 export const WAVE_SCHEMA_VERSION = 1;
 
-// The artifact keys this code knows how to consume. The download list is taken from
-// HERE and never from manifest.artifacts[].key, so a manifest describing a third
-// file is a cycle this code cannot decode rather than one to consume as-is — and
-// every written filename stays a compile-time constant of this repo.
+// The artifact keys this code knows how to consume. The download list comes from
+// here and never from manifest.artifacts[].key, so a manifest describing a third
+// file is a cycle this code cannot decode rather than one to consume as-is, and
+// every written filename stays a constant of this repo.
 export const EXPECTED_WAVE_ARTIFACTS = ["waveinput.ndjson", "waves.ndjson"];
 
-// Absolute lease granted to every emitted KV pair, measured from the model VALID
-// TIME and not from the write clock. 7 h covers the 3 h cron interval with two
+// Absolute lease granted to every emitted KV pair, measured from the model valid
+// time and not from the write clock. 7 h covers the 3 h cron interval with two
 // consecutive missed occurrences of margin.
 export const WAVE_KV_LEASE_SECONDS = 25200;
 
@@ -71,7 +62,7 @@ function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-// Short, deterministic rendering of an offending value. Never throws — a
+// Short, deterministic rendering of an offending value. Never throws: a
 // getter-bearing object or a symbol taking the gate down is the one outcome worse
 // than refusing.
 function describeValue(value) {
@@ -106,10 +97,10 @@ function collectFailures(report) {
     fatal.push("schema-version: expected " + String(WAVE_SCHEMA_VERSION) +
       ", got " + describeValue(report.schemaVersion));
   }
-  // waves/current.json named a cycleId; the manifest read from the pinned immutable
-  // prefix must carry that same cycleId. A mismatch means a cycle completed mid-run
-  // and the fetch mixed two sets — every count below would then be measuring one
-  // cycle against another's manifest.
+  // The manifest read from the pinned immutable prefix must carry the cycleId
+  // waves/current.json named. A mismatch means a cycle completed mid-run and the
+  // fetch mixed two sets, so every count below would be measuring one cycle
+  // against another's manifest.
   if (report.pointerAgreesWithManifest !== true) {
     fatal.push("pointer-mismatch: pointerAgreesWithManifest is " +
       describeValue(report.pointerAgreesWithManifest));
@@ -121,11 +112,10 @@ function collectFailures(report) {
     fatal.push("artifacts-unverified: artifactsVerified is " +
       describeValue(report.artifactsVerified));
   }
-  // BOTH operands must be real numbers before they are compared. A bare
-  // "present !== expected" is FAIL-OPEN when both fields are absent, because
-  // undefined !== undefined is false — the report with no artifact counting at all
-  // would pass the conjunct that exists to prove the counting happened. Ported
-  // verbatim from src/layerManifest.js.
+  // Both operands must be real numbers before they are compared. A bare
+  // "present !== expected" is fail-open when both fields are absent, because
+  // undefined !== undefined is false, so a report with no artifact counting at all
+  // would pass the conjunct that exists to prove the counting happened.
   if (!isFiniteNumber(report.artifactsPresent) || !isFiniteNumber(report.artifactsExpected)) {
     fatal.push("artifact-count: artifactsPresent/artifactsExpected are " +
       describeValue(report.artifactsPresent) + "/" + describeValue(report.artifactsExpected));
@@ -143,15 +133,15 @@ function collectFailures(report) {
   if (report.buildStatus !== "complete") {
     fatal.push("build-incomplete: buildStatus is " + describeValue(report.buildStatus));
   }
-  // Per band, GRIB_VALID_TIME === validStartEpoch + i*3600. This is the conjunct
-  // that catches an .idx off-by-one, which otherwise produces a complete, plausible,
-  // silently time-shifted 24 h series.
+  // Per band, GRIB_VALID_TIME === validStartEpoch + i*3600. This catches an .idx
+  // off-by-one, which otherwise produces a complete, plausible, silently
+  // time-shifted 24 h series.
   if (report.validTimesPassed !== true) {
     fatal.push("valid-times: validTimesPassed is " + describeValue(report.validTimesPassed));
   }
-  // No emitted value equals any grid's header nodata, exceeds 100 ft, or is negative.
-  // 9999 m is 32808.4 ft and colors a flag RED with a straight-faced reason string;
-  // a negative sentinel colors it GREEN.
+  // No emitted value equals any grid's header nodata, exceeds 100 ft, or is
+  // negative. 9999 m is 32808.4 ft and colors a flag red with a straight-faced
+  // reason string; a negative sentinel colors it green.
   if (report.sentinelScanPassed !== true) {
     fatal.push("sentinel-scan: sentinelScanPassed is " +
       describeValue(report.sentinelScanPassed));
@@ -166,17 +156,17 @@ function collectFailures(report) {
 
   // --- tier: expired -------------------------------------------------------------
 
-  // sha256 over gridsDigestInput(GRIDS) equals manifest.gridsDigest. A mismatch means
-  // the grid set moved since this cycle was built, so its coverage floors and its
-  // per-grid counts describe a different world. Tiered with expiry rather than fatal
-  // because the honest operator response is identical: stop writing, rebuild.
+  // sha256 over gridsDigestInput(GRIDS) equals manifest.gridsDigest. A mismatch
+  // means the grid set moved since this cycle was built, so its coverage floors and
+  // per-grid counts describe a different world. Tiered with expiry rather than
+  // fatal because the operator response is identical: stop writing, rebuild.
   if (report.gridsDigestMatches !== true) {
     expired.push("grids-digest-mismatch: gridsDigestMatches is " +
       describeValue(report.gridsDigestMatches));
   }
-  // NaN — from an unparseable validStartIso — fails this range check, and that is
-  // CORRECT: refusing because we cannot tell how old the data is is the same answer
-  // as refusing because it is too old.
+  // NaN, from an unparseable validStartIso, fails this range check, which is
+  // correct: refusing because the age is unknowable is the same answer as refusing
+  // because it is too old.
   if (!isFiniteNumber(report.secondsRemaining)) {
     expired.push("lease: secondsRemaining is " + describeValue(report.secondsRemaining));
   } else if (report.secondsRemaining < MIN_LEASE_SECONDS) {
@@ -186,17 +176,17 @@ function collectFailures(report) {
 
   // --- tier: degraded ------------------------------------------------------------
 
-  // Every enabled grid contributed records. False means one upstream was out (NOMADS
-  // down leaves every Great Lakes beach unsampled), which is less data, not wrong
-  // data.
+  // Every enabled grid contributed records. False means one upstream was out —
+  // NOMADS down leaves every Great Lakes beach unsampled — which is less data, not
+  // wrong data.
   if (report.gridsComplete !== true) {
     degraded.push("grids-incomplete: gridsComplete is " +
       describeValue(report.gridsComplete));
   }
-  // A human ran the build with --allow-shrink, so a coverage refusal was demoted to
-  // a warning. Published separately by build-wave-manifest.js precisely so an
-  // overridden cycle stays distinguishable downstream; flattened onto the report by
-  // scripts/build-wave-kv.js the way fetch-layers.js flattens buildSanityPassed.
+  // A human ran the build with --allow-shrink, demoting a coverage refusal to a
+  // warning. Published separately by build-wave-manifest.js so an overridden cycle
+  // stays distinguishable downstream, and flattened onto the report by
+  // scripts/build-wave-kv.js.
   if (report.sanityOverridden === true) {
     degraded.push("sanity-overridden: a coverage gate was demoted to a warning by " +
       "--allow-shrink");
@@ -205,10 +195,9 @@ function collectFailures(report) {
   return { fatal: fatal, expired: expired, degraded: degraded };
 }
 
-// Splits the tiers so the caller can act on them differently. reasons carries EVERY
-// failing conjunct, not just the ones belonging to the reported tier, ordered
-// fatal-first: an operator wants the whole diagnosis at once, and the tier alone
-// does not say which conjunct fired. Pure; never throws for any input.
+// Splits the tiers so the caller can act on them differently. reasons carries every
+// failing conjunct, not only the reported tier's, ordered fatal-first: the tier
+// alone does not say which conjunct fired. Pure; never throws for any input.
 export function classifyWaveManifestFailure(report) {
   const failures = collectFailures(report);
   const reasons = failures.fatal.concat(failures.expired, failures.degraded);
@@ -224,8 +213,8 @@ export function classifyWaveManifestFailure(report) {
 }
 
 // "May this cycle be written into production KV?" True for a clean or degraded
-// cycle, false for anything fatal or expired. Pure; false (never a throw, never a
-// default true) for null and malformed input.
+// cycle, false for anything fatal or expired. Null and malformed input answer
+// false, never a throw and never a default true.
 export function waveKvWriteAllowed(report) {
   const failures = collectFailures(report);
   return failures.fatal.length === 0 && failures.expired.length === 0;

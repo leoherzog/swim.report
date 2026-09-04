@@ -1,32 +1,28 @@
 name: Tests
 
-# Runs the vitest suite on every push and pull request. This repo deletes a lot of
-# tested code and adds new spatial-join code in the same migration, which is exactly
-# the change during which a green-on-push signal earns its keep.
+# Runs the vitest suite on every push and pull request.
 #
-# THE INSTALL IS DELIBERATELY NOT "npm ci". package.json's two RUNTIME dependencies
+# The install is deliberately not "npm ci". package.json's two runtime dependencies
 # (@web.awesome.me/webawesome-pro and @awesome.me/kit-*) come from private registries
 # whose tokens live in .dev.vars, and .npmrc routes those scopes through
-# ${WEBAWESOME_NPM_TOKEN} / ${FONTAWESOME_NPM_TOKEN}. A plain npm ci here fails E401 —
-# verified, not assumed — and the fix is NOT to hand CI those secrets. Nothing under
-# src/ or test/ imports either package: Web Awesome and Font Awesome are loaded from a
-# version-pinned CDN kit at runtime (see WA_KIT_BASE in src/frontend/render.js), and
-# the local package exists only so a developer can read the bundled Web Awesome agent
-# skill. So the test job drops the two dependencies from the ephemeral checkout's
-# manifest and installs the rest:
+# ${WEBAWESOME_NPM_TOKEN} / ${FONTAWESOME_NPM_TOKEN}. A plain npm ci here fails E401,
+# and the fix is not to hand CI those secrets. Nothing under src/ or test/ imports
+# either package: Web Awesome and Font Awesome load from a version-pinned CDN kit at
+# runtime (see WA_KIT_BASE in src/frontend/render.js), and the local package exists
+# only so a developer can read the bundled Web Awesome agent skill. So the job drops
+# the two dependencies from the ephemeral checkout's manifest and installs the rest:
 #
 #   npm pkg delete dependencies    (npm's own CLI; touches only the runner's copy)
 #   npm install                    (devDependencies only, still resolved from the
 #                                   committed package-lock.json entries)
 #
-# npm ci cannot be used AFTER that edit because it requires package.json and
-# package-lock.json to agree, and the edit deliberately makes them disagree; npm
-# install reconciles by pruning the two private trees, which is precisely the
-# intended effect. The devDependency versions still come from the lockfile, so the
-# run stays reproducible where it matters.
+# npm ci cannot be used after that edit, because it requires package.json and
+# package-lock.json to agree and the edit deliberately makes them disagree; npm
+# install reconciles by pruning the two private trees, which is the intended effect.
+# The devDependency versions still come from the lockfile.
 #
-# If this job ever starts failing with E401, the cause is a NEW import of a private
-# package from src/ or test/ — fix the import, do not add the secrets.
+# If this job ever fails with E401, the cause is a new import of a private package
+# from src/ or test/ — fix the import, do not add the secrets.
 
 on:
   push:
@@ -34,20 +30,18 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # One run per ref. A newer push makes an in-flight run's answer irrelevant, so this
-  # is the one workflow in the repo where cancelling in progress is correct — unlike
-  # discovery/classify, it writes nothing anywhere.
+  # One run per ref. A newer push makes an in-flight run's answer irrelevant, and this
+  # workflow writes nothing anywhere, so cancelling in progress is correct here.
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
-# Not needed by the vitest job, which never invokes deno — but the deno-lock job below
-# does, and a workflow-scoped value cannot be forgotten when a step is added. Without
-# it Deno auto-discovers the repo-root deno.lock, wants a workspace.packageJson block
-# for package.json's npm deps, and "deno check --frozen" FAILS with "The lockfile is
-# out of date" while a plain "deno run" SILENTLY REWRITES the checked-in lock.
+# Workflow-scoped so a new step cannot forget it. Without it Deno auto-discovers the
+# repo-root deno.lock, wants a workspace.packageJson block for package.json's npm
+# deps, and "deno check --frozen" fails with "The lockfile is out of date" while a
+# plain "deno run" silently rewrites the checked-in lock.
 env:
   DENO_NO_PACKAGE_JSON: "1"
 
@@ -62,11 +56,10 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          # 24, not the 22 the wrangler jobs use, on purpose: node:sqlite is
-          # unflagged from Node 24, and test/demandOrdering.test.js degrades to a
-          # SKIP with a printed reason when node:sqlite is unavailable rather than
-          # failing. On Node 22 the suite would stay green while quietly testing
-          # less, which is the worst outcome a test workflow can have.
+          # 24, not the 22 the wrangler jobs use: node:sqlite is unflagged from Node
+          # 24, and test/demandOrdering.test.js skips with a printed reason when
+          # node:sqlite is unavailable rather than failing. On Node 22 the suite would
+          # stay green while quietly testing less.
           node-version: "24"
           cache: npm
 
@@ -82,10 +75,10 @@ jobs:
         run: npm test
 
   deno-lock:
-    # The offline batch and the build scripts run on Deno with a FROZEN lockfile, and
+    # The offline batch and the build scripts run on Deno with a frozen lockfile, and
     # both delete-adjacent workflows depend on that staying true. Type-checking them
-    # under --frozen here means lock drift is caught on the commit that causes it,
-    # not at 08:47 UTC inside the only job that can delete production rows.
+    # under --frozen here catches lock drift on the commit that causes it, rather than
+    # inside the only job that can delete production rows.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -93,16 +86,16 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Lint the workflow files
-        # A YAML or ${{ }} typo in build-layers/discovery/waves currently surfaces only
-        # when the cron fires, inside the jobs that delete production rows and publish
-        # to R2. actionlint checks expressions, needs/uses references and runner labels
-        # statically. Pinned as a content-addressed image rather than a marketplace
-        # wrapper, matching how every other third-party dependency here is pinned.
+        # A YAML or ${{ }} typo in the other workflows otherwise surfaces only when the
+        # cron fires, inside the jobs that delete production rows and publish to R2.
+        # actionlint checks expressions, needs/uses references and runner labels
+        # statically. Pinned as a content-addressed image, like every other third-party
+        # dependency here.
         #
         # -shellcheck= disables the shellcheck integration. Enabling it is a deliberate
-        # follow-up: it reports nine findings across three workflow files, and each one
-        # has to be fixed or given an inline "# shellcheck disable=" before the flag can
-        # come off, or every workflow-touching PR goes red on pre-existing shell style.
+        # follow-up: it reports nine findings across three workflow files, and each has
+        # to be fixed or given an inline "# shellcheck disable=" first, or every
+        # workflow-touching PR goes red on pre-existing shell style.
         uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color -shellcheck=
@@ -114,9 +107,8 @@ jobs:
 
       - name: Check the offline scripts against the frozen lockfile
         # Every offline script belongs here, including scripts/build-marine-zones.js,
-        # which no workflow invokes — an operator runs it by hand when NWS publishes a
-        # new marine-zone shapefile, roughly twice a year, which is exactly the cadence
-        # at which unchecked rot is most expensive.
+        # which no workflow invokes: an operator runs it by hand about twice a year,
+        # the cadence at which unchecked rot is most expensive.
         run: |
           set -euo pipefail
           deno check --lock=deno.lock --frozen \
@@ -133,9 +125,8 @@ jobs:
             scripts/build-wave-kv.js
 
       - name: Assert deno.lock is unchanged
-        # Belt to the --frozen brace: --frozen is the documented refusal, and this is
-        # the observation. If a future Deno relaxes it, the working tree still tells
-        # the truth.
+        # Belt to the --frozen brace. If a future Deno relaxes the refusal, the
+        # working tree still tells the truth.
         run: |
           set -euo pipefail
           if ! git diff --quiet -- deno.lock; then
@@ -146,20 +137,20 @@ jobs:
           echo "deno.lock unchanged"
 
       - name: Assert no --allow-net reaches an offline-only script
-        # The machine-enforced form of the offline-path contract: these scripts make zero
+        # The machine-enforced form of the offline-path contract: these scripts make no
         # upstream requests, and the absence of the permission flag is the proof.
-        # Whole-line YAML comments are stripped first (discovery.yml and waves.yml state
-        # the rule in prose, which would otherwise match), and backslash continuations are
-        # joined so the comparison is per COMMAND rather than per source line — a
-        # permission flag and a script name three lines apart are still one invocation.
-        # test.yml is excluded because this guard's own command line necessarily contains
-        # both tokens.
+        # Whole-line YAML comments are stripped first, since discovery.yml and waves.yml
+        # state the rule in prose and would otherwise match, and backslash continuations
+        # are joined so the comparison is per command rather than per source line: a
+        # permission flag and a script name three lines apart are one invocation.
+        # test.yml is excluded because this guard's own command line contains both
+        # tokens.
         #
-        # The list must name EVERY pure-math offline script, in both pipelines: a script
-        # missing from it is a script whose network silence nothing enforces.
+        # The list must name every pure-math offline script in both pipelines; a script
+        # missing from it is one whose network silence nothing enforces.
         # scripts/fetch-layers.js, scripts/fetch-wave-grids.js and
-        # scripts/build-marine-zones.js are the only network-capable offline scripts in
-        # the repo and are deliberately absent.
+        # scripts/build-marine-zones.js are the only network-capable offline scripts and
+        # are deliberately absent.
         run: |
           set -euo pipefail
           joined=$(mktemp)
@@ -177,28 +168,28 @@ jobs:
           done
 
   worker-bundle:
-    # Nothing else in CI bundles or boots the Worker. vitest imports src/index.js as a
-    # plain ES module, which every valid and several invalid Workers happily satisfy,
-    # and the deno-lock job never touches it. Two steps, catching different things:
+    # Nothing else in CI bundles or boots the Worker: vitest imports src/index.js as a
+    # plain ES module, which every valid and several invalid Workers satisfy, and the
+    # deno-lock job never touches it. Two steps, catching different things:
     #
     #   deploy --dry-run  — a broken wrangler.toml, an unresolvable import, a missing
     #                       binding, the bundle size cap. Needs no auth.
     #   wrangler dev      — the workerd entrypoint contract. workerd rejects any named
     #                       export of the entry module that is not a function or an
-    #                       ExportedHandler, and dry-run does NOT catch it: a bare
+    #                       ExportedHandler, and dry-run does not catch it: a bare
     #                       "export const FOO = 123" in src/index.js bundles clean and
     #                       then kills the isolate at startup. This is the only step in
-    #                       the repo that sees that. test/workerExports.test.js stays as
+    #                       the repo that sees that. test/workerExports.test.js stays
     #                       the fast static guard on the one known instance.
     #
     # No npm install anywhere: package.json's two runtime dependencies come from private
-    # registries this job has no tokens for (see the header), so wrangler is fetched on
-    # its own through npx, exactly as discovery.yml and waves.yml do it.
+    # registries this job has no tokens for, so wrangler is fetched on its own through
+    # npx, as discovery.yml and waves.yml do it.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # Pin to the wrangler MAJOR line, matching package.json's ^4 and the two other
-      # wrangler-using workflows.
+      # Pinned to the wrangler major line, matching package.json's ^4 and the two
+      # other wrangler-using workflows.
       WRANGLER_VERSION: "4"
     steps:
       - name: Checkout
@@ -214,9 +205,9 @@ jobs:
 
       - name: Boot the Worker under workerd
         # wrangler dev runs workerd locally against emulated bindings and contacts no
-        # Cloudflare API, so this needs no secrets either. ANY HTTP status proves the
-        # isolate started and accepted the entry module — the response body is not the
-        # subject here and must never become one; request behaviour is vitest's job.
+        # Cloudflare API, so this needs no secrets. Any HTTP status proves the isolate
+        # started and accepted the entry module; the response body is not the subject
+        # and must never become one, since request behaviour is vitest's job.
         run: |
           set -euo pipefail
           npx --yes "wrangler@${WRANGLER_VERSION}" dev --port 8787 --inspector-port 9229 > dev.log 2>&1 &

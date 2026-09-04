@@ -1,50 +1,40 @@
-// Pure module: builds the literal text of the inline, client-side map script
-// used on the beach list (home) page. This code RUNS IN THE BROWSER, not in the
-// Worker. It still follows project style rules: const/let only, never var, no
-// template literals / backticks, console.log for logging.
+// Builds the literal text of the inline map script on the beach list (home)
+// page. It runs in the browser, not in the Worker.
 //
-// MapLibre GL JS 6 is ESM-ONLY — the UMD bundle this page used to pull in with
-// a plain <script src> is no longer published. So the library is pulled in with
-// a DYNAMIC import() from inside this (classic, non-module) inline script: the
-// script tag keeps its current shape and, more importantly, a failed load stays
-// a silent no-op via .catch — a static import in a <script type="module"> would
-// log an uncaught module error instead. buildListMapScript takes the pinned
-// module URL so render.js stays the single place both CDN pins live.
+// MapLibre GL JS 6 is ESM-only, so the library arrives through a dynamic
+// import() from inside this classic inline script: a failed load stays a silent
+// no-op via .catch, where a static import in a <script type="module"> would log
+// an uncaught module error. buildListMapScript takes the pinned module URL so
+// render.js stays the single place both CDN pins live.
 //
-// Behavior: build a MapLibre GL map with the OpenFreeMap positron style, then
-// fetch EVERY flag-worthy beach ONCE from the cacheable /api/beaches.geojson
-// endpoint and hand the FeatureCollection to a native clustered GeoJSON source.
-// Zoomed out, beaches collapse into neutral count bubbles that expand on click;
-// zoomed in, each beach is a rasterized fa-flag icon tinted by its `flag`
-// keyword (green|yellow|red|unknown) to the EXACT flag-icon-* palette (the WA
-// tokens are resolved at runtime so the map matches the rest of the UI, with the
-// mild-palette hexes only as a fallback). Clicking a flag navigates to
-// /beach/:id; clicking a cluster zooms to expand it.
+// The map uses the OpenFreeMap positron style and fetches every flag-worthy
+// beach once from the cacheable /api/beaches.geojson endpoint into a native
+// clustered GeoJSON source. Zoomed out, beaches collapse into neutral count
+// bubbles that expand on click; zoomed in, each beach is a rasterized fa-flag
+// icon tinted by its `flag` keyword (green|yellow|red|unknown) to the exact
+// flag-icon-* palette, resolved from the live WA tokens so the map matches the
+// rest of the UI, with the mild-palette hexes only as a fallback. Clicking a
+// flag navigates to /beach/:id; clicking a cluster zooms to expand it.
 //
 // Centering precedence: the container's data-center attribute (the resolved user
-// location — a browser fix or Cloudflare's IP estimate — at zoom 10 when
-// data-center-precise is "1", else zoom 9) -> fitBounds over all fetched
-// features (padding 40, maxZoom 10) -> the Great Lakes default center [-84, 44]
-// at zoom 5. A "swimreport:nearupdate" CustomEvent on document (dispatched by
-// geoScript.js after its in-place proximity swap) makes the LIVE map re-read the
-// updated data-center and ease to it — the source already holds every beach, so
-// nothing is refetched or rebuilt, it is a pure re-center.
+// location, at zoom 10 when data-center-precise is "1", else zoom 9), then
+// fitBounds over all fetched features (padding 40, maxZoom 10), then the Great
+// Lakes default center [-84, 44] at zoom 5. A "swimreport:nearupdate"
+// CustomEvent on document, dispatched by geoScript.js after its in-place
+// proximity swap, makes the live map re-read the updated data-center and ease to
+// it; the source already holds every beach, so it is a pure re-center.
 //
-// Accessibility: the map is a purely visual supplement — the search box +
-// results list is the complete accessible path (it covers the full flag-worthy
-// table server-side). So MapLibre keyboard handling is disabled (keyboard:
-// false), the container is aria-hidden (set server-side in render.js) and kept
-// out of the tab order, and the canvas is set to tabindex -1 at construction. No
-// focusable control chrome is ever added — attributionControl is disabled (its
-// links populate asynchronously and would otherwise become focusable inside the
-// aria-hidden mount; OpenFreeMap's OSM credit lives in the static footer instead)
-// and no NavigationControl is added — so the aria-hidden subtree holds no
-// focusable node at any lifecycle point, tile load or not.
+// The map is a purely visual supplement: the search box plus results list is the
+// complete accessible path, covering the full flag-worthy table server-side. So
+// MapLibre keyboard handling is disabled, the container is aria-hidden (set
+// server-side in render.js) and kept out of the tab order, and the canvas is set
+// to tabindex -1 at construction. No focusable control chrome is ever added, so
+// the aria-hidden subtree holds no focusable node at any lifecycle point, tile
+// load or not.
 //
 // Everything degrades silently: a failed module import, a missing container, an
-// init throw, a GPU/WebGL2 failure (MapLibre 6 reports that through the map's
-// 'error' event rather than a constructor throw), or a missing/failed/empty
-// GeoJSON fetch simply leaves the page with its (server-rendered) beach list.
+// init throw, a GPU/WebGL2 failure, or a missing, failed or empty GeoJSON fetch
+// simply leaves the page with its server-rendered beach list.
 
 const SCRIPT_LINES = [
   "  const container = document.getElementById('home-map');",
@@ -78,9 +68,9 @@ const SCRIPT_LINES = [
   "  const GEOJSON_URL = '/api/beaches.geojson';",
   // The four flag tint hexes: resolve the live WA palette tokens so the map
   // matches the rest of the UI exactly, falling back to the mild-palette hexes
-  // only if resolution yields an empty string. The tint is resolved ONCE at init
-  // and rasterized into the icon images; a later light/dark toggle does not
-  // re-tint them (a rare cosmetic not worth a MutationObserver).
+  // only if resolution yields an empty string. The tint is resolved once at init
+  // and rasterized into the icon images, so a later light/dark toggle does not
+  // re-tint them.
   "  const FLAG_HEX_FALLBACK = { green: '#4f8051', yellow: '#c6ad4f', red: '#cf443b', unknown: '#777478' };",
   "  const FLAG_TOKEN = {",
   "    green: '--wa-color-green-50',",
@@ -120,9 +110,9 @@ const SCRIPT_LINES = [
   "    ctx.globalCompositeOperation = 'source-over';",
   "    return ctx.getImageData(0, 0, w, h);",
   "  };",
-  // Register the four pre-tinted images BEFORE any layer references them. Decode
-  // is async, so the layers are gated behind this Promise. Resolves regardless
-  // of success — a decode failure leaves the missing-image resolver net below.
+  // Register the four pre-tinted images before any layer references them. Decode
+  // is async, so the layers are gated behind this Promise, which resolves
+  // regardless of success: a decode failure leaves the resolver net below.
   "  const addFlagImages = function () {",
   "    return new Promise(function (resolve) {",
   "      const img = new Image();",
@@ -143,11 +133,10 @@ const SCRIPT_LINES = [
   "      img.src = url;",
   "    });",
   "  };",
-  // Fit the whole fetched set only when there is no explicit data-center — the
-  // resolved user/IP center always wins, matching the previous precedence. Re-read
-  // the LIVE center (not just the init snapshot): a geolocation swap that lands
-  // while the geojson fetch is in flight must not be overridden by a whole-region
-  // fitBounds.
+  // Fit the whole fetched set only when there is no explicit data-center; the
+  // resolved user/IP center always wins. Re-read the live center rather than the
+  // init snapshot, so a geolocation swap that lands while the geojson fetch is in
+  // flight is not overridden by a whole-region fitBounds.
   "  const fitToFeatures = function (fc) {",
   "    if (readCenter()) { return; }",
   "    if (!fc || !fc.features || !fc.features.length) { return; }",
@@ -166,19 +155,15 @@ const SCRIPT_LINES = [
   "      try { map.fitBounds(bounds, { padding: 40, maxZoom: 10, animate: false }); } catch (e) {}",
   "    }",
   "  };",
-  // Add the clustered source + its three layers (cluster circle, count label,
-  // unclustered flag icon), then wire the click/cursor handlers. Called once,
-  // after the images are registered and the FeatureCollection is in hand.
+  // Add the clustered source plus its three layers (cluster circle, count label,
+  // unclustered flag icon), then wire the click/cursor handlers.
   //
-  // Clustering is deliberately tuned WEAK: it exists to keep the fully zoomed-out
-  // continental view legible, not to thin out a regional one. clusterRadius is
-  // one icon width (CSS_SIZE, 28 px) rather than the 50 px default, so two
-  // beaches merge only when their flags would genuinely collide; and
-  // clusterMaxZoom 8 turns clustering off entirely from zoom 9 up — the zoom the
-  // map itself opens at once a user location is resolved, so a located visitor
-  // never lands on a bubble. Individual symbols are cheap here (GPU-drawn, and
-  // icon-allow-overlap is already true), so the cost of the looser setting is
-  // only visual density, which is the point.
+  // Clustering is deliberately weak: it keeps the fully zoomed-out continental
+  // view legible rather than thinning out a regional one. clusterRadius is one
+  // icon width (CSS_SIZE) rather than the 50 px default, so two beaches merge
+  // only when their flags would genuinely collide, and clusterMaxZoom 8 turns
+  // clustering off from zoom 9 up, the zoom the map opens at once a user location
+  // is resolved, so a located visitor never lands on a bubble.
   "  const addBeachLayers = function (fc) {",
   "    try {",
   "      map.addSource('beaches', {",
@@ -244,24 +229,21 @@ const SCRIPT_LINES = [
   "        map.easeTo({ center: coords, zoom: zoom });",
   "      }).catch(function () {});",
   "    });",
-  // Unclustered flag click: navigate to the beach page.
   "    map.on('click', 'unclustered', function (e) {",
   "      if (!e.features || !e.features.length) { return; }",
   "      const id = e.features[0].properties.id;",
   "      if (id === undefined || id === null) { return; }",
   "      window.location.href = '/beach/' + encodeURIComponent(id);",
   "    });",
-  // Pointer cursor over both interactive layers.
   "    ['clusters', 'unclustered'].forEach(function (layerId) {",
   "      map.on('mouseenter', layerId, function () { map.getCanvas().style.cursor = 'pointer'; });",
   "      map.on('mouseleave', layerId, function () { map.getCanvas().style.cursor = ''; });",
   "    });",
   "  };",
-  // Everything above only DEFINES things; nothing has touched the library yet.
   // startMap runs once the dynamic import below resolves: it constructs the map
-  // and wires the lifecycle. readCenter() is called HERE, not at parse time, so
-  // a geolocation swap that lands while the module is still downloading is
-  // picked up by the construction itself.
+  // and wires the lifecycle. readCenter() is called here, not at parse time, so a
+  // geolocation swap that lands while the module is still downloading is picked
+  // up by the construction itself.
   "  const startMap = function (mod) {",
   "    maplibre = mod;",
   "    const initialCenter = readCenter();",
@@ -274,35 +256,31 @@ const SCRIPT_LINES = [
   // keyboard: false disables MapLibre's KeyboardHandler so the visual-only map
   // never captures arrow/+/- keys; it is not in the tab order to begin with.
   "        keyboard: false,",
-  // attributionControl: false — the compact control's attribution <a href> links
-  // are populated asynchronously (on styledata, after construction), so they would
-  // become focusable descendants of the aria-hidden mount at a lifecycle point no
-  // synchronous sweep could reach. Disabling it leaves the map with NO focusable
-  // control chrome ever; OpenFreeMap's required OpenStreetMap credit is rendered
-  // as static footer text instead (renderFooter in render.js).
+  // The compact attribution control's <a href> links are populated
+  // asynchronously, on styledata after construction, so they would become
+  // focusable descendants of the aria-hidden mount at a lifecycle point no
+  // synchronous sweep could reach. OpenFreeMap's required OpenStreetMap credit is
+  // rendered as static footer text instead (renderFooter in render.js).
   "        attributionControl: false",
   "      });",
   "    } catch (e) {",
   "      return;",
   "    }",
   // MapLibre 6 reports a failed GPU/WebGL2 context through the map's 'error'
-  // event (GPUInitializationError) instead of throwing out of the constructor,
-  // so the try/catch above no longer covers the browser-can't-render case.
-  // Listening keeps that — and any tile/source error — a logged no-op rather
-  // than an unhandled console error; the page still has its beach list.
+  // event (GPUInitializationError) rather than throwing out of the constructor,
+  // so the try/catch above does not cover the browser-cannot-render case.
+  // Listening keeps that, and any tile/source error, a logged no-op.
   "    map.on('error', function (e) {",
   "      console.log('map error: ' + ((e && e.error && e.error.message) || 'unknown'));",
   "    });",
   // The canvas is the only always-present focusable-ish node; keep it out of the
-  // tab order. With no attribution control (and no NavigationControl), it is the
-  // whole story — the aria-hidden mount holds no focusable node at any lifecycle
-  // point, before or permanently without tile load.
+  // tab order.
   "    try { map.getCanvas().setAttribute('tabindex', '-1'); } catch (e) {}",
   // Safety net: if a layer ever references an unregistered icon-image, register a
   // 1px transparent placeholder so MapLibre neither throws nor spams the console.
-  // MapLibre 6 demoted 'styleimagemissing' to a notify-only event — a listener
-  // can no longer satisfy the request it is told about — so the net has to be a
-  // missing-image RESOLVER, which is awaited before the image is given up on.
+  // MapLibre 6 made 'styleimagemissing' notify-only, so a listener cannot satisfy
+  // the request it is told about and the net has to be a missing-image resolver,
+  // which is awaited before the image is given up on.
   "    try {",
   "      map.setMissingStyleImageResolver(function (id) {",
   "        if (map.hasImage(id)) { return; }",
@@ -310,9 +288,8 @@ const SCRIPT_LINES = [
   "      });",
   "    } catch (e) {}",
   "    map.on('load', function () {",
-  // The canvas/focusable sweep runs synchronously at construction above (an
-  // aria-hidden subtree must never hold a focusable node, even if tiles never
-  // load); this handler only fetches the beach directory once the style is ready.
+  // This handler only fetches the beach directory once the style is ready; the
+  // focusable sweep already ran synchronously at construction.
   "      if (typeof fetch === 'undefined') { return; }",
   "      addFlagImages().then(function () {",
   "        return fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } });",
@@ -325,11 +302,11 @@ const SCRIPT_LINES = [
   "      }).catch(function () {});",
   "    });",
   "  };",
-  // Proximity swap (geoScript.js): the source already holds every beach, so this
-  // is a pure re-center on the updated data-center — no refetch, no rebuild.
-  // Registered at parse time, before the import resolves, so it is never missed;
-  // a swap that arrives with no map yet is simply dropped, because startMap's
-  // own readCenter() will pick that same live attribute up at construction.
+  // Proximity swap (geoScript.js): a pure re-center on the updated data-center,
+  // with no refetch or rebuild. Registered at parse time, before the import
+  // resolves, so it is never missed; a swap that arrives with no map yet is
+  // dropped, because startMap's own readCenter() picks that same live attribute
+  // up at construction.
   "  document.addEventListener('swimreport:nearupdate', function () {",
   "    if (!map) { return; }",
   "    const updated = readCenter();",
@@ -339,8 +316,8 @@ const SCRIPT_LINES = [
   "      } catch (e) {}",
   "    }",
   "  });",
-  // MapLibre 6 ships ESM only. import() works in a classic script, keeps the
-  // failure path silent, and never blocks the parser.
+  // import() works in a classic script, keeps the failure path silent, and never
+  // blocks the parser.
   "  import(MAPLIBRE_MODULE_URL).then(startMap).catch(function () {});",
   "})();"
 ];

@@ -1,7 +1,6 @@
 // test/nyOprhpBeachStatus.test.js
 // Unit tests for the NY OPRHP Beach Status water-quality FLOOR source.
-// Pure parsers only — no network. Project style: ES modules, NO template
-// literals, string concat with +, function () {} callbacks.
+// Pure parsers only, no network.
 import { describe, it, expect } from "vitest";
 import {
   parseNyOprhpBeachStatus,

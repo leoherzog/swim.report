@@ -3,7 +3,7 @@
 // eccc_zone (not yet enriched for either authority) must get an estimate
 // whose reason carries the explicit "Weather alerts not yet available for
 // this beach" caveat, while an enriched beach whose alerts fetch merely
-// failed this run must NOT.
+// failed this run must not.
 // The network is stubbed to fail entirely, so every client returns null and
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -54,7 +54,7 @@ function makeEnv(beachRows, kvSeed) {
     : new Map(Object.entries(kvSeed || {}));
   // Every bind() call is recorded (sql + args) so the demand-ordering tests
   // can assert on the SELECT's ORDER BY shape and its single bound cutoff arg;
-  // the returned statement supports BOTH .all() (the candidate SELECT) and
+  // the returned statement supports both .all() (the candidate SELECT) and
   // .run() (the per-beach UPDATEs), since the same stub backs both call sites.
   const preparedBinds = [];
   // Every env.DB.batch(...) call, in the order D1 received it. The water-temp
@@ -449,9 +449,9 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
 });
 
 // flag_history (migration 0006) is the calibration signal: one row per beach
-// per run ONLY when that beach has BOTH a fresh estimate AND a scraped official
+// per run only when that beach has both a fresh estimate AND a scraped official
 // color this run. Estimate-only rows must never be logged, or the table would
-// grow with all ~613 beaches hourly.
+// grow by one row per beach every hour.
 function makeBatchRecordingEnv(beachRows) {
   const kvPuts = new Map();
   const kvStore = new Map();
@@ -548,7 +548,7 @@ describe("runFlagRecompute flag_history calibration logging", function () {
         nws_grid_url: null
       }),
       // Alpena beach: gets an estimate but matches no scraper -> no official ->
-      // must NOT appear in flag_history.
+      // must not appear in flag_history.
       makeBeachRow({ id: "osm-node-alpena", name: "Alpena Beach", lat: 44.8, lon: -83.3 })
     ]);
     await runHourlyCron(made.env);
@@ -712,7 +712,7 @@ describe("scraper health season/cadence gate (healthMonitored)", function () {
 
 // The hourly recompute's wind-fallback wiring: windSpeedMph/windGustMph come
 // from the same "waveinput:" KV payload the offline wave pipeline wrote, and the
-// { label: "Wind Forecast" } source entry is pushed ONLY when the payload's
+// { label: "Wind Forecast" } source entry is pushed only when the payload's
 // waveHeightFt is null (wind is a fallback, never a co-signal).
 describe("runFlagRecompute wind fallback from waveinput: KV", function () {
   afterEach(function () {
@@ -1076,7 +1076,7 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
     const hotIdx = sql.indexOf("(last_viewed IS NOT NULL AND last_viewed >= ?1) DESC");
     const recomputeIdx = sql.indexOf("recompute_updated ASC, id ASC");
     expect(hotIdx).toBeGreaterThan(-1);
-    // The hot guard MUST precede the pre-existing rotation key — NULLS/never-
+    // The hot guard must precede the pre-existing rotation key — NULLS/never-
     // viewed rows evaluate the guard to 0 and sort after hot rows into the
     // unchanged recompute_updated/id rotation.
     expect(recomputeIdx).toBeGreaterThan(hotIdx);
@@ -1124,7 +1124,7 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
 
 // ---------------------------------------------------------------------------
 // Integration coverage for the registered sources: ECCC marine warnings raising
-// a Canadian beach, a raise-only water-quality floor lifting a green (and NOT
+// a Canadian beach, a raise-only water-quality floor lifting a green (and not
 // lowering a hazard red), and an official scraper overriding via KV. All run
 // through the real cron handler + registries; only upstream fetch is stubbed.
 // ---------------------------------------------------------------------------
@@ -1328,13 +1328,8 @@ describe("runFlagRecompute - registered-source integration", function () {
 // The 6-hourly cron: the bounded-concurrency write pool and the wave_updated
 // rotation cursor it stamps.
 //
-// These lock the behavior that replaced the production failure mode: the cron
-// wrote ~1450 KV keys with a SEQUENTIAL await env.FLAGS.put per beach, had no
-// budget of any kind, and was SIGKILLed at 899.989 s of workerd's 900 s
-// scheduled ceiling — mid-loop, so its post-loop cursor batch never ran, the
-// step that writes "watertemp:" was never reached at all, and the invocation
-// left three log lines and no completion record. Everything below is an
-// assertion about what a truncated run must still deliver.
+// Everything below asserts what a truncated run must still deliver against
+// workerd's 900 s scheduled ceiling: a persisted prefix, not nothing.
 // ---------------------------------------------------------------------------
 
 // Every "UPDATE beaches SET wave_updated" statement the run batched, in the
@@ -1447,7 +1442,7 @@ describe("runWaterTempRefresh bounded-concurrency write pool", function () {
       "index: water temp write failed for beach osm-node-30: kv put rejected"
     );
     expect(logged.indexOf("pool: worker threw")).toBe(-1);
-    // The failed beach is NOT stamped: it persisted nothing, so advancing its
+    // The failed beach is not stamped: it persisted nothing, so advancing its
     // wave_updated cursor would send a beach with no data to the BACK of the
     // rotation. Unstamped means NULL, which sorts first next run. The RUN is
     // still complete — failures= carries the one bad put and truncated= stays
@@ -1496,7 +1491,7 @@ describe("runWaterTempRefresh bounded-concurrency write pool", function () {
   });
 });
 
-// The NDBC water-temperature pass (DISPLAY-ONLY: it colors no flag and never
+// The NDBC water-temperature pass (display-only: it colors no flag and never
 // reaches src/rules.js) is the whole of the 6-hourly cron, and the only writer
 // of "watertemp:". Many beaches share one station, so the pass dedups by station
 // id; every put rides the bounded-concurrency write pool.
@@ -1527,7 +1522,7 @@ function ndbcTextResponse(body) {
 }
 
 // n beach rows sitting on NDBC station 45164 (Cleveland, OH), so nearestStation
-// resolves the SAME station for every one of them and the pass must dedup down
+// resolves the same station for every one of them and the pass must dedup down
 // to a single realtime2 fetch.
 function clevelandBeaches(n) {
   const rows = [];

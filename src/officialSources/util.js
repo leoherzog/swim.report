@@ -1,12 +1,11 @@
-// src/officialSources/util.js
-// Shared helpers for the official-source scrapers. This module imports only
-// the dependency-free src/geo.js, so any scraper can import it without ever
-// creating a cycle through src/officialSources/index.js (which imports every
-// scraper; a scraper importing index.js back would hit the scrapers-array
-// TDZ during module evaluation).
+// src/officialSources/util.js — shared helpers for the official-source scrapers.
+// It imports only the dependency-free src/geo.js, so a scraper can import it
+// without creating a cycle through src/officialSources/index.js: that module
+// imports every scraper, so a scraper importing it back would hit the
+// scrapers-array TDZ during module evaluation.
 //
-// Everything here is either pure or (for fetchText) a thin network wrapper
-// used exclusively on the cron path. No Date.now(), no ambient clock.
+// Everything here is pure except fetchText, a thin network wrapper used only on
+// the cron path. No Date.now(), no ambient clock.
 
 import { distanceMi } from "../geo.js";
 
@@ -24,9 +23,9 @@ export function ageDays(nowMs, thenMs) {
 // official tier and must outrank red).
 export const FLAG_SEVERITY = { green: 1, yellow: 2, red: 3, "double-red": 4 };
 
-// Cron-side only. Fetches url and returns its body text, or null on ANY
-// failure (non-2xx status, network error, body read error) — never throws
-// across the module boundary. This wraps ONLY the fetch + ok-check + text;
+// Cron-side only. Fetches url and returns its body text, or null on any failure
+// (non-2xx status, network error, body read error); it never throws across the
+// module boundary. It wraps only the fetch, ok-check and text read;
 // parsing stays inside each scraper so a parse failure keeps degrading to
 // null in the scraper's own defensive code.
 // options:
@@ -69,7 +68,7 @@ export async function fetchText(url, options) {
 // Never throws; a non-string yields "".
 //
 // This is the CONSERVATIVE table-cell chain shared verbatim by the scrapers
-// that parse a server-rendered <td> grid. It is deliberately NOT a union of
+// that parse a server-rendered <td> grid. It is deliberately not a union of
 // every entity chain in this project: several scrapers strip FULL-PAGE HTML
 // into a bounded character window that gates a floor color, and adding an
 // entity to their decode step demonstrably changes whether a floor is raised
@@ -120,7 +119,7 @@ export function extractTableRowsRaw(html) {
 }
 
 // Pure. True if any needle in needles is a substring of hay. Compares the
-// strings EXACTLY as given (no case folding) — callers that need
+// strings exactly as given (no case folding) — callers that need
 // case-insensitivity lowercase both sides themselves. Use matchesAnyAlias
 // below when the needles are a curated all-lowercase alias list.
 export function containsAny(hay, needles) {
@@ -133,7 +132,7 @@ export function containsAny(hay, needles) {
 }
 
 // Pure. True when any alias appears as a substring of haystack. Lowercases
-// ONLY the haystack: every curated alias array in this project is already
+// only the haystack: every curated alias array in this project is already
 // lowercase by convention, so folding the aliases too would be wasted work
 // and would quietly hide a mis-cased curation entry. A non-string haystack or
 // a non-array aliases list yields false.

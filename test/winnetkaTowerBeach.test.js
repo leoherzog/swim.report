@@ -12,10 +12,9 @@ import { makeBeach } from "./helpers/beach.js";
 
 const NOW_ISO = "2026-07-21T21:43:00.000Z";
 
-// Trimmed but structurally faithful fixture mirroring the real
-// rainoutline.com response (confirmed live 2026-07-22): the status2 span,
-// the "&nbsp;-&nbsp;" separator, free-text reason, then the "Last updated"
-// clue span on the next line.
+// Trimmed but structurally faithful fixture mirroring the rainoutline.com
+// response: the status2 span, the "&nbsp;-&nbsp;" separator, free-text reason,
+// then the "Last updated" clue span on the next line.
 function buildPage(statusHtml, lastUpdatedLine) {
   return "<div class=\"floatleft gridcell7 padding5\">" +
     statusHtml +

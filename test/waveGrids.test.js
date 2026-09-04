@@ -137,10 +137,11 @@ describe("waterClassAllowsGrid", function () {
     expect(waterClassAllowsGrid("", gridById("noaa_glwu"))).toBe(true);
   });
 
-  it("gates BOTH directions, so neither arm may be short-circuited away", function () {
-    // The lake direction happens to be covered a second time by gfswave's land mask.
-    // The ocean direction is covered by this gate ALONE: nothing stops an ocean
-    // beach inside the GLWU window from sampling the lakes model if it goes.
+  it("gates both directions, so neither arm may be short-circuited away", function () {
+    // The lake direction happens to be covered a second time by gfswave's land
+    // mask. The ocean direction is covered by this gate alone: nothing stops an
+    // ocean beach inside the GLWU window from sampling the lakes model if it
+    // goes.
     expect(waterClassAllowsGrid("ocean", gridById("noaa_glwu"))).toBe(false);
     expect(waterClassAllowsGrid("great_lake", gridById("noaa_gfswave"))).toBe(false);
   });
@@ -161,10 +162,10 @@ describe("waterClassAllowsGrid", function () {
 // keeps such a beach off ocean values on a lake is not the water_class gate — the
 // gate lets it through — but ORDER plus gfswave's land mask.
 describe("the NULL water_class fallthrough at a Great Lakes beach", function () {
-  // Chicago 63rd Street Beach: inside the GLWU window AND inside gfswave global.
+  // Chicago 63rd Street Beach: inside the GLWU window and inside gfswave global.
   const PENDING_LAKE_BEACH = { id: "b-63rd", lat: 41.78, lon: -87.58, water_class: null };
 
-  it("offers GLWU BEFORE gfswave, so the lake model answers first", function () {
+  it("offers GLWU before gfswave, so the lake model answers first", function () {
     const ids = candidateGrids(PENDING_LAKE_BEACH, GRIDS).map(function (g) { return g.id; });
     expect(ids).toEqual(["noaa_glwu", "noaa_gfswave"]);
   });
@@ -199,7 +200,7 @@ describe("nearestWetSample over a masked gfswave plane", function () {
     });
   }
 
-  it("is not vacuously null — one wet cell at the containing cell IS found", function () {
+  it("is not vacuously null: one wet cell at the containing cell is found", function () {
     const lat = 43.5;
     const lon = -87.0;
     const col = Math.floor((lon - header.originLon) / header.pixelLon);

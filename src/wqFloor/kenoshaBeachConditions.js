@@ -1,17 +1,7 @@
-// src/wqFloor/kenoshaBeachConditions.js
+// src/wqFloor/kenoshaBeachConditions.js — a raise-only water-quality floor source
+// (E. coli); see src/wqFloor/index.js for the floor contract.
 //
-// KIND: wq — RAISE-ONLY water-quality FLOOR source (src/wqFloor registry, NOT
-// an official scraper). Its site colors feed rules.js estimateFlag's
-// "waterQualityAdvisory" input (step 7), where an active E. coli advisory can
-// RAISE a flag UP to yellow/red (worst-of by SEVERITY_RANK) but can NEVER pull
-// a hazard estimate down. A clean/OPEN reading is modeled as the ABSENCE of a
-// site (resolves to null -> zero color effect), so a clean-water status can
-// never mask a wave/rip/alert red. This is water quality (E. coli), a
-// DIFFERENT axis from the posted-flag hazard sources — it must live here, not
-// in src/officialSources/ (an official color OVERRIDES the estimate
-// everywhere).
-//
-// SOURCE: Kenosha County, WI "Beach Conditions" page — a server-rendered HTML
+// Source: Kenosha County, WI "Beach Conditions" page — a server-rendered HTML
 // table. GET https://www.kenoshacountywi.gov/348/Beach-Conditions
 // Each table row reads roughly: "<beach name> <N> MPN/100mL <STATUS> <date>"
 // (inland-lake rows instead read "<N> E.coli/100 mL"; the unit text is not
@@ -23,7 +13,7 @@
 //
 // FETCH URL CONFIRMED LIVE 2026-07 (fetched via WebFetch to confirm the table
 // contents and column order: Beach Name | E.coli Result | Condition |
-// Sampling Date). The exact underlying HTML tag/class structure was NOT
+// Sampling Date). The exact underlying HTML tag/class structure was not
 // directly observable through the fetch tool (it returns rendered/markdown
 // content, not raw markup), so parseKenoshaBeachConditions is written
 // defensively against the STANDARD <table>/<tr>/<td> shape a CivicPlus-style
@@ -47,8 +37,8 @@
 //
 // INTEGRATOR / DEDUP NOTE: register in src/wqFloor/index.js "wqFloorSources"
 // (append; no ordering conflict with the existing NY/USGS sources — disjoint
-// geography). Do NOT add this to src/officialSources/index.js — water quality
-// is a NEW axis, disjoint from every hazard source (wave / rip / NWS+ECCC
+// geography). Do Not add this to src/officialSources/index.js — water quality
+// is a New axis, disjoint from every hazard source (wave / rip / NWS+ECCC
 // alerts), so there is no dedup concern. Its entire color effect is inside the
 // estimate (official:false).
 //
@@ -69,10 +59,10 @@ export const KENOSHA_BEACH_CONDITIONS_URL =
 
 export const KENOSHA_LABEL = "Kenosha County Beach Conditions";
 
-export const KENOSHA_INFO_URL = KENOSHA_BEACH_CONDITIONS_URL;
+const KENOSHA_INFO_URL = KENOSHA_BEACH_CONDITIONS_URL;
 
 // The ~6 Lake Michigan beaches this floor is scoped to (Kenosha County, WI).
-// aliases are lowercase substrings matched BOTH against a table row's name
+// aliases are lowercase substrings matched both against a table row's name
 // cell (to pick the row) and, as resolveSiteForBeach "names", against a
 // swim.report beach's park_name + name. Coordinates are approximate Kenosha,
 // WI lakefront locations (used only as the resolver's proximity fallback when
@@ -110,7 +100,7 @@ export function htmlToText(html) {
 // Pure, exported for tests. Raw HTML -> array of row-cell-text arrays
 // (["Alford Park", "10 MPN/100mL", "OPEN", "07/20/26"], ...), or [] when no
 // <tr> blocks are found at all (a total structural change). Only <td> cells
-// are collected (NOT <th>), so a standard header row built from <th> cells
+// are collected (Not <th>), so a standard header row built from <th> cells
 // naturally yields zero cells and is dropped; a data row with fewer than 3
 // <td> cells is also dropped silently — both simply never contribute a row.
 // Never throws. The <tr>/<td> walk itself lives in the shared
@@ -190,7 +180,7 @@ export function parseSamplingDate(raw) {
 }
 
 // Pure, exported for tests. Row-cell-text arrays -> sites[] | null.
-//   - null ONLY when zero rows resolved to a curated Lake Michigan beach at
+//   - null only when zero rows resolved to a curated Lake Michigan beach at
 //     all — i.e. the table shape/column order has drifted so far that none of
 //     the ~6 curated names were ever recognized. That is the health-failure
 //     signal (fail closed, never a guessed color).
@@ -198,7 +188,7 @@ export function parseSamplingDate(raw) {
 //     all-clear case) — a SUCCESSFUL parse with nothing to report.
 //   - one site per curated beach currently reading ADVISORY or CLOSED.
 // Expects cells in [name, ecoliReading, status, date] order (Kenosha County's
-// published column order as of 2026-07); a row with fewer than 3 cells never
+// published column order); a row with fewer than 3 cells never
 // reaches here (extractTableRows already dropped it).
 export function parseKenoshaBeachConditions(rows, nowIso) {
   if (!Array.isArray(rows)) {

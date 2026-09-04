@@ -2,59 +2,42 @@
 // classification, run from GitHub Actions on Deno (see
 // .github/workflows/discovery.yml and docs/offline-discovery.md).
 //
-// WHY THIS EXISTS
-// The in-Worker crons that once did discovery + classification worked a rationed
-// handful of rows at a time because a Cloudflare Worker invocation is bounded
-// (CPU / subrequest / wall-clock caps). Those are *pipeline* concerns (run
-// occasionally, tolerate hours of latency, produce a table), not *serving*
-// concerns. This script runs the same discovery and classification logic —
-// imported verbatim from src/ so it can never diverge — as a plain offline
-// batch: a loop that can run for minutes, emit one idempotent .sql file, and
-// bulk-load it into production D1 via
+// Discovery and classification are pipeline work, not serving work: they run
+// occasionally, tolerate hours of latency and produce a table. This script runs
+// that logic — imported verbatim from src/ so it can never diverge — as a plain
+// offline batch that loops for minutes, emits one idempotent .sql file and
+// bulk-loads it into production D1 via
 //   wrangler d1 execute swim-report --remote --file=<out>
-// The Worker keeps serving + the hourly recompute + the 6-hourly wave refresh +
-// NWS/ECCC/webcam enrichment; only discovery + classification live here.
+// The Worker keeps serving, the hourly recompute, the water-temperature refresh
+// and NWS/ECCC/webcam enrichment.
 //
-// TWO-PATH RULE: unchanged. The Worker request path still reads only D1 + KV.
-// This is a third, OFFLINE path that writes D1 out-of-band — it never runs
+// The two-path rule is unchanged: the Worker request path still reads only D1 and
+// KV. This is a third, offline path that writes D1 out of band and never runs
 // inside the Worker.
 //
-// NO UPSTREAM QUERIES AT ALL
-// This batch makes ZERO network requests. Both halves of the pipeline read
-// PREBUILT SPATIAL LAYERS (FlatGeobuf files published to R2 by
-// .github/workflows/build-layers.yml and downloaded, verified and reported on by
-// scripts/fetch-layers.js in a separate step). Discovery is a local scan
-// (src/layerDiscovery.js) and classification is a local spatial join
+// The batch makes zero network requests. Both halves read prebuilt spatial layers
+// (FlatGeobuf files published to R2 by .github/workflows/build-layers.yml, then
+// downloaded, verified and reported on by scripts/fetch-layers.js). Discovery is a
+// local scan (src/layerDiscovery.js) and classification a local spatial join
 // (src/layerSignals.js) against segment grids built once per run. The workflow
-// therefore runs this script with --allow-read --allow-write and NO --allow-net,
-// which is the machine-enforced form of that claim: any surviving --allow-net on
-// a discovery-batch.js invocation anywhere in this repo is a leftover upstream
-// call, findable by one grep.
+// runs this with --allow-read --allow-write and no --allow-net, which is the
+// machine-enforced form of that claim: any surviving --allow-net on a
+// discovery-batch.js invocation is a leftover upstream call, findable by one grep.
 //
-// THE INVERTED FAILURE MODE — read this before touching the delete path.
-// Under the old per-tile transport, failure was NOISY and DELETE-SAFE: a bad
-// response made a tile fail, coverage went incomplete, and reconciliation was
-// skipped. Under prebuilt layers the failure mode INVERTS. A wrong tag filter
-// exits 0, the build exits 0, the manifest is well-formed, every checksum
-// matches, and this run confidently DELETEs every beach the filter failed to
-// match. Silent, valid-looking, and delete-bearing. That inversion is why the
-// gate is now a MANIFEST predicate (src/layerManifest.js), why the proportional
-// delete rail tightened from 25% to 5% with a per-REGION rail beside it, and why
-// mass RE-CLASSIFICATION now has a rail of its own — deciding "inland" hides a
-// beach, which is product loss of the same family as a wrong delete, arrives
-// faster, and is invisible in the row count.
+// The inverted failure mode — read this before touching the delete path. A wrong
+// tag filter exits 0, the build exits 0, the manifest is well-formed, every
+// checksum matches, and this run confidently deletes every beach the filter failed
+// to match: silent, valid-looking and delete-bearing. That is why the gate is a
+// manifest predicate (src/layerManifest.js), why the proportional delete rail is
+// tight and has a per-region rail beside it, and why mass re-classification has a
+// rail of its own. Deciding "inland" hides a beach, which is product loss of the
+// same family as a wrong delete, arrives faster, and is invisible in the row
+// count.
 //
-// Project style: ES modules, const/let only, string concatenation with + (never
-// template literals), console for logging. Runs on Deno (Deno.args /
-// readTextFile / writeTextFile / exit).
-//
-// NPM DEPENDENCIES: exactly one, and only through scripts/lib/fgbReader.js,
-// which imports the flatgeobuf decoder via the bare specifier the committed
-// deno.json import map resolves (and which vitest resolves through the
-// package.json devDependency). Every src/ module reached from here is still
-// dependency-free. The workflows run "deno cache --lock=deno.lock --frozen"
-// before this script so the only DELETE-bearing job in the repo never resolves
-// an unpinned transitive tree from the network.
+// Exactly one npm dependency, reached only through scripts/lib/fgbReader.js. Every
+// src/ module reached from here is dependency-free. The workflows run
+// "deno cache --lock=deno.lock --frozen" first, so the only delete-bearing job in
+// the repo never resolves an unpinned transitive tree from the network.
 
 import { mergeBeachRows } from "../src/discovery.js";
 import { classifyLayerFeature, discoverFromLayers } from "../src/layerDiscovery.js";
@@ -86,75 +69,63 @@ import { readFgbStream, readLayerFile } from "./lib/fgbReader.js";
 
 // --- Constants --------------------------------------------------------------
 // The discovery regions and the point-in-region predicate come from the
-// standalone src/regions.js (pure data + one pure function, no Worker import
-// graph), so this offline batch and the Worker share ONE definition. The
-// reconciliation rails below change rarely and stay local. The water-class
-// constants ARE imported from src/waterClass.js (their single source of truth),
-// so they can never drift.
+// standalone src/regions.js, so this batch and the Worker share one definition.
+// The reconciliation rails below stay local; the water-class constants are
+// imported from src/waterClass.js so they cannot drift.
 
-// GLOBAL proportional delete rail. A run may delete at most
-// max(RECONCILE_MAX_DELETES, ceil(fraction * candidates)) stale rows; beyond
-// that the ENTIRE reconciliation is refused, because a delete set that large is
-// evidence about the layer set as a whole and partial deletes under suspicion
-// are worse than none.
+// Global proportional delete rail. A run may delete at most
+// max(RECONCILE_MAX_DELETES, ceil(fraction * candidates)) stale rows; beyond that
+// the entire reconciliation is refused, because a delete set that large is
+// evidence about the layer set as a whole and partial deletes under suspicion are
+// worse than none.
 //
-// THE FRACTION IS 0.05, NOT 0.25. 0.25 was calibrated for the old per-tile
-// transport, where partial coverage was a normal, noisy occurrence and a large
-// legitimate delete set was plausible. Under prebuilt layers coverage is either
-// verified-complete or gated off entirely, so a 25%-of-candidates delete run is
-// never legitimate — and against the measured production table (1669 rows, 982
-// of them park-origin delete candidates) 0.25 permitted 246 silent deletes, i.e.
-// ~15% of the whole table in one run. That allowance waved through every
-// regression worth naming: a 9% parks-layer shrink is ~88 deletes, a 15%
-// single-region parks loss is ~45, and a clip-mask bug that zeroes Lake Ontario
-// is 80. At 0.05 the global allowance is ~50 and all three are refused. The cost
-// of a FALSE refusal is close to zero — the row simply is not deleted this run
-// and reconciliation retries tomorrow — which is what makes the tight number the
-// right trade.
+// Coverage under prebuilt layers is either verified-complete or gated off
+// entirely, so a delete run reaching a quarter of the candidate set is never
+// legitimate. At 0.05 a single-digit-percent parks-layer shrink, a single-region
+// parks loss and a clip-mask bug that zeroes one lake are all refused. A false
+// refusal costs close to nothing — the row is simply not deleted this run and
+// reconciliation retries tomorrow — which is what makes the tight number the right
+// trade against an irreversible delete.
 const RECONCILE_MAX_DELETES = 10;
 const RECONCILE_MAX_DELETE_FRACTION = 0.05;
 
-// PER-REGION proportional delete rail, applied after the global one. The global
+// Per-region proportional delete rail, applied after the global one. The global
 // rail's protection asymptotes toward zero as the number of independently
 // breakable clip masks grows: a bug that zeroes one region's parks is a small
-// fraction of the global candidate set and passes. Each region therefore gets
-// its own allowance over its own candidates.
+// fraction of the global candidate set and passes. Each region gets its own
+// allowance over its own candidates.
 //
-// THE FLOOR IS 2, NOT 10. The region tail is tiny — Niagara has 5 park-origin
-// candidates and St. Marys 6 — so a floor of 10 makes the rail VACUOUS for
-// exactly the three regions a global rail can never protect. A floor of 2 still
-// absorbs the legitimate swing (one mapper deleting a couple of polygons)
-// without admitting a whole-region wipe.
+// The floor is 2, not 10. The region tail is single-digit, so a floor of 10 makes
+// the rail vacuous for exactly the regions a global rail can never protect. A
+// floor of 2 still absorbs one mapper deleting a couple of polygons without
+// admitting a whole-region wipe.
 const REGION_RECONCILE_MIN_DELETES = 2;
 const REGION_RECONCILE_MAX_DELETE_FRACTION = 0.05;
 
-// The CLASSIFICATION flip rail (see classificationFlipRailAllows). There were
-// four rails on deletes and none at all on mass re-classification, while the
-// design's own argument is that deciding "inland" HIDES a beach and is product
-// loss of the same family as deleting it. 100% of the flag-worthy rows served
-// today classify through a single code path; one broken build plus a
-// WATER_CLASS_VERSION bump would re-decide all of them in one delta and empty
-// the site, with the row count unchanged and every delete rail green.
+// The classification flip rail (see classificationFlipRailAllows). Deciding
+// "inland" hides a beach, which is product loss of the same family as deleting it,
+// and every flag-worthy row served classifies through one code path: a broken
+// build plus a WATER_CLASS_VERSION bump would re-decide all of them in one delta
+// and empty the site, with the row count unchanged and every delete rail green.
 const CLASSIFY_MAX_HIDE_FLIPS = 10;
 const CLASSIFY_MAX_HIDE_FRACTION = 0.10;
 
 const FLAG_HISTORY_RETENTION_DAYS = 90;
-// A re-discovered beach whose centroid moved > this (~0.001 deg ~ 80-111 m at
-// Great Lakes latitudes) may now sit on different water — its water_class is
-// reset so it re-classifies. Mirrors the "moved" fragment in the Worker's
-// historic upsert.
+// A re-discovered beach whose centroid moved further than this (~80-111 m at
+// Great Lakes latitudes) may sit on different water, so its water_class is reset
+// and it re-classifies.
 const WATER_CLASS_MOVE_DEG = 0.001;
 
-// The published layer FILES, fanned out to the LOGICAL layers the consumers
-// take. Splits exist because one FlatGeobuf file holds exactly one geometry
-// type, so a logical layer that legitimately arrives as several geometry types
-// is published as several files and re-concatenated here.
+// The published layer files, fanned out to the logical layers the consumers take.
+// One FlatGeobuf file holds exactly one geometry type, so a logical layer that
+// legitimately arrives as several geometry types is published as several files and
+// re-concatenated here.
 //
-// other-relations.fgb is deliberately NOT in any list: it carries BOTH halves
-// (beach relations GDAL could not assemble into a polygon, and park relations
-// map_to_area produced no area for) and is split by tag through
-// splitOtherRelations below. Publishing it was not optional — a beach that
-// arrives only as an unassemblable relation vanishes entirely otherwise.
+// other-relations.fgb is deliberately in none of these lists: it carries both
+// halves — beach relations GDAL could not assemble into a polygon, and park
+// relations map_to_area produced no area for — and is split by tag through
+// splitOtherRelations below. Publishing it is not optional, because a beach
+// arriving only as an unassemblable relation would otherwise vanish.
 export const LAYER_FILES = {
   beaches: ["beaches-point.fgb", "beaches-line.fgb", "beaches-polygon.fgb"],
   parksPoly: ["parks-polygon.fgb"],
@@ -177,23 +148,19 @@ function sleep(ms) {
 }
 
 // Pure wall-clock budget predicate for the classify loop. budgetMs <= 0 disables
-// it (always false); otherwise true once (nowMs - startMs) has reached budgetMs.
-// Kept pure + three-arg (no injected clock) so it is trivially unit-testable.
+// it; otherwise true once (nowMs - startMs) has reached budgetMs. Pure and
+// three-arg so it is trivially unit-testable.
 //
-// The production call site does NOT pass a budget any more — the classification
-// pass is a local join, not a per-beach network probe. The Great Lakes cost is
-// now MEASURED rather than predicted: 5.8 s for the whole 1771-beach pass on a
-// GitHub runner (17 s on a slower laptop), inside a 22 s end-to-end batch. The
-// machinery stays wired and tested anyway, because that figure is a Great Lakes
-// figure and the stated goal is every ocean and Great Lakes beach in North
-// America — roughly 6x the table. Re-inventing a budget after a SIGKILLed daily
-// job is strictly worse than keeping one that costs nothing to carry.
+// The production call site passes no budget: the classification pass is a local
+// join, not a per-beach network probe, and the whole pass costs seconds. The
+// machinery stays wired and tested because the target footprint is several times
+// the current table, and carrying it costs nothing.
 export function budgetExhausted(startMs, budgetMs, nowMs) {
   return budgetMs > 0 && (nowMs - startMs) >= budgetMs;
 }
 
-// SQL string literal with single quotes doubled. Used for every text value in
-// the emitted .sql — the ONLY untrusted text is OSM-derived beach/park names.
+// SQL string literal with single quotes doubled. Used for every text value in the
+// emitted .sql; the only untrusted text is OSM-derived beach and park names.
 export function sqlStr(value) {
   if (value === null || value === undefined) {
     return "NULL";
@@ -238,19 +205,18 @@ export function parseArgs(argv) {
     else if (a === "--now") { args.now = argv[++i]; }
     else { throw new Error("unknown argument: " + a); }
   }
-  // Derived AFTER the loop so the default holds regardless of flag order. An
-  // explicit --report always wins; without --layers there is nothing to derive
-  // from and the value stays null (the run then refuses at the guard in main).
+  // Derived after the loop so the default holds regardless of flag order. An
+  // explicit --report wins; without --layers there is nothing to derive from and
+  // the value stays null, so the run refuses at the guard in main.
   if (args.report === null && args.layers !== null) {
     args.report = joinLayerPath(args.layers, "report.json");
   }
   return args;
 }
 
-// Join a layer directory and a file name with exactly one separator. The
-// directory comes from a workflow env var, so a trailing slash is a realistic
-// input and a doubled separator would produce a path that reads fine in a log
-// and fails to open.
+// Join a layer directory and a file name with exactly one separator. The directory
+// comes from a workflow env var, so a trailing slash is realistic and a doubled
+// separator produces a path that reads fine in a log and fails to open.
 export function joinLayerPath(dir, name) {
   const base = String(dir);
   if (base === "" || base.charAt(base.length - 1) === "/") {
@@ -280,13 +246,12 @@ export function parseSnapshot(text) {
 
 // --- The layer set ----------------------------------------------------------
 
-// Pure structural self-check on LAYER_FILES: every published key must be
-// consumed by exactly one logical layer (parks-polygon.fgb is the one deliberate
-// double, feeding both the MEMBERSHIP tier and the NAMING tier), and no list may
-// name a file the build does not publish. A drift here does not throw or warn at
-// runtime — it silently zeroes a logical layer, which is precisely the
-// valid-looking failure the whole gate exists for — so it is asserted instead.
-// Returns { missing, unexpected }; both empty means the plan is sound.
+// Pure structural self-check on LAYER_FILES: every published key must be consumed
+// by exactly one logical layer (parks-polygon.fgb is the one deliberate double,
+// feeding both the membership tier and the naming tier), and no list may name a
+// file the build does not publish. Drift here neither throws nor warns at runtime,
+// it silently zeroes a logical layer, so it is asserted instead. Returns
+// { missing, unexpected }; both empty means the plan is sound.
 export function layerFilePlanProblems() {
   const named = [];
   const keys = Object.keys(LAYER_FILES);
@@ -313,15 +278,13 @@ export function layerFilePlanProblems() {
   return { missing: missing, unexpected: unexpected };
 }
 
-// Split other-relations.fgb into its beach half and its park half by TAG, using
+// Split other-relations.fgb into its beach half and its park half by tag, using
 // the same branch-precedence chain the rest of discovery uses
 // (classifyLayerFeature): natural=beach wins over named-and-park-tagged, which
-// wins over water. A named protected lake carries park tags AND natural=water
-// and must keep donating its name, so the order is load-bearing and is not
-// re-implemented here.
-//
-// Pure; exported for tests. A feature that is neither is dropped: the layer also
-// carries type=site relations that are neither a beach nor a named park.
+// wins over water. A named protected lake carries park tags and natural=water and
+// must keep donating its name, so that order is load-bearing and is not
+// re-implemented here. A feature that is neither is dropped: the layer also
+// carries type=site relations.
 export function splitOtherRelations(features) {
   const beaches = [];
   const parks = [];
@@ -355,15 +318,14 @@ async function readLogicalLayer(dir, fileNames) {
 
 // Load the layer set discoverFromLayers consumes.
 //
-// beaches and parks MUST be materialised: membership, association and the pond
+// beaches and parks must be materialised: membership, association and the pond
 // filter all need whole geometry, not envelopes. coastline and water are
-// materialised too, which is safe ONLY because the build proximity-clips them to
-// the beach set (WATER_CLIP_PAD_DEG ~ 1.1 km) — they are O(beaches), not
-// O(continent). lakes-polygon is the one layer that is never materialised
-// anywhere: it is streamed straight into the signals index below, because six
-// simplified Great Lake polygons are megabytes of coordinates and a GeoJSON
-// coordinate pair costs roughly 10-20x its packed FlatGeobuf footprint in a JS
-// heap.
+// materialised too, which is safe only because the build proximity-clips them to
+// the beach set, making them O(beaches) rather than O(continent). lakes-polygon is
+// never materialised anywhere: it streams straight into the signals index below,
+// because six simplified Great Lake polygons are megabytes of coordinates and a
+// GeoJSON coordinate pair costs roughly 10-20x its packed FlatGeobuf footprint in
+// a JS heap.
 async function loadLayerSet(dir) {
   const beaches = await readLogicalLayer(dir, LAYER_FILES.beaches);
   const parksPoly = await readLogicalLayer(dir, LAYER_FILES.parksPoly);
@@ -382,12 +344,11 @@ async function loadLayerSet(dir) {
   };
 }
 
-// Build the classification index over the SAME arrays discovery already holds,
-// plus a streamed lakes layer. Feeding the in-memory arrays through the
-// three-call builder rather than re-reading the files is not just a saving: it
-// guarantees the two halves of the run see one identical view of the beach set,
-// so "absent from the layer set" (the D21 attempts bump) can never mean "absent
-// from the copy classification happened to read".
+// Build the classification index over the same arrays discovery already holds,
+// plus a streamed lakes layer. Feeding the in-memory arrays through the three-call
+// builder rather than re-reading the files guarantees both halves of the run see
+// one identical view of the beach set, so "absent from the layer set" can never
+// mean "absent from the copy classification happened to read".
 async function buildRunSignalsIndex(dir, layerSet) {
   const builder = beginSignalsIndex();
   for (let i = 0; i < layerSet.beaches.length; i = i + 1) {
@@ -410,10 +371,9 @@ async function buildRunSignalsIndex(dir, layerSet) {
 
 // --- The manifest gate ------------------------------------------------------
 
-// sha256 hex of a UTF-8 string. Web Crypto, so identical under Deno, workerd and
-// node — and identical to what scripts/build-manifest.js computes, which is the
-// whole point: the two sides must agree bit for bit or every run refuses to
-// delete.
+// sha256 hex of a UTF-8 string, through Web Crypto so it is identical under Deno,
+// workerd and node — and identical to what scripts/build-manifest.js computes. The
+// two sides must agree bit for bit or every run refuses to delete.
 async function sha256OfText(text) {
   const bytes = new TextEncoder().encode(text);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -426,10 +386,10 @@ async function sha256OfText(text) {
   return hex;
 }
 
-// Age of the OSM data cutoff in days. Pure; exported for tests. Returns NaN for
-// a missing or unparseable timestamp, which is CORRECT: NaN fails the gate's
-// range check, and refusing to delete because we cannot tell how old the data is
-// is the same answer as refusing because it is too old.
+// Age of the OSM data cutoff in days. Returns NaN for a missing or unparseable
+// timestamp, which is correct: NaN fails the gate's range check, and refusing to
+// delete because the age is unknowable is the same answer as refusing because it
+// is too old.
 export function sourceAgeDays(oldestSourceTimestamp, nowIso) {
   const then = Date.parse(String(oldestSourceTimestamp));
   const now = Date.parse(String(nowIso));
@@ -439,13 +399,13 @@ export function sourceAgeDays(oldestSourceTimestamp, nowIso) {
   return (now - then) / 86400000;
 }
 
-// Fold in the two conjuncts scripts/fetch-layers.js structurally cannot compute:
-// it does not import src/regions.js and it has no run clock. Their ABSENCE from
-// the fetched report is fail-closed by design (a strict !== true refuses exactly
-// as false does), so this must run before the report reaches any predicate.
+// Fold in the two conjuncts scripts/fetch-layers.js cannot compute: it does not
+// import src/regions.js and has no run clock. Their absence from the fetched
+// report is fail-closed by design, since a strict !== true refuses exactly as
+// false does, so this must run before the report reaches any predicate.
 //
-// Pure: returns a NEW object rather than mutating, so a caller holding the
-// fetched report still sees exactly what fetch-layers.js wrote.
+// Returns a new object rather than mutating, so a caller holding the fetched
+// report still sees what fetch-layers.js wrote.
 export function applyRunConjuncts(report, nowIso, regionsDigest) {
   if (report === null || typeof report !== "object" || Array.isArray(report)) {
     return report;
@@ -457,28 +417,26 @@ export function applyRunConjuncts(report, nowIso, regionsDigest) {
   return merged;
 }
 
-// THE DELETE-PATH CHOKE POINT. Same name and same single call site as the
-// predicate it replaces; the input is now a manifest report rather than a pair
-// of per-tile coverage booleans. Kept as a thin wrapper (rather than a bare
-// re-export) so this file still names the invariant it depends on, and so the
-// unit test that proves "unproven coverage means no DELETE" keeps importing it
-// from the module that emits the DELETEs.
+// The delete-path choke point, kept as a thin wrapper rather than a bare re-export
+// so this file names the invariant it depends on, and so the unit test proving
+// "unproven coverage means no delete" keeps importing it from the module that
+// emits the DELETEs.
 //
-// Every conjunct inside is a strict identity comparison, so a MISSING field
-// refuses exactly as an explicitly false one does — which is the realistic
-// failure now that the report is assembled by three separate scripts.
+// Every conjunct inside is a strict identity comparison, so a missing field
+// refuses exactly as an explicitly false one does — the realistic failure, since
+// the report is assembled by three separate scripts.
 export function reconciliationAllowed(report) {
   return manifestReconciliationAllowed(report);
 }
 
-// The WEAKER predicate, and the one classification is gated on. A partial view
-// of OSM makes classifyWaterBody's clean-but-empty branch decide "inland", which
-// HIDES a beach — so genuine INCOMPLETENESS must stop classification. Staleness
-// and a regions-digest mismatch must NOT: a 20-day-old extract's geometry is
-// complete, just older, and a digest mismatch is what an expansion commit
-// produces by construction. Gating classification on either would turn that
-// commit into a mass fail-open event, publishing thousands of unclassified
-// new-coast beaches live with estimated flag cards until a rebuild lands.
+// The weaker predicate, and the one classification is gated on. A partial view of
+// OSM makes classifyWaterBody's clean-but-empty branch decide "inland", which
+// hides a beach, so genuine incompleteness must stop classification. Staleness and
+// a regions-digest mismatch must not: an old extract's geometry is complete, just
+// older, and a digest mismatch is what an expansion commit produces by
+// construction. Gating classification on either would turn that commit into a mass
+// fail-open event, publishing thousands of unclassified new-coast beaches live
+// with estimated flag cards until a rebuild lands.
 export function classificationAllowed(report) {
   return manifestClassificationAllowed(report);
 }
@@ -492,7 +450,7 @@ export function upsertSql(row, hasPark) {
   const lonL = sqlNum(row.lon);
   const osmL = sqlStr(row.osmId);
   // The "moved" guard: an unqualified column in ON CONFLICT ... DO UPDATE is the
-  // EXISTING row value; the literal lat/lon are the newly-discovered centroid.
+  // existing row value; the literal lat/lon are the newly-discovered centroid.
   const moved = " CASE WHEN (abs(lat - " + latL + ") > " + String(WATER_CLASS_MOVE_DEG) +
     " OR abs(lon - " + lonL + ") > " + String(WATER_CLASS_MOVE_DEG) + ") THEN ";
   if (!hasPark) {
@@ -523,13 +481,13 @@ export function deleteBeachSql(id) {
   return "DELETE FROM beaches WHERE id = " + sqlStr(id) + ";";
 }
 
-// --- Stale park-beach reconciliation — THE ONLY DELETE PATH -----------------
+// --- Stale park-beach reconciliation — the only delete path ------------------
 
-// The FIRST REGIONS entry whose bbox contains the point, or null. Pure; exported
-// for tests. Boxes overlap by design, so "first match wins" is the tie-break and
-// it is deterministic because the REGIONS order is fixed source. Bounds are
-// inclusive and non-finite inputs return null, matching pointInAnyRegion exactly
-// — the two must never disagree about whether a row is in scope.
+// The first REGIONS entry whose bbox contains the point, or null. Boxes overlap by
+// design, so first-match-wins is the tie-break, deterministic because REGIONS
+// order is fixed source. Bounds are inclusive and non-finite inputs return null,
+// matching pointInAnyRegion exactly: the two must never disagree about whether a
+// row is in scope.
 export function regionForPoint(lat, lon) {
   if (typeof lat !== "number" || typeof lon !== "number") {
     return null;
@@ -546,19 +504,18 @@ export function regionForPoint(lat, lon) {
   return null;
 }
 
-// Second, per-REGION proportional rail. Buckets candidates and stale rows by
-// regionForPoint and refuses the ENTIRE reconciliation if ANY single region
-// exceeds its own max(REGION_RECONCILE_MIN_DELETES, ceil(fraction * n))
-// allowance. Refusing everything rather than just that region is deliberate: a
-// region-scale anomaly is evidence about the layer set as a whole, and partial
-// deletes under suspicion are worse than none.
+// The per-region proportional rail. Buckets candidates and stale rows by
+// regionForPoint and refuses the entire reconciliation if any single region
+// exceeds its own max(REGION_RECONCILE_MIN_DELETES, ceil(fraction * n)) allowance.
+// Refusing everything rather than just that region is deliberate: a region-scale
+// anomaly is evidence about the layer set as a whole, and partial deletes under
+// suspicion are worse than none.
 //
-// Pure; exported for tests. Returns
-//   { allowed, region, staleCount, allowance, regions }
-// where on REFUSAL region/staleCount/allowance describe the first offending
-// region in REGIONS order, and on ALLOW region is null, staleCount is the total
-// stale rows bucketed and allowance the sum of the per-region allowances. The
-// regions array carries the full per-region tally so the run log can show it.
+// Returns { allowed, region, staleCount, allowance, regions }. On a refusal,
+// region/staleCount/allowance describe the first offending region in REGIONS
+// order; on an allow, region is null, staleCount is the total stale rows bucketed
+// and allowance the sum of the per-region allowances. The regions array carries
+// the full tally for the run log.
 export function regionDeleteRailAllows(candidates, stale) {
   const buckets = new Map();
   const bucketFor = function (name) {
@@ -581,9 +538,8 @@ export function regionDeleteRailAllows(candidates, stale) {
     const row = staleList[i];
     const name = regionForPoint(row.lat, row.lon);
     if (name === null) {
-      // Out-of-region rows are not delete candidates at all (reconcileStaleRows
-      // scopes them out upstream), so one arriving here is a caller bug rather
-      // than a rail decision. Skipping it keeps the rail from silently
+      // reconcileStaleRows scopes out-of-region rows out upstream, so one
+      // arriving here is a caller bug. Skipping it keeps the rail from silently
       // attributing a delete to the wrong region.
       continue;
     }
@@ -632,25 +588,23 @@ export function regionDeleteRailAllows(candidates, stale) {
   };
 }
 
-// Returns the snapshot rows that WILL be deleted this run (post-rails), or []
-// when reconciliation is skipped/refused. SINGLE SOURCE for both the emitted
-// DELETEs and the classify-universe exclusion set, so those can never diverge
-// (an earlier bug computed the exclusion set with a different predicate than the
-// DELETEs). Candidates are UNNAMED-origin park rows (name = park_name) inside
-// any REGION (pointInAnyRegion) from the D1 snapshot; stale = not produced this
-// run.
+// Returns the snapshot rows that will be deleted this run, after the rails, or []
+// when reconciliation is skipped or refused. The single source for both the
+// emitted DELETEs and the classify-universe exclusion set, so those cannot
+// diverge. Candidates are unnamed-origin park rows (name = park_name) inside any
+// region from the D1 snapshot; stale means not produced this run.
 //
-// NOTE on the allowance denominator: candidates come from the PRE-upsert
-// snapshot only, so this run's brand-new park rows are not in it. The stale SET
-// is identical either way (new rows are in producedIds, never stale); only the
-// denominator differs, so this is at most STRICTER. That is the safe direction
-// for a "never mass-delete" rail, so the pre-upsert basis is intentional.
-// NOTE on region scoping: the candidate set is bounded by pointInAnyRegion, so a
-// snapshot row outside every REGION bbox is never a delete candidate. Shrinking
-// a REGION box therefore only ever REMOVES delete candidates (fail-safe), and
-// WIDENING one is refused upstream by the regions-digest conjunct of
-// reconciliationAllowed, because a layer set built before the widening has no
-// features in the new box and every D1 row there would read as gone.
+// The allowance denominator comes from the pre-upsert snapshot only, so this run's
+// brand-new park rows are not in it. The stale set is identical either way, since
+// new rows are in producedIds and never stale; only the denominator differs, which
+// makes this at most stricter — the safe direction for a never-mass-delete rail.
+//
+// The candidate set is bounded by pointInAnyRegion, so a snapshot row outside every
+// REGION bbox is never a delete candidate. Shrinking a REGION box therefore only
+// removes delete candidates, and widening one is refused upstream by the
+// regions-digest conjunct of reconciliationAllowed, because a layer set built
+// before the widening has no features in the new box and every D1 row there would
+// read as gone.
 export function reconcileStaleRows(snapshotRows, producedIds, producedParkRowCount) {
   if (producedParkRowCount === 0) {
     log("reconciliation skipped, run produced 0 park-containment rows");
@@ -682,26 +636,23 @@ export function reconcileStaleRows(snapshotRows, producedIds, producedParkRowCou
   return stale;
 }
 
-// The delete rail's full composition, exported as a real builder so nothing has
-// to mirror main() by hand: reconcileStaleRows decides the set, deleteBeachSql
-// renders it, and both the emitted SQL and the classify-universe exclusion set
-// come from the SAME rows. Returns { rows, statements }.
-// The three run-level preconditions on emitting ANY DELETE, as a pure predicate
-// so the gate is unit-testable. main() is orchestration and is deliberately not
-// exercised by the suite, so every decision it makes that can destroy data is
-// pulled out to here — the same reason reconciliationDelta and the SQL builders
-// are exported rather than inlined.
+// The delete rail's full composition, a real builder so nothing has to mirror
+// main() by hand: reconcileStaleRows decides the set, deleteBeachSql renders it,
+// and both the emitted SQL and the classify-universe exclusion set come from the
+// same rows. Returns { rows, statements }.
+// The three run-level preconditions on emitting any DELETE, as a pure predicate so
+// the gate is unit-testable. main() is orchestration and is not exercised by the
+// suite, so every decision it makes that can destroy data is pulled out to here.
 //
-// hasPark is a precondition and not merely a warning because the delete-candidate
-// set is EXCLUSIVELY park-origin rows (park_name != null && name === park_name).
-// parksLayerHealthy is the only signal that says the parks layer is
-// under-populated, and an under-populated parks layer makes real beaches fail
-// park membership, drop out of producedIds, and read as stale. The proportional
-// rails cannot see that band: a parks build at 0.96x clears every build gate
-// (they refuse below 0.95x) while producing roughly 39 deletes against a global
-// allowance of 50. A false refusal costs one skipped day of reconciliation and
-// retries; a false delete is irreversible and discards enrichment that took weeks
-// of cron runs to acquire.
+// hasPark is a precondition rather than a warning because the delete-candidate set
+// is exclusively park-origin rows (park_name != null && name === park_name).
+// parksLayerHealthy is the only signal that the parks layer is under-populated,
+// and an under-populated parks layer makes real beaches fail park membership, drop
+// out of producedIds and read as stale. The proportional rails cannot see that
+// band: a parks build at 0.96x clears every build gate, which refuse below 0.95x,
+// while producing enough deletes to sit just under the global allowance. A false
+// refusal costs one skipped day of reconciliation; a false delete is irreversible
+// and discards enrichment that took weeks of cron runs to acquire.
 export function reconciliationGate(coverageComplete, hasPark, hasSnapshot) {
   if (!coverageComplete) {
     return {
@@ -732,23 +683,22 @@ export function reconciliationDelta(snapshotRows, producedIds, producedParkRowCo
 }
 
 // --- Offline marine_zone derivation ------------------------------------------
-// Replaces the retired in-Worker marine-enrichment cron (up to 17 live NWS
-// probes per beach, 4x daily) with pure local math against the repo-committed
-// data/marine-zones-greatlakes.json (see src/marineZones.js and
-// scripts/build-marine-zones.js). Pure builder, mirrors reconcileStaleRows:
-//   - operates ONLY on snapshot rows (a beach discovered THIS run resolves on
-//     the next daily run, after the in-Worker NWS enrichment stamps nws_zone);
+// Pure local math against the repo-committed data/marine-zones-greatlakes.json
+// (see src/marineZones.js and scripts/build-marine-zones.js). Mirrors
+// reconcileStaleRows:
+//   - operates only on snapshot rows, so a beach discovered this run resolves on
+//     the next daily run, once NWS enrichment has stamped nws_zone;
 //   - skips rows in this run's reconciliation delete set;
-//   - re-derives for EVERY row with nws_zone set (not just marine_zone-NULL
-//     rows) so historic probe artifacts self-correct once — the old probe took
-//     the FIRST ring hit, not the true nearest zone;
-//   - emits an UPDATE only when the derived zone is non-null AND differs from
-//     the snapshot value; derived-null NEVER NULLs out an existing value
-//     (marine alerts are a bonus signal — an old probe result beats nothing).
+//   - re-derives for every row with nws_zone set, not just marine_zone-NULL rows,
+//     because taking the first ring hit is not the true nearest zone and historic
+//     values must self-correct;
+//   - emits an UPDATE only when the derived zone is non-null and differs from the
+//     snapshot value; a derived null never NULLs out an existing value, since
+//     marine alerts are a bonus signal and an old value beats nothing.
 // Derivation is deterministic (see nearestMarineZone's tie-break), so a
-// steady-state run emits zero statements. The SQL-side guards keep each
-// statement idempotent and safe under a stale snapshot. beaches.marine_attempts
-// is vestigial: the column stays but nothing writes it anymore.
+// steady-state run emits zero statements. The SQL-side guards keep each statement
+// idempotent and safe under a stale snapshot. beaches.marine_attempts is
+// vestigial: the column stays but nothing writes it.
 export function marineZoneSql(snapshotRows, deletedIds, index) {
   const statements = [];
   let considered = 0;
@@ -786,30 +736,27 @@ export function marineZoneSql(snapshotRows, deletedIds, index) {
 // AND attempts < WATER_CLASS_MAX_ATTEMPTS gate. New and moved rows enter as
 // unclassified.
 //
-// PLUS a one-time legacy re-drain: rows left unclassified AT/ABOVE the attempts
+// Plus a one-time legacy re-drain: rows left unclassified at or above the attempts
 // cap by the pre-decisive classifier (see the clean-but-empty note in
 // src/waterClass.js) are admitted despite the cap, identified by
-// water_class_version IS NULL — a row that ever reached a decision carries a
-// stamped version, so the marker only ever matches pre-change parks. Their
-// attempts are deliberately NOT reset: at the cap they stay hidden by
-// FLAG_WORTHY_WATER_SQL, so ~409 confirmed-inland beaches re-decide quietly
-// instead of all reappearing on the live site with estimated flag cards while
-// they drain. The set drains to empty and cannot refill — the decisive
-// classifier never returns null for a complete probe, so nothing bumps attempts
-// to the cap again.
+// water_class_version IS NULL, since a row that ever reached a decision carries a
+// stamped version. Their attempts are deliberately not reset: at the cap they stay
+// hidden by FLAG_WORTHY_WATER_SQL, so they re-decide quietly instead of all
+// reappearing on the live site with estimated flag cards while they drain. The set
+// drains to empty and cannot refill, because the decisive classifier never returns
+// null for a complete probe.
 // Pure; exported for tests. Whole-table classification visibility, logged every
 // classify run because a NULL-hide with no metric is silent product loss (PLAN.md
 // section 7 requires these counts):
-//   parked        - water_class IS NULL at/above the attempts cap: hidden, and
-//                   under the decisive classifier this can only SHRINK. A rising
+//   parked        - water_class IS NULL at or above the attempts cap: hidden, and
+//                   under the decisive classifier this can only shrink. A rising
 //                   parked count means the classifier regressed to a pending state.
 //   hidden_inland - decided inland: hidden on purpose, the product working.
-//   pending_visible - water_class IS NULL under the cap. These are FAIL-OPEN: the
+//   pending_visible - water_class IS NULL under the cap. These are fail-open: the
 //                   site lists them and serves them estimated flag cards before
-//                   they are known to be flag-worthy water. This is the count that
-//                   went undiagnosed when an inland-lake beach was published for
-//                   five attempts; it should stay near the size of one discovery
-//                   delta and drain to ~0 after each classify run.
+//                   they are known to be flag-worthy water. It should stay near the
+//                   size of one discovery delta and drain to about zero after each
+//                   classify run.
 export function classifyCoverageCounts(snapshotRows, deletedIds) {
   const skip = deletedIds || new Set();
   const counts = { parked: 0, hidden_inland: 0, pending_visible: 0, flag_worthy: 0 };
@@ -853,7 +800,7 @@ export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
       (Math.abs(prev.lat - row.lat) > WATER_CLASS_MOVE_DEG ||
         Math.abs(prev.lon - row.lon) > WATER_CLASS_MOVE_DEG);
     if (!prev || moved) {
-      // New row, or moved centroid — upsert resets water_class to NULL/0.
+      // New row, or moved centroid: the upsert resets water_class.
       byId.set(row.id, {
         id: row.id,
         osm_id: row.osmId,
@@ -879,7 +826,7 @@ export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
     const staleVersion = typeof b.water_class_version === "number" &&
       b.water_class_version < WATER_CLASS_VERSION;
     const underCap = b.water_class_attempts < WATER_CLASS_MAX_ATTEMPTS;
-    // Legacy park marker: unclassified, at/above the cap, and never versioned.
+    // Legacy park marker: unclassified, at or above the cap, never versioned.
     const parkedPreDecisive = unclassified && !underCap &&
       (b.water_class_version === null || b.water_class_version === undefined);
     const needs = ((unclassified || staleVersion) && underCap) || parkedPreDecisive;
@@ -887,7 +834,7 @@ export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
       queue.push(b);
     }
   }
-  // Lowest attempts first (mirrors ORDER BY water_class_attempts ASC), then id
+  // Lowest attempts first, mirroring ORDER BY water_class_attempts ASC, then id
   // for deterministic ordering under an injected limit.
   queue.sort(function (a, b) {
     if (a.water_class_attempts !== b.water_class_attempts) {
@@ -898,10 +845,10 @@ export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
   return queue;
 }
 
-// The two production-mutating classify statements: a decision stores
-// water_class + version and RESETS attempts to 0; a clean-but-empty answer BUMPS
-// attempts by 1. Exported as pure builders so the emitted SQL is unit-tested (a
-// typo here silently mis-classifies at scale).
+// The two production-mutating classify statements: a decision stores water_class
+// and version and resets attempts to 0; a clean-but-empty answer bumps attempts by
+// 1. Pure builders so the emitted SQL is unit-tested, since a typo here silently
+// mis-classifies at scale.
 export function classifyUpdateSql(id, cls) {
   return "UPDATE beaches SET water_class = " + sqlStr(cls) +
     ", water_class_version = " + String(WATER_CLASS_VERSION) +
@@ -913,39 +860,38 @@ export function bumpAttemptsSql(id) {
     sqlStr(id) + ";";
 }
 
-// Probe + classify each queued beach. Under prebuilt layers the probe is a local
-// spatial join (src/layerSignals.js) rather than a per-beach network call, so
-// the production call site passes NO limit, delay or budget — but every one of
-// those parameters and its code path stays wired and tested, because the join's
-// real cost at continental scale is a prediction and re-inventing a budget after
-// a SIGKILLed daily job is strictly worse than keeping one that costs nothing.
+// Probe and classify each queued beach. The probe is a local spatial join
+// (src/layerSignals.js) rather than a per-beach network call, so the production
+// call site passes no limit, delay or budget; the parameters and their code paths
+// stay wired and tested because the join's cost at continental scale is a
+// prediction.
 //
 // Outcomes, and why they differ:
-//   - a decision            -> store water_class + version, RESET attempts to 0;
+//   - a decision -> store water_class and version, reset attempts to 0;
 //   - a clean-but-empty answer (classify returns null) -> bump attempts;
-//   - null signals, KNOWN ABSENT from a verified layer set -> bump attempts. The
-//     element is gone from OSM, which is a REAL answer, not a failure. Without
-//     this the row would re-queue forever with attempts stuck at 0 and
-//     FLAG_WORTHY_WATER_SQL's fail-open would serve it live with an estimated
-//     flag card permanently — the exact exposure this pipeline exists to close.
-//     The bump is armed ONLY under a verified set (see isKnownAbsent's wiring in
-//     main): under an unverified one, "absent" means "we cannot see it", and
-//     parking every beach on a newly-added coast is the failure that gate stops.
+//   - null signals, known absent from a verified layer set -> bump attempts. The
+//     element is gone from OSM, which is a real answer rather than a failure.
+//     Without this the row would re-queue forever with attempts stuck at 0 and
+//     FLAG_WORTHY_WATER_SQL's fail-open would serve it live with an estimated flag
+//     card permanently. The bump is armed only under a verified set (see
+//     isKnownAbsent's wiring in main): under an unverified one, absent means "we
+//     cannot see it", and parking every beach on a newly-added coast is the
+//     failure that gate stops.
 //   - null signals otherwise -> transient: no SQL, row stays queued.
 //
-// THE SEAM: opts.fetchSignals / opts.classify / opts.isKnownAbsent are injected,
-// so the whole loop runs in tests with zero I/O and a different provider can be
-// dropped in without touching the queue, the SQL or the gating.
+// opts.fetchSignals, opts.classify and opts.isKnownAbsent are injected, so the
+// loop runs in tests with zero I/O and a different provider can be dropped in
+// without touching the queue, the SQL or the gating.
 export async function classifyQueue(queue, options) {
   const opts = options || {};
   const limit = opts.limit || 0;
   const delayMs = opts.delayMs || 0;
   const budgetMs = opts.budgetMs || 0;
   const now = opts.now || Date.now;
-  // No default provider exists any more: the signals index is built per run and
-  // must be injected. A missing provider is a wiring bug, so it fails loudly on
-  // first use rather than silently marking the whole table transient — which
-  // would emit an empty delta and look like a healthy no-op run.
+  // The signals index is built per run and must be injected. A missing provider is
+  // a wiring bug and fails loudly on first use rather than silently marking the
+  // whole table transient, which would emit an empty delta that looks like a
+  // healthy no-op run.
   const fetchSignals = opts.fetchSignals || function () {
     throw new Error("classifyQueue: no fetchSignals provider was injected");
   };
@@ -953,30 +899,27 @@ export async function classifyQueue(queue, options) {
   const isKnownAbsent = opts.isKnownAbsent || function () { return false; };
   const flush = opts.flush || null;
   const statements = [];
-  // verdicts feeds classificationFlipRailAllows: id -> the class this run
-  // DECIDED. Bumps are deliberately absent — the rail measures re-decisions, and
-  // a bump is the absence of one.
+  // verdicts feeds classificationFlipRailAllows: id -> the class this run decided.
+  // Bumps are absent, because the rail measures re-decisions and a bump is the
+  // absence of one.
   const verdicts = new Map();
-  // inland_no_water is a SUBSET of inland (not a separate class): the rows decided
-  // by the clean-but-empty branch — no water found at all — rather than by a real
-  // adjacent water way. Both are non-flag-worthy and both store 'inland', but the
-  // split is the only way to tell "confirmed on an inland lake" from "nothing
-  // mapped within the probe radii" in a run log, which is what made the old parked
-  // pool undiagnosable.
-  // absent_from_layers is likewise a SUBSET of bumped, and a RISING value is a
-  // BUILD alarm rather than a data observation: it says D1 holds beaches the
+  // inland_no_water is a subset of inland, not a separate class: the rows decided
+  // by the clean-but-empty branch rather than by a real adjacent water way. Both
+  // store 'inland', but the split is the only way a run log can tell "confirmed on
+  // an inland lake" from "nothing mapped within the probe radii".
+  // absent_from_layers is likewise a subset of bumped, and a rising value is a
+  // build alarm rather than a data observation: it says D1 holds beaches the
   // published layer set does not.
   const counts = {
     attempted: 0, classified: 0, ocean: 0, great_lake: 0, inland: 0,
     inland_no_water: 0, bumped: 0, absent_from_layers: 0, transient: 0
   };
   const total = limit > 0 ? Math.min(limit, queue.length) : queue.length;
-  // buildClassifyQueue returns a deterministic order (attempts ASC, id) — right
-  // for the scheduled full drain (limit 0). But under a PARTIAL limit, always
-  // taking the lowest ids would starve the tail across repeated dispatches
-  // (transient failures don't bump attempts, so the same rows resort to the front
-  // every time). Mirror ORDER BY attempts ASC, RANDOM() by randomizing within
-  // equal-attempts groups only when we actually cap.
+  // buildClassifyQueue returns a deterministic order (attempts ASC, id), which is
+  // right for the scheduled full drain. Under a partial limit, always taking the
+  // lowest ids would starve the tail across repeated dispatches, since transient
+  // failures do not bump attempts and the same rows resort to the front every
+  // time. So randomize within equal-attempts groups, but only when capping.
   let ordered = queue;
   if (limit > 0 && total < queue.length) {
     ordered = queue.slice();
@@ -987,10 +930,10 @@ export async function classifyQueue(queue, options) {
     // Stable sort (V8) => attempts ASC preserved, random order within a group.
     ordered.sort(function (a, b) { return a.water_class_attempts - b.water_class_attempts; });
   }
-  // Per-statement flush so a valid, statement-boundary-clean partial .sql always
-  // exists on disk even under a hard SIGKILL — each stmt is a complete UPDATE.
-  // Unused by the production call site (which writes the whole delta atomically),
-  // kept because it has to come back at continental scale.
+  // Per-statement flush so a statement-boundary-clean partial .sql always exists
+  // on disk even under a hard kill; each statement is a complete UPDATE. Unused by
+  // the production call site, which writes the whole delta atomically, and kept
+  // because it has to come back at continental scale.
   const emit = async function (stmt) {
     statements.push(stmt);
     if (flush) {
@@ -1019,7 +962,7 @@ export async function classifyQueue(queue, options) {
       threw = true;
     }
     if (signals === null) {
-      // A THROWN provider is always transient: it says the probe failed, never
+      // A thrown provider is always transient: it says the probe failed, never
       // that the element is missing. Only a clean null is eligible for the
       // absent-from-layers reading.
       let absent = false;
@@ -1087,30 +1030,28 @@ function isFlagWorthyClass(value) {
   return value === "ocean" || value === "great_lake";
 }
 
-// The fourth rail, and the only one that is not on the delete path. Structurally
-// identical to reconcileStaleRows: it refuses the ENTIRE water_class UPDATE
-// block when the proposed flag-worthy -> inland flip set is too large.
+// The one rail that is not on the delete path. Structurally identical to
+// reconcileStaleRows: it refuses the entire water_class UPDATE block when the
+// proposed flag-worthy -> inland flip set is too large.
 //
-// WHY A HIDE NEEDS A RAIL AT ALL. Deciding "inland" removes a beach from
-// FLAG_WORTHY_WATER_SQL, so the site stops serving it. That is the same product
-// loss as deleting the row, it arrives faster, and it is INVISIBLE in the row
-// count — which is why four rails guarded deletes and none guarded this. Today
-// every served flag-worthy row classifies through one code path, so one broken
-// build plus a WATER_CLASS_VERSION bump re-decides all of them in a single
-// delta.
+// A hide needs a rail because deciding "inland" removes a beach from
+// FLAG_WORTHY_WATER_SQL and the site stops serving it. That is the same product
+// loss as deleting the row, it arrives faster, and it is invisible in the row
+// count, so no delete rail can see it. Every served flag-worthy row classifies
+// through one code path, so a broken build plus a WATER_CLASS_VERSION bump
+// re-decides all of them in a single delta.
 //
-// ASYMMETRIC BY DESIGN. inland -> flag-worthy only WARNS: it un-hides beaches,
-// which is recoverable and self-correcting, and refusing it would make a
+// Asymmetric by design: inland -> flag-worthy only warns, because un-hiding
+// beaches is recoverable and self-correcting and refusing it would make a
 // legitimate coverage improvement undeployable. A NULL -> inland decision is the
-// normal drain and is not a flip at all.
+// normal drain and is not a flip.
 //
-// Refusing the WHOLE block, bumps included, is deliberate for the same reason
-// the delete rails refuse wholesale: at this magnitude the evidence is about the
-// layer set, and a mass attempts-bump parks rows just as effectively as a mass
-// inland decision hides them.
+// Refusing the whole block, bumps included, follows the delete rails: at this
+// magnitude the evidence is about the layer set, and a mass attempts-bump parks
+// rows just as effectively as a mass inland decision hides them.
 //
-// Pure; exported for tests. verdictsById may be a Map or a plain object.
-// Returns { allowed, hideFlips, unhideFlips, allowance, flagWorthy, matrix }.
+// verdictsById may be a Map or a plain object. Returns
+// { allowed, hideFlips, unhideFlips, allowance, flagWorthy, matrix }.
 export function classificationFlipRailAllows(snapshotRows, verdictsById) {
   const rows = Array.isArray(snapshotRows) ? snapshotRows : [];
   const lookup = function (id) {
@@ -1165,9 +1106,8 @@ export function classificationFlipRailAllows(snapshotRows, verdictsById) {
   };
 }
 
-// One-line rendering of the confusion matrix, logged EVERY run whether or not
-// the rail fires. A one-time manual dry-run review protects the cutover and
-// nothing after it; this is the standing signal.
+// One-line rendering of the confusion matrix, logged every run whether or not the
+// rail fires: it is the standing signal that mass re-classification happened.
 export function formatFlipMatrix(matrix) {
   const rowKeys = FLIP_RAIL_CLASSES.concat(["unclassified"]);
   const parts = [];
@@ -1182,10 +1122,9 @@ export function formatFlipMatrix(matrix) {
 
 // --- Main -------------------------------------------------------------------
 
-// Pure guard, exported for tests: a run with discovery, classify, AND the
-// marine pass all switched off does nothing and is a caller error. Layers are an
-// INPUT to discovery and classification, not a fourth mode, so --layers does not
-// appear here.
+// A run with discovery, classify and the marine pass all switched off does nothing
+// and is a caller error. Layers are an input to discovery and classification, not
+// a fourth mode, so --layers does not appear here.
 export function nothingToDo(args) {
   return !args.discovery && !args.classify && !args.marineZones;
 }
@@ -1204,16 +1143,16 @@ async function readReportFile(path) {
 export async function main() {
   const runStartMs = Date.now();
   const args = parseArgs(Deno.args);
-  // The batch runs discovery and classification in ONE pass over ONE verified
-  // layer set, so a beach is classified in the same run that discovers it and
-  // the FLAG_WORTHY_WATER_SQL fail-open window (an unclassified beach served
-  // live with an estimated flag card) is zero rather than hours:
-  //   DISCOVERY   (--layers <dir>): local scan -> upserts + stale-row
-  //     reconciliation (the ONLY delete path) + retention + sync_meta.
-  //   CLASSIFY    (--layers <dir>): local spatial join -> water_class UPDATEs.
-  //   Either half may be switched off (--no-discovery / --no-classify), and
-  //   either mode may ALSO carry the offline marine_zone pass (--marine-zones):
-  //   pure local derivation over the snapshot, no layers needed.
+  // Discovery and classification run in one pass over one verified layer set, so
+  // a beach is classified in the run that discovers it and the
+  // FLAG_WORTHY_WATER_SQL fail-open window — an unclassified beach served live
+  // with an estimated flag card — is zero rather than hours:
+  //   discovery (--layers <dir>): local scan -> upserts + stale-row reconciliation
+  //     (the only delete path) + retention + sync_meta.
+  //   classify (--layers <dir>): local spatial join -> water_class UPDATEs.
+  //   Either half may be switched off (--no-discovery / --no-classify), and either
+  //   mode may also carry the offline marine_zone pass (--marine-zones), a pure
+  //   local derivation over the snapshot that needs no layers.
   if (nothingToDo(args)) {
     throw new Error("nothing to do — pick at least one of discovery, classify, --marine-zones");
   }
@@ -1239,16 +1178,16 @@ export async function main() {
     log("no --snapshot given: reconciliation deletes and classification-queue skipping will be conservative (treats table as empty)");
   }
 
-  // --- The manifest gate, and the THREE tiers it splits into ----------------
-  // fatal          — we cannot decode this set: exit 1, NO SQL at all.
-  // incomplete     — readable but not provably a complete view of OSM: upserts
-  //                  + marine only. No deletes AND no classification, because a
-  //                  partial water view makes classifyWaterBody's
-  //                  clean-but-empty branch decide inland, which HIDES beaches.
-  // scope_or_stale — a complete view, but not scoped to this code's regions or
-  //                  not fresh: upserts + marine + classification runs NORMALLY.
+  // --- The manifest gate, and the three tiers it splits into ----------------
+  // fatal          — the set cannot be decoded: exit 1, no SQL at all.
+  // incomplete     — readable but not provably a complete view of OSM: upserts and
+  //                  marine only. No deletes and no classification, because a
+  //                  partial water view makes classifyWaterBody's clean-but-empty
+  //                  branch decide inland, which hides beaches.
+  // scope_or_stale — a complete view, but not scoped to this code's regions or not
+  //                  fresh: upserts, marine and classification all run normally.
   //                  No deletes, and the absent-from-layers attempts bump is
-  //                  DISARMED. Coupling classification to staleness or to a
+  //                  disarmed. Coupling classification to staleness or to a
   //                  regions-digest change would turn an expansion commit into a
   //                  mass fail-open event.
   let report = null;
@@ -1310,8 +1249,8 @@ export async function main() {
       " otherRelations=" + String(layerSet.otherRelations));
   }
 
-  // Inputs to the classification queue. With discovery off nothing is
-  // discovered or deleted, so the queue is exactly (snapshot rows needing class).
+  // Inputs to the classification queue. With discovery off nothing is discovered
+  // or deleted, so the queue is exactly the snapshot rows needing a class.
   let mergedRows = [];
   let deletedIds = new Set();
 
@@ -1324,16 +1263,15 @@ export async function main() {
       " dropped_pond=" + String(counts.droppedPond) +
       " membership_rejected=" + String(counts.membershipRejected) +
       " out_of_region=" + String(counts.outOfRegion));
-    // parkBeaches is ALWAYS merged, even when hasPark is false. It is tempting
-    // to pass [] instead (mirroring the old "park query degraded" path), and it
-    // would be wrong: producedIds is what keeps an existing park-origin row out
-    // of the stale set, so dropping the park rows would turn every one of them
-    // into a DELETE candidate in the very run that already suspects the parks
-    // layer. hasPark instead controls only the upsert's COLUMN SET, which leaves
-    // park_name untouched on existing rows. The residual is that a park-origin
-    // row DISCOVERED for the first time during an unhealthy-parks run is
-    // inserted with park_name NULL and is not a delete candidate until a healthy
-    // run stamps it — self-correcting, and the safe direction.
+    // parkBeaches is always merged, even when hasPark is false. Passing [] would
+    // be wrong: producedIds is what keeps an existing park-origin row out of the
+    // stale set, so dropping the park rows would turn every one of them into a
+    // delete candidate in the very run that already suspects the parks layer.
+    // hasPark controls only the upsert's column set, which leaves park_name
+    // untouched on existing rows. The residual is that a park-origin row
+    // discovered for the first time during an unhealthy-parks run is inserted with
+    // park_name NULL and is not a delete candidate until a healthy run stamps it,
+    // which is self-correcting and the safe direction.
     const merged = mergeBeachRows(discovery.namedRows, discovery.parkBeaches);
     mergedRows = merged.rows;
     log("discovery merged rows=" + String(merged.rows.length) +
@@ -1351,42 +1289,25 @@ export async function main() {
     out.push("DELETE FROM flag_history WHERE observed_at < " + sqlStr(cutoffIso) + ";");
     out.push("");
 
-    // 2. Beach upserts (enrichment columns — nws_zone/eccc_zone/webcam_* — are
-    //    untouched by ON CONFLICT, exactly as the Worker upsert preserves them).
+    // 2. Beach upserts. The enrichment columns are untouched by ON CONFLICT.
     out.push("-- beach upserts (" + String(merged.rows.length) + ")");
     for (const row of merged.rows) {
       out.push(upsertSql(row, hasPark));
     }
     out.push("");
 
-    // 3. Stale park-beach reconciliation — THE ONLY DELETE PATH — gated on a
-    //    manifest that PROVES the layer set is a complete, intact, in-scope,
-    //    fresh view of OSM (reconciliationAllowed) plus a snapshot to diff
-    //    against. Anything less and this branch never runs: the delta is upserts
-    //    only. deletedIds is derived from the SAME rows that produce the DELETEs,
-    //    so the classify-universe exclusion set is exactly the set actually
-    //    deleted (never a superset that could drop a still-present row from
-    //    classification).
-    // hasPark is part of this condition on purpose. parksLayerHealthy is the ONLY
-    // signal in the system that says specifically "the parks layer is
-    // under-populated", and the delete-candidate set is EXCLUSIVELY park-origin
-    // rows (park_name != null && name === park_name). Without it there is a live
-    // band the proportional rails cannot see: a parks-polygon build at 0.96x the
-    // previous count clears every build gate (they refuse below 0.95x, globally
-    // and per region), yet the missing polygons make ~4% of unnamed beaches fail
-    // beachInAnyParkPolygon, drop out of producedIds, and read as stale. That is
-    // ~39 deletes against a global allowance of 50 and a Lake Michigan allowance
-    // of 15 — every rail green, in the very run that already printed the
-    // parksLayerHealthy warning naming the cause. The exposed window is a 2-5%
-    // parks shrink, up to ~49 permanently deleted rows carrying nws_zone,
-    // eccc_zone, marine_zone and webcam_* enrichment, plus orphaned KV.
+    // 3. Stale park-beach reconciliation, the only delete path, gated on a
+    //    manifest that proves the layer set is a complete, intact, in-scope, fresh
+    //    view of OSM (reconciliationAllowed) plus a snapshot to diff against.
+    //    Anything less and this branch never runs: the delta is upserts only.
+    //    deletedIds comes from the same rows that produce the DELETEs, so the
+    //    classify-universe exclusion set is exactly the set actually deleted,
+    //    never a superset that could drop a still-present row from classification.
     //
-    // The asymmetry justifies it: a false refusal costs ONE skipped day of
-    // reconciliation, which simply retries tomorrow, while a false delete is
-    // irreversible and loses enrichment that took weeks of cron runs to acquire.
-    // Intended consequence: build 1 (empty history, so hasPark is false by
-    // design) performs no deletes on its first run — the correct posture for a
-    // bootstrap layer set that already requires a human to publish it.
+    // hasPark is part of this condition on purpose; see reconciliationGate for the
+    // 0.96x band the proportional rails cannot see. An intended consequence is
+    // that a bootstrap build, whose empty history makes hasPark false, performs no
+    // deletes on its first run.
     const gate = reconciliationGate(coverageComplete, hasPark, Boolean(args.snapshot));
     if (gate.allowed) {
       const delta = reconciliationDelta(snapshotRows, producedIds, producedParkRowCount);
@@ -1402,11 +1323,10 @@ export async function main() {
     }
 
     // 4. sync_meta bookkeeping. last_discovery_count is this run's produced-row
-    //    count (a degraded run undercounts, hence the companion completeness
-    //    marker so an operator never reads a small count as "table shrank"), and
-    //    the two layer rows make the exact input set answerable from D1 alone.
-    //    The one-time DELETE retires the three rows the retired transport left
-    //    behind; it is a harmless no-op on every subsequent run.
+    //    count; a degraded run undercounts, which is why the companion completeness
+    //    marker exists so a small count is never read as a shrink. The two layer
+    //    rows make the exact input set answerable from D1 alone. The one-time
+    //    DELETE clears three superseded rows and is a no-op on every later run.
     out.push("-- sync_meta");
     out.push("DELETE FROM sync_meta WHERE key IN ('last_overpass_sync', 'last_overpass_count', 'last_overpass_complete');");
     out.push(syncMetaSql("last_discovery_sync", nowIso, nowIso));
@@ -1420,19 +1340,17 @@ export async function main() {
   }
 
   // 4b. Offline marine_zone derivation (see marineZoneSql). Pure local math over
-  // the committed geometry — no layers, no network, and NO effect on
-  // reconciliationAllowed or the delete path (it only ever appends change-only
-  // UPDATEs).
+  // the committed geometry: no layers, no network, and no effect on
+  // reconciliationAllowed or the delete path, since it only appends change-only
+  // UPDATEs.
   //
-  // ISOLATED from the delete-bearing discovery output: everything that can
-  // throw (a missing/malformed data/marine-zones-greatlakes.json fails
-  // Deno.readTextFile / JSON.parse, and buildMarineZoneIndex throws by design
-  // on malformed geometry) is computed into a LOCAL buffer inside try/catch,
-  // and only appended to out[] once the whole pass succeeded. A broken marine
-  // data file therefore degrades to a loudly-logged "no marine changes" —
-  // the discovery delta (upserts + reconciliation DELETEs + retention +
-  // sync_meta) still writes and Apply still runs. A bonus signal must never
-  // abort the project's ONLY delete path.
+  // Isolated from the delete-bearing discovery output. Everything that can throw —
+  // a missing or malformed data/marine-zones-greatlakes.json, and
+  // buildMarineZoneIndex, which throws by design on malformed geometry — is
+  // computed into a local buffer inside try/catch and appended to out[] only once
+  // the whole pass succeeded. A broken marine data file therefore degrades to a
+  // logged "no marine changes" while the discovery delta still writes. A bonus
+  // signal must never abort the project's only delete path.
   if (args.marineZones) {
     if (!args.snapshot) {
       log("marine zone pass skipped: marine pass needs --snapshot");
@@ -1461,8 +1379,8 @@ export async function main() {
     }
   }
 
-  // 5. Water-body classification — a LOCAL SPATIAL JOIN against the same layer
-  // set discovery just read, in the same run, so a beach discovered above is
+  // 5. Water-body classification: a local spatial join against the same layer set
+  // discovery just read, in the same run, so a beach discovered above is
   // classified below and never reaches the site unclassified.
   if (args.classify && classifyAllowed) {
     const indexStartMs = Date.now();
@@ -1488,9 +1406,9 @@ export async function main() {
       " bumped=" + String(c.bumped) + " (absent_from_layers=" + String(c.absent_from_layers) + ")" +
       " transient=" + String(c.transient));
     log("stopped_on_budget=" + String(result.stopped) + " processed=" + String(result.processed));
-    // THE FOURTH RAIL. Logged every run whether or not it fires — a hide is
-    // invisible in the row count, so the confusion matrix is the only standing
-    // signal that mass re-classification happened at all.
+    // The classification flip rail, logged every run whether or not it fires: a
+    // hide is invisible in the row count, so the confusion matrix is the only
+    // standing signal that mass re-classification happened.
     const rail = classificationFlipRailAllows(snapshotRows, result.verdicts);
     log("classification flips hide=" + String(rail.hideFlips) + "/" + String(rail.allowance) +
       " unhide=" + String(rail.unhideFlips) + " snapshot_flag_worthy=" + String(rail.flagWorthy) +
@@ -1511,8 +1429,8 @@ export async function main() {
         " (snapshot flag-worthy " + String(rail.flagWorthy) + ") — emitting NO water_class " +
         "UPDATEs of any kind this run");
     }
-    // Whole-table visibility AS OF THE SNAPSHOT (this run's UPDATEs are not applied
-    // to D1 yet), so pending_visible is the exposure the run STARTED with.
+    // Whole-table visibility as of the snapshot, since this run's UPDATEs are not
+    // applied to D1 yet, so pending_visible is the exposure the run started with.
     const cov = classifyCoverageCounts(snapshotRows, deletedIds);
     log("classification coverage parked=" + String(cov.parked) +
       " hidden_inland=" + String(cov.hidden_inland) +
@@ -1525,17 +1443,17 @@ export async function main() {
     log("classification skipped (--no-classify)");
   }
 
-  // The whole delta is written ATOMICALLY, once, at the end: this run has a
-  // clean binary outcome (exit 0 with a complete file, or exit 1 with no file),
-  // so the workflow's Apply step needs no torn-tail truncation and no always()
+  // The whole delta is written atomically, once, at the end, so the run has a
+  // binary outcome: exit 0 with a complete file, or exit 1 with no file. The
+  // workflow's Apply step therefore needs no torn-tail truncation and no always()
   // belt.
   await Deno.writeTextFile(args.out, out.join("\n") + "\n");
   log("wrote " + args.out + " (" + String(out.length) + " lines) in " +
     String(Date.now() - runStartMs) + "ms total");
 }
 
-// Only run as an entrypoint (Deno). Importing this module (e.g. under vitest to
-// test the pure SQL/queue/rail builders above) does NOT trigger discovery.
+// Only runs as an entrypoint. Importing this module, as vitest does to test the
+// pure SQL, queue and rail builders above, triggers no discovery.
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("discovery-batch: FATAL: " + (err && err.stack ? err.stack : err));

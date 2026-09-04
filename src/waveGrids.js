@@ -2,26 +2,22 @@
 // plus the pure geometry over them: grid selection, the nearest-wet-cell search and
 // the m/s -> mph conversion the GRIB path needs.
 //
-// OFFLINE ONLY. Nothing in the Worker's import closure may import this module: it
+// Offline only. Nothing in the Worker's import closure may import this module: it
 // exists for scripts/sample-waves.js and scripts/build-wave-manifest.js, which run
-// on Deno inside .github/workflows/waves.yml. The Worker request path still reads
-// only D1 and KV, and the cron path reads the KV this pipeline writes.
+// on Deno inside .github/workflows/waves.yml. The Worker request path reads only
+// D1 and KV, and the cron path reads the KV this pipeline writes.
 //
-// THE UNITS CONTRACT
-// ------------------
-// HTSGW is METERS. Feet = meters * 3.28084 (metersToFeet, src/geo.js). WIND is
-// METERS PER SECOND. mph = m/s * 2.2369362920544 (METERS_PER_SECOND_TO_MPH below).
-// Feeding m/s straight into src/rules.js makes an actual 25 mph arrive as 11, so
-// every wind reads green with no error anywhere.
+// The units contract. HTSGW is metres; feet = metres * 3.28084 (metersToFeet,
+// src/geo.js). WIND is metres per second; mph = m/s * 2.2369362920544
+// (METERS_PER_SECOND_TO_MPH below). Feeding m/s straight into src/rules.js makes
+// an actual 25 mph arrive as 11, so every wind reads green with no error
+// anywhere.
 //
-// NODATA IS A NUMBER THAT SURVIVES JSON. gfswave uses 9999 and GLWU uses
-// 9.999000260554009e+20; both are read PER BAND from the gdalinfo sidecar and never
-// hardcoded at a sample site. 9999 m is 32808.4 ft and colors a flag red with a
-// straight-faced reason string, so every candidate is screened here before it can
-// reach a record.
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with +
-// (never template literals), console.log for logging.
+// nodata is a number that survives JSON: gfswave uses 9999 and GLWU uses
+// 9.999000260554009e+20. Both are read per band from the gdalinfo sidecar and
+// never hardcoded at a sample site — 9999 m is 32808.4 ft and colors a flag red
+// with a straight-faced reason string, so every candidate is screened here before
+// it can reach a record.
 
 import { distanceKm, KM_PER_DEG } from "./geo.js";
 
@@ -38,18 +34,16 @@ export function metersPerSecondToMph(ms) {
   return ms * METERS_PER_SECOND_TO_MPH;
 }
 
-// Upper and lower containment rails applied to EVERY sampled value before it can
-// become a record. They are deliberately generous: their job is to catch a
-// sentinel or a garbage plane, not to second-guess a model.
-export const MAX_PLAUSIBLE_SAMPLE = 9000;
-export const MIN_PLAUSIBLE_SAMPLE = 0;
+// Containment rails applied to every sampled value before it can become a record.
+// Deliberately generous: they catch a sentinel or a garbage plane, they do not
+// second-guess a model.
+const MAX_PLAUSIBLE_SAMPLE = 9000;
+const MIN_PLAUSIBLE_SAMPLE = 0;
 
-// The two GRIB elements sliced out of every cycle. The gfswave .idx variable list
-// is DIRPW HTSGW PERPW SWDIR SWELL SWPER UGRD VGRD WDIR WIND WVDIR WVHGT WVPER —
-// no GUST field, which is why windGustMph is permanently null on this pipeline.
-// That list describes gfswave alone: GLWU is fetched whole and never touches an
-// .idx, so its element set is measured per cycle from the gdalinfo sidecar at plan
-// time. Unverified until the first GLWU cycle is planned.
+// The two GRIB elements sliced out of every cycle. gfswave publishes no GUST
+// element, which is why windGustMph is permanently null on this pipeline. GLWU is
+// fetched whole and never touches an .idx, so its element set is measured per
+// cycle from the gdalinfo sidecar at plan time.
 export const WAVE_ELEMENT = "HTSGW";
 export const WIND_ELEMENT = "WIND";
 export const GRID_ELEMENTS = [WIND_ELEMENT, WAVE_ELEMENT];
@@ -58,19 +52,19 @@ export const GRID_ELEMENTS = [WIND_ELEMENT, WAVE_ELEMENT];
 // src/frontend/waveStrip.js drops the whole strip.
 export const FORECAST_HOURS = 24;
 
-// The three grids, in FALLTHROUGH ORDER. wcoast.0p16, atlocn.0p16, epacif.0p16 and
+// The three grids, in fallthrough order. wcoast.0p16, atlocn.0p16, epacif.0p16 and
 // global.0p25 are deliberately absent: global.0p16 supersedes the first three and
-// closes the coverage gap between wcoast's -109.917 edge and atlocn's -100.083 edge
-// (which matters because this repo builds layers for us/canada/mexico), and epacif
-// is a 0-360 longitude grid on which a real Hawaii longitude silently samples as
-// empty.
+// closes the coverage gap between wcoast's -109.917 edge and atlocn's -100.083
+// edge, which matters because this repo builds layers for us/canada/mexico, and
+// epacif is a 0-360 longitude grid on which a real Hawaii longitude silently
+// samples as empty.
 //
 // sampled{} describes the raster the workflow hands to scripts/sample-waves.js,
-// AFTER the shell's gdal_translate (gfswave, already lat/lon) or gdalwarp (glwu and
-// arctic, both projected). Sampling in one lat/lon frame for all three grids is
-// what keeps nearestWetSample free of projection math; -r near is mandatory on the
-// warp, because any interpolating resampler smears wave values across the land mask
-// and manufactures readings on shore.
+// after the shell's gdal_translate (gfswave, already lat/lon) or gdalwarp (glwu
+// and arctic, both projected). Sampling every grid in one lat/lon frame keeps
+// nearestWetSample free of projection math. -r near is mandatory on the warp,
+// because any interpolating resampler smears wave values across the land mask and
+// manufactures readings on shore.
 export const GRIDS = [
   {
     id: "noaa_glwu",
@@ -78,11 +72,11 @@ export const GRIDS = [
     label: "NOAA Great Lakes Wave Model",
     infoUrl: "https://www.weather.gov/greatlakes/",
     // NOMADS documents a 10 second wait between scripted fetches, so this grid is
-    // ONE whole-file fetch: all 49 forecast steps arrive in a single ~22 MB object.
+    // one whole-file fetch: all 49 forecast steps in a single ~22 MB object.
     fetchMode: "whole",
     urlTemplate: "https://nomads.ncep.noaa.gov/pub/data/nccf/com/glwu/prod/" +
       "glwu.{YYYYMMDD}/glwu.grlc_2p5km_sr.t{HH}z.grib2",
-    // grlc_2p5km_sr, NOT grlc_2p5km_lc_sr — the lc variant is the much smaller
+    // grlc_2p5km_sr, not grlc_2p5km_lc_sr: the lc variant is the much smaller
     // lake-connecting-channels grid and covers none of the open lake.
     variables: GRID_ELEMENTS,
     // Great Lakes fetch is hourly with ~6 minutes of publish latency, and one file
@@ -157,10 +151,10 @@ export const GRIDS = [
     maxCycleAgeHours: 24,
     forecastSteps: 358,
     // 1006x1006 polar stereographic at 9000 m, warped to lat/lon over the Alaska
-    // mainland and the eastern Aleutians. Beaches WEST of the antimeridian (Attu
-    // and the far Aleutians) are outside this window and outside global.0p16's
-    // 52.583N ceiling, so they resolve to no grid; naming that gap is cheaper than
-    // carrying a second warp window nothing has been validated against.
+    // mainland and the eastern Aleutians. Beaches west of the antimeridian sit
+    // outside this window and outside global.0p16's 52.583N ceiling, so they
+    // resolve to no grid; naming that gap is cheaper than carrying a second warp
+    // window nothing has validated.
     warp: {
       targetSrs: "EPSG:4326",
       te: [-180.0, 50.0, -128.0, 73.2],
@@ -208,21 +202,22 @@ export function gridById(id, grids) {
 
 // --- the grids digest -------------------------------------------------------------
 
-// Canonical digest INPUT: id, domain, sampled cell size, url template, variables and
-// cap km, with a fixed key order. The caller hashes the returned string (sha256).
+// Canonical digest input: id, domain, sampled cell size, url template, variables
+// and cap km, with a fixed key order. The caller hashes the returned string with
+// sha256.
 //
-// THE BEACH SET IS DELIBERATELY NOT IN THE DIGEST. It grows daily, and a digest that
-// changes daily is not a gate — it would invalidate the seeded floors in
-// data/wave-floors.json every single cycle and permanently withhold auto-publish.
+// The beach set is deliberately not in the digest. It grows daily, and a digest
+// that changes daily is not a gate: it would invalidate the seeded floors in
+// data/wave-floors.json every cycle and permanently withhold auto-publish.
 //
-// What MUST invalidate a floors entry: adding or removing a grid, moving a domain
-// edge, changing a cell size, retargeting a url template, or changing a search cap.
-// All five change which beaches resolve and how far a sample may reach, so counts
-// seeded under the old set say nothing about the new one.
+// What must invalidate a floors entry: adding or removing a grid, moving a domain
+// edge, changing a cell size, retargeting a url template, or changing a search
+// cap. All five change which beaches resolve and how far a sample may reach, so
+// counts seeded under the old set say nothing about the new one.
 //
-// Throws on malformed input: GRIDS is repo-committed source, so a malformed entry is
-// a commit bug that must fail loudly rather than digest to something that happens to
-// match.
+// Throws on malformed input: GRIDS is repo-committed source, so a malformed entry
+// is a commit bug that must fail loudly rather than digest to something that
+// happens to match.
 export function gridsDigestInput(grids) {
   const source = grids === undefined ? GRIDS : grids;
   if (!Array.isArray(source) || source.length === 0) {
@@ -307,22 +302,23 @@ export function containsPoint(grid, lat, lon) {
   return lat >= d.minLat && lat <= d.maxLat && lon >= d.minLon && lon <= d.maxLon;
 }
 
-// True when a beach's water_class permits this grid. NULL (or a missing column) may
-// try every grid; an explicit class is confined to the grids that model that water.
+// True when a beach's water_class permits this grid. A NULL or missing column may
+// try every grid; an explicit class is confined to the grids that model that
+// water.
 //
-// This is the cheapest available fix for the wrong-water-body problem: a 'great_lake'
-// beach can never sample an ocean grid and an 'ocean' beach can never sample the
-// lakes. The RESIDUAL is accepted and bounded only by searchMaxKm — a beach on a
-// narrow peninsula can still find a wet cell on the far side within its cap. A
+// This is the cheapest fix for the wrong-water-body problem: a 'great_lake' beach
+// can never sample an ocean grid and an 'ocean' beach can never sample the lakes.
+// The residual is accepted and bounded only by searchMaxKm — a beach on a narrow
+// peninsula can still find a wet cell on the far side within its cap. A
 // polygon-aware fix does not belong here.
 //
-// The NULL branch is safe in the lake direction because gfswave global.0p16 carries
-// no wet cell anywhere in the Great Lakes basin: the nearest is over 380 km from any
-// lake point against a 25 km search cap, so a NULL water_class at a lake beach
-// resolves to no record rather than to ocean values. The gate still protects the
-// reverse direction, an 'ocean' beach reaching GLWU, and any future grid whose mask
-// is less generous, so it must not be removed on the grounds that the lake direction
-// is already covered by the mask.
+// The NULL branch is safe in the lake direction because gfswave global.0p16
+// carries no wet cell anywhere in the Great Lakes basin: the nearest is over
+// 380 km from any lake point against a 25 km search cap, so a NULL water_class at
+// a lake beach resolves to no record rather than to ocean values. The gate still
+// protects the reverse direction, an 'ocean' beach reaching GLWU, and any future
+// grid whose mask is less generous, so it must not be removed on the grounds that
+// the mask already covers the lake direction.
 export function waterClassAllowsGrid(waterClass, grid) {
   if (!isPlainObject(grid)) {
     return false;
@@ -357,11 +353,11 @@ export function candidateGrids(beach, grids) {
   return out;
 }
 
-// Ordered fallthrough: the first candidate grid whose probe finds a usable wet cell.
-// probe(grid, beach) returns truthy when the grid can actually answer for this beach;
-// omitting it selects on domain and water_class alone (which is what the digest and
-// the selection tests care about). A beach out of every domain, or with no wet cell
-// inside any cap, resolves to null and simply gets no wave record.
+// Ordered fallthrough: the first candidate grid whose probe finds a usable wet
+// cell. probe(grid, beach) returns truthy when the grid can answer for this beach;
+// omitting it selects on domain and water_class alone. A beach out of every
+// domain, or with no wet cell inside any cap, resolves to null and gets no wave
+// record.
 export function selectGrid(beach, grids, probe) {
   const candidates = candidateGrids(beach, grids);
   for (let i = 0; i < candidates.length; i = i + 1) {
@@ -379,12 +375,12 @@ export function selectGrid(beach, grids, probe) {
 
 // Relative tolerance for matching a sampled value against its band's nodata.
 //
-// Exact equality is NOT usable here. gdalinfo -json prints a large nodata with about
+// Exact equality is unusable here. gdalinfo -json prints a large nodata with about
 // eight significant digits, so GLWU's 9.999000260554009e+20 comes back from the
-// sidecar as 9.999e+20 while the raster cell still holds the full float32 value: a
-// strict === would miss every Great Lakes sentinel. 1e-6 is far wider than that
-// printing loss and far narrower than the gap to any real reading.
-export const NODATA_MATCH_RELATIVE = 1e-6;
+// sidecar as 9.999e+20 while the raster cell still holds the full float32 value,
+// and a strict === would miss every Great Lakes sentinel. 1e-6 is far wider than
+// that printing loss and far narrower than the gap to any real reading.
+const NODATA_MATCH_RELATIVE = 1e-6;
 
 // True when the value is this band's nodata, within the printing tolerance above.
 export function matchesNodata(value, nodata) {
@@ -397,11 +393,11 @@ export function matchesNodata(value, nodata) {
   return Math.abs(value - nodata) <= Math.abs(nodata) * NODATA_MATCH_RELATIVE;
 }
 
-// A sampled value is usable only when it is finite, is not the band's OWN header
-// nodata, and sits inside the containment rails. The nodata comes from the caller
-// (read per band out of gdalinfo -json), never from a literal here: gfswave uses
-// 9999 and GLWU uses 9.999000260554009e+20, so a hardcoded 9999 would silently pass
-// every Great Lakes sentinel straight into a flag color.
+// A sampled value is usable only when it is finite, is not the band's own header
+// nodata, and sits inside the containment rails. The nodata comes from the caller,
+// read per band out of gdalinfo -json, never from a literal here: gfswave uses
+// 9999 and GLWU uses 9.999000260554009e+20, so a hardcoded 9999 would pass every
+// Great Lakes sentinel straight into a flag color.
 export function isUsableSample(value, nodata) {
   if (!isFiniteNumber(value)) {
     return false;
@@ -437,18 +433,18 @@ export function cellCenterLon(header, col) {
   return header.originLon + (col + 0.5) * header.pixelLon;
 }
 
-// Chebyshev-ring search outward from the cell containing (lat, lon) for the nearest
-// usable value, and the single mechanism this pipeline depends on: 4 of 5 real beach
-// coordinates land on a masked LAND cell, so naive nearest-cell sampling returns
-// nodata almost everywhere.
+// Chebyshev-ring search outward from the cell containing (lat, lon) for the
+// nearest usable value. This is the sampling mechanism, not a fallback: 4 of 5
+// real beach coordinates land on a masked land cell, so naive nearest-cell
+// sampling returns nodata almost everywhere.
 //
-// THE TIE-BREAK IS LOAD-BEARING. Candidates are ranked by TRUE GREAT-CIRCLE distance
-// to the cell CENTRE, never by ring index: longitude cells narrow with latitude, so
-// ring-index-nearest picks the wrong cell in Alaska, and first-hit-in-scan-order
-// returns 0.90 m from the NW cell at Santa Monica where great-circle-minimum returns
-// 0.66 m from the W cell. Both wrong answers are plausible numbers with no error
-// anywhere. Exact distance ties break lexicographically by (dr, dc) so the result is
-// deterministic across engines.
+// The tie-break is load-bearing. Candidates are ranked by true great-circle
+// distance to the cell centre, never by ring index: longitude cells narrow with
+// latitude, so ring-index-nearest picks the wrong cell in Alaska, and
+// first-hit-in-scan-order returns 0.90 m from the NW cell at Santa Monica where
+// great-circle-minimum returns 0.66 m from the W cell. Both wrong answers are
+// plausible numbers with no error anywhere. Exact distance ties break
+// lexicographically by (dr, dc) so the result is deterministic across engines.
 //
 // Returns { value, row, col, cellLat, cellLon, distanceKm, ring } or null.
 export function nearestWetSample(grid, header, data, lat, lon) {

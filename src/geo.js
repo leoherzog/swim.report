@@ -1,16 +1,12 @@
-// src/geo.js
-// Dependency-free geographic helpers shared across the worker. This module
-// imports nothing from the rest of src/, so importing it can never create a
-// circular dependency — which is why the official-source scrapers (registered
-// into src/officialSources/index.js) can pull their distance math from here
-// instead of copy-pasting a local haversine to dodge a cycle.
+// src/geo.js — dependency-free geographic helpers. It imports nothing else from
+// src/, so importing it can never create a circular dependency, which is why the
+// official-source scrapers can pull their distance math from here instead of
+// copy-pasting a local haversine to dodge a cycle.
 //
 // Pure: no fetch, no Date, no I/O. Safe on both the request and cron paths.
 
-// Great Lakes / CONUS distance math uses a spherical earth. The kilometre
-// radius (6371 km) and the mile-per-kilometre ratio below are carried over
-// from the pre-consolidation copies (which paired 6371 km with a 3958.8 mi
-// radius) so distances stay numerically identical to the originals.
+// Spherical earth. The kilometre radius and the mile-per-kilometre ratio below
+// pair 6371 km with a 3958.8 mi radius.
 const EARTH_RADIUS_KM = 6371;
 const MI_PER_KM = 3958.8 / 6371;
 const METERS_TO_FEET = 3.28084;
@@ -54,12 +50,10 @@ export function celsiusToFahrenheit(c) {
 }
 
 // Ray-casting point-in-ring test on a GeoJSON linear ring ([[lon, lat], ...]).
-// Planar math is fine at forecast-region scale; boundary points are accepted
-// or rejected by the crossing parity like any ray cast (no special casing).
-// Exported for scripts/build-marine-zones.js, whose hole-grouping pass needs
-// the same planar ray cast (Deno resolves this relative ESM import directly —
-// the generator's "dependency-free" rule is about npm packages, not local
-// modules).
+// Planar math is fine at forecast-region scale, and boundary points are accepted
+// or rejected by the crossing parity like any ray cast. Exported for
+// scripts/build-marine-zones.js, whose hole-grouping pass needs the same planar
+// ray cast.
 export function pointInRing(lon, lat, ring) {
   let inside = false;
   let j = ring.length - 1;
@@ -78,11 +72,10 @@ export function pointInRing(lon, lat, ring) {
   return inside;
 }
 
-// True when the point sits inside a GeoJSON Polygon or MultiPolygon geometry:
-// inside an outer ring and inside none of that polygon's holes. Malformed or
-// non-areal geometry (null, Point, missing coordinates) returns false — the
-// caller treats "not contained" as "no match", never as an error. Used by the
-// ECCC alerts client to match beaches to alert-region polygons.
+// True when the point sits inside a GeoJSON Polygon or MultiPolygon: inside an
+// outer ring and inside none of that polygon's holes. Malformed or non-areal
+// geometry returns false, and the caller treats "not contained" as "no match"
+// rather than an error.
 export function pointInGeometry(geometry, lat, lon) {
   if (geometry === null || typeof geometry !== "object") {
     return false;
@@ -119,10 +112,9 @@ export function pointInGeometry(geometry, lat, lon) {
   return false;
 }
 
-// Kilometres per degree of latitude (and of longitude at the equator) on the
-// spherical earth used above: 2 * pi * 6371 / 360. Shared by every nearest-edge
-// consumer (src/clients/eccc.js, src/clients/ecccMarine.js, src/marineZones.js)
-// so the three copies can never drift apart.
+// Kilometres per degree of latitude, and of longitude at the equator, on the
+// spherical earth used above. Shared by every nearest-edge consumer so the value
+// cannot drift between them.
 export const KM_PER_DEG = 111.195;
 
 // GeoJSON Polygon/MultiPolygon -> array of polygons (each an array of rings).
@@ -159,14 +151,12 @@ export function pointToSegmentKm(ax, ay, bx, by) {
   return Math.sqrt(px * px + py * py);
 }
 
-// Minimum distance (km) from (lat, lon) to any ring edge of the geometry —
-// OUTER RINGS AND HOLES ALIKE (an island beach sits inside a HOLE of a marine
-// polygon and correctly resolves via the nearest hole edge). Malformed
-// rings/points are SKIPPED, never thrown on: GeoMet responses are upstream
-// input, and the repo-committed marine file is already validated up front by
-// buildMarineZoneIndex, so nothing malformed can reach here from that path.
-// Returns Infinity when no usable edge exists. The per-caller distance CAP
-// stays at the call site — this returns a raw distance and applies no cap.
+// Minimum distance in km from (lat, lon) to any ring edge of the geometry, outer
+// rings and holes alike: an island beach sits inside a hole of a marine polygon
+// and resolves via the nearest hole edge. Malformed rings and points are skipped,
+// never thrown on, since GeoMet responses are upstream input. Returns Infinity
+// when no usable edge exists. The per-caller distance cap stays at the call site;
+// this returns a raw distance.
 export function minEdgeDistanceKm(geometry, lat, lon) {
   const cosLat = Math.cos(lat * Math.PI / 180);
   let best = Infinity;
@@ -201,20 +191,17 @@ export function minEdgeDistanceKm(geometry, lat, lon) {
 // GeoJSON LineString/MultiLineString -> array of point arrays (each an array of
 // [lon, lat] positions). Anything else -> [] so callers skip it.
 //
-// Deliberately a SIBLING of geometryPolygons rather than an extension of it:
-// teaching geometryPolygons about lines would make pointInGeometry treat an open
-// line as a closed ring, which is wrong (a ray cast against an unclosed line
-// answers a question nobody asked). Keeping the two apart means every existing
-// caller of geometryPolygons — pointInGeometry and minEdgeDistanceKm — is
-// unaffected by the arrival of line support.
+// Deliberately a sibling of geometryPolygons rather than an extension: teaching
+// geometryPolygons about lines would make pointInGeometry treat an open line as a
+// closed ring, and a ray cast against an unclosed line answers a question nobody
+// asked. Keeping them apart leaves pointInGeometry and minEdgeDistanceKm
+// unaffected by line support.
 //
-// Why this exists at all, and why it is a correctness fix rather than a nicety:
-// minEdgeDistanceKm returns Infinity for a LineString, SILENTLY, because
-// geometryPolygons returns [] for it. The OSM coastline layer is predominantly
-// LineString, so a nearest-shore probe routed through the polygon-only path
-// would report "no coastline anywhere" for every ocean beach on earth. That
-// failure is invisible in this repo's current data (production has zero ocean
-// rows), which is exactly the kind of bug that ships.
+// It exists because minEdgeDistanceKm returns Infinity for a LineString,
+// silently, since geometryPolygons returns [] for one. The OSM coastline layer is
+// predominantly LineString, so a nearest-shore probe routed through the
+// polygon-only path would report "no coastline anywhere" for every ocean beach on
+// earth.
 export function geometryLines(geometry) {
   if (geometry === null || typeof geometry !== "object" || !Array.isArray(geometry.coordinates)) {
     return [];
@@ -228,19 +215,18 @@ export function geometryLines(geometry) {
   return [];
 }
 
-// Minimum distance (km) from the local-planar origin to any vertex in a list of
-// [lon, lat] positions. Internal helper shared by the line and point branches of
-// minGeometryDistanceKm; malformed positions are SKIPPED, never thrown on, for
-// the same reason minEdgeDistanceKm skips them (layer data is upstream input).
+// Minimum distance in km from the local-planar origin to any vertex in a list of
+// [lon, lat] positions. Shared by the line and point branches of
+// minGeometryDistanceKm; malformed positions are skipped, never thrown on.
 function minPositionsDistanceKm(positions, lat, lon, cosLat, asLine) {
   if (!Array.isArray(positions)) {
     return Infinity;
   }
   let best = Infinity;
   // A line of N positions has N-1 segments; a bag of points has N vertices. The
-  // single loop below handles both by treating a vertex as a degenerate segment
-  // from the position to itself, which pointToSegmentKm evaluates correctly
-  // (len2 === 0 -> t stays 0 -> distance to the point itself).
+  // loop below handles both by treating a vertex as a degenerate segment from the
+  // position to itself, which pointToSegmentKm evaluates correctly (len2 === 0
+  // keeps t at 0, giving the distance to the point itself).
   const last = asLine ? positions.length - 1 : positions.length;
   for (let i = 0; i < last; i = i + 1) {
     const a = positions[i];
@@ -260,27 +246,25 @@ function minPositionsDistanceKm(positions, lat, lon, cosLat, asLine) {
   return best;
 }
 
-// Minimum distance (km) from (lat, lon) to ANY geometry type: polygon and
-// multipolygon ring edges (delegating to minEdgeDistanceKm, unchanged),
-// linestring and multilinestring segments, point and multipoint vertices, and
-// a GeometryCollection's members (the coastline layer mixes open ways with
-// closed island ways, so a caller handed one geometry cannot assume a family).
-// Returns Infinity when no usable geometry exists — malformed input is skipped,
-// never thrown on.
+// Minimum distance in km from (lat, lon) to any geometry type: polygon and
+// multipolygon ring edges (delegating to minEdgeDistanceKm), linestring and
+// multilinestring segments, point and multipoint vertices, and a
+// GeometryCollection's members — the coastline layer mixes open ways with closed
+// island ways, so a caller handed one geometry cannot assume a family. Returns
+// Infinity when no usable geometry exists; malformed input is skipped.
 //
-// No cap is applied: the caller owns the radius, exactly as with
-// minEdgeDistanceKm. Every branch uses the SAME local equirectangular frame
-// anchored at (lat, lon) that minEdgeDistanceKm uses, so distances stay
-// comparable across geometry families and against the segment grid, which is
-// planar too. (Haversine for the point branch would have been marginally more
-// accurate and would have made a mixed-geometry minimum a comparison between
-// two different metrics.)
+// No cap is applied: the caller owns the radius. Every branch uses the same local
+// equirectangular frame anchored at (lat, lon) that minEdgeDistanceKm uses, so
+// distances stay comparable across geometry families and against the segment
+// grid, which is planar too. Haversine for the point branch would be marginally
+// more accurate and would make a mixed-geometry minimum a comparison between two
+// metrics.
 //
-// Used for DIAGNOSTICS, tests and small geometries only. The hot probe path
-// goes through the segment grid (src/layerGrid.js), which never touches whole
+// For diagnostics, tests and small geometries only. The hot probe path goes
+// through the segment grid (src/layerGrid.js), which never touches whole
 // geometries: this function iterates every edge with no radius short-circuit,
-// which is correct at marine-zone scale and catastrophic against a lakes layer
-// of ~3e6 vertices probed once per beach vertex.
+// correct at marine-zone scale and catastrophic against a lakes layer of ~3e6
+// vertices probed once per beach vertex.
 export function minGeometryDistanceKm(geometry, lat, lon) {
   if (geometry === null || typeof geometry !== "object") {
     return Infinity;
@@ -307,23 +291,22 @@ export function minGeometryDistanceKm(geometry, lat, lon) {
 }
 
 // Point-to-segment distance in the same local-planar frame minEdgeDistanceKm
-// uses, over a PACKED segment buffer rather than a GeoJSON structure. This is
+// uses, over a packed segment buffer rather than a GeoJSON structure. This is
 // what the segment grid (src/layerGrid.js) evaluates.
 //
-//   segs:  Float64Array of [ax, ay, bx, by, ...] in DEGREES — each group of four
+//   segs:  Float64Array of [ax, ay, bx, by, ...] in degrees — each group of four
 //          is one segment as two (lon, lat) pairs, so segment s occupies
 //          segs[4*s] .. segs[4*s + 3].
-//   idx:   Int32Array (or any indexable) of SEGMENT indices to evaluate, as
+//   idx:   Int32Array (or any indexable) of segment indices to evaluate, as
 //          handed back by the grid's cell neighbourhood.
-//   count: how many entries of idx are live (the grid's arrays are grown in
-//          blocks, so idx.length is not the answer).
+//   count: how many entries of idx are live; the grid's arrays grow in blocks, so
+//          idx.length is not the answer.
 //
-// Returns true as soon as SOME segment is within maxKm, false if none is. The
-// early exit is the whole point: every probe in this pipeline is a threshold
-// question ("is there coastline within 150 m of any beach vertex?"), never
-// "how far exactly", and the difference between answering it on the first hit
-// and scanning every candidate is the difference between a build that finishes
-// and one that does not.
+// Returns true as soon as some segment is within maxKm, false if none is. The
+// early exit is the point: every probe in this pipeline is a threshold question,
+// never "how far exactly", and answering on the first hit rather than scanning
+// every candidate is the difference between a build that finishes and one that
+// does not.
 export function anySegmentWithinKm(segs, idx, count, lat, lon, maxKm) {
   if (!segs || !idx || !(count > 0) || !(maxKm >= 0)) {
     return false;
@@ -342,17 +325,17 @@ export function anySegmentWithinKm(segs, idx, count, lat, lon, maxKm) {
     const ay = (segs[base + 1] - lat) * KM_PER_DEG;
     const bx = (segs[base + 2] - lon) * cosLat * KM_PER_DEG;
     const by = (segs[base + 3] - lat) * KM_PER_DEG;
-    // NO cheap axis-aligned pre-reject here, deliberately. The obvious one
-    // ("both endpoints are beyond maxKm on the same axis, so skip") is
-    // mathematically sound but not BIT-exact against pointToSegmentKm, whose
-    // sqrt(px*px + py*py) round-trip can land an ulp below the raw coordinate
-    // it was derived from: an endpoint at exactly -maxKm was rejected by the
-    // comparison while the sqrt reported <= maxKm. Exactness is worth more than
-    // the saved multiply, because the whole safety argument for this evaluator
-    // is that it answers bit-for-bit the same threshold question as
-    // minGeometryDistanceKm(geometry, lat, lon) <= maxKm, and the cross-check
-    // test asserts precisely that. The real pruning is the grid's job — this
-    // function only ever sees one cell neighbourhood's worth of segments.
+    // No cheap axis-aligned pre-reject here, deliberately. The obvious one —
+    // both endpoints beyond maxKm on the same axis, so skip — is mathematically
+    // sound but not bit-exact against pointToSegmentKm, whose
+    // sqrt(px*px + py*py) round-trip can land an ulp below the raw coordinate it
+    // came from: an endpoint at exactly -maxKm is rejected by the comparison
+    // while the sqrt reports <= maxKm. Exactness is worth more than the saved
+    // multiply, because the safety argument for this evaluator is that it answers
+    // bit-for-bit the same threshold question as
+    // minGeometryDistanceKm(geometry, lat, lon) <= maxKm, which the cross-check
+    // test asserts. Pruning is the grid's job; this function only ever sees one
+    // cell neighbourhood's worth of segments.
     if (pointToSegmentKm(ax, ay, bx, by) <= maxKm) {
       return true;
     }

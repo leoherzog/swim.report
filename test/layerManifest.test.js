@@ -1,14 +1,12 @@
-// Tests for src/layerManifest.js — the DELETE-PATH GATE.
+// Tests for src/layerManifest.js, the delete-path gate.
 //
-// This is a pure src/ module: no entrypoint, no import.meta.main guard needed, no
-// fetch, no Date, no filesystem. Its only import is src/regions.js (read-only),
-// so importing it here touches nothing. Every fixture below is built in memory by
-// one named helper with explicit MALFORMATION knobs.
+// A pure src/ module: no entrypoint, no fetch, no Date, no filesystem. Its only
+// import is src/regions.js, so importing it here touches nothing.
 //
-// The bias of this file is deliberate: the REFUSAL paths get more coverage than
+// The bias of this file is deliberate: the refusal paths get more coverage than
 // the accept paths. A gate that wrongly returns false costs one skipped
-// reconciliation pass, retried on the next daily run. A gate that wrongly returns
-// true mass-deletes live, enriched production rows.
+// reconciliation pass, retried on the next daily run. A gate that wrongly
+// returns true mass-deletes live, enriched production rows.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -74,9 +72,8 @@ function makeParks(overrides) {
   return parks;
 }
 
-// Every value that is NOT proof, for the strictness sweep. The Overpass-era gate
-// carried this same list for the same reason: a truthy-but-not-true value must
-// never slip a DELETE through.
+// Every value that is not proof, for the strictness sweep: a truthy-but-not-true
+// value must never slip a DELETE through.
 const NON_TRUE_VALUES = [null, undefined, false, 0, 1, "true", "", [], {}, NaN];
 
 // --- constants -------------------------------------------------------------------
@@ -111,7 +108,7 @@ describe("layer manifest constants", function () {
       }
     }
     expect(unique.length).toBe(10);
-    // coastline-polygon.fgb is deliberately NOT published: the lines pass already
+    // coastline-polygon.fgb is deliberately not published: the lines pass already
     // carries every coastline way, and publishing both double-counted islands.
     expect(EXPECTED_LAYER_KEYS.indexOf("coastline-polygon.fgb")).toBe(-1);
   });
@@ -162,10 +159,9 @@ describe("reconciliationAllowed refuses every unproven report", function () {
   });
 
   it("is strict about the boolean true — any non-true value refuses", function () {
-    // Ported verbatim in spirit from the Overpass-era strictness case. The
-    // failure mode is MORE likely now, not less: this report is assembled by
-    // three separate scripts, so a JSON string "true" or a 1 from a shell
-    // pipeline is a realistic way for an unproven set to look proven.
+    // This report is assembled by three separate scripts, so a JSON string
+    // "true" or a 1 from a shell pipeline is a realistic way for an unproven
+    // set to look proven.
     const booleans = ["sourcesVerified", "buildSanityPassed", "pointerAgreesWithManifest",
       "layersVerified", "regionsDigestMatches"];
     for (let b = 0; b < booleans.length; b = b + 1) {
@@ -284,7 +280,7 @@ describe("classificationAllowed is the weaker predicate", function () {
 
   it("refuses classification when the view of OSM is INCOMPLETE", function () {
     // A partial water view makes classifyWaterBody's clean-but-empty branch
-    // decide inland, which HIDES beaches — the same product loss as a wrong
+    // decide inland, which hides beaches — the same product loss as a wrong
     // delete, arriving faster and invisible in the row count.
     expect(classificationAllowed(makeReport({ buildStatus: "partial" }))).toBe(false);
     expect(classificationAllowed(makeReport({ sourcesVerified: false }))).toBe(false);

@@ -1,97 +1,80 @@
-// src/layerManifest.js — the DELETE-PATH GATE for the FlatGeobuf layer pipeline.
+// src/layerManifest.js — the delete-path gate for the FlatGeobuf layer pipeline,
+// and the single choke point scripts/discovery-batch.js consults before any
+// DELETE. Pure: no fetch, no Date, no filesystem, and its only import is
+// src/regions.js, so the offline Deno batch, the build-side scripts and vitest
+// all load it verbatim.
 //
-// This module replaces reconciliationAllowed(namedComplete, parkComplete) in
-// scripts/discovery-batch.js at the same call site, keeping its single-choke-point
-// role. It is pure: no fetch, no Date, no filesystem. Its only import is
-// src/regions.js (read-only, for the regions digest), so the offline Deno batch,
-// the build-side scripts and vitest all load it verbatim.
+// The failure mode this gate exists for is inverted from a network one. A wrong
+// tag filter exits 0, ogr2ogr exits 0, the manifest is well-formed, every
+// checksum matches, and the run confidently deletes every beach the filter failed
+// to match: silent, valid-looking and delete-bearing. Every conjunct below asks
+// "do I have proof this layer set is a complete, intact, in-scope, fresh view of
+// OSM?" and answers no whenever the proof is missing, malformed or merely absent.
 //
-// WHY THIS MODULE EXISTS AT ALL
-// -----------------------------
-// Under Overpass, failure was NOISY and DELETE-SAFE: a 504 storm made one tile
-// fail, namedComplete went false, and the whole reconciliation pass was skipped.
-// Under prebuilt layers the failure mode INVERTS. A wrong tag filter exits 0,
-// ogr2ogr exits 0, the manifest is well-formed, every checksum matches, and the
-// run confidently DELETEs every beach the filter failed to match. Silent,
-// valid-looking, and delete-bearing. Every conjunct below exists for that
-// inversion — the gate's job is to answer "do I have PROOF this layer set is a
-// complete, intact, in-scope, fresh view of OSM?" and to answer NO whenever the
-// proof is missing, malformed, or merely absent.
+// Fail-closed rule: every conjunct is a strict identity comparison against the
+// value that means "proven", so a missing field refuses exactly as an explicit
+// false does. That is the realistic failure, because the report is assembled by
+// three separate scripts (scripts/fetch-layers.js, scripts/build-manifest.js,
+// scripts/discovery-batch.js) rather than by one loop's own bookkeeping. A
+// truthy-but-not-true value (1, "true", {}) is not proof and must never slip a
+// delete through.
 //
-// THE FAIL-CLOSED RULE
-// --------------------
-// Every conjunct uses a STRICT identity comparison against the value that means
-// "proven". A MISSING field therefore refuses exactly as an explicitly false one
-// does — which is the realistic failure now that the report is assembled by three
-// separate scripts (scripts/fetch-layers.js, scripts/build-manifest.js and
-// scripts/discovery-batch.js) rather than derived from one loop's own bookkeeping.
-// A truthy-but-not-true value (1, "true", {}) is NOT proof and must never slip a
-// DELETE through; the strictness test from the Overpass era is ported here
-// verbatim in spirit for that reason.
+// Two predicates, not one. classificationAllowed is the weaker one and
+// reconciliationAllowed is defined in terms of it, so the two cannot drift apart
+// or be applied in the wrong order:
 //
-// TWO PREDICATES, NOT ONE (the BL-4 / D15 restructuring)
-// ------------------------------------------------------
-// classificationAllowed is the WEAKER predicate and reconciliationAllowed is
-// defined in terms of it, so the two can never drift apart or be applied in the
-// wrong order. They answer different questions:
+//   classificationAllowed  — "is this a complete view of OSM?"
+//   reconciliationAllowed  — "...and is it scoped to this code's regions and fresh?"
 //
-//   classificationAllowed  — "is this a COMPLETE view of OSM?"
-//   reconciliationAllowed  — "...AND is it scoped to THIS code's regions AND fresh?"
+// Classification must stop when the view is incomplete, because a partial water
+// view makes classifyWaterBody's clean-but-empty branch decide "inland", which
+// hides a beach — the same product loss as deleting it, arriving faster and
+// invisible in the row count. It must keep running when the set is merely stale
+// or out of scope:
 //
-// Coupling classification to the delete gate is a known fail-open regression, not
-// a nicety. Classification must stop when the view is INCOMPLETE, because a
-// partial water view makes classifyWaterBody's clean-but-empty branch decide
-// "inland", which HIDES a beach — the same product loss as deleting it, arriving
-// faster and invisible in the row count. But classification must KEEP RUNNING
-// when the set is merely stale or out of scope:
-//
-//   - A 20-day-old extract's shoreline geometry is COMPLETE, just older.
-//     Classifying from it is strictly better than leaving newly-discovered rows
-//     NULL and VISIBLE, because FLAG_WORTHY_WATER_SQL is deliberately fail-OPEN
-//     for NULL rows under the attempts cap (the Locklin Pines regression).
-//   - A regions-digest mismatch is what an expansion commit (appending a Pacific
-//     box to src/regions.js) produces BY CONSTRUCTION. Deletes must stop — that
-//     is the digest guard's entire purpose — but discovery keeps upserting, so
-//     gating classification here too would publish thousands of unclassified
-//     new-coast beaches live until a rebuild lands.
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with
-// + only (never template literals), console.log for logging.
+//   - A 20-day-old extract's shoreline geometry is complete, just older.
+//     Classifying from it beats leaving newly-discovered rows NULL and visible,
+//     because FLAG_WORTHY_WATER_SQL is deliberately fail-open for NULL rows under
+//     the attempts cap (the Locklin Pines exposure).
+//   - A regions-digest mismatch is what an expansion commit produces by
+//     construction. Deletes must stop, which is the digest guard's whole purpose,
+//     but discovery keeps upserting, so gating classification here too would
+//     publish thousands of unclassified new-coast beaches live until a rebuild
+//     lands.
 
 import { REGIONS } from "./regions.js";
 
 // Bump only alongside a breaking change to the manifest shape written by
 // scripts/build-manifest.js. A set written under a different schemaVersion is
-// FATAL, not degraded: this code cannot claim to understand it at all.
+// fatal, not degraded: this code cannot claim to understand it at all.
 export const LAYER_SCHEMA_VERSION = 1;
 
 // Wall-clock horizon for the published layer set, measured against the OSM data
 // cutoff (manifest.oldestSourceTimestamp / osmosisReplicationTimestamp), never
 // against the build's own wall clock.
 //
-// Staleness ALONE is delete-SAFE, which is why it is an OPERATOR TRIPWIRE rather
-// than a correctness rail: an older extract is OVER-inclusive — it still contains
-// beaches OSM has since removed, and lacks only beaches OSM has since added,
-// which D1 also lacks. So the consequence of tripping it is "stop deleting, keep
-// upserting, keep classifying, and make the broken build unmissable in the run
-// log", not "stop everything".
+// Staleness alone is delete-safe, so this is an operator tripwire rather than a
+// correctness rail: an older extract is over-inclusive, still carrying beaches
+// OSM has since removed and lacking only ones OSM has since added, which D1 also
+// lacks. Tripping it stops deletes and makes the broken build unmissable in the
+// run log; upserts and classification continue.
 //
-// 21 days, not 14: GitHub does not merely DEFER this repo's schedules, it SKIPS
-// occurrences. Against the twice-weekly build cadence, 21 days is three missed
-// slots — wide enough that a single skipped occurrence is not an alarm, tight
-// enough that two consecutive silent build failures are.
+// 21 days, not 14, because GitHub skips schedule occurrences rather than
+// deferring them. Against the twice-weekly build cadence that is three missed
+// slots: wide enough that one skipped occurrence is not an alarm, tight enough
+// that two consecutive silent build failures are.
 export const MAX_SOURCE_AGE_DAYS = 21;
 
-// The TEN published layer object keys, in the order of the layer table. This is
-// the code-side expectation that scripts/fetch-layers.js derives its download
-// list and its layersExpected count from; a set that does not carry exactly
-// these keys is undecodable by this code and refuses FATALLY.
+// The published layer object keys, in the order of the layer table. This is the
+// code-side expectation scripts/fetch-layers.js derives its download list and its
+// layersExpected count from; a set not carrying exactly these keys is undecodable
+// here and refuses fatally.
 //
-// Splits exist because one FlatGeobuf file holds exactly one geometry type: a
-// logical layer that legitimately arrives as more than one geometry type is
-// published as several files and re-concatenated by the reader under one logical
-// name. (There is no coastline-polygon file: the lines pass already carries every
-// coastline way, and publishing both double-counted island coastlines.)
+// Splits exist because one FlatGeobuf file holds exactly one geometry type, so a
+// logical layer arriving as more than one type is published as several files and
+// re-concatenated by the reader under one name. There is no coastline-polygon
+// file: the lines pass carries every coastline way, and publishing both
+// double-counts island coastlines.
 export const EXPECTED_LAYER_KEYS = [
   "beaches-point.fgb",
   "beaches-line.fgb",
@@ -105,7 +88,7 @@ export const EXPECTED_LAYER_KEYS = [
   "other-relations.fgb"
 ];
 
-// parksLayerHealthy's ratio against the PREVIOUS build's parks counts. Tighter
+// parksLayerHealthy's ratio against the previous build's parks counts. Tighter
 // than the 0.95x build-side shrink refusal on purpose: by the time the report
 // reaches the discovery batch the build gate has already accepted the set, so
 // this is the last valve between a quietly under-populated parks layer and a
@@ -118,10 +101,10 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// Strict finite-number test. Deliberately typeof-checked rather than relying on
-// the comparison operators: the string "5" satisfies BOTH "5" >= 0 and "5" <= 21
-// through numeric coercion, so a report field that arrived as JSON text instead
-// of a JSON number would sail through a bare range check and arm the delete path.
+// Strict finite-number test, typeof-checked rather than left to the comparison
+// operators: the string "5" satisfies both "5" >= 0 and "5" <= 21 through numeric
+// coercion, so a report field that arrived as JSON text would sail through a bare
+// range check and arm the delete path.
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -139,20 +122,15 @@ function describeValue(value) {
   return kind;
 }
 
-// The single evaluation of every conjunct, bucketed by TIER. All three exported
-// predicates are defined on top of this one walk, so classificationAllowed,
-// reconciliationAllowed and classifyManifestFailure cannot disagree about a
-// report no matter how the conjunct list changes later.
+// The single evaluation of every conjunct, bucketed by tier. All three exported
+// predicates are defined on top of this one walk, so they cannot disagree about a
+// report however the conjunct list changes later.
 //
-// Tiers (see the module header for why classification is gated by INCOMPLETENESS
-// and deliberately not by scope or staleness):
-//
-//   fatal          — we cannot decode this set at all. No SQL of any kind.
-//   incomplete     — readable, but not provably a complete view of OSM.
-//                    Upserts and the marine pass only: no deletes AND no
-//                    classification.
+//   fatal          — this set cannot be decoded at all. No SQL of any kind.
+//   incomplete     — readable, but not provably a complete view of OSM. Upserts
+//                    and the marine pass only: no deletes, no classification.
 //   scope_or_stale — a complete view, but not scoped to this code's regions or
-//                    not fresh. Upserts, marine AND classification run normally;
+//                    not fresh. Upserts, marine and classification run normally;
 //                    only deletes stop.
 function collectFailures(report) {
   const fatal = [];
@@ -173,27 +151,27 @@ function collectFailures(report) {
     fatal.push("schema-version: expected " + String(LAYER_SCHEMA_VERSION) +
       ", got " + describeValue(report.schemaVersion));
   }
-  // The pointer (layers/current.json) named a buildId; the manifest read from the
-  // pinned immutable prefix must carry that same buildId. A mismatch means a build
-  // completed mid-run and the fetch mixed two sets — every count comparison below
-  // would then be measuring one set against another's manifest.
+  // The manifest read from the pinned immutable prefix must carry the buildId
+  // layers/current.json named. A mismatch means a build completed mid-run and the
+  // fetch mixed two sets, so every count comparison below would be measuring one
+  // set against another's manifest.
   if (report.pointerAgreesWithManifest !== true) {
     fatal.push("pointer-mismatch: pointerAgreesWithManifest is " +
       describeValue(report.pointerAgreesWithManifest));
   }
-  // sha256 AND byte length of every downloaded file matched manifest.layers. A
+  // sha256 and byte length of every downloaded file matched manifest.layers. A
   // truncated FlatGeobuf still parses far enough to yield a plausible feature
   // count, and because the format is Hilbert-ordered the missing tail is
-  // SPATIALLY CONTIGUOUS — exactly the shape the proportional delete rails are
+  // spatially contiguous — exactly the shape the proportional delete rails are
   // worst at catching.
   if (report.layersVerified !== true) {
     fatal.push("layers-unverified: layersVerified is " + describeValue(report.layersVerified));
   }
   // Files on disk vs EXPECTED_LAYER_KEYS.length. Both operands must be real
-  // numbers before they are compared: a bare "present !== expected" is FAIL-OPEN
-  // when both fields are absent, because undefined !== undefined is false — the
-  // report with no layer counting at all would have passed the conjunct that
-  // exists to prove the layer counting happened.
+  // numbers before they are compared: a bare "present !== expected" is fail-open
+  // when both fields are absent, because undefined !== undefined is false, so a
+  // report with no layer counting at all would pass the conjunct that exists to
+  // prove the layer counting happened.
   if (!isFiniteNumber(report.layersPresent) || !isFiniteNumber(report.layersExpected)) {
     fatal.push("layer-count: layersPresent/layersExpected are " +
       describeValue(report.layersPresent) + "/" + describeValue(report.layersExpected));
@@ -201,16 +179,16 @@ function collectFailures(report) {
     fatal.push("layer-count: " + String(report.layersPresent) + " of " +
       String(report.layersExpected) + " layers present");
   } else if (report.layersExpected !== EXPECTED_LAYER_KEYS.length) {
-    // The fetcher counted a complete set of a DIFFERENT size than this code
-    // expects — the two halves have drifted (a layer was added or dropped on one
-    // side only), so "complete" does not mean what the gate assumes.
+    // The fetcher counted a complete set of a different size than this code
+    // expects, so a layer was added or dropped on one side only and "complete"
+    // does not mean what the gate assumes.
     fatal.push("layer-count: expected " + String(EXPECTED_LAYER_KEYS.length) +
       " layers, report describes " + String(report.layersExpected));
   }
-  // OPTIONAL, and validated only when supplied: the exact key set the run read.
-  // When fetch-layers.js provides it this catches the two cases a pair of equal
-  // counts cannot — a layer on disk that the manifest never described, and a
-  // manifest layer absent from disk, where the two errors cancel in the count.
+  // Optional, validated only when supplied: the exact key set the run read. It
+  // catches the two cases equal counts cannot — a layer on disk the manifest
+  // never described, and a manifest layer absent from disk, where the two errors
+  // cancel in the count.
   if (report.layerKeys !== undefined) {
     const keyProblem = describeLayerKeyProblem(report.layerKeys);
     if (keyProblem !== null) {
@@ -227,16 +205,16 @@ function collectFailures(report) {
     incomplete.push("build-incomplete: buildStatus is " + describeValue(report.buildStatus));
   }
   // Every source extract's observed md5 equalled its published md5. This is the
-  // download-completeness proof that replaces the Overpass era's "did every tile
-  // fetch": a mid-download extract rotation shows as a mismatch.
+  // download-completeness proof: a mid-download extract rotation shows as a
+  // mismatch.
   if (report.sourcesVerified !== true) {
     incomplete.push("sources-unverified: sourcesVerified is " +
       describeValue(report.sourcesVerified));
   }
-  // The build-side floors, per-region floors and shrink ratios all passed. These
-  // are the checks the discovery job structurally CANNOT make (they need the
-  // previous build's counts and per-region tallies), so the batch trusts the
-  // build's own verdict here and refuses when it is anything but an explicit yes.
+  // The build-side floors, per-region floors and shrink ratios all passed. The
+  // discovery job structurally cannot make these checks — they need the previous
+  // build's counts and per-region tallies — so the batch trusts the build's
+  // verdict and refuses when it is anything but an explicit yes.
   if (report.buildSanityPassed !== true) {
     incomplete.push("build-sanity-failed: buildSanityPassed is " +
       describeValue(report.buildSanityPassed));
@@ -244,12 +222,11 @@ function collectFailures(report) {
 
   // --- tier: scope_or_stale — deletes only --------------------------------------
 
-  // sha256 over regionsDigestInput(REGIONS) equals manifest.regionsDigest. This
-  // closes a failure mode the Overpass design did not have: appending a coastal
-  // box to src/regions.js immediately widens pointInAnyRegion, so every D1 row in
-  // the new box becomes a DELETE CANDIDATE — while a layer set built before that
-  // commit produces zero beaches there. Without this conjunct the first run after
-  // an expansion commit would mass-delete the entire new coast.
+  // sha256 over regionsDigestInput(REGIONS) equals manifest.regionsDigest.
+  // Appending a coastal box to src/regions.js immediately widens pointInAnyRegion,
+  // so every D1 row in the new box becomes a delete candidate while a layer set
+  // built before that commit produces zero beaches there. Without this conjunct
+  // the first run after an expansion commit mass-deletes the entire new coast.
   if (report.regionsDigestMatches !== true) {
     scopeOrStale.push("regions-digest-mismatch: regionsDigestMatches is " +
       describeValue(report.regionsDigestMatches));
@@ -268,9 +245,9 @@ function collectFailures(report) {
   return { fatal: fatal, incomplete: incomplete, scopeOrStale: scopeOrStale };
 }
 
-// Returns null when layerKeys is exactly EXPECTED_LAYER_KEYS as a SET, or a short
-// description of the first structural problem otherwise. Order is not required
-// (the fetcher may list files in directory order); membership is.
+// Returns null when layerKeys is exactly EXPECTED_LAYER_KEYS as a set, or a short
+// description of the first structural problem. Order is not required — the
+// fetcher may list files in directory order — but membership is.
 function describeLayerKeyProblem(layerKeys) {
   if (!Array.isArray(layerKeys)) {
     return "layerKeys is " + describeValue(layerKeys);
@@ -300,12 +277,11 @@ function describeLayerKeyProblem(layerKeys) {
 // --- exported predicates -------------------------------------------------------
 
 // Splits the three tiers so main() can act on them differently: fatal exits 1
-// with no SQL at all, incomplete suppresses deletes AND classification, and
+// with no SQL at all, incomplete suppresses deletes and classification, and
 // scope_or_stale suppresses only deletes. Pure; never throws for any input.
 //
-// reasons carries EVERY failing conjunct, not just the ones belonging to the
-// reported tier, ordered fatal-first: an operator reading the run log wants the
-// whole diagnosis at once, and the tier alone does not say which conjunct fired.
+// reasons carries every failing conjunct, not only the reported tier's, ordered
+// fatal-first: the tier alone does not say which conjunct fired.
 export function classifyManifestFailure(report) {
   const failures = collectFailures(report);
   const reasons = failures.fatal.concat(failures.incomplete, failures.scopeOrStale);
@@ -320,20 +296,18 @@ export function classifyManifestFailure(report) {
   return { tier: tier, reasons: reasons };
 }
 
-// "Is this a COMPLETE view of OSM?" — the only question classification needs.
-// True for a complete set that is merely stale or out of delete scope; false for
-// anything fatal or incomplete. Pure; false (never a throw, never a default true)
-// for null and malformed input.
+// "Is this a complete view of OSM?" — the only question classification needs.
+// True for a complete set that is merely stale or out of delete scope, false for
+// anything fatal or incomplete. Null and malformed input answer false, never a
+// throw and never a default true.
 export function classificationAllowed(report) {
   const failures = collectFailures(report);
   return failures.fatal.length === 0 && failures.incomplete.length === 0;
 }
 
-// "Is this a complete view AND scoped to THIS code's regions AND fresh?" — the
-// gate for the stale-row reconciliation / DELETE pass. Replaces
-// reconciliationAllowed(namedComplete, parkComplete) at the same call site and
-// keeps its single-choke-point role, so the exported-and-unit-tested invariant
-// "incomplete coverage means no DELETE" survives with a new input.
+// "Is this a complete view, scoped to this code's regions, and fresh?" — the gate
+// for the stale-row reconciliation and DELETE pass, and the one choke point that
+// holds the invariant "incomplete coverage means no DELETE".
 //
 // By construction:
 //   reconciliationAllowed(report) === classificationAllowed(report)
@@ -347,14 +321,13 @@ export function reconciliationAllowed(report) {
 
 // Parks-layer health, consumed by scripts/discovery-batch.js as hasPark.
 //
-// WHY THIS IS NOT HARDCODED TRUE. "The parks layer is present under a verified
+// Not hardcoded true, because "the parks layer is present under a verified
 // manifest" and "the parks layer is correctly populated" are different
-// predicates, and this whole design's thesis is that layer failures are
-// VALID-LOOKING. hasPark false makes upsertSql emit the five-column variant,
-// which leaves park_name UNTOUCHED on existing rows; hardcoding it true makes a
-// 9%-short parks layer BLANK park_name on every named row in the missing parks
-// and, through mergeBeachRows' skippedUnnamed path, strand the park-origin rows
-// those names produced as stale — i.e. as DELETE candidates. False is therefore
+// predicates and layer failures are valid-looking. hasPark false makes upsertSql
+// emit the five-column variant, leaving park_name untouched on existing rows;
+// hardcoding it true lets a short parks layer blank park_name on every named row
+// in the missing parks and, through mergeBeachRows' skippedUnnamed path, strand
+// the park-origin rows those names produced as stale delete candidates. False is
 // the safe direction and every unproven input resolves to it.
 //
 // Inputs (assembled by scripts/fetch-layers.js from the manifest, its history
@@ -369,15 +342,14 @@ export function reconciliationAllowed(report) {
 //     previousLineCount:    number
 //   }
 //
-// A bootstrap set (build 1, empty history) has no previous counts and an
-// unseeded floors entry, so this returns false and the first discovery runs
-// against it simply leave park_name alone. That is a deliberate, cheap, and
-// self-healing cost: the next build carries history and the valve opens.
+// A bootstrap set has no previous counts and an unseeded floors entry, so this
+// returns false and the first discovery against it leaves park_name alone. The
+// next build carries history and the valve opens.
 export function parksLayerHealthy(report) {
-  // The parks counts come from the manifest, so they are only worth reading at
-  // all once the set is a decodable, complete build. This is the "complete view"
-  // question, NOT the delete question: a stale or out-of-scope set still has a
-  // fully populated parks layer and should keep refreshing park_name.
+  // The parks counts come from the manifest, so they are only worth reading once
+  // the set is a decodable, complete build. This is the complete-view question,
+  // not the delete question: a stale or out-of-scope set still has a fully
+  // populated parks layer and should keep refreshing park_name.
   if (!classificationAllowed(report)) {
     return false;
   }
@@ -393,24 +365,20 @@ export function parksLayerHealthy(report) {
       return false;
     }
   }
-  // A parks-POLYGON count of zero is a hard refusal: membership comes from that
+  // A parks-polygon count of zero is a hard refusal: membership comes from that
   // layer alone, membership produces park-origin rows, and park-origin rows are
   // the entire delete-candidate set.
   //
-  // A parks-LINE count of zero is NOT a refusal, though it used to be here on the
-  // grounds that "named park ways exist unconditionally in this scope". That is an
-  // Overpass-era invariant and it does not survive the move to a GDAL-derived
-  // layer set: Overpass's way[leisure=park][name] selector returns closed AND
-  // unclosed ways, while GDAL routes every closed area-tagged way to multipolygons
-  // and leaves only UNCLOSED ways in its lines layer. Verified on GDAL 3.12.4.
-  // Essentially every mapped Great Lakes park is closed or a relation, so the
-  // first real build measured parks-line 0 against parks-polygon 6457 — and this
-  // predicate returned false, which would have meant park_name never refreshing
-  // and (because reconciliation requires it) deletes NEVER running at all.
+  // A parks-line count of zero is not a refusal. GDAL routes every closed
+  // area-tagged way to the polygon layer and leaves only unclosed ways in the
+  // lines layer, and essentially every mapped Great Lakes park is closed or a
+  // relation, so an empty parks-line is legitimate. Refusing on it would mean
+  // park_name never refreshing and, since reconciliation requires hasPark,
+  // deletes never running at all.
   //
   // The floor and previous-count ratio checks below still apply to lineCount and
   // are the right guards for it: they are no-ops at 0 against a 0 floor and a 0
-  // previous count, and they still fire if a layer that HAD named park lines
+  // previous count, and they still fire if a layer that had named park lines
   // empties. That case is genuinely delete-bearing, because parks-line feeds the
   // parksName tier and a beach that loses its park name loses its row.
   if (parks.polygonCount <= 0) {
@@ -430,26 +398,26 @@ export function parksLayerHealthy(report) {
 
 // --- the regions digest --------------------------------------------------------
 
-// Canonical digest INPUT for the regions guard: name plus bbox only, sorted by
+// Canonical digest input for the regions guard: name plus bbox only, sorted by
 // name, with a fixed key order, JSON.stringify'd. The caller hashes the returned
-// string (sha256) and compares it with manifest.regionsDigest; both the build
+// string with sha256 and compares it with manifest.regionsDigest. Both the build
 // (scripts/build-manifest.js) and the batch (scripts/discovery-batch.js) must
-// hash the output of THIS function so the two can never disagree about
+// hash the output of this function so the two cannot disagree about
 // canonicalisation.
 //
-// What must NOT invalidate a layer set: comment edits, reformatting, note-text
+// What must not invalidate a layer set: comment edits, reformatting, note-text
 // rewrites, reordering the REGIONS array, or reordering the keys inside a bbox
-// literal. None of those change the discovery footprint, and invalidating a set
-// over them would stop deletes for a week over a typo fix.
+// literal. None change the discovery footprint, and invalidating a set over them
+// would stop deletes for a week over a typo fix.
 //
-// What MUST invalidate it: adding a box, removing a box, renaming a box, or
-// moving any bbox edge. All four change which D1 rows pointInAnyRegion admits as
-// DELETE CANDIDATES, and a layer set built before the change has no features in
-// the newly-admitted area.
+// What must invalidate it: adding, removing or renaming a box, or moving any bbox
+// edge. All four change which D1 rows pointInAnyRegion admits as delete
+// candidates, and a layer set built before the change has no features in the
+// newly-admitted area.
 //
 // Throws on malformed input. REGIONS is repo-committed source, so a malformed
-// entry is a commit bug that must fail the batch loudly rather than silently
-// digest to something that happens to match or happens not to.
+// entry is a commit bug that must fail the batch loudly rather than digest to
+// something that happens to match or happens not to.
 export function regionsDigestInput(regions) {
   const source = regions === undefined ? REGIONS : regions;
   if (!Array.isArray(source) || source.length === 0) {
@@ -485,8 +453,8 @@ export function regionsDigestInput(regions) {
     });
   }
   // Sort by name, then by the canonical bbox rendering, so two identically-named
-  // boxes still order deterministically instead of depending on Array.sort's
-  // stability across engines (Deno, workerd and node all differ historically).
+  // boxes order deterministically instead of depending on Array.sort's stability
+  // across engines.
   entries.sort(function (a, b) {
     if (a.name < b.name) { return -1; }
     if (a.name > b.name) { return 1; }

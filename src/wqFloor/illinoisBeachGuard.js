@@ -1,68 +1,56 @@
-// src/wqFloor/illinoisBeachGuard.js
+// src/wqFloor/illinoisBeachGuard.js — a raise-only water-quality floor source;
+// see src/wqFloor/index.js for the floor contract.
 //
-// KIND: wq (src/wqFloor raise-only water-quality floor source).
-// SOURCE: Illinois Department of Public Health "BeachGuard" per-beach detail
+// Source: Illinois Department of Public Health "BeachGuard" per-beach detail
 // page, https://www.idph.state.il.us/envhealth/ilbeaches/public/
 // BeachDetail.aspx?BeachID={n} — a plain server-rendered GET (no JS render
 // required). Curated to Illinois's Lake Michigan shoreline beaches (Illinois
 // Beach State Park / Winthrop Harbor / Waukegan / Zion, Lake County).
 //
-// FLOOR MAPPING (RAISE-ONLY, never a hazard override):
+// FLOOR MAPPING (raise-only, never a hazard override):
 //   - Page shows an active advisory panel (elevated bacteria, beach still
 //     open with caution)                       -> floorColor "yellow"
 //   - Page shows an active closure panel (high bacteria, swimming
 //     prohibited)                               -> floorColor "red"
 //   - Page shows "no advisory or closure" / the green-flag "is open." state
-//     -> NO site is emitted (never "green" — a clean reading is the ABSENCE
+//     -> NO site is emitted (never "green" — a clean reading is the absence
 //        of a floor, not an affirmative color; see rules.js wq-floor step,
 //        which only ever raises green/unknown/yellow up, never down).
 //   - Any unrecognized/garbage markup (site redesign, unexpected id/text)
 //     -> NO site is emitted and the page's fetch does not count as a
 //        "clean" read either — see parseIllinoisBeachGuardDetail below.
 //
-// KEYING: this parser intentionally keys on the ABSENCE of the
+// KEYING: this parser intentionally keys on the absence of the
 // id="Main_pnlNoAdvisory" panel (whose body text reads "no advisory or
-// closure" on a clean day), NOT on the id="Main_imgGreenFlag" image — the
+// closure" on a clean day), not on the id="Main_imgGreenFlag" image — the
 // spec for this source explicitly calls out the green-flag image as an
 // unreliable/secondary signal versus the advisory/closure panel state.
 //
-// *** LIVE-MARKUP CONFIRMATION NEEDED ***
-// The exact BeachDetail.aspx markup (precise panel ids for the active
-// advisory vs. active closure states, and the real numeric BeachIDs for each
-// curated Lake Michigan site below) could not be confirmed against a live,
-// currently-monitored beach page at build time — every BeachDetail.aspx
-// fetch attempted during research returned either an off-season "no
-// monitoring information for this year" placeholder or an unrelated inland
-// beach record, never a live advisory/closure example. The parser below is
-// written defensively against the documented panel/text shapes in the task
-// spec and degrades to null (no floor) on anything it cannot positively
-// recognize — "no data" always beats a guess. Before enabling this source in
-// the wqFloor registry, an integrator MUST:
-//   1. Confirm the real BeachID for each SITE_DEFS entry (placeholders below
-//      are marked "UNCONFIRMED" and are best-effort guesses only).
-//   2. Confirm the exact advisory-panel and closure-panel id/text markup
-//      against a live BeachDetail.aspx response during an active advisory,
-//      and tighten extractAdvisoryState()'s regexes to match verbatim.
-// Until then this module fails closed: scrape() only ever produces a site
-// for pages it can positively recognize as advisory/closure; anything else
-// (including a fetch/parse it cannot confirm) yields no site for that beach.
+// The live markup is unconfirmed. The exact BeachDetail.aspx panel ids for the
+// active advisory and closure states, and the real numeric BeachIDs for each
+// curated Lake Michigan site below, could not be confirmed against a live,
+// currently-monitored page: every fetch returned an off-season "no monitoring
+// information for this year" placeholder or an unrelated inland beach record.
+// The parser is written defensively and degrades to null on anything it cannot
+// positively recognize. Before enabling this source in the wqFloor registry:
+//   1. Confirm the real BeachID for each SITE_DEFS entry; the placeholders below
+//      are best-effort guesses.
+//   2. Confirm the advisory-panel and closure-panel id and text markup against a
+//      live response during an active advisory, and tighten
+//      extractAdvisoryState()'s regexes to match verbatim.
+// Until then scrape() only produces a site for pages it can positively recognize
+// as advisory or closure; anything else yields no site for that beach.
 //
-// INTEGRATOR DEDUP NOTE: this is a NEW axis (water quality / bacteria), not a
-// hazard source — it must be registered in src/wqFloor/index.js's
-// wqFloorSources array, ABOVE both usgsGreatLakesNowcast and
-// kenoshaBeachConditions (matches() is first-match-wins and this module's box,
-// lat 42.0-42.55 / lon -87.9..-87.7, overlaps Kenosha's coverage around
-// lat 42.517-42.55 — registering below either one would shadow this source);
-// never in src/officialSources/index.js's scrapers
-// array (which is a hazard-axis OVERRIDE registry; a clean "no advisory"
-// reading here must never be able to mask a wave/rip/alert hazard estimate).
-// No overlap with existing hazard sources (SRF rip, NWS/ECCC alerts, wave
-// height) — this floor can only ever raise a color, never decide/lower one.
+// When registered, this belongs in wqFloorSources above both
+// usgsGreatLakesNowcast and kenoshaBeachConditions: matches() is
+// first-match-wins, and this module's box (lat 42.0-42.55, lon -87.9..-87.7)
+// overlaps Kenosha's coverage around lat 42.517-42.55, so registering below
+// either would shadow this source.
 
 import { fetchText, perBeachResult, DEFAULT_SITE_RADIUS_MI } from "../officialSources/util.js";
 
 export const ILLINOIS_BEACHGUARD_LABEL = "Illinois BeachGuard (IDPH)";
-export const ILLINOIS_BEACHGUARD_INFO_URL =
+const ILLINOIS_BEACHGUARD_INFO_URL =
   "https://www.idph.state.il.us/envhealth/ilbeaches/public/default.aspx";
 export const ILLINOIS_BEACHGUARD_DETAIL_BASE =
   "https://www.idph.state.il.us/envhealth/ilbeaches/public/BeachDetail.aspx?BeachID=";
@@ -76,7 +64,7 @@ export function buildIllinoisBeachDetailUrl(beachId) {
 // module's own header-declared best-effort GUESSES, never verified against a
 // live BeachDetail.aspx page, and the exact advisory/closure panel markup could
 // not be confirmed either (see the module header). Until a human confirms both,
-// scrape() returns null WITHOUT fetching — the same fail-closed-inert pattern
+// scrape() returns null without fetching — the same fail-closed-inert pattern
 // erieCountyPaKml uses for its unconfirmed KML URL — so this source is present
 // in the registry but incapable of emitting a color (or binding a possibly-wrong
 // BeachID to a beach). Flip to true only after confirming the real BeachIDs AND
@@ -166,7 +154,7 @@ function slicePanelById(html, panelId) {
 // closed — never guess). Defensive: matches on documented panel id + text
 // shapes, not brittle DOM structure.
 //
-// FAIL CLOSED: a color is emitted ONLY when a POSITIVE, scoped advisory/closure
+// FAIL CLOSED: a color is emitted only when a POSITIVE, scoped advisory/closure
 // container is matched (the id="Main_pnlClosure" / id="Main_pnlAdvisory" panels,
 // each confirmed by its own body text). The earlier unscoped whole-page
 // /\bclosed\b/ etc. fallback was removed — it red-flagged off-season placeholder
@@ -253,7 +241,7 @@ export const illinoisBeachGuard = {
   label: ILLINOIS_BEACHGUARD_LABEL,
   infoUrl: ILLINOIS_BEACHGUARD_INFO_URL,
   matches: matches,
-  // Cron-side ONLY: fetches one BeachDetail page per curated site (small,
+  // Cron-side only: fetches one BeachDetail page per curated site (small,
   // fixed list — no per-beach fan-out beyond SITE_DEFS). Returns
   // { perBeach:true, sites, source, updated } | null. null is reserved for a
   // total failure (every fetch failed) so scraperHealth bookkeeping is

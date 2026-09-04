@@ -1,5 +1,8 @@
 // Pure module: exports a single CSS string used by src/frontend/render.js.
-// No fetch, no Date, no DOM APIs. String built with array + join, never backticks.
+// No fetch, no Date, no DOM APIs.
+//
+// Properties absent from a rule below come from Web Awesome utility classes on
+// the element; only genuinely custom declarations live here.
 
 const RULES = [
   "html, body {",
@@ -9,13 +12,12 @@ const RULES = [
   "}",
 
   // The page's opaque base color. <wa-page>'s host normally paints this itself,
-  // but we make the host transparent (below) so the fixed .wave-bg layer can sit
-  // behind it. The surface color must live on <html> (the canvas background),
-  // NOT on <body>: WA's native.css already backgrounds <html>, which blocks
-  // body→canvas propagation, and a body-painted background renders ABOVE
-  // negative z-index positioned elements in the root stacking context — it
-  // would hide the waves. Restated here (unlayered, so it outranks the
-  // @layer wa-native copy) to make the dependency explicit.
+  // but the host is made transparent below so the .wave-bg layer can sit behind
+  // it. The surface color has to live on <html>, the canvas background, and not
+  // on <body>: WA's native.css already backgrounds <html>, which blocks
+  // body-to-canvas propagation, and a body-painted background renders above
+  // negative z-index positioned elements in the root stacking context, hiding
+  // the waves. Restated here unlayered, so it outranks the @layer wa-native copy.
   "html {",
   "  background-color: var(--wa-color-surface-default);",
   "}",
@@ -32,21 +34,14 @@ const RULES = [
   "  background-color: transparent;",
   "}",
 
-  // Anchors .wave-bg's absolute positioning to the full document height (body
-  // spans the whole page; html/body already have min-height: 100%). relative +
-  // z-index: auto does NOT create a stacking context, so the wave layer keeps
-  // participating in the root stacking context where negative z-index paints
-  // below all content.
+  // Anchors .wave-bg's absolute positioning to the full document height.
+  // relative with z-index: auto does not create a stacking context, so the wave
+  // layer keeps participating in the root stacking context, where negative
+  // z-index paints below all content.
   "body {",
   "  position: relative;",
   "}",
 
-  // Firewatch-style ambient wave swells, anchored to the bottom of the document
-  // (not the viewport — they sit behind the footer and only appear as you reach
-  // the end of the page) and rendered behind everything (z-index: -1, above
-  // only the html canvas background). Decorative: aria-hidden in the markup,
-  // and pointer-events: none so it never eats clicks. Kept low and wide so it
-  // reads as a gentle water body, not a banner.
   ".wave-bg {",
   "  position: absolute;",
   "  left: 0;",
@@ -66,17 +61,12 @@ const RULES = [
   "  height: 100%;",
   "}",
 
-  // Parallax drift: each layer shares the horizontal translate keyframe but runs
-  // at a different (deliberately slow) duration, so the crests slide past each
-  // other for a gentle swell. Very long durations + tiny tints keep it subtle.
   ".wave-layers > use {",
   "  animation: wave-drift 26s cubic-bezier(0.55, 0.5, 0.45, 0.5) infinite;",
   "}",
 
-  // Tint from the theme's own text token mixed into transparent: subtle
-  // dark-on-light in light mode, light-on-dark under .wa-dark — no hardcoded
-  // colors, so it always matches the current surface. Front layers a touch
-  // stronger for depth.
+  // Tint from the theme's own text token mixed into transparent, so it always
+  // matches the current surface with no hardcoded colors.
   ".wave-layers > use:nth-child(1) {",
   "  animation-delay: -2s;",
   "  animation-duration: 24s;",
@@ -114,10 +104,9 @@ const RULES = [
   "  padding-inline: var(--wa-space-xl);",
   "}",
 
-  // Size/weight come from wa-font-size-l + wa-font-weight-bold utility classes
-  // on the element. inline-flex + gap stay custom: wa-cluster is block-level
-  // flex, so it is NOT an equivalent swap here. wa-link-plain is also not a
-  // match — it adds a hover color-mix this link deliberately doesn't have.
+  // inline-flex + gap stay custom: wa-cluster is block-level flex, so it is not
+  // an equivalent swap here, and wa-link-plain adds a hover color-mix this link
+  // deliberately does not have.
   ".brand-link {",
   "  display: inline-flex;",
   "  align-items: center;",
@@ -126,14 +115,14 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
-  // wa-page's shadow sheet paints EVERY slotted section opaque via
-  // slot[name]::slotted(*) { background-color: var(--wa-color-surface-default) }
-  // — which would sit the footer on top of the document-bottom .wave-bg layer.
+  // wa-page's shadow sheet paints every slotted section opaque via
+  // slot[name]::slotted(*) { background-color: var(--wa-color-surface-default) },
+  // which would sit the footer on top of the document-bottom .wave-bg layer.
   // Transparent here wins without !important: outer-document author rules beat
-  // shadow ::slotted() declarations regardless of specificity. The sticky
-  // header deliberately keeps its opaque ::slotted fill so content scrolling
-  // under it can't show through.
-  // wa-page also makes the slotted footer a space-between flex ROW; the footer
+  // shadow ::slotted() declarations regardless of specificity. The sticky header
+  // deliberately keeps its opaque ::slotted fill so content scrolling under it
+  // cannot show through.
+  // wa-page also makes the slotted footer a space-between flex row; the footer
   // holds exactly one child (.footer-lines) and centers it instead.
   ".app-footer {",
   "  padding-inline: var(--wa-space-xl);",
@@ -156,7 +145,6 @@ const RULES = [
   "  margin-inline: auto;",
   "}",
 
-  // list-style/padding come from the wa-list-plain utility on the element.
   // margin stays: the ul's parent (.beach-list-section) is not a layout
   // utility, so the utilities' child-margin reset doesn't reach it, and the
   // native :has(+ *) rule would otherwise add margin-block-end before the
@@ -192,8 +180,7 @@ const RULES = [
   "  font-size: var(--wa-font-size-s);",
   "}",
 
-  // Quiet color/size/weight come from the wa-caption-s utility on the element;
-  // only the offset and the no-wrap behavior are genuinely custom.
+  // Only the offset and the no-wrap behavior are custom.
   ".beach-row-distance {",
   "  margin-inline-start: var(--wa-space-xs);",
   "  white-space: nowrap;",
@@ -210,10 +197,8 @@ const RULES = [
   ".flag-icon-red { color: var(--wa-color-red-50); }",
   ".flag-icon-unknown { color: var(--wa-color-gray-50); }",
 
-  // Shared framed-embed treatment: the wrapper div carries the
-  // "wa-frame:landscape wa-border-radius-m" utilities, which already supply the
-  // 16:9 aspect-ratio, overflow clipping, and rounded corners. Only the 1px
-  // surface border (not part of any utility) lives here.
+  // Shared framed-embed treatment. Only the 1px surface border lives here; the
+  // wrapper's utilities supply the aspect ratio, clipping and rounded corners.
   ".framed-embed {",
   "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
   "}",
@@ -244,9 +229,8 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
-  // Grouping/spacing come from the parent .beach-identity (wa-stack wa-gap-l),
-  // which also zero-margins its children — so the title needs no rule of its
-  // own, and the subtitle keeps only its quiet color and size.
+  // The parent .beach-identity (wa-stack wa-gap-l) zero-margins its children, so
+  // the title needs no rule of its own.
   ".beach-subtitle {",
   "  color: var(--wa-color-text-quiet);",
   "  font-size: var(--wa-font-size-l);",
@@ -370,11 +354,9 @@ const RULES = [
   "  white-space: nowrap;",
   "}",
 
-  // Homepage map: the border comes from the shared .framed-embed class and the
-  // rounded corners from the wa-border-radius-m utility (same treatment as the
-  // detail-page wave map / webcam). Only the map's own concerns live here: an
-  // explicit height (MapLibre collapses to 0px without one and renders blank)
-  // and the overflow clip that keeps the tiles inside the rounded corners.
+  // Homepage map: MapLibre collapses to 0px and renders blank without an
+  // explicit height. The overflow clip keeps the tiles inside the rounded
+  // corners the wa-border-radius-m utility supplies.
   ".home-map {",
   "  height: 20rem;",
   "  overflow: hidden;",

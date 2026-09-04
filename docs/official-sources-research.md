@@ -7,9 +7,9 @@
 > **removed**. An official color overrides the flag estimate wherever shown, and a
 > bacteria "clean → green" reading is a different axis from surf hazard: letting it
 > win would mask a genuine hazard estimate (e.g. a gale-driven red). Only
-> hazard/flag/closure sources remain registered (South Haven, Huron-Clinton
-> Metroparks, Chicago Park District). See TODO.md's "Official-source coverage" and
-> PLAN.md section 6 for the current registry.
+> hazard/flag/closure sources are registered — seven of them today. Water quality
+> now feeds the separate raise-only floor in `src/wqFloor/`. See TODO.md's
+> "Official-source coverage" and PLAN.md section 6 for the current registry.
 
 ## 1. TL;DR
 

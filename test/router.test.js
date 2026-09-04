@@ -819,10 +819,10 @@ describe("last_viewed demand stamping", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Appended coverage: worker entrypoint (error boundary + cron dispatch),
-// router guards (405, proximity ordering), and render.js
-// invariants (stale warnings, honest unknown, double-red, footer disclaimer,
-// source labels, escapeHtml, formatMiles, search-script id contract).
+// Worker entrypoint (error boundary and cron dispatch), router guards (405,
+// proximity ordering), and render.js invariants (stale warnings, honest
+// unknown, double-red, footer disclaimer, source labels, escapeHtml,
+// formatMiles, search-script id contract).
 // ---------------------------------------------------------------------------
 
 import { vi } from "vitest";

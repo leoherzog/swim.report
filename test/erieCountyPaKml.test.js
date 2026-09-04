@@ -4,9 +4,8 @@
 // KML fixtures (no network). scrape() tests lock the fail-closed contract
 // (the KML export URL ships unconfirmed/empty, so scrape must never fetch).
 //
-// Project style: ES modules, NO template literals, string concat with +,
-// function () {} callbacks. This is a RAISE-ONLY floor: the parser must never
-// emit green/double-red/unknown, and a clean/open reading must produce NO site.
+// This is a raise-only floor: the parser must never emit green, double-red or
+// unknown, and a clean or open reading must produce no site.
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   parseErieCountyPaKml,

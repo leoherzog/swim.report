@@ -4,8 +4,6 @@
 // floor). No network -- every case builds an inline HTML fixture mirroring
 // the live-confirmed Ontario Parks "Beach Postings" table markup and
 // exercises the exported pure functions directly.
-// Project style: ES modules, no template literals, string concat with +,
-// function () {} callbacks.
 
 import { describe, it, expect } from "vitest";
 import {

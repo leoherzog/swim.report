@@ -7,43 +7,36 @@
 //   deno run --allow-read --allow-write scripts/sample-waves.js --mode sample \
 //     --dest ./.waves --planes ./.waves/planes --snapshot snapshot.json --out ./.waves/out
 //
-// NO --allow-net AND NO --allow-run. GDAL runs in the WORKFLOW SHELL and never from
-// here: plan mode reads the gdalinfo JSON the shell captured and says which band of
-// which file to extract; sample mode reads the flat ENVI rasters the shell wrote and
-// their gdalinfo sidecars. That keeps subprocess permission out of the entire wave
-// pipeline, and .github/workflows/test.yml enforces the no-network half.
+// No --allow-net and no --allow-run. GDAL runs in the workflow shell and never
+// from here: plan mode reads the gdalinfo JSON the shell captured and says which
+// band of which file to extract; sample mode reads the flat ENVI rasters the shell
+// wrote and their gdalinfo sidecars. That keeps subprocess permission out of the
+// wave pipeline, and .github/workflows/test.yml enforces the no-network half.
 //
-// THE UNITS CONTRACT
-// ------------------
-// HTSGW is METERS. Feet = meters * 3.28084 (metersToFeet, src/geo.js — never
-// re-derived here). WIND is METERS PER SECOND. mph = m/s * 2.2369362920544
-// (metersPerSecondToMph, src/waveGrids.js). src/rules.js thresholds are 2 ft yellow
-// and 4 ft red, and 15/25 mph; handing it metres makes every sea state below 1.22 m
-// read green sitewide and handing it m/s makes an actual 25 mph arrive as 11, with
-// no error anywhere in either case.
+// The units contract. HTSGW is metres; feet = metres * 3.28084 (metersToFeet in
+// src/geo.js, never re-derived here). WIND is metres per second; mph = m/s *
+// 2.2369362920544 (metersPerSecondToMph in src/waveGrids.js). src/rules.js
+// thresholds are 2 ft yellow, 4 ft red and 15/25 mph, so handing it metres makes
+// every sea state below 1.22 m read green sitewide and handing it m/s makes an
+// actual 25 mph arrive as 11, with no error anywhere in either case.
 //
-// windGustMph is ALWAYS null: gfswave publishes no GUST field (verified against the
-// GFSWAVE .idx variable list DIRPW HTSGW PERPW SWDIR SWELL SWPER UGRD VGRD WDIR WIND
-// WVDIR WVHGT WVPER). src/rules.js already renders "n/a" for a null gust. That list
-// describes gfswave alone; GLWU is fetched whole and its element set is measured per
-// cycle from the gdalinfo sidecar at plan time.
+// windGustMph is always null: gfswave publishes no GUST element, and src/rules.js
+// already renders "n/a" for a null gust. GLWU is fetched whole and its element set
+// is read per cycle from the gdalinfo sidecar at plan time.
 //
-// NODATA IS A NUMBER THAT SURVIVES JSON. gfswave uses 9999 and GLWU uses
-// 9.999000260554009e+20, both read PER BAND from the gdalinfo sidecar and never
-// hardcoded. 9999 m becomes 32808.4 ft and colors a flag RED with a straight-faced
-// reason string; a negative sentinel colors it GREEN. src/rules.js tests
+// Nodata is a number that survives JSON: gfswave uses 9999 and GLWU
+// 9.999000260554009e+20, both read per band from the gdalinfo sidecar and never
+// hardcoded. 9999 m becomes 32808.4 ft and colors a flag red with a straight-faced
+// reason string; a negative sentinel colors it green. src/rules.js tests
 // waveHeightFt !== null with no isFinite guard and src/index.js guards with typeof
-// === "number" only, so containment is THIS writer's job (isUsableSample in
+// === "number" only, so containment is this writer's job (isUsableSample in
 // src/waveGrids.js) and nothing else's.
 //
-// THE RESOLVED CELL IS COMPUTED ONCE PER BEACH, FROM THE HOUR-0 WAVE BAND, AND
-// REUSED FOR ALL 24 HOURS. The WW3 land mask is fixed for a cycle, and re-running
-// the spiral per hour would let hoursFt jump between cells — breaking the
-// hoursFt[0] === waveinput.waveHeightFt invariant in a way no test catches
-// obviously, and making the detail page's "now" stat contradict its own first bar.
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with +
-// (never template literals), console for logging.
+// The resolved cell is computed once per beach from the hour-0 wave band and
+// reused for all 24 hours. The WW3 land mask is fixed for a cycle, and re-running
+// the spiral per hour would let hoursFt jump between cells, breaking the
+// hoursFt[0] === waveinput.waveHeightFt invariant and making the detail page's
+// "now" stat contradict its own first bar.
 
 import {
   GRIDS,
@@ -131,8 +124,8 @@ export function parseGribValidTime(raw) {
 }
 
 // Flattens gdalinfo -json into the per-band facts the gates need. Throws on output
-// this code cannot read: a gdalinfo result it cannot parse is a raster it cannot
-// vouch for, and the one outcome worse than refusing is guessing a band index.
+// this code cannot read: the one outcome worse than refusing is guessing a band
+// index.
 export function gdalinfoBands(info, what) {
   if (!isPlainObject(info) || !Array.isArray(info.bands)) {
     throw new Error("sample-waves: " + what + ": gdalinfo output has no bands array");
@@ -156,8 +149,8 @@ export function gdalinfoBands(info, what) {
 
 // The sampled raster's geometry, straight from gdalinfo's own size and geoTransform.
 //
-// ENVI's "map info" header is deliberately NOT parsed: its tie point is 1-INDEXED
-// and refers to a pixel CORNER, so reading it is a half-cell error waiting to
+// ENVI's "map info" header is deliberately not parsed: its tie point is 1-indexed
+// and refers to a pixel corner, so reading it is a half-cell error waiting to
 // happen. gdalinfo's geoTransform is the same six numbers GDAL itself used.
 export function headerFromInfo(info, what) {
   if (!isPlainObject(info) || !Array.isArray(info.size) || !Array.isArray(info.geoTransform)) {
@@ -178,13 +171,14 @@ export function headerFromInfo(info, what) {
 
 // --- plan mode -------------------------------------------------------------------
 
-// The per-grid verdict threaded band-plan.json -> sample-report.json -> manifest.json,
-// carrying ONE entry for EVERY grid in GRIDS whatever the cycle contained.
+// The per-grid verdict threaded band-plan.json -> sample-report.json ->
+// manifest.json, carrying one entry for every grid in GRIDS whatever the cycle
+// contained.
 //
 // That completeness is the contract. An absent entry would let the build gate's
 // per-grid floor silently skip a grid that under-covered, and an entry claiming a
 // status a grid never reached would score an absent grid as a shrink to zero and
-// refuse the whole cycle — including the grids that sampled cleanly.
+// refuse the whole cycle, including the grids that sampled cleanly.
 //
 //   unfetched — no grids-report entry, so the fetch never produced this grid
 //   unplanned — fetched but not usable for waves; contributes no planes and no records
@@ -198,13 +192,12 @@ export function emptyGridStatus() {
 }
 
 // For each enabled grid and each of the 24 forecast hours, name the source file and
-// the BAND INDEX carrying that hour's HTSGW and WIND, plus the GRIB_VALID_TIME the
+// the band index carrying that hour's HTSGW and WIND, plus the GRIB_VALID_TIME the
 // gate will assert against validStartEpoch + hour*3600.
 //
-// Band indices are DISCOVERED from gdalinfo, never assumed: GLWU is one file of 931
-// bands (49 steps x 19 elements) and the stepped grids are two-record concatenations
-// whose order mirrors ascending byte offset. Assuming either layout is how an .idx
-// off-by-one becomes a complete, plausible, silently time-shifted series.
+// Band indices are discovered from GRIB_VALID_TIME, never assumed from a layout.
+// Assuming one is how an .idx off-by-one becomes a complete, plausible, silently
+// time-shifted series.
 export function planFor(gridsReport, infoByFile, validStartEpoch) {
   const entries = [];
   const problems = [];
@@ -231,8 +224,8 @@ export function planFor(gridsReport, infoByFile, validStartEpoch) {
       }
       continue;
     }
-    // The workflow shell marks a grid unusable after the fact — a gdalinfo sweep or a
-    // band extraction that failed for it. An absent usable field means true.
+    // The workflow shell marks a grid unusable after a failed gdalinfo sweep or
+    // band extraction. An absent usable field means true.
     if (entry.usable === false) {
       const message = gridId + ": " + (typeof entry.unusableReason === "string" &&
         entry.unusableReason !== "" ? entry.unusableReason : "marked unusable by the workflow");
@@ -298,12 +291,12 @@ export function planFor(gridsReport, infoByFile, validStartEpoch) {
         });
       }
     }
-    // The element requirement splits in ONE direction only. A grid missing HTSGW at any
-    // hour contributes nothing at all, because a wind-only record from a grid whose wave
-    // plane was never proven is a wave lane nobody can audit. A grid missing only WIND
-    // still carries its waves: WIND is read at exactly one place — the hour-0 wind plane
-    // behind the wave-null fallback — so losing it costs that grid's beaches the fallback
-    // and nothing else.
+    // The element requirement splits in one direction only. A grid missing HTSGW at
+    // any hour contributes nothing, because a wind-only record from a grid whose
+    // wave plane was never proven is a wave lane nobody can audit. A grid missing
+    // only WIND still carries its waves: WIND is read at one place, the hour-0 wind
+    // plane behind the wave-null fallback, so losing it costs that grid's beaches
+    // the fallback and nothing else.
     if (waveProblems.length > 0) {
       status.status = "unplanned";
       status.reasons = status.reasons.concat(waveProblems);
@@ -323,13 +316,11 @@ export function planFor(gridsReport, infoByFile, validStartEpoch) {
   return { entries: entries, problems: problems, gridStatus: gridStatus };
 }
 
-// The two refusals the plan step applies, as one pure decision.
-//
-// Everything else a grid can do wrong costs THAT grid's beaches their waves and
-// nothing more. These two are different in kind: an empty plan has nothing to sample
-// at all, and a grid in REQUIRED_GRID_IDS that did not reach "planned" means the
-// beaches this pipeline exists to cover would get nothing, so the cycle is refused
-// rather than published thin. Returns the refusal text, or null to proceed.
+// The two refusals the plan step applies, as one pure decision. Everything else a
+// grid can do wrong costs that grid's beaches their waves and nothing more; these
+// two are different in kind, because an empty plan has nothing to sample and a
+// grid in REQUIRED_GRID_IDS short of "planned" means the beaches this pipeline
+// exists to cover get nothing. Returns the refusal text, or null to proceed.
 export function planRefusal(entries, gridStatus) {
   if (!Array.isArray(entries) || entries.length === 0) {
     return "no grid could be planned";
@@ -347,18 +338,18 @@ export function planRefusal(entries, gridStatus) {
 
 // --- sample mode -----------------------------------------------------------------
 
-// The record pair for ONE beach, carrying both write-skip guards:
+// The record pair for one beach, carrying both write-skip guards:
 //
-//   wave null AND wind null -> NO record at all, so the previous KV key rides its
+//   wave null and wind null -> no record at all, so the previous KV key rides its
 //                              lease and the flag ages out to unknown rather than
 //                              being recoloured from nothing.
 //   wave null, wind present -> a waveinput record only, no series.
 //
-// The wind is a FALLBACK and is recorded ONLY for a wave-null beach, which is what
-// keeps src/index.js's "Wind Forecast" source attribution honest: it pushes that
-// source exactly when waveHeightFt is null.
+// The wind is a fallback and is recorded only for a wave-null beach, which keeps
+// src/index.js's "Wind Forecast" source attribution honest: it pushes that source
+// exactly when waveHeightFt is null.
 //
-// hoursFt[0] and waveHeightFt are the SAME conversion of the SAME sample, computed
+// hoursFt[0] and waveHeightFt are the same conversion of the same sample, computed
 // once and written twice.
 export function waveRecordsForBeach(input) {
   const hoursM = Array.isArray(input.waveMeters) ? input.waveMeters : null;
@@ -383,8 +374,7 @@ export function waveRecordsForBeach(input) {
     model: waveHeightFt === null ? null : input.gridId,
     windSpeedMph: windSpeedMph,
     // gfswave publishes no GUST element, so this is permanently null and the wind
-    // red rule narrows to speed alone. The branch only fires when waveHeightFt is
-    // null, which under GRIB is rare.
+    // red rule narrows to speed alone.
     windGustMph: null,
     updated: input.updated
   };
@@ -411,13 +401,11 @@ export function waveRecordsForBeach(input) {
   return { waveinput: waveinput, waves: waves };
 }
 
-// The sample report's per-grid verdict: the plan's gridStatus carried forward, with a
-// grid upgraded to "sampled" only when it actually produced a stats entry.
-//
-// A planned grid that produced no stats is reported "unplanned", never "sampled" with
-// zeroes: the build gate scores a per-grid floor against what a grid claims to have
-// measured, and a phantom zero would refuse the whole cycle on behalf of a grid that
-// never ran.
+// The plan's gridStatus carried forward, with a grid upgraded to "sampled" only
+// when it produced a stats entry. A planned grid that produced no stats is
+// reported "unplanned", never "sampled" with zeroes: the build gate scores a
+// per-grid floor against what a grid claims to have measured, and a phantom zero
+// would refuse the whole cycle on behalf of a grid that never ran.
 export function sampleGridStatus(planStatus, stats) {
   const out = emptyGridStatus();
   const ids = Object.keys(out);
@@ -474,7 +462,7 @@ export function validFractionOf(header, data) {
   return usable / data.length;
 }
 
-// The plane keys this run READ for one grid, hour-ordered by construction of the key.
+// The plane keys this run read for one grid, hour-ordered by construction.
 export function planeKeysFor(planeInfo, gridId) {
   const out = [];
   if (!isPlainObject(planeInfo)) {
@@ -489,12 +477,10 @@ export function planeKeysFor(planeInfo, gridId) {
 }
 
 // Every plane of one grid must describe the same raster as its hour-0 wave plane.
-// Hour 0 proves nothing about hour 7: noaa_gfswave downloads ONE file per forecast
+// Hour 0 proves nothing about hour 7: noaa_gfswave downloads one file per forecast
 // hour and each plane's geotransform comes from that file, so a shifted origin
-// decodes, samples and gates cleanly while reading the wrong cells.
-//
-// Returns one message per mismatched field, in the shape the build gate's refusals
-// already speak; an empty list is a grid whose planes agree.
+// decodes, samples and gates cleanly while reading the wrong cells. Returns one
+// message per mismatched field; an empty list is a grid whose planes agree.
 export function planeIdentityMismatches(planeInfo, gridId, reference) {
   const out = [];
   const keys = planeKeysFor(planeInfo, gridId);
@@ -518,8 +504,8 @@ export function planeIdentityMismatches(planeInfo, gridId, reference) {
           ", expected " + String(reference[fields[f]]));
       }
     }
-    // Relative, like the build gate: gdalinfo prints a large sentinel rounded, so an
-    // equality test would report a mismatch for a formatting difference.
+    // Relative, like the build gate: gdalinfo prints a large sentinel rounded, so
+    // an equality test would report a mismatch for a formatting difference.
     if (!matchesNodata(observed.nodata, reference.nodata)) {
       out.push(key + ": nodata is " + String(observed.nodata) +
         ", expected " + String(reference.nodata));
@@ -534,13 +520,11 @@ async function readJson(path) {
   return JSON.parse(await Deno.readTextFile(path));
 }
 
-// One ENVI plane as a Float32Array over the raw bytes.
-//
-// Byte order is the runner's native little-endian, which is what GDAL's ENVI driver
-// writes by default and what Float32Array reads. A byte-swapped plane would not fail
-// here — it would produce absurd magnitudes, which is exactly what the sentinel,
-// mean-plausibility and distinct-value gates in scripts/build-wave-manifest.js exist
-// to refuse.
+// One ENVI plane as a Float32Array over the raw bytes. Byte order is the runner's
+// native little-endian, which is what GDAL's ENVI driver writes and what
+// Float32Array reads; a byte-swapped plane would not fail here, it would produce
+// absurd magnitudes, which is what the sentinel, mean-plausibility and
+// distinct-value gates in scripts/build-wave-manifest.js refuse.
 async function readPlane(path, header, what) {
   const bytes = await Deno.readFile(path);
   const expected = header.width * header.height * 4;
@@ -588,7 +572,7 @@ async function runPlan(args) {
   const gridIds = Object.keys(gridsReport.grids || {});
   for (let g = 0; g < gridIds.length; g = g + 1) {
     const entry = gridsReport.grids[gridIds[g]];
-    // A grid the shell already marked unusable is not read at all: its sidecars may be
+    // A grid the shell marked unusable is not read at all: its sidecars may be
     // truncated or missing, and planFor unplans it from the marking alone.
     if (!isPlainObject(entry) || !Array.isArray(entry.files) || entry.usable === false) {
       continue;
@@ -609,9 +593,9 @@ async function runPlan(args) {
   for (let i = 0; i < plan.problems.length; i = i + 1) {
     log("PROBLEM " + plan.problems[i]);
   }
-  // A grid that could not be planned costs ITS beaches their waves and nothing more.
-  // Refusing the whole cycle for one grid's unexpected file takes down every other
-  // grid's beaches too, which is more data lost, not less.
+  // A grid that could not be planned costs its beaches their waves and nothing
+  // more. Refusing the whole cycle for one grid's unexpected file takes down every
+  // other grid's beaches too, which is more data lost, not less.
   const statusIds = Object.keys(plan.gridStatus);
   for (let i = 0; i < statusIds.length; i = i + 1) {
     const status = plan.gridStatus[statusIds[i]];
@@ -642,13 +626,13 @@ async function runSample(args) {
   const beaches = beachesFromSnapshot(await readJson(args.snapshot));
   const validStartEpoch = plan.validStartEpoch;
   const startIso = new Date(validStartEpoch * 1000).toISOString();
-  // startIso AND updated are the model VALID START, never the run clock: a cycle
-  // published late must not be able to claim it is fresher than its own data.
+  // startIso and updated are the model valid start, never the run clock: a cycle
+  // published late must not claim to be fresher than its own data.
   const updated = startIso;
   log("beaches " + String(beaches.length) + ", validStart " + startIso);
 
-  // Object.create(null) throughout: these are keyed by beach id and plane key, both of
-  // which are upstream strings, and a row named __proto__ must not silently vanish.
+  // Object.create(null) throughout: these are keyed by beach id and plane key,
+  // both upstream strings, and a row named __proto__ must not silently vanish.
   const byKey = Object.create(null);
   for (let i = 0; i < plan.entries.length; i = i + 1) {
     byKey[plan.entries[i].key] = plan.entries[i];
@@ -728,10 +712,9 @@ async function runSample(args) {
     unresolved = stillUnresolved;
   }
 
-  // Pass 2 — wind fallback for beaches with no wet WAVE cell. WIND shares the wave
-  // model's land mask, so this is expected to be nearly empty; it exists because the
-  // Worker's read contract has a wind-only branch and dropping it would be a silent
-  // narrowing of that contract.
+  // Pass 2 — wind fallback for beaches with no wet wave cell. WIND shares the wave
+  // model's land mask, so this is expected to be nearly empty; it exists because
+  // the Worker's read contract has a wind-only branch.
   const windOnly = Object.create(null);
   for (let g = 0; g < gridIds.length && unresolved.length > 0; g = g + 1) {
     const grid = gridById(gridIds[g]);
@@ -755,7 +738,7 @@ async function runSample(args) {
   }
 
   // Pass 3 — the 24 hourly wave planes, one resident at a time, read at each
-  // assigned beach's ALREADY RESOLVED cell.
+  // assigned beach's already resolved cell.
   const hoursByBeach = Object.create(null);
   const ids = Object.keys(assignment);
   for (let i = 0; i < ids.length; i = i + 1) {
@@ -781,11 +764,10 @@ async function runSample(args) {
     }
   }
 
-  // Every plane this run READ is compared against its own grid's hour-0 wave raster,
-  // which is the only comparison that can see an hour whose geotransform moved.
-  // Pass 3 skips a grid with no beaches assigned to it, so its hourly planes were
-  // never read and are never compared: the set compared is exactly the set that
-  // contributed a value.
+  // Every plane this run read is compared against its own grid's hour-0 wave
+  // raster, the only comparison that can see an hour whose geotransform moved. Pass
+  // 3 skips a grid with no beaches assigned, so its hourly planes were never read
+  // and are never compared: the set compared is the set that contributed a value.
   const identityIds = Object.keys(stats);
   for (let i = 0; i < identityIds.length; i = i + 1) {
     const id = identityIds[i];
@@ -820,9 +802,9 @@ async function runSample(args) {
       waveMeters: cell !== undefined ? hoursByBeach[beach.id] : null,
       windMs: wind !== undefined ? wind.windMs : null
     });
-    // Attribution is the grid that resolved THIS beach's cell (or, for a wave-null
-    // beach, its wind cell). Crediting a record to any other grid would inflate that
-    // grid's counts and let a real shrink pass its own floor.
+    // Attribution is the grid that resolved this beach's cell, or for a wave-null
+    // beach its wind cell. Crediting a record elsewhere would inflate that grid's
+    // counts and let a real shrink pass its own floor.
     const gridStats = stats[gridId];
     if (records.waveinput !== null) {
       waveinputLines.push(JSON.stringify(records.waveinput));

@@ -1,4 +1,4 @@
-// Dependency-free proof that the four demand-aware ORDER BY clauses (F8) do
+// Dependency-free proof that the four demand-aware ORDER BY clauses do
 // what the plan claims when run against REAL SQLite, not just substring
 // matches on the SQL string. Uses the Node built-in node:sqlite
 // (DatabaseSync) so no better-sqlite3/native-module dependency is added to
@@ -84,7 +84,7 @@ function idsOf(rows) {
   return rows.map(function (r) { return r.id; });
 }
 
-describeIfSqlite("demand-aware ORDER BY clauses against real SQLite (F8)", function () {
+describeIfSqlite("demand-aware ORDER BY clauses against real SQLite", function () {
   let now;
   let hotCutoffIso;
   let recentIso;

@@ -1,17 +1,17 @@
 // src/officialSources/paDcnrPresqueIsle.js
 // Official HAZARD scraper for the PA DCNR Park Advisory feed, scoped to
-// Presque Isle State Park (Lake Erie, PA). This is a CLOSURE-ONLY source: an
+// Presque Isle State Park (Lake Erie, PA). This is a closure-only source: an
 // active "Danger"-tier advisory whose free text describes a genuine SWIMMING
 // hazard (beach closed, swimming prohibited, dangerous conditions, rip
 // current, high water/high surf, hazardous swimming) maps to a park-wide RED.
 // Anything else degrades to no-data:
 //   - IsAlert:false                                  -> ignored (not a Danger tier)
 //   - Water-quality / E. coli / bacteria / algae     -> null (that is the
-//       raise-only wqFloor axis, NOT a hazard override — a clean surf estimate
+//       raise-only wqFloor axis, not a hazard override — a clean surf estimate
 //       must never be overridden by a bacteria closure; see the dedup note)
 //   - road / facility / trail / event / boilerplate  -> null (off the surf axis)
-// This source NEVER emits green: the absence of a hazard advisory is the
-// absence of a site (no KV write), so it can only ever RAISE a beach to red,
+// This source never emits green: the absence of a hazard advisory is the
+// absence of a site (no KV write), so it can only ever raise a beach to red,
 // never lower an estimate.
 //
 // COLOR MAPPING (provisional — fail closed):
@@ -19,7 +19,7 @@
 //   everything else                                            -> no site
 // NOTE: as of this writing the live payload is 100% off-axis boilerplate
 // (Spotted Lanternfly / firewood / drone advisories, all IsAlert:false), so
-// the hazard keyword mapping is verified ONLY against the SYNTHETIC fixtures in
+// the hazard keyword mapping is verified only against the SYNTHETIC fixtures in
 // test/paDcnrPresqueIsle.test.js. Treat the mapping as provisional; every
 // unrecognized shape/word degrades to null, never a wrong color.
 //
@@ -31,11 +31,10 @@
 // scrape() runs cron-side only. parsePresqueIsleAdvisories, classifyAdvisoryMessage,
 // and htmlToText are pure and exported for tests.
 //
-// FETCH URL: confirmed live and openly readable at the documented endpoint
-// below; the JSON shape (array of { IsAlert, Message }) is confirmed. Whether
-// Workers' fetch needs a User-Agent for this .gov host has NOT been probed, so
-// no header is sent (a 403 would degrade to null — the safe direction). If it
-// is later found to 403, add a probed User-Agent to the fetchText call.
+// The endpoint below is openly readable and returns an array of
+// { IsAlert, Message }. No User-Agent is sent, because whether this .gov host
+// needs one is unprobed and a 403 degrades to null, which is the safe direction.
+// Add a probed User-Agent to the fetchText call if it ever starts 403ing.
 
 import { fetchText, perBeachResult, containsAny } from "./util.js";
 
@@ -43,7 +42,7 @@ import { fetchText, perBeachResult, containsAny } from "./util.js";
 export const PRESQUE_ISLE_URL =
   "https://services.dcnr.pa.gov/ParkAddresses/api/ParkAdvisory/get?id=6220";
 
-export const PRESQUE_ISLE_LABEL =
+const PRESQUE_ISLE_LABEL =
   "PA DCNR Park Advisory (Presque Isle State Park)";
 
 // Peninsula centroid + a radius generous enough to span the full Presque Isle
@@ -60,8 +59,8 @@ const PRESQUE_ISLE_RADIUS_MI = 6;
 const PRESQUE_ISLE_SITE_ID = "presque-isle-state-park";
 const PRESQUE_ISLE_SITE_NAMES = ["presque isle"];
 
-// Water-quality / bacteria / algae phrasing. Checked FIRST: a "beach closed"
-// message that is actually a bacteria/E. coli closure must NOT become a hazard
+// Water-quality / bacteria / algae phrasing. Checked first: a "beach closed"
+// message that is actually a bacteria/E. coli closure must not become a hazard
 // red here — water quality is the raise-only floor axis, so it degrades to
 // no-data on this hazard-override path.
 const WATER_QUALITY_KEYWORDS = [
@@ -127,7 +126,7 @@ export function htmlToText(html) {
 //   "hazard"        — a genuine swimming-hazard closure (-> red)
 //   "water-quality" — a bacteria/E. coli/algae closure (-> no data here; wqFloor axis)
 //   "none"          — nothing recognized on the surf axis (-> no data)
-// Water quality is tested BEFORE hazard so a bacteria "beach closed" message is
+// Water quality is tested before hazard so a bacteria "beach closed" message is
 // never mis-mapped to a hazard red.
 export function classifyAdvisoryMessage(message) {
   const text = htmlToText(message).toLowerCase();
@@ -144,7 +143,7 @@ export function classifyAdvisoryMessage(message) {
 }
 
 // Pure, exported for tests. Raw JSON text -> sites[] | null.
-//   - null ONLY on a total failure: unparseable JSON or a non-array payload
+//   - null only on a total failure: unparseable JSON or a non-array payload
 //     (schema change / bad body). That is the health-failure signal.
 //   - [] when the feed parsed cleanly but no active Danger advisory describes a
 //     swimming hazard (the all-clear case) — a SUCCESSFUL scrape with nothing

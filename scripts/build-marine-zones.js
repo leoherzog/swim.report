@@ -4,48 +4,42 @@
 // --marine-zones) uses to derive beaches.marine_zone with zero runtime
 // upstream requests.
 //
-// Run MANUALLY (never in CI) whenever NWS publishes a new coastal marine zone
-// shapefile release (https://www.weather.gov/gis/MarineZones, ~1-2x/year):
+// Run manually, never in CI, whenever NWS publishes a new coastal marine zone
+// shapefile release (https://www.weather.gov/gis/MarineZones):
 //
 //   deno run --allow-net --allow-read --allow-write scripts/build-marine-zones.js
 //   deno run --allow-read --allow-write scripts/build-marine-zones.js --zip /path/to/mzXXxxYY.zip
 //
 // Then review the logged per-prefix counts against the previous release, diff
-// the JSON, and commit. The zip filename changes each release (mz18mr25.zip ->
-// mz16ap26.zip ...) — update DEFAULT_ZIP_URL below when a new one lands.
+// the JSON, and commit. The zip filename changes each release, so update
+// DEFAULT_ZIP_URL below when a new one lands.
 //
-// The script is dependency-free (no npm shapefile/zip packages, matching the
-// batch's ethos): it reads the zip central directory itself, inflates entries
-// with the built-in DecompressionStream, and parses the DBF + SHP binary
-// layouts directly (both are simple fixed-offset formats). That rule is about
-// npm packages — it does not bar a relative import of a pure local module, so
-// the hole-grouping ray cast comes from src/geo.js (the same pointInRing the
-// runtime resolver uses) rather than a fourth private copy.
+// The script takes no npm dependency: it reads the zip central directory itself,
+// inflates entries with DecompressionStream, and parses the DBF and SHP
+// fixed-offset layouts directly. That rule is about npm packages and does not
+// bar a relative import of a pure local module, so the hole-grouping ray cast
+// comes from src/geo.js rather than a fourth private copy of pointInRing.
 //
-// Output shape (see docs/offline-discovery.md):
+// Output shape:
 //   {
 //     source, validDate, generated, simplifyToleranceDeg,
 //     zones: [ { id: "LMZ874", polygons: [ [ [ [lon, lat], ... ] ] ] }, ... ]
 //   }
 // polygons is GeoJSON-MultiPolygon-shaped coordinates: polygons -> rings ->
 // [lon, lat] points; ring 0 is the outer ring, the rest are holes; rings are
-// closed (first point repeated last); coords rounded to 5 decimals (~1 m).
-//
-// Project style: ES modules, const/let only, string concatenation with +
-// (never template literals), console for logging.
+// closed; coords rounded to 5 decimals (~1 m).
 
 import { pointInRing } from "../src/geo.js";
 
-// Current release: mz16ap26.zip, 569 records, valid/effective 2026-04-16.
-// Update BOTH constants when a new release lands.
+// Update both constants together when a new release lands.
 const DEFAULT_ZIP_URL = "https://www.weather.gov/source/gis/Shapefiles/WSOM/mz16ap26.zip";
 const RELEASE_VALID_DATE = "2026-04-16";
 const DEFAULT_OUT = "data/marine-zones-greatlakes.json";
 const DEFAULT_TOLERANCE_DEG = 0.001;
 
-// Great Lakes (+ St. Lawrence / St. Clair) marine zone id prefixes. Extend this
-// list when src/regions.js REGIONS grows coasts beyond the Great Lakes system.
-export const GREAT_LAKES_ZONE_PREFIXES = ["LCZ", "LEZ", "LHZ", "LMZ", "LOZ", "LSZ", "SLZ"];
+// Great Lakes plus St. Lawrence and St. Clair marine zone id prefixes. Extend
+// when src/regions.js REGIONS grows coasts beyond the Great Lakes system.
+const GREAT_LAKES_ZONE_PREFIXES = ["LCZ", "LEZ", "LHZ", "LMZ", "LOZ", "LSZ", "SLZ"];
 
 function log(msg) {
   console.error("build-marine-zones: " + msg);
@@ -64,10 +58,10 @@ export function parseArgs(argv) {
 }
 
 // --- Minimal zip reader -------------------------------------------------------
-// Reads the End-Of-Central-Directory record, walks the central directory, and
-// inflates each wanted entry. Supports method 0 (stored) and 8 (deflate) —
-// everything the NWS zips use. Returns a Map of lowercased extension suffix
-// (".shp", ".dbf") -> Uint8Array for the entries we ask for.
+// Reads the End-Of-Central-Directory record, walks the central directory and
+// inflates each wanted entry. Supports method 0 (stored) and 8 (deflate), which
+// is everything the NWS zips use. Returns a Map of lowercased extension suffix
+// to Uint8Array.
 
 async function inflateRaw(compressed) {
   const ds = new DecompressionStream("deflate-raw");
@@ -92,8 +86,8 @@ async function inflateRaw(compressed) {
 
 export async function extractZipEntries(zipBytes, wantedSuffixes) {
   const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
-  // Find EOCD (signature 0x06054b50) scanning back from the end (comment can
-  // trail it, max 65535 bytes).
+  // Find EOCD (signature 0x06054b50) scanning back from the end; a trailing
+  // comment of up to 65535 bytes can follow it.
   let eocd = -1;
   const scanStart = zipBytes.length - 22;
   const scanEnd = Math.max(0, zipBytes.length - 22 - 65535);
@@ -122,8 +116,8 @@ export async function extractZipEntries(zipBytes, wantedSuffixes) {
     const lower = name.toLowerCase();
     for (const suffix of wantedSuffixes) {
       if (lower.endsWith(suffix)) {
-        // Local header: name/extra lengths there may differ from the central
-        // directory's — read them from the local header itself.
+        // The local header's name and extra lengths may differ from the central
+        // directory's, so read them from the local header.
         if (view.getUint32(localOffset, true) !== 0x04034b50) {
           throw new Error("zip: bad local header signature for " + name);
         }
@@ -245,10 +239,9 @@ export function parseShpPolygons(bytes) {
 
 // --- Ring orientation + hole grouping -----------------------------------------
 // Shapefile polygons carry outer rings clockwise and holes counter-clockwise
-// (Y-up), with no explicit grouping. Shoelace signed area: negative = clockwise
-// = outer. Each hole is assigned to the first outer ring that contains its
-// first vertex (planar ray cast); an orphan hole degrades to its own outer
-// ring rather than being dropped.
+// (Y-up) with no explicit grouping. Shoelace signed area: negative is clockwise,
+// so outer. Each hole goes to the first outer ring containing its first vertex;
+// an orphan hole degrades to its own outer ring rather than being dropped.
 
 export function ringSignedArea(ring) {
   let sum = 0;
@@ -279,8 +272,8 @@ export function groupRingsToPolygons(rings) {
       }
     }
     if (!placed) {
-      // Orphan (winding quirk in the source data) — keep it as an outer ring so
-      // its edges still participate in nearest-edge distance.
+      // Orphan: keep it as an outer ring so its edges still participate in
+      // nearest-edge distance.
       outers.push([hole]);
     }
   }
@@ -288,10 +281,10 @@ export function groupRingsToPolygons(rings) {
 }
 
 // --- Douglas-Peucker simplification -------------------------------------------
-// Planar perpendicular distance in degrees; toleranceDeg 0.001 ~ 110 m max
-// boundary displacement — negligible against the 15 km resolution cap and the
-// 5 NM zone widths. Endpoints are always kept, so a closed ring stays closed.
-// Rings that would drop under 4 points keep their original geometry.
+// Planar perpendicular distance in degrees. toleranceDeg 0.001 is ~110 m of
+// boundary displacement, negligible against the 15 km resolution cap and the
+// 5 NM zone widths. Endpoints are always kept, so a closed ring stays closed;
+// rings that would drop under 4 points keep their original geometry.
 
 function perpDistanceDeg(pt, a, b) {
   const dx = b[0] - a[0];
@@ -371,8 +364,8 @@ async function main() {
       " vs " + String(shpRecords.length) + ") — refusing to misalign attributes");
   }
 
-  // Filter to Great Lakes zones by id prefix and merge polygons by zone id
-  // (defensive: a zone split across records merges into one MultiPolygon).
+  // Filter to Great Lakes zones by id prefix, merging a zone split across
+  // records into one MultiPolygon.
   const byId = new Map();
   for (let i = 0; i < dbfRecords.length; i = i + 1) {
     const id = dbfRecords[i].ID;

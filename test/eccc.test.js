@@ -128,7 +128,7 @@ describe("fetchActiveEcccAlerts", function () {
 
     const result = await fetchActiveEcccAlerts(NOW_ISO);
     expect(result).not.toBeNull();
-    // MSC usage policy asks for a self-identifying User-Agent (F11).
+    // MSC usage policy asks for a self-identifying User-Agent.
     expect(requestedInit.headers["User-Agent"]).toBe(ECCC_USER_AGENT);
     expect(result.alerts.length).toBe(1);
     expect(result.alerts[0].event).toBe("severe thunderstorm warning");

@@ -1,51 +1,27 @@
-// src/layerSignals.js — the water-class SIGNAL PROVIDER for the FlatGeobuf
-// layer pipeline. Replaces fetchWaterClassSignals in src/clients/overpass.js at
-// the same seam (scripts/discovery-batch.js passes it as classifyQueue's
-// opts.fetchSignals), with the same signature and the same null contract.
+// src/layerSignals.js — the water-class signal provider for the FlatGeobuf
+// layer pipeline. scripts/discovery-batch.js passes it as classifyQueue's
+// opts.fetchSignals. Pure: no fetch, no Date, no filesystem; it imports the
+// probe radii and vertex anchor from src/osmSelect.js and the spatial index from
+// src/layerGrid.js, and loads verbatim under Deno, workerd and vitest.
 //
-// Pure: no fetch, no Date, no filesystem. Imports src/osmSelect.js (the probe
-// radii, the vertex anchor and the area threshold) and src/layerGrid.js (the
-// spatial index). Loads verbatim under Deno, workerd and vitest.
+// The object it returns is consumed by classifyWaterBody in src/waterClass.js.
+// Every key, type and threshold below must stay fixed, because a divergence
+// silently re-classifies live beaches, and a flag-worthy -> inland flip hides a
+// beach that is being served today.
 //
-// WHAT THIS MODULE MUST NOT CHANGE
-// --------------------------------
-// The object it returns is consumed by classifyWaterBody in src/waterClass.js,
-// which is UNCHANGED by this migration. Every key, type and threshold below is a
-// transcription of parseWaterClassElements plus the radius its Overpass "around"
-// clause carried, because any divergence silently RE-CLASSIFIES live beaches —
-// and a re-classification in the flag-worthy -> inland direction HIDES a beach
-// that is being served today. The Overpass query this replaces was:
+// Segment grids, not envelope grids: the six Great Lake bounding boxes contain
+// essentially every Great Lakes beach, so an envelope index prunes nothing and
+// every probe falls through to a linear scan of millions of ring segments. Mode
+// B of src/layerGrid.js indexes the segments themselves and keeps only
+// { osmType, osmId, tags, bounds } per feature, which is what lets a ~3e6-vertex
+// lakes layer live in typed arrays instead of gigabytes of GeoJSON heap.
 //
-//   way["natural"="coastline"](around.a:150);                    -> coastlinePresent
-//   relation["natural"="water"]["water"="lake"](around.a:150);    -> nearbyLakeQids
-//   way["natural"="water"](around.a:120);                         -> nearbyWayWater
-//
-// where set .a was the beach element RECURSED DOWN to its member nodes. The
-// layer pipeline reproduces .a with probeVertices (src/osmSelect.js) and the
-// three "around" clauses with three SEGMENT GRIDS, which answer exactly the
-// threshold question "is any part of this feature within R metres of any probe
-// vertex" — the same question, evaluated locally instead of on a public mirror.
-//
-// WHY SEGMENT GRIDS AND NOT ENVELOPE GRIDS
-// ----------------------------------------
-// An envelope grid prunes nothing for the six Great Lake polygons: their
-// bounding boxes contain essentially every Great Lakes beach, so every probe
-// would return all six and then fall through to a linear scan of millions of
-// ring segments. Mode B of src/layerGrid.js indexes the SEGMENTS themselves and
-// keeps only { osmType, osmId, tags, bounds } per feature afterwards, which is
-// what lets a ~3e6-vertex lakes layer be indexed in typed arrays instead of
-// multiple gigabytes of GeoJSON heap.
-//
-// THE NULL CONTRACT IS THE WHOLE ATTEMPTS SEMANTICS (see beachAbsentFromLayers)
-// ----------------------------------------------------------------------------
-// null means TRANSIENT: the caller must NOT bump water_class_attempts and the
-// row stays queued. A signals object — INCLUDING the all-empty one — is a CLEAN,
-// complete answer that classifyWaterBody DECIDES on (all-empty decides inland).
-// Under Overpass that distinction separated a mirror flake from a real negative;
-// here it separates a data bug from a real negative, and the second failure mode
-// Overpass never had (the beach's OSM element is simply not in the layer set) is
-// disambiguated by the separate beachAbsentFromLayers predicate below rather
-// than folded into the null.
+// The null contract carries the whole attempts semantics. null means transient:
+// the caller must not bump water_class_attempts and the row stays queued. A
+// signals object, including the all-empty one, is a clean complete answer that
+// classifyWaterBody decides on (all-empty decides inland). The separate case of
+// a beach whose OSM element is not in the layer set is answered by
+// beachAbsentFromLayers below, never folded into the null.
 
 import {
   sortLayerFeatures,
@@ -65,25 +41,22 @@ import {
   featuresWithinKmOfVertices
 } from "./layerGrid.js";
 
-// The three validated probe radii, in the kilometres the grid queries take. The
-// metre constants stay the single source of truth in src/osmSelect.js — these
-// are a unit conversion and nothing else. The radii DID NOT CHANGE in this
-// migration, and that is the entire safety argument for it: the geometry source
-// moved, the thresholds did not.
+// The three probe radii in the kilometres the grid queries take. The metre
+// constants in src/osmSelect.js stay the single source of truth; these are a
+// unit conversion and nothing else.
 const COASTLINE_MAX_KM = OCEAN_RADIUS_M / 1000;
 const LAKE_MAX_KM = GREAT_LAKE_RADIUS_M / 1000;
 const WATER_MAX_KM = INLAND_RADIUS_M / 1000;
 
-// The stored osm_id form ("way/N" | "relation/N" | "node/N"), relocated here
-// from buildWaterClassAnchor in src/clients/overpass.js. It stays ANCHORED and
+// The stored osm_id form ("way/N" | "relation/N" | "node/N"). Anchored and
 // digits-only: a loose match would turn a corrupt id into a lookup miss, which
-// this module reports as ABSENT (and, under a verified layer set, bumps
-// attempts for) rather than as the transient data bug it actually is.
+// this module reports as absent (and, under a verified layer set, bumps attempts
+// for) rather than as the transient data bug it is.
 const OSM_ID_PATTERN = /^(way|relation|node)\/(\d+)$/;
 
-// The index key, identical in construction to dedupByOsm's key in
-// scripts/discovery-batch.js and to the stored osm_id column, so a D1 row's
-// osm_id IS the key with no re-derivation: "way/123".
+// Identical in construction to dedupByOsm's key in scripts/discovery-batch.js
+// and to the stored osm_id column, so a D1 row's osm_id is the key with no
+// re-derivation: "way/123".
 function featureKey(osmType, osmId) {
   return String(osmType) + "/" + String(osmId);
 }
@@ -105,10 +78,9 @@ function beachKey(beach) {
 }
 
 // A probe layer's per-feature sidecar: everything an answer needs and nothing
-// the segment grid already holds. The GEOMETRY IS DELIBERATELY NOT RETAINED —
-// see the module header. bounds is kept because nearbyWayWater's area test is a
-// raw degree product over the envelope, exactly as parseWaterClassElements
-// computed it from Overpass's "out ... bb".
+// the segment grid already holds. Geometry is deliberately not retained. bounds
+// is kept because nearbyWayWater's area test is a raw degree product over the
+// envelope.
 function sidecarFor(feature) {
   return {
     osmType: feature.osmType,
@@ -120,18 +92,12 @@ function sidecarFor(feature) {
 
 // Canonical answer order, as ranks over the sidecar array.
 //
-// featuresWithinKmOfVertices returns owning feature indices in ASCENDING INDEX
-// order, i.e. in the order the features were fed to the builder. That is
-// deterministic for a given feed but it is not the pipeline's canonical order,
-// and nearbyLakeQids is an ORDER-SENSITIVE answer (classifyWaterBody scans it
-// front to back, and the run-to-run diff of 9.3 compares the arrays). So the
-// order is normalised HERE, after indexing, rather than by pre-sorting the input
-// arrays: that is what lets the index be fed from readFgbStream one feature at a
-// time without ever materialising a whole layer.
-//
-// The comparator is not re-implemented — sortLayerFeatures is called on a shim
-// array carrying just { osmType, osmId, index }, so node-then-way-then-relation,
-// id ascending, stable, can never drift from the discovery path's ordering.
+// featuresWithinKmOfVertices returns hits in feed order, but nearbyLakeQids is
+// order-sensitive (classifyWaterBody scans it front to back). Normalising here,
+// after indexing, rather than by pre-sorting the inputs is what lets the index be
+// fed from readFgbStream one feature at a time without materialising a layer.
+// sortLayerFeatures is called on a shim array of { osmType, osmId, index } so the
+// comparator cannot drift from the discovery path's ordering.
 function canonicalRanks(sidecars) {
   const shims = [];
   for (let i = 0; i < sidecars.length; i = i + 1) {
@@ -162,10 +128,9 @@ function emptyProbeLayer() {
 // --- the index ----------------------------------------------------------------
 
 // Start an empty index. The three-call builder (begin / add / finish) exists so
-// the caller can feed the index STRAIGHT OFF readFgbStream: scripts/lib/fgbReader.js
-// yields one LayerFeature at a time and the whole point of mode B is that no
-// layer is ever held in memory as GeoJSON. buildSignalsIndex below is the
-// array-shaped convenience wrapper over the same three calls.
+// the caller can feed the index straight off readFgbStream one LayerFeature at a
+// time, never holding a layer in memory as GeoJSON. buildSignalsIndex below is
+// the array-shaped wrapper over the same three calls.
 export function beginSignalsIndex() {
   return {
     beaches: new Map(),
@@ -177,19 +142,17 @@ export function beginSignalsIndex() {
   };
 }
 
-// Add one LayerFeature to the index under its LOGICAL layer name — one of
-// "beaches", "coastline", "water", "lakes". Returns true when the feature was
-// indexed, false when it was skipped.
+// Add one LayerFeature to the index under its logical layer name — one of
+// "beaches", "coastline", "water", "lakes". Returns true when indexed, false
+// when skipped.
 //
-// A skip is a per-feature data problem and is never thrown on, for the same
-// reason toLayerFeature returns null rather than throwing: layer bytes are
-// upstream input, and one unbuildable geometry must not take down a run. An
-// ARTIFACT problem (a truncated file) is caught by the reader, upstream of here.
+// A skip is a per-feature data problem and is never thrown on: layer bytes are
+// upstream input and one unbuildable geometry must not take down a run. A
+// truncated file is an artifact problem, caught by the reader upstream of here.
 //
-// beaches are keyed FIRST-SEEN-WINS, matching dedupByOsm in
+// beaches are keyed first-seen-wins, matching dedupByOsm in
 // scripts/discovery-batch.js: the same (type, id) legitimately arrives from more
-// than one published file (a beach relation appears in both beaches-polygon.fgb
-// and other-relations.fgb), and the copies are equivalent for a distance probe.
+// than one published file, and the copies are equivalent for a distance probe.
 export function addSignalsFeature(index, layerName, feature) {
   if (index === null || typeof index !== "object") {
     return false;
@@ -220,9 +183,9 @@ export function addSignalsFeature(index, layerName, feature) {
   return true;
 }
 
-// Freeze a builder into a query-ready index. The mutable builders are replaced
-// by finished segment grids (which copy their typed arrays down to exact length)
-// and each probe layer gains its canonical rank table.
+// Freeze a builder into a query-ready index: finished segment grids, with their
+// typed arrays copied down to exact length, plus a canonical rank table per
+// probe layer.
 export function finishSignalsIndex(builder) {
   const source = (builder !== null && typeof builder === "object")
     ? builder
@@ -254,10 +217,10 @@ export function finishSignalsIndex(builder) {
 //     lakes:     Array<LayerFeature>   // lakes-polygon.fgb
 //   }
 //
-// water and lakes stay SEPARATE inputs and are never merged: the two probes ask
-// different questions at different radii (a lake RELATION donates a QID at
-// 150 m; an inland water WAY sets the pond-guarded nearbyWayWater at 120 m), and
-// merging them would let a Great Lake polygon answer the inland probe.
+// water and lakes stay separate inputs and are never merged: the two probes ask
+// different questions at different radii (a lake relation donates a QID at 150 m;
+// an inland water way sets the pond-guarded nearbyWayWater at 120 m), and merging
+// them would let a Great Lake polygon answer the inland probe.
 export function buildSignalsIndex(layers) {
   const index = beginSignalsIndex();
   if (layers === null || typeof layers !== "object") {
@@ -277,8 +240,8 @@ export function buildSignalsIndex(layers) {
   return finishSignalsIndex(index);
 }
 
-// Diagnostic snapshot for the batch's run log and for the 9.7 benchmark gate,
-// which records the per-layer segment counts. Never consulted by any gate.
+// Diagnostic snapshot of per-layer segment counts for the batch's run log.
+// Never consulted by any gate.
 export function signalsIndexStats(index) {
   if (index === null || typeof index !== "object") {
     return { beaches: 0, coastline: null, water: null, lakes: null, skipped: 0 };
@@ -292,9 +255,9 @@ export function signalsIndexStats(index) {
   };
 }
 
-// A finished index carries the three probe layers with their grids and rank
-// tables. A builder that never reached finishSignalsIndex does not, and querying
-// one would either throw or quietly answer "nothing in range".
+// A builder that never reached finishSignalsIndex lacks the grids and rank
+// tables, and querying one would either throw or quietly answer "nothing in
+// range".
 function isQueryableIndex(index) {
   if (index === null || typeof index !== "object" || !index.beaches) {
     return false;
@@ -313,35 +276,32 @@ function isQueryableIndex(index) {
 
 // --- the two exported predicates ----------------------------------------------
 
-// TRUE iff this beach's osm_id PARSES and no beaches feature is indexed under
+// True iff this beach's osm_id parses and no beaches feature is indexed under
 // it. Injected into classifyQueue as opts.isKnownAbsent, alongside
 // opts.fetchSignals below.
 //
-// WHY THIS IS A SEPARATE PREDICATE AND NOT ANOTHER NULL (D21/M4).
-// fetchWaterClassSignals never had this failure mode: Overpass answered for any
-// osm_id, so "absent" did not exist. Under prebuilt layers it does, and folding
-// it into the transient null would create a permanently-undecidable row class —
-// a D1 row whose OSM element is missing from the set would re-queue forever with
+// This is a separate predicate rather than another null because folding it into
+// the transient null creates a permanently-undecidable row class: a D1 row whose
+// OSM element is missing from the set would re-queue forever with
 // water_class_attempts stuck at 0, and FLAG_WORTHY_WATER_SQL's deliberate
 // fail-open for NULL-under-the-cap would keep serving it live with an estimated
-// flag card. That is the Locklin Pines exposure made unbounded.
+// flag card — the Locklin Pines exposure made unbounded.
 //
-// The decision of what to DO about it belongs to the caller and is gated on
+// What to do about it belongs to the caller and is gated on
 // reconciliationAllowed(report) (src/layerManifest.js):
-//   - verified set  -> the set is by definition a complete view of OSM, so
-//                      absent means GONE FROM OSM: bump attempts, count
-//                      absent_from_layers, park the row after the cap.
-//   - unverified set -> the bump is DISARMED and the row stays transient.
-//                      Critically this covers a regionsDigest mismatch, which is
-//                      exactly what an NA-expansion commit produces: without the
-//                      gate the first run after it would park and hide every
-//                      beach on the newly added coast.
+//   - verified set   -> the set is a complete view of OSM, so absent means gone
+//                       from OSM: bump attempts, count absent_from_layers, park
+//                       the row after the cap.
+//   - unverified set -> the bump is disarmed and the row stays transient. This
+//                       covers a regionsDigest mismatch, which is what a
+//                       region-expansion commit produces: without the gate the
+//                       first run after it parks and hides every beach on the
+//                       newly added coast.
 //
-// FAIL-SAFE DIRECTION. Every unproven input answers FALSE (not absent), because
+// Fail-safe direction: every unproven input answers false (not absent), because
 // false costs one more queued round and true costs an attempts bump toward
-// hiding a live row. An UNPARSEABLE id answers false too: that is a data bug in
-// the row, not evidence about layer coverage, and waterClassSignals already
-// keeps it transient forever.
+// hiding a live row. An unparseable id answers false too — that is a data bug in
+// the row, not evidence about layer coverage.
 export function beachAbsentFromLayers(index, beach) {
   if (index === null || typeof index !== "object" || !index.beaches) {
     return false;
@@ -353,21 +313,17 @@ export function beachAbsentFromLayers(index, beach) {
   return !index.beaches.has(key);
 }
 
-// THE SEAM. Signature and null contract match fetchWaterClassSignals exactly, so
-// classifyQueue's body does not change: it is handed a beach row carrying the D1
-// column names and gets back the signals object classifyWaterBody consumes, or
-// null.
-//
-// Returns EXACTLY the three keys and no more:
+// classifyQueue's seam: takes a beach row carrying the D1 column names, returns
+// exactly the three keys classifyWaterBody consumes and no more —
 //   { coastlinePresent: boolean, nearbyLakeQids: string[], nearbyWayWater: boolean }
 //
-// null in exactly two cases, both TRANSIENT for the caller (no SQL, no attempts
-// bump), and distinguishable through beachAbsentFromLayers above:
+// null in exactly two cases, both transient for the caller (no SQL, no attempts
+// bump) and distinguishable through beachAbsentFromLayers above:
 //   1. the osm_id does not parse — a data bug in the row;
 //   2. no beaches feature is indexed under it — a coverage question.
 export function waterClassSignals(index, beach) {
-  // A malformed or half-built index answers TRANSIENT rather than throwing or
-  // fabricating an all-empty (and therefore DECIDING) answer: an index this
+  // A malformed or half-built index answers transient rather than throwing or
+  // fabricating an all-empty (and therefore deciding) answer: an index this
   // module cannot read is not evidence that a beach has no water near it.
   if (!isQueryableIndex(index)) {
     return null;
@@ -387,12 +343,11 @@ export function waterClassSignals(index, beach) {
   }
 
   // The probe anchor. Every distance below is measured from the beach element's
-  // member VERTICES and from nothing else — never its centroid and never its
-  // bbox — because a set-back beach's centroid sits tens of metres further out
-  // than its nearest vertex, and a large multipolygon like Sleeping Bear has a
-  // centroid well inland of the 150 m coastline band while its sand is right on
-  // it. That is the difference between great_lake and inland for the whole dune
-  // complex, and it is why probeVertices reproduces Overpass's "way(N);>->.a;".
+  // member vertices and from nothing else — never its centroid, never its bbox.
+  // A set-back beach's centroid sits tens of metres further out than its nearest
+  // vertex, and a large multipolygon like Sleeping Bear has a centroid well
+  // inland of the 150 m coastline band while its sand is right on it: that is
+  // the difference between great_lake and inland for the whole dune complex.
   const vertices = probeVertices(feature);
 
   const signals = {
@@ -402,15 +357,14 @@ export function waterClassSignals(index, beach) {
   };
 
   // 1. coastlinePresent — any coastline segment within OCEAN_RADIUS_M of any
-  // probe vertex. No area test (parity: the Overpass clause had none), and the
-  // per-vertex loop early-exits on the first hit.
+  // probe vertex. No area test, and the per-vertex loop early-exits on the first
+  // hit.
   //
-  // No natural=coastline tag test either, and that omission is deliberate rather
-  // than an oversight: coastline-line.fgb is cut with -where natural='coastline',
-  // so the test is vacuous on a well-formed set — while on a MALFORMED one (GDAL
-  // dropping the "natural" field from the inferred schema, the B3 failure) a
-  // defensive test here would silently flip every ocean beach to a non-coastline
-  // answer, i.e. would HIDE them. Missing-field detection belongs in
+  // No natural=coastline tag test either, deliberately: coastline-line.fgb is
+  // cut with -where natural='coastline', so the test is vacuous on a well-formed
+  // set, while on a set where GDAL dropped the "natural" field from the inferred
+  // schema a defensive test here would silently flip every ocean beach to a
+  // non-coastline answer and hide it. Missing-field detection belongs in
   // build-manifest.js, which hard-refuses the whole set, not in a per-beach probe
   // that can only fail in the hiding direction.
   for (let i = 0; i < vertices.length; i = i + 1) {
@@ -421,24 +375,21 @@ export function waterClassSignals(index, beach) {
     }
   }
 
-  // 2. nearbyLakeQids — the wikidata QID of every water=lake RELATION within
-  // GREAT_LAKE_RADIUS_M of any probe vertex, pushed VERBATIM.
+  // 2. nearbyLakeQids — the wikidata QID of every water=lake relation within
+  // GREAT_LAKE_RADIUS_M of any probe vertex, pushed verbatim.
   //
-  // The three tag conditions and the relation-only type test are transcribed
-  // from parseWaterClassElements, which mirrored
-  // relation["natural"="water"]["water"="lake"]. They matter here in a way the
-  // coastline test does not: an untagged or way-mapped feature contributing a
-  // QID would classify a beach great_lake on the strength of the wrong geometry,
-  // and dropping the natural/water tags from the layer would empty this array
-  // for every served beach — which is why 1.4 carries natural on lakes-polygon.fgb
-  // and build-manifest.js asserts it.
+  // The three tag conditions and the relation-only type test matter here in a
+  // way the coastline test does not: an untagged or way-mapped feature
+  // contributing a QID would classify a beach great_lake on the strength of the
+  // wrong geometry, and dropping the natural/water tags from the layer would
+  // empty this array for every served beach. That is why lakes-polygon.fgb
+  // carries natural and build-manifest.js asserts it.
   //
-  // NO DEDUPE and NO NORMALISATION, both for Overpass parity: the same QID may
-  // legitimately appear twice (a lake published as two relations), and
-  // isGreatLakeQid is an exact, case-sensitive hasOwnProperty lookup, so a value
-  // of " Q1066" or "Q1066;Q123" must be allowed to fail to match here exactly as
-  // it failed to match before. Order is canonical (see canonicalRanks) so the
-  // array is byte-stable run to run.
+  // No dedupe and no normalisation. The same QID may legitimately appear twice
+  // (a lake published as two relations), and isGreatLakeQid is an exact,
+  // case-sensitive hasOwnProperty lookup, so a value of " Q1066" or "Q1066;Q123"
+  // must be allowed to fail to match. Order is canonical (see canonicalRanks) so
+  // the array is byte-stable run to run.
   const lakeHits = orderedHits(index.lakes, featuresWithinKmOfVertices(index.lakes.grid, vertices, LAKE_MAX_KM));
   for (let i = 0; i < lakeHits.length; i = i + 1) {
     const lake = index.lakes.sidecars[lakeHits[i]];
@@ -454,25 +405,21 @@ export function waterClassSignals(index, beach) {
     }
   }
 
-  // 3. nearbyWayWater — a real inland water WAY within INLAND_RADIUS_M. The
+  // 3. nearbyWayWater — a real inland water way within INLAND_RADIUS_M. The
   // radius is tighter than the other two on purpose: this probe answers "does
-  // this beach have its OWN adjacent water body", not "is there water nearby".
+  // this beach have its own adjacent water body", not "is there water nearby".
   //
-  // WAYS ONLY, matching way["natural"="water"](around.a:120): a relation-mapped
-  // water body never sets this flag, and never did.
+  // Ways only: a relation-mapped water body never sets this flag.
   //
   // The area gate is the pond threshold, >= WATER_MIN_AREA_DEG2 on the raw degree
-  // product of the envelope — the same >= parseWaterClassElements applied to
-  // Overpass's "bb", and deliberately not the strict < used in the pond skip.
+  // product of the envelope, deliberately not the strict < used in the pond skip.
   //
-  // The tags.natural === "water" test IS kept here, unlike the coastline probe,
-  // and it is free: nearbyWayWater true and nearbyWayWater false BOTH resolve to
-  // "inland" in classifyWaterBody (it is the last positive branch before the
-  // clean-but-empty default), so this test cannot move a verdict in either
-  // direction. What it does preserve is the run log's inland_no_water counter,
-  // the one diagnostic that separates a data-coverage failure from a genuinely
-  // set-back beach — which is why classifyQueue reads this signal directly rather
-  // than only the verdict.
+  // The tags.natural === "water" test is kept here, unlike the coastline probe,
+  // and it is free: nearbyWayWater true and false both resolve to "inland" in
+  // classifyWaterBody, so it cannot move a verdict either way. What it preserves
+  // is the run log's inland_no_water counter, the one diagnostic separating a
+  // data-coverage failure from a genuinely set-back beach, which is why
+  // classifyQueue reads this signal directly rather than only the verdict.
   const waterHits = featuresWithinKmOfVertices(index.water.grid, vertices, WATER_MAX_KM);
   for (let i = 0; i < waterHits.length; i = i + 1) {
     const water = index.water.sidecars[waterHits[i]];

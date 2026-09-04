@@ -1,13 +1,11 @@
-// src/clients/alertMatch.js
-// Pure helpers shared by the three alert clients — nwsAlertsForZone
-// (src/clients/nws.js), ecccAlertsForPoint (src/clients/eccc.js) and
-// ecccMarineAlertsForPoint (src/clients/ecccMarine.js). Each of those used to
-// carry a byte-identical copy of the accumulate/dedupe loop below; only the
-// per-alert match test differed, so that is the one thing passed in.
+// src/clients/alertMatch.js — the accumulate and dedupe walk shared by the three
+// alert clients: nwsAlertsForZone (src/clients/nws.js), ecccAlertsForPoint
+// (src/clients/eccc.js) and ecccMarineAlertsForPoint (src/clients/ecccMarine.js).
+// Only the per-alert match test differs between them, so that is the one thing
+// passed in.
 //
-// No fetch, no Date, no I/O — nothing here can violate the two-path rule on its
-// own. It is filed under src/clients/ because the alerts shapes it walks are
-// the clients' wire shapes, not general geography.
+// No fetch, no Date, no I/O. Filed under src/clients/ because the shapes it walks
+// are the clients' wire shapes, not general geography.
 
 // First non-empty string of the two candidates, else null (alert features
 // commonly carry effective/expires but leave onset/ends null; the ECCC land
@@ -30,11 +28,11 @@ export function pickIsoString(primary, fallback) {
 // is not an object with a string event, is skipped — malformed input degrades
 // to { events: [], details: [] }, never to a guess.
 //
-// matches(alert) is called only for entries that already passed the shape
-// check, and is NOT wrapped in a try/catch here: a caller whose predicate can
-// throw on hostile upstream geometry (ecccMarine) puts the catch INSIDE its own
-// closure, so the other two callers keep propagating a genuine bug instead of
-// silently dropping alerts.
+// matches(alert) is called only for entries that already passed the shape check,
+// and is deliberately not wrapped in a try/catch here: the one caller whose
+// predicate can throw on hostile upstream geometry (ecccMarine) puts the catch
+// inside its own closure, so the other two keep propagating a genuine bug instead
+// of silently dropping alerts.
 export function matchedAlerts(alerts, matches) {
   const events = [];
   // Prototype-less: an event name that is an Object.prototype key ('constructor',

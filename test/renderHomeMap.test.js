@@ -1,11 +1,10 @@
-// test/renderHomeMap.test.js
-// Coverage for the homepage map MOUNT: the #home-map container, its
+// Coverage for the homepage map mount: the #home-map container, its
 // accessibility attributes (aria-hidden, tabindex, no advertising aria-label),
 // the data-center attribute, section ordering (intro -> map -> search), and the
 // client script wiring (one-shot /api/beaches.geojson fetch feeding a clustered
 // GeoJSON source, keyboard:false, click handlers, re-center-only nearupdate).
-// The per-beach flag data now lives in the /api/beaches.geojson endpoint, so its
-// color-keyword coverage is in test/router.test.js, not here.
+// The per-beach flag data lives in the /api/beaches.geojson endpoint, so its
+// color-keyword coverage is in test/router.test.js.
 
 import { describe, it, expect } from "vitest";
 import { renderListPage } from "../src/frontend/render.js";
@@ -35,16 +34,17 @@ describe("renderListPage home map", () => {
     // path), so the mount is aria-hidden and not keyboard-focusable.
     expect(html).toContain("aria-hidden=\"true\"");
     expect(html).toContain("tabindex=\"-1\"");
-    // The old section aria-label advertised a now-hidden map; it must be gone.
+    // A section aria-label would advertise a map that is hidden from assistive
+    // tech, so there must not be one.
     expect(html).not.toContain("aria-label=\"Map of nearby beaches");
   });
 
-  it("no longer embeds per-beach marker JSON", () => {
+  it("embeds no per-beach marker JSON", () => {
     const html = renderListPage({
       entries: [{ beach: makeBeach(), estimate: { color: "green" }, official: null, distanceMi: null }]
     });
-    // Marker data moved to the fetched GeoJSON endpoint — no inline block, and
-    // no server-embedded iconClass/label.
+    // Marker data comes from the fetched GeoJSON endpoint, so there is no inline
+    // block and no server-embedded iconClass or label.
     expect(html).not.toContain("id=\"home-map-data\"");
     expect(html).not.toContain("iconClass");
   });
@@ -87,7 +87,7 @@ describe("renderListPage home map", () => {
     const html = renderListPage({ entries: [] });
     // MapLibre 6 reports a failed WebGL2 context through the map's 'error'
     // event rather than throwing out of the constructor, so the construction
-    // try/catch no longer covers it.
+    // try/catch does not cover it.
     expect(html).toContain("map.on('error', function (e)");
     expect(html).toContain("console.log('map error: '");
   });
@@ -149,7 +149,7 @@ describe("renderListPage home map", () => {
     const html = renderListPage({ entries: [] });
     expect(html).toContain("keyboard: false");
     // NavigationControl's zoom buttons would be focusable inside the aria-hidden
-    // container, so the map no longer adds one.
+    // container, so the map adds none.
     expect(html).not.toContain("NavigationControl");
   });
 
@@ -187,7 +187,7 @@ describe("renderListPage home map", () => {
     const dispatch = html.indexOf("dispatchEvent(new CustomEvent('swimreport:nearupdate'))", helper);
     expect(setAttr).toBeGreaterThan(-1);
     expect(dispatch).toBeGreaterThan(setAttr);
-    // The immediate re-center precedes the fetch it used to depend on.
+    // The immediate re-center precedes the fetch, never waiting on it.
     expect(html.indexOf("applyMapCenter(params.get('near'));"))
       .toBeLessThan(html.indexOf("fetch(nextUrl)"));
   });

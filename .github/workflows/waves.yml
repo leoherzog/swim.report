@@ -4,59 +4,51 @@ name: Wave cycle
 # the result to the swim-report R2 bucket (public at https://map.swim.report) and bulk
 # writes it into the "waveinput:" / "waves:" KV the hourly flag cron already reads.
 #
-# NOT COLOR-BEARING ON FAILURE. This job never writes a flag color. A failed or refused
-# cycle leaves the previous cycle's KV in place under an expiration derived from the
-# model valid time, so the failure mode is the flag aging out to unknown — gray and
-# honest — never a stale wave height deciding a color. That is what tells you which
-# gates are hard: everything that could produce a WRONG NUMBER is non-overridable, and
-# everything that is merely LESS DATA is overridable and warns.
+# Never color-bearing on failure. This job never writes a flag color. A failed or
+# refused cycle leaves the previous cycle's KV in place under an expiration derived
+# from the model valid time, so the failure mode is the flag aging out to unknown —
+# gray and honest — never a stale wave height deciding a color. That is also what
+# sorts the gates: everything that could produce a wrong number is non-overridable,
+# and everything that is merely less data is overridable and warns.
 #
 # Publication is atomic by construction: every artifact is written under an immutable
 # per-cycle prefix nobody is reading, and only then is the small waves/current.json
 # pointer overwritten. A reader can never see a torn set.
 #
-# ABSOLUTE EXPIRATION, NOT TTL. Every emitted pair carries
+# Absolute expiration, never a TTL. Every emitted pair carries
 # "expiration": validStartEpoch + 25200, so a key expires 7 h after the hour it
-# DESCRIBES regardless of when this job ran. runFlagRecompute never reads
-# waveinput.updated, so that expiration is the ONLY staleness control on the color
+# describes regardless of when this job ran. runFlagRecompute never reads
+# waveinput.updated, so that expiration is the only staleness control on the color
 # path. A TTL measured from write time would be wrong for a scheduler that skips
 # occurrences: a run firing 9 h late would grant 7 more hours of life to data already
 # 9 h old.
 #
-# UNCLOSED RISK, NAMED LOUDLY. GitHub does not merely DEFER this repo's schedules, it
-# SKIPS occurrences — build-layers.yml's header records the retired hourly workflow
-# firing 4-6 of its 24 daily slots. At 8 slots a day against a 7 h expiration this
-# tolerates two consecutive misses and no more. That is this design's single largest
-# exposure and it is NOT closed here. The permanent fix is to carry hoursFt + startIso
-# in waveinput: and have runFlagRecompute index the current hour, which turns one
-# landed cycle into 24 h of coverage.
+# The unclosed risk: GitHub skips schedule occurrences rather than merely deferring
+# them, and 8 slots a day against a 7 h expiration tolerates two consecutive misses
+# and no more. That is this design's largest exposure and it is not closed here. The
+# permanent fix is to carry hoursFt and startIso in waveinput: and have
+# runFlagRecompute index the current hour, turning one landed cycle into 24 h of
+# coverage. Measure the exposure rather than assuming it: read the slot hit rate from
+# this workflow's run history and the per-beach coverage from
+# manifest.beaches.resolved across consecutive cycles, and treat a run of missed slots
+# as the trigger for that fix.
 #
-# MEASURE THE EXPOSURE, do not assume it. No second wave source is left to shadow
-# against, so read the slot hit rate from this workflow's own run history and the
-# per-beach coverage from manifest.beaches.resolved across consecutive cycles. Two
-# consecutive misses is the whole margin, so treat a run of missed slots as the
-# trigger for the permanent fix above, not as noise.
+# Repository secrets, split so neither job holds both halves and the job that can
+# write production KV cannot write R2. sample reads CLOUDFLARE_R2_ACCESS_KEY and
+# CLOUDFLARE_R2_SECRET_ACCESS_KEY plus CLOUDFLARE_D1_READ_TOKEN, a read-scoped D1
+# token rather than the edit-scoped one discovery.yml uses. publish-kv reads
+# CLOUDFLARE_KV_WRITE_TOKEN, which carries Workers KV Storage: Edit, and no AWS keys.
 #
-# REQUIRED REPOSITORY SECRETS. Neither job holds both halves, and the job that can
-# write production KV cannot write R2:
-#   sample:     CLOUDFLARE_R2_ACCESS_KEY / CLOUDFLARE_R2_SECRET_ACCESS_KEY (S3-API keys
-#               on the swim-report bucket) and CLOUDFLARE_D1_READ_TOKEN (a READ-scoped
-#               D1 token, NOT the edit-scoped CLOUDFLARE_D1_EDIT_TOKEN discovery.yml uses).
-#   publish-kv: CLOUDFLARE_KV_WRITE_TOKEN (Workers KV Storage: Edit) and no AWS keys.
-# OPERATOR PREREQUISITE THAT CANNOT BE VERIFIED FROM CODE: both tokens must be
-# provisioned before the first run, or the first bulk put fails after every other step
-# has already succeeded.
-#
-# It needs no npm private-registry tokens: it never runs npm install / npm ci in the
-# repo root (which would reify package.json's private @web.awesome.me / @fortawesome
-# deps and fail E401). Every wrangler call goes through npx --yes wrangler@<pin>.
+# It needs no npm private-registry tokens: it never runs npm install in the repo root,
+# which would reify package.json's private deps and fail E401. Every wrangler call
+# goes through npx --yes wrangler@<pin>.
 
 on:
   # 8 slots a day. Minute 52 is clear of every existing cron minute in this repo
   # (7, 15, 17, 29, 31, 41, 47) and off the congested top of the hour. The cron picks
-  # no model cycle: a RUNTIME resolver walks GFS cycles newest-first and takes the
-  # first one whose f(k)..f(k+23) all exist, so the job cadence and the model cadence
-  # are deliberately decoupled.
+  # no model cycle: a runtime resolver walks GFS cycles newest-first and takes the
+  # first whose f(k)..f(k+23) all exist, so job cadence and model cadence are
+  # decoupled.
   schedule:
     - cron: "52 */3 * * *"
   workflow_dispatch:
@@ -86,31 +78,29 @@ concurrency:
 permissions:
   contents: read
 
-# Workflow-scoped so it covers EVERY deno invocation in EVERY job and step, present and
-# future. The repo-root deno.lock is auto-discovered by Deno for every deno invocation
-# here, and without this Deno also wants a workspace.packageJson block for
-# package.json's npm deps: "deno cache --frozen" then FAILS with "The lockfile is out of
-# date", and a plain "deno run" SILENTLY REWRITES the checked-in deno.lock.
+# Workflow-scoped so it covers every deno invocation in every job and step. Deno
+# auto-discovers the repo-root deno.lock, and without this it also wants a
+# workspace.packageJson block for package.json's npm deps: "deno cache --frozen" then
+# fails with "The lockfile is out of date", and a plain "deno run" silently rewrites
+# the checked-in lock.
 env:
   DENO_NO_PACKAGE_JSON: "1"
 
 jobs:
   sample:
     runs-on: ubuntu-latest
-    # Budget: apt ~1 min + D1 snapshot ~30 s + ~26 MB of Range slices 2-5 min +
-    # ~150 gdal invocations 2-4 min + sampling 1-2 min + upload/read-back ~1 min.
-    # Realistic 10-18 min.
+    # A realistic run is 10-18 minutes, dominated by the GRIB fetch and the gdal
+    # invocations.
     timeout-minutes: 30
     outputs:
-      # publish-kv reads this. Without it, a run that WITHHELD the pointer would send
-      # job 2 at the previous cycle, whose absolute expiration has already been spent —
-      # a guaranteed red "expired" refusal that says nothing about what actually
-      # happened here.
+      # publish-kv reads this. Without it, a run that withheld the pointer would send
+      # job 2 at the previous cycle, whose absolute expiration is already spent: a
+      # guaranteed "expired" refusal that says nothing about what happened here.
       published: ${{ steps.publish.outputs.published }}
     env:
-      # The bucket is swim-report with a HYPHEN. The zone is swim.report with a dot and
+      # The bucket is swim-report with a hyphen. The zone is swim.report with a dot and
       # the public R2 domain is map.swim.report, so the dotted form reads naturally and
-      # is wrong: R2 returns AccessDenied (never NoSuchBucket) for a bucket the token
+      # is wrong: R2 answers AccessDenied rather than NoSuchBucket for a bucket a token
       # cannot see, so the wrong name looks exactly like a bad secret.
       R2_BUCKET: swim-report
       R2_PUBLIC_BASE: https://map.swim.report
@@ -118,34 +108,32 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: auto
       AWS_ENDPOINT_URL: https://0e01552527359dfcce6edc27ebedb530.r2.cloudflarestorage.com
-      # The AWS CLI has defaulted to sending CRC32 integrity headers since 2.23; R2 has
-      # historically answered "not implemented". when_required is Cloudflare's
-      # documented mitigation.
+      # The AWS CLI defaults to sending CRC32 integrity headers, which R2 has answered
+      # "not implemented"; when_required is Cloudflare's documented mitigation.
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
       AWS_MAX_ATTEMPTS: "5"
       AWS_RETRY_MODE: standard
       AWS_PAGER: ""
-      # READ-scoped, deliberately not the edit-scoped token discovery.yml uses: this
+      # Read-scoped, deliberately not the edit-scoped token discovery.yml uses: this
       # job only ever SELECTs from D1.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_READ_TOKEN }}
       # A minimal D1-only API token cannot enumerate GET /accounts to auto-discover the
-      # account, so wrangler needs it handed over explicitly. Account IDs are not secret
-      # (they ship in wrangler.toml and dashboard URLs).
+      # account, so wrangler needs it explicitly. Account IDs are not secret.
       CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
       DB_NAME: swim-report
-      # Pin to the wrangler MAJOR line (matches package.json's ^4), so the unattended
-      # job gets 4.x fixes automatically but a future wrangler 5 can never silently
-      # change flags or --file parsing under a scheduled run.
+      # Pinned to the wrangler major line, matching package.json's ^4, so the
+      # unattended job gets 4.x fixes but a future wrangler 5 can never silently change
+      # flags or --file parsing under a scheduled run.
       WRANGLER_VERSION: "4"
       SNAPSHOT_PAGE: "5000"
       PUBLISH: ${{ github.event_name == 'schedule' && 'true' || inputs.publish }}
       ALLOW_SHRINK: ${{ github.event_name == 'schedule' && 'false' || inputs.allow_shrink }}
-      # NEVER settable on a schedule. Auto-publish is withheld by
-      # scripts/build-wave-manifest.js exactly when the evidence for publishing is
-      # missing (no previous manifest to ratio against, or a floors entry that is absent
-      # or still status "bootstrap" for this gridsDigest). A human reads the manifest and
-      # dispatches with this on; a scheduler never decides that on its own.
+      # Never settable on a schedule. scripts/build-wave-manifest.js withholds
+      # auto-publish exactly when the evidence for publishing is missing: no previous
+      # manifest to ratio against, or a floors entry that is absent or still status
+      # "bootstrap" for this gridsDigest. A human reads the manifest and dispatches with
+      # this on; a scheduler never decides that.
       FORCE_PUBLISH: ${{ github.event_name == 'schedule' && 'false' || inputs.force_publish }}
     steps:
       - name: Checkout
@@ -161,8 +149,8 @@ jobs:
         with:
           node-version: "22"
 
-      # Resolve the dependency tree from the COMMITTED deno.lock, once, explicitly, and
-      # fail loudly if it drifts. --frozen refuses any lockfile change.
+      # Resolve the dependency tree from the committed deno.lock once, explicitly, and
+      # fail loudly if it drifts.
       - name: Cache Deno dependencies (frozen lockfile)
         run: |
           deno cache --lock=deno.lock --frozen \
@@ -174,10 +162,10 @@ jobs:
 
       - name: Install GDAL and prove it can decode GRIB2 JPEG 2000
         # gfswave packs with DRS template 5.40, which is JPEG 2000, and
-        # --no-install-recommends is exactly the flag build-layers.yml's own comment
-        # names as the first suspect for a missing format driver. The format list is
-        # checked first because it fails in one line; it is NOT sufficient on its own,
-        # so a real slice is decoded below and asserted to carry data.
+        # --no-install-recommends is the first suspect for a missing format driver. The
+        # format list is checked first because it fails in one line, but it is not
+        # sufficient on its own, so a real slice is decoded below and asserted to carry
+        # data.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -188,17 +176,17 @@ jobs:
           echo "GDAL carries the JP2OpenJPEG and GRIB drivers"
 
       - name: Configure aws CLI for R2
-        # The AWS CLI is PREINSTALLED on ubuntu-latest — never add an install step.
+        # The AWS CLI is preinstalled on ubuntu-latest; never add an install step.
         run: |
           set -euo pipefail
           mkdir -p ~/.aws
-          # PATH-STYLE, pinned deliberately. The bucket name carries no dot, so the
-          # wildcard certificate for *.r2.cloudflarestorage.com would in fact cover
+          # Path-style, pinned deliberately. The bucket name carries no dot, so the
+          # wildcard certificate for *.r2.cloudflarestorage.com would cover
           # virtual-hosted addressing today. It is pinned anyway because this is the only
-          # publish path and path-style is what R2 documents: a future rename to a DOTTED
-          # bucket would otherwise produce <bucket>.<account>.r2.cloudflarestorage.com,
-          # which that wildcard does NOT cover, and the failure would be a TLS error at
-          # upload time rather than anything resembling a naming mistake.
+          # publish path and path-style is what R2 documents: a future rename to a dotted
+          # bucket would produce a host that wildcard does not cover, and the failure
+          # would be a TLS error at upload time rather than anything resembling a naming
+          # mistake.
           cat > ~/.aws/config <<'AWSCFG'
           [default]
           s3 =
@@ -208,7 +196,7 @@ jobs:
               max_concurrent_requests = 8
           AWSCFG
           aws --version
-          # Cheap Class B fail-fast so a bad secret surfaces now, not after an hour of
+          # Cheap fail-fast so a bad secret surfaces now, not after an hour of
           # downloading and sampling.
           aws s3api list-objects-v2 --bucket "$R2_BUCKET" --max-items 1 > /dev/null
           echo "R2 credentials and endpoint verified"
@@ -216,15 +204,15 @@ jobs:
       - name: Prepare workspace and fetch the previous manifest
         run: |
           set -euo pipefail
-          # WORK is resolved HERE, not in the job-level env block: the runner context is
-          # not available to jobs.<id>.env, only to steps, and a job-level env value is
-          # never re-expanded by the shell either.
+          # WORK is resolved here, not in the job-level env block: the runner context
+          # is unavailable to jobs.<id>.env, and a job-level env value is never
+          # re-expanded by the shell either.
           WORK="$RUNNER_TEMP/waves"
           echo "WORK=$WORK" >> "$GITHUB_ENV"
           echo "PLANES=$WORK/planes" >> "$GITHUB_ENV"
           mkdir -p "$WORK/grib" "$WORK/planes" "$WORK/out" "$WORK/verify"
-          # Previous manifest, for the shrink-ratio and decay gates. Absent on the very
-          # first cycle; build-wave-manifest.js then skips the ratio checks and withholds
+          # Previous manifest, for the shrink-ratio and decay gates. Absent on the first
+          # cycle, where build-wave-manifest.js skips the ratio checks and withholds
           # auto-publish.
           if curl -sfL --retry 3 "$R2_PUBLIC_BASE/waves/current.json?cb=$GITHUB_RUN_ID" -o "$WORK/prev-current.json"; then
             prev_prefix=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prefix)" "$WORK/prev-current.json")
@@ -235,17 +223,16 @@ jobs:
           fi
 
       - name: Snapshot flag-worthy beaches from D1
-        # Read-only, and PAGINATED FROM DAY ONE. discovery.yml's own comment says a
-        # paginated snapshot is required before the North America expansion, and this
-        # workflow reaches 16k rows first, so it must not inherit the un-paginated
-        # version. The count guard still applies on top.
+        # Read-only, and paginated from day one: this workflow reaches the row counts
+        # that force pagination before discovery.yml does, so it must not inherit the
+        # un-paginated version. The count guard still applies on top.
         run: |
           set -euo pipefail
-          # ONE spelling of the hide-until-flag-worthy gate, from
-          # src/waterClass.js FLAG_WORTHY_WATER_SQL, used by BOTH the paginated
-          # SELECT and the count guard below. An empty value would snapshot the whole
-          # table and the guard, comparing the same predicate against itself, would
-          # bless it — so the step fails here instead.
+          # One spelling of the hide-until-flag-worthy gate, from
+          # src/waterClass.js FLAG_WORTHY_WATER_SQL, used by both the paginated SELECT
+          # and the count guard below. An empty value would snapshot the whole table
+          # and the guard, comparing the same predicate against itself, would bless it,
+          # so the step fails here instead.
           FLAG_WORTHY=$(deno run --lock=deno.lock --frozen --allow-read scripts/print-flag-worthy-sql.js)
           if [ -z "$FLAG_WORTHY" ]; then
             echo "::error::scripts/print-flag-worthy-sql.js printed nothing — refusing to run an unbounded snapshot query"
@@ -255,8 +242,8 @@ jobs:
           offset=0
           : > "$WORK/pages.json"
           while : ; do
-            # --json writes API errors (bad token, missing DB) to STDOUT, so a naive
-            # redirect swallows them and the step fails with a blank log.
+            # --json writes API errors to stdout, so a naive redirect swallows them and
+            # the step fails with a blank log.
             if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
               --command "SELECT id, lat, lon, water_class, last_viewed FROM beaches WHERE ${FLAG_WORTHY} ORDER BY id LIMIT ${SNAPSHOT_PAGE} OFFSET ${offset}" \
               > "$WORK/page.json"; then
@@ -266,10 +253,10 @@ jobs:
             fi
             got=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < "$WORK/page.json")
             echo "page at offset $offset: $got row(s)"
-            # Compact to ONE line before appending. The assembler below splits on
-            # newlines and parses each part, but wrangler --json pretty-prints across
-            # ~34 lines, so appending it raw feeds JSON.parse a bare "[". JSON.stringify
-            # escapes any newline inside a string, so one document per line holds.
+            # Compact to one line before appending. The assembler below splits on
+            # newlines and parses each part, but wrangler --json pretty-prints, so
+            # appending it raw feeds JSON.parse a bare "[". JSON.stringify escapes any
+            # newline inside a string, so one document per line holds.
             node -e "const fs=require('fs');process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(process.argv[1],'utf8')))+'\n')" \
               "$WORK/page.json" >> "$WORK/pages.json"
             if [ "$got" -lt "$SNAPSHOT_PAGE" ]; then break; fi
@@ -301,10 +288,9 @@ jobs:
           fi
 
       - name: Fetch the GRIB2 cycle
-        # The ONLY network-touching script in this pipeline, and the only one carrying
-        # --allow-net. Range-slices HTSGW and WIND off the .idx sidecars (~1 MB per
-        # forecast hour against an 11 MB whole file) and takes GLWU as one whole-file
-        # NOMADS fetch, spaced by the documented 10 s.
+        # The only network-touching script in this pipeline, and the only one carrying
+        # --allow-net. It Range-slices HTSGW and WIND off the .idx sidecars and takes
+        # GLWU as one whole-file NOMADS fetch, spaced by the documented 10 s.
         run: |
           set -euo pipefail
           deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
@@ -323,9 +309,8 @@ jobs:
           " "$WORK/grib/grids-report.json"
 
       - name: Smoke decode one slice
-        # A format-list grep is not proof. GDAL has a documented mode where it returns an
-        # EMPTY result with exit status ZERO (build-layers.yml greps stderr for "Cannot
-        # read node" for exactly this reason), so the only thing that proves the JPEG
+        # A format-list grep is not proof: GDAL has a documented mode where it returns
+        # an empty result with exit status zero, so the only thing that proves the JPEG
         # 2000 path works is decoding real data and finding some.
         run: |
           set -euo pipefail
@@ -356,19 +341,20 @@ jobs:
           " "$WORK/smoke.json"
 
       - name: Capture gdalinfo for every source file
-        # PER GRID, not per cycle. A grid whose file gdalinfo cannot read — or reads with
-        # an ERROR or a "Warning 1:" on stderr — is marked usable:false in
-        # grids-report.json and contributes nothing from here on; it does not take the
-        # grids that decoded down with it. A grid in requiredGridIds failing this sweep is
-        # still a whole-cycle refusal, and that id is read from the report rather than
-        # spelled here, so the shell and the scripts can never disagree about which grid
-        # the cycle cannot do without.
+        # Per grid, not per cycle. A grid whose file gdalinfo cannot read, or reads
+        # with an ERROR or a "Warning 1:" on stderr, is marked usable:false in
+        # grids-report.json and contributes nothing from here on without taking the
+        # grids that decoded down with it. A grid in requiredGridIds failing this sweep
+        # is still a whole-cycle refusal, and that id is read from the report rather
+        # than spelled here, so the shell and the scripts cannot disagree about which
+        # grid the cycle cannot do without.
         run: |
           set -euo pipefail
           report="$WORK/grib/grids-report.json"
           : > "$WORK/grid-unusable.tsv"
-          # An assignment carries the substitution's exit status, so a grids-report.json
-          # that does not parse fails HERE rather than silently sweeping nothing.
+          # An assignment carries the substitution's exit status, so a
+          # grids-report.json that does not parse fails here rather than silently
+          # sweeping nothing.
           gids=$(node -e "
             const r = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
             console.log(Object.keys(r.grids || {}).join(' '));
@@ -432,25 +418,25 @@ jobs:
           echo "captured $(find "$WORK/grib" -name "*.info.json" | wc -l) gdalinfo sidecar(s)"
 
       - name: Plan the bands
-        # Band indices are DISCOVERED from gdalinfo and matched on GRIB_VALID_TIME, never
-        # assumed. Assuming a layout is how an .idx off-by-one becomes a complete,
-        # plausible, silently time-shifted 24 h series.
+        # Band indices are discovered from gdalinfo and matched on GRIB_VALID_TIME,
+        # never assumed. Assuming a layout is how an .idx off-by-one becomes a
+        # complete, plausible, silently time-shifted 24 h series.
         run: |
           set -euo pipefail
           deno run --lock=deno.lock --frozen --allow-read --allow-write \
             scripts/sample-waves.js --mode plan --dest "$WORK/grib" --out "$WORK/grib/band-plan.json"
 
       - name: Extract every band as a flat lat/lon raster
-        # -r near is MANDATORY on the warp: any interpolating resampler smears wave
+        # -r near is mandatory on the warp: any interpolating resampler smears wave
         # values across the land mask and manufactures readings on shore.
         #
         # The two projected grids go through gdal_translate -of VRT first rather than
-        # gdalwarp -srcband. -srcband is GDAL 3.7+; -b on gdal_translate and a plain VRT
-        # are ancient, cost nothing (a VRT copies no pixels), and keep this step working
-        # on whatever GDAL the runner image happens to ship.
+        # gdalwarp -srcband, which is GDAL 3.7+. -b on gdal_translate and a plain VRT
+        # are ancient, cost nothing since a VRT copies no pixels, and keep this step
+        # working on whatever GDAL the runner image ships.
         #
-        # -of EHdr is NOT usable here (it errors on Float64); ENVI with -ot Float32 is
-        # lossless at these values.
+        # -of EHdr is not usable here, because it errors on Float64; ENVI with
+        # -ot Float32 is lossless at these values.
         run: |
           set -euo pipefail
           node -e "
@@ -482,7 +468,7 @@ jobs:
             img="$PLANES/$key.img"
             fail=""
             # A warp with an unknown mask value would manufacture readings out of the
-            # land mask, so this refusal keeps its meaning exactly — for THIS grid.
+            # land mask, so this refusal keeps its meaning, for this grid.
             if [ "$mode" = "warp" ] && [ -z "$nodata" ]; then
               fail="$key needs a warp but gdalinfo reported no band nodata — refusing to warp with an unknown mask value"
             elif [ "$mode" = "warp" ]; then
@@ -505,9 +491,9 @@ jobs:
             if [ -z "$fail" ] && ! gdalinfo -json -stats "$img" > "$PLANES/$key.info.json" 2> "$WORK/gdal.err"; then
               fail="gdalinfo failed on the extracted plane $key: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
             fi
-            # The byte-size check is what proves a plane is COMPLETE, and it is the only
-            # thing standing between a truncated raster and a sampler that would read it
-            # as a valid buffer.
+            # The byte-size check is what proves a plane is complete, and the only thing
+            # standing between a truncated raster and a sampler that would read it as a
+            # valid buffer.
             if [ -z "$fail" ] && ! node -e "
               const fs = require('fs');
               const info = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
@@ -523,8 +509,8 @@ jobs:
             fi
             if [ -n "$fail" ]; then
               cat "$WORK/gdal.err" || true
-              # DELETE the partials. A half-written .img whose plane key still matches the
-              # plan is the worst outcome available here: the sampler reads it as a plane.
+              # Delete the partials: a half-written .img whose plane key still matches
+              # the plan is read by the sampler as a plane.
               rm -f "$img" "$img.hdr" "$img.aux.xml" "$PLANES/$key.vrt" "$PLANES/$key.info.json"
               echo "::warning::$gid: $fail"
               printf '%s\t%s\n' "$gid" "$fail" >> "$WORK/plane-unusable.tsv"
@@ -572,7 +558,7 @@ jobs:
           echo "extracted $(ls "$PLANES"/*.img | wc -l) plane(s)"
 
       - name: Sample every beach
-        # NO --allow-net and NO --allow-run: GDAL ran in this shell and never from the
+        # No --allow-net and no --allow-run: GDAL ran in this shell and never from the
         # script, so the sampler is pure local math over bytes on disk.
         run: |
           set -euo pipefail
@@ -631,12 +617,12 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORK/verify"
-          # SHA256SUMS covers the two .ndjson artifacts and NOTHING ELSE. manifest.json
-          # must stay outside its own checksum scope: it is the sole INPUT to the
+          # SHA256SUMS covers the two .ndjson artifacts and nothing else. manifest.json
+          # must stay outside its own checksum scope: it is the sole input to the
           # consumer gate and is byte-compared on its own.
           cp "$WORK/out/SHA256SUMS" .
-          # --retry-all-errors is load-bearing: plain --retry does not retry the 404 that
-          # a few seconds of edge propagation produces on a just-written key.
+          # --retry-all-errors is load-bearing: plain --retry does not retry the 404 a
+          # few seconds of edge propagation produces on a just-written key.
           for f in waveinput.ndjson waves.ndjson; do
             curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/$f" -o "$f"
           done
@@ -646,38 +632,38 @@ jobs:
           echo "read-back verified at $PREFIX"
 
       - name: Explain a withheld publish
-        # Loud, and NOT a failure: the prefix is uploaded and complete, it simply is not
-        # live. This is the bootstrap path (seed data/wave-floors.json from this
-        # manifest, commit it, then re-dispatch with force_publish) and the unseeded
-        # gridsDigest path (someone changed a grid in src/waveGrids.js).
+        # Loud, and not a failure: the prefix is uploaded and complete, it is simply not
+        # live. This is the bootstrap path — seed data/wave-floors.json from this
+        # manifest, commit it, then re-dispatch with force_publish — and the unseeded
+        # gridsDigest path, where someone changed a grid in src/waveGrids.js.
         if: ${{ env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
         run: |
           echo "::warning::build-wave-manifest.js withheld auto-publish (bootstrap cycle, or no seeded floors entry for this gridsDigest). The cycle is uploaded at $PREFIX but waves/current.json was NOT moved. Read the manifest above, seed data/wave-floors.json at 0.75x the observed counts, commit it, then re-dispatch with force_publish true."
 
       - name: Publish the pointer
         id: publish
-        # Two conjuncts, both required. PUBLISH is the operator's intent; AUTO_PUBLISH is
-        # build-wave-manifest.js's verdict on whether the evidence supports going live.
-        # FORCE_PUBLISH is the human override for the bootstrap deadlock and is
+        # Two conjuncts, both required. PUBLISH is the operator's intent; AUTO_PUBLISH
+        # is build-wave-manifest.js's verdict on whether the evidence supports going
+        # live. FORCE_PUBLISH is the human override for the bootstrap deadlock and is
         # unavailable on a scheduled run.
         if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
         run: |
           set -euo pipefail
           printf '{"cycleId":"%s","prefix":"%s"}\n' "$CYCLE_ID" "$PREFIX" > current.json
-          # no-store, and JSON is not in Cloudflare's default-cached extension set, so the
-          # pointer is never served stale. Every object it names is immutable, so caching
-          # those is a pure win.
+          # no-store, and JSON is not in Cloudflare's default-cached extension set, so
+          # the pointer is never served stale. Every object it names is immutable, so
+          # caching those is a win.
           aws s3 cp current.json "s3://$R2_BUCKET/waves/current.json" \
             --cache-control "no-store" --content-type application/json --only-show-errors
           echo "published=true" >> "$GITHUB_OUTPUT"
           echo "published $CYCLE_ID"
 
       - name: Prune old wave cycles
-        # Same gate as Publish, deliberately: a run that did not move the pointer has left
-        # an extra non-live prefix behind, and pruning on that run would be deleting
-        # cycles to make room for one nobody is reading. 24 cycles is three days at the
-        # 3-hourly cadence. An age-based R2 lifecycle rule is deliberately NOT used: if
-        # the job broke for longer than the rule's age it would delete the LIVE cycle.
+        # Same gate as Publish, deliberately: a run that did not move the pointer has
+        # left an extra non-live prefix behind, and pruning there would delete cycles to
+        # make room for one nobody is reading. 24 cycles is three days at the 3-hourly
+        # cadence. An age-based R2 lifecycle rule is deliberately not used: if the job
+        # broke for longer than the rule's age it would delete the live cycle.
         if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
         run: |
           set -euo pipefail
@@ -708,15 +694,15 @@ jobs:
 
   publish-kv:
     needs: sample
-    # Only when this run actually moved the pointer. A withheld publish (bootstrap, or
-    # an unseeded gridsDigest) leaves the previous cycle live, and re-writing that
-    # cycle's KV would either refuse as expired or extend nothing.
+    # Only when this run actually moved the pointer. A withheld publish leaves the
+    # previous cycle live, and re-writing that cycle's KV would either refuse as
+    # expired or extend nothing.
     if: ${{ needs.sample.outputs.published == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       R2_PUBLIC_BASE: https://map.swim.report
-      # Workers KV Storage: Edit. This job holds NO AWS keys, so the job that can write
+      # Workers KV Storage: Edit. This job holds no AWS keys, so the job that can write
       # production KV cannot write R2 and the job that can write R2 cannot write KV.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_KV_WRITE_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
@@ -741,9 +727,9 @@ jobs:
         run: deno cache --lock=deno.lock --frozen scripts/build-wave-kv.js
 
       - name: Read the pointer ONCE and plan the download
-        # Re-reading the pointer per file would let a cycle completing mid-run hand you a
-        # set that passes every checksum (each file matches its OWN manifest) while
-        # describing a world that never existed.
+        # Re-reading the pointer per file would let a cycle completing mid-run hand you
+        # a set that passes every checksum, since each file matches its own manifest,
+        # while describing a world that never existed.
         run: |
           set -euo pipefail
           DL="$RUNNER_TEMP/wavedl"
@@ -756,9 +742,9 @@ jobs:
           cat "$DL/plan.json"
 
       - name: Download the cycle into quarantine
-        # QUARANTINE, not a working directory: nothing but scripts/build-wave-kv.js reads
-        # this path, and that script verifies byte length AND sha256 against the manifest
-        # before a single record is parsed. The download list comes from
+        # A quarantine, not a working directory: nothing but scripts/build-wave-kv.js
+        # reads this path, and that script verifies byte length and sha256 against the
+        # manifest before a record is parsed. The download list comes from
         # EXPECTED_WAVE_ARTIFACTS in code, never from manifest.artifacts[].key.
         run: |
           set -euo pipefail
@@ -779,9 +765,9 @@ jobs:
 
       - name: Warn on a degraded cycle
         # Names the grid, why it is missing and what a reader will see, because "a grid
-        # contributed nothing" leaves the operator to guess which beaches went gray.
-        # manifest.gridStatus is provenance: an older manifest without it degrades this
-        # line to the generic wording rather than failing the step.
+        # contributed nothing" leaves the operator guessing which beaches went gray.
+        # manifest.gridStatus is provenance: a manifest without it degrades this line to
+        # the generic wording rather than failing the step.
         run: |
           set -euo pipefail
           node -e "
@@ -812,9 +798,9 @@ jobs:
           " "$DL/kv/kv-report.json" "$DL/quarantine/manifest.json"
 
       - name: Bulk write the KV pairs
-        # Chunks are idempotent (same key, same value, same ABSOLUTE expiration), so
-        # GitHub's "Re-run failed jobs" repairs a half-landed write against the pinned
-        # immutable prefix.
+        # Chunks are idempotent — same key, same value, same absolute expiration — so
+        # "Re-run failed jobs" repairs a half-landed write against the pinned immutable
+        # prefix.
         if: ${{ env.APPLY == 'true' }}
         run: |
           set -euo pipefail
@@ -829,9 +815,9 @@ jobs:
                 --namespace-id "$KV_NAMESPACE_ID" --remote "$f" 2>&1 | tee "$DL/put.log"; then
                 ok=1
               fi
-              # wrangler WARNS and exits 0 on an unexpected pair property, so a camelCase
-              # expirationTtl would write keys that never expire and exit green. The grep
-              # is what turns that warning into a failure.
+              # wrangler warns and exits 0 on an unexpected pair property, so a
+              # camelCase expirationTtl would write keys that never expire and exit
+              # green. This grep is what turns that warning into a failure.
               if grep -q "unexpected properties" "$DL/put.log"; then
                 echo "::error::wrangler reported unexpected properties in $f — the pair spelling is wrong and those keys would never expire"
                 exit 1

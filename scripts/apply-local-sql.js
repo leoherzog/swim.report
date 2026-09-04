@@ -1,21 +1,17 @@
-// scripts/apply-local-sql.js — apply a large .sql delta to the LOCAL D1 in
+// scripts/apply-local-sql.js — apply a large .sql delta to the local D1 in
 // chunks (node scripts/apply-local-sql.js <delta.sql> [db-name]).
 //
-// WHY: `wrangler d1 execute --local --file <f>` hands the WHOLE file to
-// miniflare/workerd, whose SQLite build caps a single SQL call at 100,000
-// bytes — a file over that fails with "statement too long: SQLITE_TOOBIG"
-// even when every individual statement is tiny (verified on wrangler 4.112.0:
-// a 98.6 KB file applies, a 100.5 KB file fails). A full discovery delta is
-// ~700 KB, so `npm run seed` cannot apply .seed.sql in one call. The REMOTE
-// path is unaffected (wrangler --remote --file uploads through the D1 import
-// API, which ingests server-side), so the GitHub Actions workflows keep their
-// single-file apply; only local dev needs this splitter.
+// `wrangler d1 execute --local --file <f>` hands the whole file to
+// miniflare/workerd as one SQL call, which its SQLite build caps at 100,000
+// bytes: a larger file fails with "statement too long: SQLITE_TOOBIG" even when
+// every individual statement is tiny. A full discovery delta is several hundred
+// KB. The --remote path uploads through the D1 import API and is unaffected, so
+// only local dev needs this splitter.
 //
-// The batch emits exactly one statement per line (scripts/discovery-batch.js),
-// so splitting on line boundaries can never tear a statement. Chunks stay
-// under CHUNK_MAX_BYTES (margin below the 100,000-byte cap) and each one is
-// applied with its own `npx wrangler d1 execute --local --file` call. The
-// delta is idempotent, so a failure partway can simply be re-run.
+// scripts/discovery-batch.js emits exactly one statement per line, so splitting
+// on line boundaries can never tear a statement. Chunks stay under
+// CHUNK_MAX_BYTES and each is applied with its own wrangler call; the delta is
+// idempotent, so a failure partway can be re-run.
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

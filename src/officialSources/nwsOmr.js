@@ -1,28 +1,22 @@
-// src/officialSources/nwsOmr.js
+// src/officialSources/nwsOmr.js — an official hazard scraper. It is admissible
+// here because it reports posted lifeguard flag colors, the same hazard axis
+// src/rules.js estimates, and an official color overrides the estimate everywhere
+// it is shown.
 //
-// KIND: official HAZARD scraper (contract v2, per-beach resolution). An
-// official color OVERRIDES the estimate everywhere it is shown
-// (render.js markerFlagColor / titleColor). This source is admissible here
-// because it reports POSTED LIFEGUARD FLAG COLORS — the gold-standard hazard
-// axis, exactly what src/rules.js estimates.
+// The product is a single morning observation, which makes it the canonical case
+// for render.js displayFlagColor's raise-only rule: past the 2 h STALE_MS horizon
+// a fresher, more severe estimate lifts the title flag and map marker above this
+// color but never below it, and this card keeps reporting the scraped color
+// verbatim. A morning table posting Yellow can be overtaken within hours by the
+// same WFO's Beach Hazards Statement and Surf Zone Forecast.
 //
-// POINT-IN-TIME CAVEAT: this product is a single MORNING observation (see the
-// updated= note below and the declared readingNote). It is therefore the
-// canonical case for render.js displayFlagColor's raise-only rule — past the
-// 2 h STALE_MS horizon a fresher, more severe estimate lifts the title flag and
-// map marker above this color, though never below it, and this card keeps
-// reporting the scraped color verbatim. Observed 2026-08-26 at Holland State
-// Park: the 10:20 AM table posted Yellow, and WFO GRR's own 11:38 AM Beach
-// Hazards Statement plus its 2:06 PM Surf Zone Forecast (Ottawa County swim
-// risk High, 3-5 ft) made red the honest headline four hours later.
-//
-// SOURCE: NWS Grand Rapids (WFO GRR) "Other Marine Reports" product (AWIPS
+// Source: NWS Grand Rapids (WFO GRR) "Other Marine Reports" product (AWIPS
 // OMRGRR), which carries the fixed "Lake Michigan Beach Reports" table for the
 // west-Michigan Lake Michigan state-park beaches. Fetched two-legged through
 // the public api.weather.gov products API:
 //   1. GET /products/types/OMR/locations/GRR -> @graph -> newest product id
 //   2. GET /products/{id} -> productText (plain text inside JSON)
-// Every request sends the required NWS User-Agent (reused from src/clients/nws.js).
+// every request sends the required NWS User-Agent (reused from src/clients/nws.js).
 //
 // COLOR MAPPING (the Flag Color column is a POSTED flag, 1:1):
 //   Green  -> green
@@ -35,17 +29,12 @@
 // morning and "may not be representative of conditions later in the day", so
 // the reading time — not the cron tick — drives the frontend stale warning).
 //
-// INTEGRATOR DEDUP NOTE: these are ~7 named Lake Michigan state-park beaches in
-// west Michigan (Ludington, Mears/Pentwater, Muskegon, P.J. Hoffmaster, Grand
-// Haven, Holland, Saugatuck Oval). They do NOT overlap the existing scrapers
-// (South Haven is south of Saugatuck; Huron-Clinton Metroparks is SE Michigan;
-// Chicago is Illinois), so registration order versus those is not a conflict —
-// but findScraper is first-match-wins, so keep matches() tight to these parks
-// (name + tight proximity). This is a HAZARD posted-flag source, so it belongs
-// in the officialSources "scrapers" registry (NOT the wqFloor floor registry).
+// The curated sites are the named Lake Michigan state-park beaches in west
+// Michigan, which overlap no other registered scraper. findScraper is
+// first-match-wins, so keep matches() tight to these parks: name plus tight
+// proximity.
 //
-// scrape() runs cron-side only; parseOmrBeachReport, normalizeOmrFlagColor,
-// and newestOmrProductId are pure and exported for tests.
+// scrape() runs cron-side only; the parsers are pure.
 
 import { fetchJson } from "../clients/http.js";
 import { NWS_USER_AGENT } from "../clients/nws.js";
@@ -65,24 +54,25 @@ export const OMR_LABEL = "NWS Grand Rapids Lake Michigan Beach Report";
 const OMR_TABLE_HEADER = "Lake Michigan Beach Reports";
 
 // Proximity fallback radius (statute miles) used by resolveSiteForBeach for
-// BOTH matches() (run over SITE_DEFS below) and per-beach resolution of a
+// both matches() (run over SITE_DEFS below) and per-beach resolution of a
 // scrape result (run over the emitted sites), when a beach name does not
 // substring-match a site.
 const OMR_MATCH_RADIUS_MI = 2;
 
-// The named beaches this product reports, in table order. names[] are LOWERCASE
-// substrings compared BOTH against each OMR table row's Location text (to map a
-// row to a site) AND, in resolveSiteForBeach, against a beach's
-// (park_name + " " + name). Keep them tight and distinctive so a row is never
-// attributed to a namesake/sibling beach. lat/lon are approximate positions
-// along the Lake Michigan shore, used only for the proximity fallback.
-// radiusMi is carried onto each emitted site so the resolution pass uses the
-// SAME reach matches() claims with — otherwise a beach 1.5-2.0 mi from a
-// centroid (no name match) would be CLAIMED here yet resolve to null. matches()
-// is itself resolveSiteForBeach(beach, SITE_DEFS) !== null, so the claim reach
-// and the resolve reach cannot drift apart as this table is edited. (A CLAIMED
-// beach may still resolve to null when the day's product reports no flag for
-// its site — that is correct: nothing to report is not the same as no coverage.)
+// The named beaches this product reports, in table order. names[] are lowercase
+// substrings compared both against each OMR table row's Location text and, in
+// resolveSiteForBeach, against a beach's (park_name + " " + name); keep them
+// tight and distinctive so a row is never attributed to a namesake or sibling
+// beach. lat/lon are approximate shore positions used only for the proximity
+// fallback.
+//
+// radiusMi rides onto each emitted site so the resolution pass uses the same
+// reach matches() claims with; otherwise a beach a mile or two from a centroid
+// with no name match would be claimed here yet resolve to null. matches() is
+// itself resolveSiteForBeach(beach, SITE_DEFS) !== null, so the claim reach and
+// the resolve reach cannot drift apart as this table is edited. A claimed beach
+// may still resolve to null when the day's product reports no flag for its site,
+// which is correct: nothing to report is not the same as no coverage.
 const SITE_DEFS = [
   {
     siteId: "ludington-state-park",
@@ -142,15 +132,12 @@ const SITE_DEFS = [
   }
 ];
 
-// One table row:
-//   "<Location>  <temp> F  <wave> ft  <Flag Color>"
-// The water-temp ("NN F" or "M F") and wave-height ("N ft" or "M ft") columns
-// are required structural anchors so this only matches genuine data rows — the
-// header lines ("Location ... Temp ... Height ... Color", "Water Wave Flag")
-// and the prose sections lack this shape and are skipped. The Location group is
-// non-greedy so it stops at the first temp column. The trailing flag word is a
-// single alpha token (Green / Yellow / Red / None); "None"/unknown normalize to
-// null (no data). There is no double-red in this product.
+// One table row: "<Location>  <temp> F  <wave> ft  <Flag Color>". The water-temp
+// and wave-height columns are required structural anchors, so only genuine data
+// rows match; the header lines and prose sections lack that shape and are
+// skipped. The Location group is non-greedy so it stops at the first temp column.
+// The trailing flag word is a single alpha token, and "None" or an unknown token
+// normalizes to null.
 const OMR_ROW_RE =
   /^(.+?)\s+(?:\d+|M)\s*F\s+(?:\d+|M)\s*ft\s+([A-Za-z]+)\s*$/;
 
@@ -190,20 +177,16 @@ function siteDefForRowName(rawName) {
   return null;
 }
 
-// Pure, exported for tests. productText (+ the cron's ISO timestamp, unused but
-// kept for signature symmetry) -> sites[] (contract shape (b) sites), [] when
-// the table parsed but has nothing reportable (every row None / off-season /
-// unknown), or null when the product is unusable (missing table header, or the
-// header is present but not one data row matches — a format change).
-//   - A row is scoped to the table region between the header and the
-//     "Disclaimer"/"Flag Definitions"/"$$" trailer so prose can never be
+// Pure. productText -> sites[], [] when the table parsed but has nothing
+// reportable, or null when the product is unusable: a missing table header, or a
+// header present with not one matching data row, which means a format change.
+//   - Rows are scoped to the region between the header and the
+//     "Disclaimer" / "Flag Definitions" / "$$" trailer, so prose can never be
 //     misread as a row.
-//   - A row that does not match OMR_ROW_RE is skipped (not a data row).
-//   - A row naming an unknown beach is skipped (cannot map to a curated site).
-//   - A row whose flag color is None/unrecognized is omitted (NO DATA), never
-//     guessed.
-//   - Duplicate rows for the same site keep the FIRST (rows are single per
-//     beach in this product; the guard is defensive).
+//   - A row not matching OMR_ROW_RE is skipped.
+//   - A row naming an unknown beach is skipped.
+//   - A row whose flag color is None or unrecognized is omitted, never guessed.
+//   - Duplicate rows for the same site keep the first; the guard is defensive.
 export function parseOmrBeachReport(text, nowIso) {
   if (typeof text !== "string" || text.length === 0) {
     return null;
@@ -331,31 +314,25 @@ export const nwsOmr = {
   id: "nws-omr-grr",
   label: OMR_LABEL,
   url: OMR_URL,
-  // Staleness horizon for THIS source. The frontend's 2 h default is calibrated
-  // to our own hourly estimate recompute, but the OMR GRR product is issued
-  // ONCE PER DAY, late morning local time — observed issuances: 2026-07-17
-  // 16:13Z, 07-18 15:17Z, 07-19 15:16Z, 07-20 16:00Z, 07-21 14:56Z, 07-22
-  // 15:33Z, i.e. roughly 14:30-16:00 UTC. Since the updated field below is the
-  // product's issuanceTime, a flat 2 h horizon would mark the official card
-  // stale for ~22 of every 24 hours even though we rewrite the record hourly
-  // and the posted flag colors are the current ones. 30 h covers the 24 h
-  // cadence plus the ~1.5 h issuance jitter with margin, so the stale warning
-  // fires only when NWS genuinely SKIPS an issuance — which is exactly when a
-  // reader should stop trusting the colors.
+  // Staleness horizon for this source. The frontend's 2 h default is calibrated
+  // to the hourly estimate recompute, but this product is issued once per day,
+  // late morning local time (roughly 14:30-16:00 UTC), and the updated field is
+  // its issuanceTime — so a flat 2 h horizon would mark the card stale for most
+  // of every day even though the posted colors are current. 30 h covers the daily
+  // cadence plus issuance jitter, so the stale warning fires only when NWS
+  // genuinely skips an issuance, which is exactly when a reader should stop
+  // trusting the colors.
   staleMs: 30 * 60 * 60 * 1000,
-  // ...but the reading is still a point-in-time morning observation, and the
-  // product text itself warns the observations "may not be representative of
-  // conditions later in the day". So between the 2 h default and the 30 h
-  // horizon we say so plainly instead of saying nothing. Rendered as a neutral
-  // callout with the age appended: "Morning reading — conditions may have
-  // changed since it was posted 11 hours ago."
+  // The reading is still point-in-time, and the product text itself warns the
+  // observations "may not be representative of conditions later in the day", so
+  // between the 2 h default and the 30 h horizon that is said plainly. Rendered
+  // as a neutral callout with the age appended.
   readingNote: "Morning reading — conditions may have changed since it was posted",
-  // Does this beach belong to one of the curated OMR sites? Exactly the shared
-  // resolver run over SITE_DEFS: any site's names[] substring-matching the
-  // beach's (park_name + " " + name), or the nearest site within its radiusMi
-  // (all seven carry OMR_MATCH_RADIUS_MI, so "nearest within radius" and "any
-  // within radius" are the same boolean here). Kept tight so a namesake beach
-  // elsewhere never resolves onto a west-Michigan state-park flag.
+  // Does this beach belong to one of the curated OMR sites? The shared resolver
+  // over SITE_DEFS: any site's names[] substring-matching the beach's
+  // (park_name + " " + name), or the nearest site within its radiusMi. Kept tight
+  // so a namesake beach elsewhere never resolves onto a west-Michigan state-park
+  // flag.
   matches: function(beach) {
     return resolveSiteForBeach(beach, SITE_DEFS) !== null;
   },

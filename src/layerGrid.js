@@ -1,46 +1,41 @@
 // src/layerGrid.js — the in-process spatial index the offline layer pipeline
-// queries instead of the Overpass server.
+// probes. A naive linear scan does not work at this scale: the lakes layer alone
+// is on the order of 3e6 ring segments, and the classification pass probes it
+// once per beach vertex, tens per beach across the whole table. That is hours of
+// segment evaluations, not the seconds a per-run job can afford.
 //
-// Overpass answered every "what is near this beach" question remotely, with its
-// own spatial index. Reading prebuilt FlatGeobuf layers moves that question into
-// this process, and a naive linear scan does not survive the move: the lakes
-// layer alone is on the order of 3e6 ring segments, and the classification pass
-// probes it once per beach VERTEX (~30-50 per beach, ~1,669 beaches today and
-// ~20k at the North America target). That is ~1e11 segment evaluations — hours,
-// not the seconds a per-run job can afford.
+// Pure: no fetch, no Date, no I/O, no npm dependency, no Deno or fs access.
+// Imports src/geo.js and nothing else, so the offline batch and the tests both
+// load it directly.
 //
-// Pure: no fetch, no Date, no I/O, no npm dependency, no Deno/fs access. Imports
-// src/geo.js and nothing else, exactly as src/marineZones.js does, so it is safe
-// to import from the offline batch and from tests alike.
+// Two index modes, because one does not fit both jobs:
 //
-// TWO INDEX MODES, because one does not fit both jobs:
+//   Mode A, the envelope grid (buildLayerGrid / queryGridByBounds), for features
+//   small relative to a cell whose whole geometry the caller needs anyway:
+//   beaches and parks. It is a candidacy filter; the exact decision
+//   (point-in-polygon, nearest-edge distance) happens at the call site against
+//   the retained geometry.
 //
-//   Mode A — ENVELOPE grid (buildLayerGrid / queryGridByBounds). For features
-//   that are SMALL relative to a cell and whose
-//   whole geometry the caller needs anyway: beaches and parks. It is a CANDIDACY
-//   filter — the exact decision (point-in-polygon, nearest-edge distance) always
-//   happens at the call site against the retained geometry.
+//   Mode B, the segment grid (buildSegmentGrid / addFeatureSegments /
+//   finishSegmentGrid / anySegmentWithinKmOfPoint / featuresWithinKmOfVertices),
+//   for coastline, water and lakes. An envelope grid prunes nothing for the six
+//   Great Lake polygons: their envelopes contain essentially every Great Lakes
+//   beach, so an envelope query returns all six and falls through to an uncapped
+//   scan of every ring segment they own. Mode B indexes the segments themselves,
+//   in typed arrays, and never retains the source geometry — both the speed fix
+//   and the memory fix, since a ~3e6-vertex layer costs ~100 MB of typed arrays
+//   instead of gigabytes of GeoJSON heap, which is what lets the caller feed it
+//   from a streaming reader.
 //
-//   Mode B — SEGMENT grid (buildSegmentGrid / addFeatureSegments /
-//   finishSegmentGrid / anySegmentWithinKmOfPoint / featuresWithinKmOfVertices).
-//   For coastline, water and lakes. An envelope grid provides ZERO pruning for
-//   the six Great Lake polygons: their envelopes contain essentially every Great
-//   Lakes beach, so an envelope query returns all six and then falls through to
-//   an uncapped scan of every ring segment they own. Mode B indexes the
-//   SEGMENTS themselves, in typed arrays, and never retains the source geometry
-//   — that is both the speed fix and the memory fix (a ~3e6 vertex layer costs
-//   ~100 MB of Float64Array/Int32Array instead of multiple GB of GeoJSON heap,
-//   which is what lets the caller feed it from a streaming reader).
+// Mode B is exact for the threshold question it answers: the candidate cell
+// neighbourhood provably contains every segment that could be within maxKm, and
+// the per-segment test is the same local-planar math minEdgeDistanceKm uses.
+// Mode A deliberately over-includes.
 //
-// Mode B is EXACT for the threshold question it answers ("is anything within
-// maxKm"): the candidate cell neighbourhood provably contains every segment that
-// could be within maxKm, and the per-segment test is the same local-planar math
-// minEdgeDistanceKm uses. Mode A is deliberately NOT exact — it over-includes.
-//
-// Known scope limit, stated rather than handled: no antimeridian wrap. Cells are
-// keyed off raw degrees, so a query at lon 179.99 does not see a feature at
-// -179.99. Every region this pipeline covers (see src/regions.js) is far from
-// the 180th meridian; a future Pacific region would need that wrap added here.
+// Scope limit, stated rather than handled: no antimeridian wrap. Cells are keyed
+// off raw degrees, so a query at lon 179.99 does not see a feature at -179.99.
+// Every region this pipeline covers is far from the 180th meridian; a Pacific
+// region would need that wrap added here.
 
 import {
   KM_PER_DEG,
@@ -56,62 +51,56 @@ import {
 // for no gain, since the neighbourhood always widens by a full cell anyway.
 export const GRID_CELL_DEG = 0.05;
 
-// Cell coordinates are packed into ONE number so the cell map can be a
-// Map<number, ...> rather than a Map<string, ...> — string keys would allocate
-// a key per lookup in the hottest loop in the pipeline. The offset recentres
-// cell indices to non-negative values and the stride keeps the two axes from
-// colliding; the widest legitimate index is 180 / 0.05 = 3,600, so a 40,000
-// offset with a 100,000 stride leaves four orders of magnitude of slack and the
-// largest key (~4.4e9) stays far inside the safe-integer range.
+// Cell coordinates are packed into one number so the cell map can be keyed by
+// number rather than string; string keys would allocate a key per lookup in the
+// hottest loop in the pipeline. The offset recentres cell indices to non-negative
+// values and the stride keeps the two axes from colliding. The widest legitimate
+// index is 180 / 0.05 = 3,600, so a 40,000 offset with a 100,000 stride leaves
+// four orders of magnitude of slack and the largest key stays inside the
+// safe-integer range.
 const CELL_KEY_OFFSET = 40000;
 const CELL_KEY_STRIDE = 100000;
 
-// Cell indices are CLAMPED into the key range rather than rejected. Wild
-// coordinates (a corrupt bound, a 1e12 longitude) then land in an edge bucket
-// instead of producing a colliding or non-integer key; correctness is unharmed
-// because the exact envelope / distance test still decides every candidate. This
-// mirrors the "skip malformed, never throw" convention the rest of the geo code
-// follows.
+// Cell indices are clamped into the key range rather than rejected, so a corrupt
+// bound or a 1e12 longitude lands in an edge bucket instead of producing a
+// colliding or non-integer key. Correctness is unharmed because the exact
+// envelope or distance test still decides every candidate.
 const CELL_INDEX_MIN = -(CELL_KEY_OFFSET - 1);
 const CELL_INDEX_MAX = CELL_KEY_OFFSET - 1;
 
-// Longitude degrees shrink with latitude. A pad expressed in degrees of LATITUDE
+// Longitude degrees shrink with latitude. A pad expressed in degrees of latitude
 // covers KM_PER_DEG km north-south but only KM_PER_DEG * cos(lat) km east-west,
-// so padding both axes by the same number of degrees would under-reach in
-// longitude and could DROP a feature that is genuinely within the radius (at
-// 49 N by a third). Every pad below is therefore divided by cos(lat) on the
-// longitude axis. The clamp matches src/marineZones.js: it bounds the pad near
-// the poles instead of letting it diverge.
+// so padding both axes by the same number of degrees under-reaches in longitude
+// and could drop a feature genuinely within the radius — by a third at 49 N.
+// Every pad below is divided by cos(lat) on the longitude axis, with a clamp
+// matching src/marineZones.js so it does not diverge near the poles.
 const MIN_COS_LAT = 0.01;
 
-// A feature whose envelope covers more cells than this is not registered per
-// cell at all — it goes on an OVERSIZED list that every query scans
-// unconditionally. Registering, say, a state-sized park envelope cell by cell
-// would write tens of thousands of entries for a feature that is a candidate
-// almost everywhere anyway. Correctness is unchanged (the oversized list is
-// always consulted); only the memory profile is.
+// A feature whose envelope covers more cells than this goes on an oversized list
+// every query scans unconditionally rather than being registered per cell.
+// Registering a state-sized park envelope cell by cell would write tens of
+// thousands of entries for a feature that is a candidate almost everywhere
+// anyway. Correctness is unchanged; only the memory profile is.
 const MAX_CELLS_PER_FEATURE = 4096;
 
-// Segments are SUBDIVIDED so that no indexed piece spans more than this many
-// cells on either axis. A single long diagonal segment (a simplified lake ring
-// edge, a coastline jump) has a bounding box covering span-x * span-y cells —
-// quadratic in its length — and registering it into all of them is pure waste.
-// Splitting a straight segment at interior points is exact (the pieces are
-// colinear with the original), so this costs nothing but a few extra entries.
+// Segments are subdivided so no indexed piece spans more than this many cells on
+// either axis. A long diagonal segment has a bounding box covering spanX * spanY
+// cells, quadratic in its length, and registering it into all of them is waste.
+// Splitting a straight segment at interior points is exact, since the pieces stay
+// colinear with the original.
 const MAX_CELL_SPAN_PER_SEGMENT = 1;
 
 // Initial segment capacity of a segment-grid builder, grown by doubling.
 const SEGMENT_INITIAL_CAPACITY = 1024;
 
 // Slack added to the segment grid's cheap bounding-box rejection, in degrees
-// (~0.1 mm). The rejection is computed in DEGREES while the decision it guards
-// (anySegmentWithinKm) is computed in projected KILOMETRES, and the two round
-// differently in the last bit: a segment lying at EXACTLY maxKm could be
-// rejected here an ulp before the evaluator would have accepted it. geo.js
-// deliberately refused a pre-reject inside the evaluator for that same
-// bit-exactness reason, so the guard in front of it has to be strictly
-// conservative rather than strictly tight. This is nine orders of magnitude
-// below any radius in the pipeline, so it costs nothing.
+// (~0.1 mm). The rejection is computed in degrees while the decision it guards
+// (anySegmentWithinKm) is computed in projected kilometres, and the two round
+// differently in the last bit: a segment lying at exactly maxKm could be rejected
+// here an ulp before the evaluator would have accepted it. geo.js deliberately
+// refuses a pre-reject inside the evaluator for that same bit-exactness reason,
+// so the guard in front of it has to be conservative rather than tight. Nine
+// orders of magnitude below any radius in the pipeline, so it costs nothing.
 const SEGMENT_BBOX_EPSILON_DEG = 1e-9;
 
 function isFiniteNumber(value) {
@@ -144,16 +133,16 @@ function validBounds(bounds) {
 // --- Mode A: the envelope grid -------------------------------------------------
 
 // Index an array of features by their bounding boxes. Features are identified by
-// their ORIGINAL ARRAY INDEX throughout — every query returns indices, ascending
-// — because the consumers' tie-break rules (associateParkForBeach's smallest-
-// area-then-first-seen, mergeBeachRows' first-seen) ride on the caller's own
-// ordering and a grid that reordered candidates would silently change answers.
+// their original array index throughout and every query returns indices in
+// ascending order, because the consumers' tie-break rules
+// (associateParkForBeach's smallest-area-then-first-seen, mergeBeachRows'
+// first-seen) ride on the caller's own ordering, and a grid that reordered
+// candidates would silently change answers.
 //
-// A feature with missing or malformed bounds is KEPT in the index positionally
-// (so indices stay aligned with the caller's array) but is registered in no cell
-// and matches no query: its stored bounds are NaN, and every comparison against
-// NaN is false. Malformed input is upstream data, not a programming error, so it
-// is skipped rather than thrown on.
+// A feature with missing or malformed bounds is kept in the index positionally,
+// so indices stay aligned with the caller's array, but is registered in no cell
+// and matches no query: its stored bounds are NaN and every comparison against
+// NaN is false. Malformed input is upstream data, not a programming error.
 export function buildLayerGrid(features) {
   const list = Array.isArray(features) ? features : [];
   const count = list.length;
@@ -252,12 +241,11 @@ function ascending(a, b) {
   return a - b;
 }
 
-// Candidates whose envelope OVERLAPS a query RECTANGLE, ascending index order.
-// UNPADDED and inclusive (edge-touching counts), matching osmSelect's
-// boundsOverlap byte for byte — associateParkForBeach matches bbox to bbox, not
-// point to bbox, and its smallest-area-then-first-seen tie-break is only
-// reproducible if this returns exactly the same set in exactly the same order as
-// the full-list scan it replaces.
+// Candidates whose envelope overlaps a query rectangle, in ascending index order.
+// Unpadded and inclusive, matching osmSelect's boundsOverlap byte for byte:
+// associateParkForBeach matches bbox to bbox rather than point to bbox, and its
+// smallest-area-then-first-seen tie-break is only reproducible if this returns
+// the same set in the same order as a full-list scan.
 export function queryGridByBounds(grid, bounds) {
   if (grid === null || typeof grid !== "object" || grid.count === 0) {
     return [];
@@ -305,12 +293,12 @@ export function queryGridByBounds(grid, bounds) {
 
 // --- Mode B: the segment grid --------------------------------------------------
 
-// A mutable builder. Segments accumulate in growable typed arrays: coordinates
-// as [ax, ay, bx, by] quads of DEGREES (lon, lat — the order anySegmentWithinKm
+// A mutable builder. Segments accumulate in growable typed arrays: coordinates as
+// [ax, ay, bx, by] quads of degrees (lon, lat, the order anySegmentWithinKm
 // expects) in a Float64Array, and the owning feature index in a parallel
-// Int32Array. Nothing else is retained: after addFeatureSegments returns, the
-// caller may drop the geometry entirely and keep only the small
-// { osmType, osmId, tags, bounds } sidecar it needs for the answer.
+// Int32Array. Nothing else is retained, so after addFeatureSegments returns the
+// caller may drop the geometry and keep only the small
+// { osmType, osmId, tags, bounds } sidecar.
 export function buildSegmentGrid() {
   return {
     cells: new Map(),
@@ -372,13 +360,12 @@ function pushSegment(builder, featureIndex, ax, ay, bx, by) {
   }
 }
 
-// Add one segment, subdividing it first if its bounding box spans more cells
-// than MAX_CELL_SPAN_PER_SEGMENT on either axis. A long diagonal segment's bbox
-// covers spanX * spanY cells — quadratic in its length, and almost all of that
-// box is nowhere near the segment — so registering it whole is both wasteful and
-// a source of useless candidates. The split points are computed by linear
-// interpolation, so the pieces are exactly colinear with the original: no
-// geometry is distorted and no distance answer changes.
+// Add one segment, subdividing it first if its bounding box spans more cells than
+// MAX_CELL_SPAN_PER_SEGMENT on either axis. A long diagonal segment's bbox covers
+// spanX * spanY cells, almost all of it nowhere near the segment, so registering
+// it whole is both wasteful and a source of useless candidates. Split points come
+// from linear interpolation, so the pieces stay exactly colinear with the
+// original: no geometry is distorted and no distance answer changes.
 function addSubdividedSegment(builder, featureIndex, ax, ay, bx, by) {
   const spanX = Math.abs(bx - ax) / GRID_CELL_DEG;
   const spanY = Math.abs(by - ay) / GRID_CELL_DEG;
@@ -407,10 +394,10 @@ function addSubdividedSegment(builder, featureIndex, ax, ay, bx, by) {
   return pieces;
 }
 
-// Every coordinate SEQUENCE a geometry contributes: polygon rings (outer rings
-// AND holes alike — an island beach sits inside a hole and its nearest water is
-// that hole's edge) and linestrings. Point/MultiPoint geometries are handled
-// separately, as degenerate zero-length segments, so a node-mapped water feature
+// Every coordinate sequence a geometry contributes: polygon rings, outer rings
+// and holes alike (an island beach sits inside a hole and its nearest water is
+// that hole's edge), and linestrings. Point and MultiPoint geometries are handled
+// separately as degenerate zero-length segments, so a node-mapped water feature
 // still answers a proximity probe instead of vanishing from the index.
 function geometryPointRuns(geometry) {
   const runs = [];
@@ -445,10 +432,9 @@ function geometrySinglePoints(geometry) {
   return [];
 }
 
-// Chop one feature's geometry into segments and register them under
-// featureIndex. Returns the number of indexed segments (diagnostic — the 9.7
-// benchmark gate records the per-layer segment count). Malformed coordinates are
-// skipped silently: layer bytes are upstream data.
+// Chop one feature's geometry into segments and register them under featureIndex.
+// Returns the number of indexed segments, for diagnostics. Malformed coordinates
+// are skipped silently: layer bytes are upstream data.
 export function addFeatureSegments(builder, featureIndex, geometry) {
   if (builder === null || typeof builder !== "object") {
     return 0;
@@ -505,11 +491,11 @@ export function finishSegmentGrid(builder) {
     count: builder.count,
     oversized: Int32Array.from(builder.oversized),
     featureCount: builder.maxOwner + 1,
-    // Diagnostic counters, mutated by the query functions. They exist because
-    // the failure this whole module prevents — a probe degenerating to a full
-    // scan — is invisible in a correctness test and only shows up as a slow job
-    // hours later. A test can assert segments-examined-per-probe directly, which
-    // is deterministic where wall clock is not.
+    // Diagnostic counters, mutated by the query functions. The failure this
+    // module prevents — a probe degenerating to a full scan — is invisible in a
+    // correctness test and only shows up as a slow job hours later. A test can
+    // assert segments-examined-per-probe directly, which is deterministic where
+    // wall clock is not.
     stats: { probes: 0, segmentsExamined: 0 }
   };
 }
@@ -547,11 +533,11 @@ function segmentBboxMiss(segs, index, lat, lon, latPad, lonPad) {
   return false;
 }
 
-// Walk the cell neighbourhood of a probe point, handing each cell's segment
-// index array to visit(). The neighbourhood is the padded query box widened by a
-// full cell, and the pad is scaled by 1/cos(lat) on the longitude axis — that
-// scaling is what makes this mode EXACT: every segment within maxKm of the point
-// is provably inside the cells visited here.
+// Walk the cell neighbourhood of a probe point, handing each cell's segment index
+// array to visit(). The neighbourhood is the padded query box widened by a full
+// cell, and the pad is scaled by 1/cos(lat) on the longitude axis — that scaling
+// is what makes this mode exact: every segment within maxKm of the point is
+// provably inside the cells visited here.
 function visitSegmentCells(segGrid, lat, lon, latPad, lonPad, visit) {
   const cxLo = cellIndexFor(lon - lonPad) - 1;
   const cxHi = cellIndexFor(lon + lonPad) + 1;
@@ -574,11 +560,10 @@ function visitSegmentCells(segGrid, lat, lon, latPad, lonPad, visit) {
   return false;
 }
 
-// TRUE iff some indexed segment is within maxKm of (lat, lon). Only the padded
+// True iff some indexed segment is within maxKm of (lat, lon). Only the padded
 // cell neighbourhood is evaluated, and anySegmentWithinKm early-exits inside each
-// cell's array — the probes here are all threshold questions ("is there
-// coastline within 150 m"), never "how far exactly", so nothing ever needs the
-// full minimum.
+// cell's array: every probe here is a threshold question, never "how far
+// exactly", so nothing needs the full minimum.
 export function anySegmentWithinKmOfPoint(segGrid, lat, lon, maxKm) {
   if (segGrid === null || typeof segGrid !== "object" || segGrid.count === 0) {
     return false;
@@ -597,9 +582,9 @@ export function anySegmentWithinKmOfPoint(segGrid, lat, lon, maxKm) {
   });
 }
 
-// The feature indices owning any segment within maxKm of ANY probe vertex,
-// deduped, ASCENDING feature-index order — the callers' answers (nearbyLakeQids
-// in particular) are order-sensitive and must not depend on which vertex found a
+// The feature indices owning any segment within maxKm of any probe vertex,
+// deduped, in ascending feature-index order: the callers' answers, nearbyLakeQids
+// in particular, are order-sensitive and must not depend on which vertex found a
 // feature first.
 export function featuresWithinKmOfVertices(segGrid, vertices, maxKm) {
   if (segGrid === null || typeof segGrid !== "object" || segGrid.count === 0) {
@@ -616,10 +601,10 @@ export function featuresWithinKmOfVertices(segGrid, vertices, maxKm) {
   const stats = segGrid.stats;
   const accepted = new Set();
   const out = [];
-  // A one-element index window: anySegmentWithinKm is the single evaluator for
+  // A one-element index window. anySegmentWithinKm is the single evaluator for
   // segment distance in this pipeline, and asking it about one segment at a time
-  // is what lets an ACCEPTED feature short-circuit every remaining segment it
-  // owns (a lake ring has hundreds of thousands of them).
+  // is what lets an accepted feature short-circuit the hundreds of thousands of
+  // remaining segments a lake ring owns.
   const single = new Int32Array(1);
   for (const vertex of vertices) {
     if (vertex === null || typeof vertex !== "object" ||
@@ -651,7 +636,7 @@ export function featuresWithinKmOfVertices(segGrid, vertices, maxKm) {
           out.push(owner);
         }
       }
-      // Never short-circuit: this query wants EVERY owning feature, not the
+      // Never short-circuit: this query wants every owning feature, not the
       // first one, so the visitor always reports "keep going".
       return false;
     });

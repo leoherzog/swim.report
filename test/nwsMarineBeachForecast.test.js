@@ -1,8 +1,7 @@
 // test/nwsMarineBeachForecast.test.js
 // Unit tests for the NWS Marine Beach Forecast official HAZARD scraper. All
 // pure parsers are exercised against inline fixtures (no network); the scrape()
-// path is exercised with a stubbed globalThis.fetch. Project style: ES modules,
-// NO template literals (string concat with +), function () {} callbacks.
+// path is exercised with a stubbed globalThis.fetch.
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   normalizeRipColor,

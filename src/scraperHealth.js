@@ -11,7 +11,7 @@
 export const SCRAPER_HEALTH_ALERT_THRESHOLD = 24;
 
 // Pure. Given the previously persisted state and this run's outcome, returns
-// the new state to persist plus an optional LOUD alert message.
+// the new state to persist plus an optional alert message.
 //
 //   scraperId  stable registry id, used to build the alert string.
 //   prev       previously stored state (parsed JSON) or null/undefined when no

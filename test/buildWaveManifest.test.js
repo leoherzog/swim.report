@@ -1,12 +1,12 @@
-// Tests for scripts/build-wave-manifest.js — the BUILD-SIDE GATE of the NOAA GRIB2
-// wave pipeline. The module's entrypoint is guarded by import.meta.main (falsy under
-// vitest), so importing the pure exports touches no Deno API, no subprocess and no
-// file system.
+// Tests for scripts/build-wave-manifest.js, the build-side gate of the NOAA
+// GRIB2 wave pipeline. Importing its pure exports touches no Deno API, no
+// subprocess and no file system.
 //
-// The split these tests defend is the whole design: everything that could produce a
-// WRONG NUMBER is non-overridable, and everything that is merely LESS DATA is
-// overridable and warns. A flag an operator reaches for during an incident must not
-// be able to wave a sentinel, a shifted grid or a time-shifted band into src/rules.js.
+// The split these tests defend is the whole design: everything that could
+// produce a wrong number is non-overridable, and everything that is merely less
+// data is overridable and warns. A flag an operator reaches for during an
+// incident must not be able to wave a sentinel, a shifted grid or a time-shifted
+// band into src/rules.js.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -43,6 +43,9 @@ import {
   perGridDecayRefusals,
   shrinkRatioRefusals,
   decayRefusals,
+  gridIdsOf,
+  gridStatusOf,
+  gridSampled,
   notSampledGrids,
   hasGridCounts,
   gridCountsFromManifest,
@@ -1293,4 +1296,75 @@ describe("main", function () {
       expect(manifest.gridsComplete).toBe(false);
       expect(manifest.buildStatus).toBe("complete");
     });
+});
+
+// --- per-grid scoping ------------------------------------------------------
+//
+// Every floor, ratio and coverage gate downstream asks "did this grid sample?"
+// through these four helpers. The failure they exist to stop is an absent grid
+// scoring as a zero: a cycle that never fetched GLWU has no Great Lakes records,
+// and a gate that reads that as a count of 0 against a seeded floor either
+// refuses a healthy cycle or, worse, passes a cycle whose missing grid was
+// silently treated as measured.
+
+describe("gridIdsOf", function () {
+  it("defaults to the committed GRIDS list when given a non-array", function () {
+    const committed = gridIdsOf(GRIDS);
+    expect(gridIdsOf(undefined)).toEqual(committed);
+    expect(gridIdsOf(null)).toEqual(committed);
+    expect(gridIdsOf("noaa_glwu")).toEqual(committed);
+    for (let i = 0; i < REQUIRED_GRID_IDS.length; i = i + 1) {
+      expect(committed).toContain(REQUIRED_GRID_IDS[i]);
+    }
+  });
+
+  it("preserves the caller's order, since fallthrough order is the grid order", function () {
+    const grids = [{ id: "b" }, { id: "a" }, { id: "c" }];
+    expect(gridIdsOf(grids)).toEqual(["b", "a", "c"]);
+  });
+});
+
+describe("gridStatusOf", function () {
+  it("reads the recorded status string", function () {
+    expect(gridStatusOf({ noaa_glwu: { status: "sampled" } }, "noaa_glwu")).toBe("sampled");
+    expect(gridStatusOf({ noaa_glwu: { status: "skipped" } }, "noaa_glwu")).toBe("skipped");
+  });
+
+  it("answers \"absent\" for a missing or malformed entry, never a measurement", function () {
+    // A missing entry means the producer said nothing, which is not the same as
+    // a grid that reported zero.
+    expect(gridStatusOf({}, "noaa_glwu")).toBe("absent");
+    expect(gridStatusOf(null, "noaa_glwu")).toBe("absent");
+    expect(gridStatusOf({ noaa_glwu: null }, "noaa_glwu")).toBe("absent");
+    expect(gridStatusOf({ noaa_glwu: {} }, "noaa_glwu")).toBe("absent");
+    expect(gridStatusOf({ noaa_glwu: { status: 1 } }, "noaa_glwu")).toBe("absent");
+  });
+});
+
+describe("gridSampled", function () {
+  it("is true only for the exact status \"sampled\"", function () {
+    expect(gridSampled({ noaa_glwu: { status: "sampled" } }, "noaa_glwu")).toBe(true);
+    expect(gridSampled({ noaa_glwu: { status: "empty" } }, "noaa_glwu")).toBe(false);
+    expect(gridSampled({ noaa_glwu: { status: "failed" } }, "noaa_glwu")).toBe(false);
+    expect(gridSampled({}, "noaa_glwu")).toBe(false);
+  });
+});
+
+describe("notSampledGrids", function () {
+  it("is empty when every grid sampled", function () {
+    const status = {};
+    const ids = gridIdsOf(GRIDS);
+    for (let i = 0; i < ids.length; i = i + 1) {
+      status[ids[i]] = { status: "sampled" };
+    }
+    expect(notSampledGrids(status, GRIDS)).toEqual([]);
+  });
+
+  it("names each unsampled grid with the status that explains it", function () {
+    const status = { noaa_glwu: { status: "failed" }, noaa_gfswave: { status: "sampled" } };
+    const out = notSampledGrids(status, [
+      { id: "noaa_glwu" }, { id: "noaa_gfswave" }, { id: "noaa_gfswave_arctic" }
+    ]);
+    expect(out).toEqual(["noaa_glwu (failed)", "noaa_gfswave_arctic (absent)"]);
+  });
 });

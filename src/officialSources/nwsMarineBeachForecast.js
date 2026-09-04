@@ -1,11 +1,11 @@
 // src/officialSources/nwsMarineBeachForecast.js
 //
 // KIND: official HAZARD scraper (src/officialSources). An official color from
-// this source OVERRIDES the swim.report estimate everywhere it is shown
+// this source overrides the swim.report estimate everywhere it is shown
 // (map marker, list, detail title via render.js markerFlagColor / titleColor —
 // except that once a reading ages past the 2 h STALE_MS horizon a fresher
-// estimate may RAISE the displayed color, never lower it; see displayFlagColor),
-// so this source may ONLY sit on the HAZARD axis — it reports the NWS-forecast
+// estimate may raise the displayed color, never lower it; see displayFlagColor),
+// so this source may only sit on the HAZARD axis — it reports the NWS-forecast
 // swim risk (rip) and surf-height conditions, both genuine surf hazards.
 //
 // SOURCE: NWS Marine Beach Forecast ArcGIS MapServer, per-WFO "Day 1" layers.
@@ -14,44 +14,40 @@
 //   Per-WFO Day1 layer query:
 //     /{layer}/query?where=1=1&outFields=*&f=json
 //   Each feature carries attributes { beachname, rip, surf, wtemp, winds,
-//   producttim, productdat, srfprod, ... }. Confirmed live 2026-07-22:
+//   producttim, productdat, srfprod, ... }. The two verified Great Lakes layers:
 //     layer 19 = CLE (Cleveland, Lake Erie OH/PA Day 1)
 //     layer  7 = BUF (Buffalo, Lake Erie/Ontario NY Day 1)
-//   Only VERIFIED-live Great Lakes layers are enabled below. Do NOT enable an
-//   unverified layer id — a wrong id silently yields no features (safe-fail).
+//   only verified layers are enabled below. Never enable an unverified layer id:
+//   a wrong id silently yields no features.
 //
-// COLOR MAPPING (most-severe of the two hazard axes; NO double-red from this
-// source):
+// Color mapping, the most severe of the two hazard axes; this source emits no
+// double-red:
 //   rip / "Swim Risk":  Low -> green, Moderate -> yellow, High -> red
-//   surf text (e.g. "2 to 4 feet subsiding to 2 feet or less."): parsed to the
-//     MAX foot value in the string (conservative — never under-report the peak)
-//     and colored via rules.js waveColorForHeight (<2 ft green, 2-4 yellow,
-//     >=4 red). Any surf string with no foot value degrades to null.
-//   The site color is the MORE SEVERE of the rip color and the surf color
-//   (FLAG_SEVERITY). If BOTH degrade to null, the zone is OMITTED (no guess).
+//   surf text ("2 to 4 feet subsiding to 2 feet or less.") is parsed to the max
+//     foot value in the string, so the peak is never under-reported, and colored
+//     via rules.js waveColorForHeight. A surf string with no foot value degrades
+//     to null.
+// If both degrade to null the zone is omitted rather than guessed.
 //
-// ZONAL, NOT PER-BEACH: features are county-scale polygons named like
-// "Lucas Area Beaches" / "Cuyahoga Area Beaches", never individual beaches.
-// We bind a swim.report beach to a zone with a CURATED table (SITE_DEFS):
-// iconic globally-unique name substrings first (resolveSiteForBeach names pass),
-// then nearest shoreline centroid within radiusMi. A beach that binds to no
-// curated zone gets NO site -> null -> no KV write (never a guessed color).
-// Note two DIFFERENT zones share the beachname "Northern Erie Area Beaches"
-// (Erie County PA under CLE vs Erie County NY under BUF); they are kept
-// distinct by layer + centroid, and their names[] never overlap.
+// The features are zonal, not per-beach: county-scale polygons named like "Lucas
+// Area Beaches", never individual beaches. A beach binds to a zone through the
+// curated SITE_DEFS table — globally-unique name substrings first, then nearest
+// shoreline centroid within radiusMi — and a beach binding to no curated zone
+// gets no site and no KV write. Two different zones share the beachname
+// "Northern Erie Area Beaches" (Erie County PA under CLE, Erie County NY under
+// BUF); they stay distinct by layer and centroid, and their names[] never
+// overlap.
 //
-// INTEGRATOR DEDUP NOTE (IMPORTANT): the rip / "Swim Risk" signal here OVERLAPS
-// the existing SRF client (src/clients/srfParser.js -> estimateFlag
-// ripCurrentRisk), which is the PRIMARY rip path. This module emits a resolved
-// official flag color (not a rip-risk input), so it does not additively
-// double-count into estimateFlag; but at integration keep ONE authoritative
-// rip path per zone — do NOT also feed this source's rip into the SRF/rip
-// input lane. Register this scraper LAST in the scrapers array (its bbox is
-// broad; tighter single-city scrapers must win findScraper first).
+// The rip signal here overlaps src/clients/srfParser.js, which is the primary rip
+// path. This module emits a resolved official flag color rather than a rip-risk
+// input, so it does not double-count into estimateFlag, but keep one
+// authoritative rip path per zone: never also feed this source's rip into the SRF
+// input lane. Register it last in the scrapers array, since its bbox is broad and
+// tighter single-city scrapers must win findScraper first.
 //
-// Two-path rule: scrape() fetches cron-side ONLY; the parsers are pure and take
-// nowIso. Error isolation: every path degrades to null, never throws across the
-// module boundary, never emits a color it cannot confirm.
+// scrape() fetches cron-side only; the parsers are pure. Every path degrades to
+// null, never throws across the module boundary, and never emits a color it
+// cannot confirm.
 
 import { fetchText, perBeachResult, FLAG_SEVERITY } from "./util.js";
 import { waveColorForHeight } from "../rules.js";
@@ -60,7 +56,7 @@ export const NWS_MARINE_BEACH_MAP_URL =
   "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/" +
   "marine_beachforecast/MapServer";
 
-export const NWS_MARINE_BEACH_LABEL = "NWS Marine Beach Forecast";
+const NWS_MARINE_BEACH_LABEL = "NWS Marine Beach Forecast";
 
 // A Day-1 product older than this many days (by productdat vs nowIso) is treated
 // as a stale cached response and dropped — the product timezone is unknown, so
@@ -68,9 +64,9 @@ export const NWS_MARINE_BEACH_LABEL = "NWS Marine Beach Forecast";
 export const STALE_MAX_DAYS = 2;
 
 // VERIFIED-live Great Lakes Day-1 layers only. Each id maps a WFO to the
-// SITE_DEFS whose layer field matches. Add a layer here ONLY after confirming
+// SITE_DEFS whose layer field matches. Add a layer here only after confirming
 // it returns features live.
-export const ACTIVE_LAYERS = [
+const ACTIVE_LAYERS = [
   { id: 19, wfo: "CLE" },
   { id: 7, wfo: "BUF" }
 ];
@@ -79,7 +75,7 @@ export const ACTIVE_LAYERS = [
 // beachname within a specific layer) to swim.report beaches via iconic
 // name substrings (unique tokens only, to avoid cross-attributing a namesake
 // beach) and a shoreline centroid + radiusMi proximity fallback. Colors are
-// NEVER stored here — they come live from the feature.
+// never stored here — they come live from the feature.
 export const SITE_DEFS = [
   // --- CLE (layer 19): Lake Erie, Ohio west->east + Erie County PA ---
   { layer: 19, zone: "lucas area beaches", siteId: "cle-lucas",
@@ -124,7 +120,7 @@ export const SITE_DEFS = [
 
 // Coarse overall gate: Lake Erie + Lake Ontario US shore. resolveSiteForBeach
 // does the fine binding; this only decides which beaches this scraper OWNS in
-// findScraper. Register LAST so tighter scrapers win their own beaches first.
+// findScraper. Register Last so tighter scrapers win their own beaches first.
 function inGreatLakesEastBox(beach) {
   return typeof beach.lat === "number" && typeof beach.lon === "number" &&
     beach.lat >= 41.3 && beach.lat <= 44.3 &&

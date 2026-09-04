@@ -1,15 +1,10 @@
-// src/frontend/waveStrip.js
 // Pure helpers for the wave-height forecast on the detail page: trimming the
 // series, run-length encoding by color band (feeds the colored flex-row strip
-// in render.js), the prose summaries, and the model-comparison chart config.
-// No fetch, no Date access at module scope beyond Date.parse on the
-// caller-supplied ISO strings (everything is derived from data + nowIso passed
-// in by the router — never Date.now()). String concatenation with +, never
-// template literals. const/let only.
+// in render.js), the prose summaries, and the model-comparison chart config. No
+// fetch, and time comes from the caller-supplied nowIso, never Date.now().
 //
-// The 2 ft / 4 ft color thresholds live ONLY in src/rules.js#waveColorForHeight,
-// so this strip colors each hour from the exact same numbers the flag estimate
-// uses — no restated thresholds here.
+// The 2 ft / 4 ft color thresholds live only in src/rules.js#waveColorForHeight,
+// so this strip colors each hour from the exact numbers the flag estimate uses.
 
 import { waveColorForHeight, alertColorForEvent, alertAuthorityForEvent, ripRiskColor } from "../rules.js";
 
@@ -25,10 +20,10 @@ const BAND_DEFS = {
   "no-data": { band: "no-data", label: "No data", tokenVar: "var(--wa-color-gray-50)" }
 };
 
-// Ordered known-model mapping: model id -> display name. The order here IS the
+// Ordered known-model mapping: model id to display name. This order is the
 // display order for the per-model caption, the comparison chart's dataset
-// sequence, and the prose summary. Kept local (not imported
-// from src/waveModels.js) so a backend id rename can't silently reorder the UI.
+// sequence, and the prose summary. Kept local rather than imported from
+// src/waveModels.js so a backend id rename cannot silently reorder the UI.
 // Unknown ids fall back to the raw id and sort after every known model, in
 // payload-key order, so every id src/waveModels.js can label must appear here.
 const MODEL_DISPLAY = [
@@ -46,10 +41,10 @@ for (let i = 0; i < MODEL_DISPLAY.length; i++) {
   MODEL_NAME_BY_ID.set(MODEL_DISPLAY[i].id, MODEL_DISPLAY[i].name);
 }
 
-// Series colors for the comparison chart, assigned by display position. Blue /
-// purple / cyan at a mid tint: deliberately NOT the green/yellow/red flag
+// Series colors for the comparison chart, assigned by display position. Blue,
+// purple and cyan at a mid tint, deliberately not the green/yellow/red flag
 // semantics, so a model line can never be misread as a hazard color. Cycles for
-// a 4th+ (unknown) model. The <wa-line-chart> component resolves the var() itself.
+// a 4th (unknown) model. The <wa-line-chart> component resolves the var() itself.
 const MODEL_SERIES_COLORS = [
   "var(--wa-color-blue-60)",
   "var(--wa-color-purple-60)",
@@ -174,17 +169,17 @@ export function trimWaveSeries(waves, nowIso) {
   };
 }
 
-// Hazard-band presentation: quiet fill + matching on-quiet text + loud edge per
-// flag color the hazard maps to, expressed through the SEMANTIC danger/warning
-// theme-assignment tokens (not raw red/yellow tints). Semantic tokens adapt to
-// light and dark modes — matter.css maps each to a different tint in its light
-// vs dark block — whereas the raw tints are single static values that never
-// invert. The default variant mapping resolves danger->red and warning->yellow,
-// so these preserve the current hues. double-red shares the red (danger)
-// treatment (the band label carries the severity). The yellow edge deliberately
-// uses warning-border-normal, not -loud: -loud resolves to yellow-50, which
-// reads olive/muddy in the mild palette (the same tint PLAN.md section 9 avoids
-// for the strip's yellow band).
+// Hazard-band presentation: quiet fill, matching on-quiet text and loud edge
+// per flag color, expressed through the semantic danger/warning
+// theme-assignment tokens rather than raw red/yellow tints. Semantic tokens
+// invert with the color scheme, since matter.css maps each to a different tint
+// in its light and dark blocks, where raw tints are single static values. The
+// default variant mapping resolves danger to red and warning to yellow, so
+// these preserve the current hues, and double-red shares the danger treatment
+// because the band label carries the severity. The yellow edge uses
+// warning-border-normal rather than -loud: -loud resolves to yellow-50, which
+// reads olive in the mild palette (the tint PLAN.md section 9 avoids for the
+// strip's yellow band).
 const HAZARD_STYLES = {
   "double-red": {
     bgVar: "var(--wa-color-danger-fill-quiet)",
@@ -313,16 +308,12 @@ export function computeWaveRuns(hoursFt) {
   return runs;
 }
 
-// "hour" is singular only for a 1-hour run.
 function hourWord(n) {
   return n === 1 ? "hour" : "hours";
 }
 
 // Lowercase the first character of a band label. The first run keeps its label
-// verbatim; every "then" run runs its label through this. Deterministic rule:
-// only "Under" and "No data" begin with an uppercase letter, so this yields
-// "under" / "no data" while leaving "2–4 ft" and "4 ft or more" (which begin
-// with a digit) unchanged.
+// verbatim; every "then" run passes through here.
 function lowerFirst(str) {
   if (str.length === 0) {
     return str;
@@ -399,15 +390,13 @@ export function modelNowCaption(trimmed) {
 
 // Chart.js line config comparing wave height across models over the trimmed
 // window. One dataset per model in display order; values rounded to 1 decimal
-// (display only — storage stays raw) so the component's default tooltips read
-// cleanly; nulls preserved so spanGaps:false draws honest gaps. Unlike the band
-// strip this keeps tooltips + legend (an interactive comparison view). The
-// chart type AND the "ft" y-axis label both come from the <wa-line-chart>
-// element (its y-label attribute — the component declares the yLabel property
-// with an explicit attribute name of "y-label", so that kebab spelling is the
-// only one it observes), so this config only needs to keep
-// plugins.title.display false to suppress the element's accessibility label
-// leaking as a visible chart title. The caller stringifies this.
+// for display only, storage stays raw; nulls preserved so spanGaps:false draws
+// honest gaps. Unlike the band strip this keeps tooltips and legend. The chart
+// type and the "ft" y-axis label both come from the <wa-line-chart> element,
+// whose yLabel property declares an explicit attribute name of "y-label", so
+// that kebab spelling is the only one it observes. This config only has to keep
+// plugins.title.display false, or the element's accessibility label leaks as a
+// visible chart title. The caller stringifies this.
 export function buildWaveModelChartConfig(trimmed) {
   const t = readTrimmed(trimmed);
   const byModel = t.byModel;

@@ -1,21 +1,12 @@
-// Tests for src/layerSignals.js — the water-class signal provider that replaces
-// fetchWaterClassSignals in src/clients/overpass.js.
+// Tests for src/layerSignals.js, the water-class signal provider.
 //
-// The module is PURE: no fetch, no Date, no filesystem, and no entrypoint at all
-// (nothing here is guarded by import.meta.main, because there is nothing to
-// guard — the file exports functions and runs no top-level work). So importing
-// it under vitest exercises exactly the code the Deno batch runs.
+// The module is pure: no fetch, no Date, no filesystem and no entrypoint, so
+// importing it under vitest exercises exactly the code the Deno batch runs. A
+// LayerFeature is a plain object, so the FlatGeobuf reader is not in the loop
+// for any assertion here.
 //
-// Every fixture below is built IN MEMORY from readable primitives by one named
-// helper per layer type. There are no committed binaries, no GDAL, and no
-// pretest step: a LayerFeature is a plain object, so the FlatGeobuf reader is
-// not in the loop for any assertion here.
-//
-// The seven parseWaterClassElements tests migrated here from
-// test/waterClass.test.js are the tag/type/area rules; what is NEW is that every
-// one of them is now also a DISTANCE question, so each rule is asserted at its
-// radius in BOTH directions. The radii did not change in this migration and that
-// is the entire safety argument for it.
+// Every tag/type/area rule is also a distance question, so each one is asserted
+// at its radius in both directions.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -113,7 +104,7 @@ function polygonFeature(options) {
     osmType: options.osmType === undefined ? "way" : options.osmType,
     osmId: options.osmId,
     tags: options.tags === undefined ? {} : options.tags,
-    // MALFORMATION KNOB: an explicit bounds override, so the area gate can be
+    // malformation KNOB: an explicit bounds override, so the area gate can be
     // exercised independently of the ring the distance probe measures against.
     bounds: options.bounds === undefined ? boundsOfPositions(ring) : options.bounds,
     geometry: { type: "Polygon", coordinates: [ring] }
@@ -309,9 +300,9 @@ describe("nearbyLakeQids — the QID path 100% of served beaches classify throug
     expect(classifyWaterBody(signals)).toBe("inland");
   });
 
-  it("QIDs are pushed with NO trimming and NO normalisation, so a dirty tag still fails to match", () => {
-    // isGreatLakeQid is an exact, case-sensitive lookup. Overpass handed these
-    // through raw and so does this: " Q1066" must still classify inland.
+  it("QIDs are pushed untrimmed and unnormalised, so a dirty tag still fails to match", () => {
+    // isGreatLakeQid is an exact, case-sensitive lookup, and these are handed
+    // through raw, so " Q1066" must still classify inland.
     const index = buildSignalsIndex({
       beaches: [beachAt("node/1")],
       lakes: [lakeAt(40, { wikidata: " Q1066" })]
@@ -321,7 +312,7 @@ describe("nearbyLakeQids — the QID path 100% of served beaches classify throug
     expect(classifyWaterBody(signals)).toBe("inland");
   });
 
-  it("a WAY-mapped lake polygon contributes nothing (relation-only, Overpass parity)", () => {
+  it("a way-mapped lake polygon contributes nothing (relations only)", () => {
     const index = buildSignalsIndex({
       beaches: [beachAt("node/1")],
       lakes: [lakeAt(40, { wikidata: "Q1169", osmType: "way", osmId: 701 })]
@@ -463,9 +454,9 @@ describe("distance is measured from member VERTICES, never the centroid (the Sle
 // --- the transient-vs-clean contract ---------------------------------------------------
 
 describe("transient null vs clean signals (ported from fetchWaterClassSignals)", () => {
-  // null = TRANSIENT: the caller must NOT bump water_class_attempts and the row
+  // null = transient: the caller must not bump water_class_attempts and the row
   // stays queued. A signals object — including the all-empty one — is a CLEAN,
-  // complete answer that DECIDES. This is the one place the migration can
+  // complete answer that decides. This is the one place the migration can
   // silently regress the Locklin Pines fix.
 
   it("an unparseable osm_id -> null", () => {
@@ -509,7 +500,7 @@ describe("transient null vs clean signals (ported from fetchWaterClassSignals)",
 
 // --- beachAbsentFromLayers ---------------------------------------------------------------
 
-describe("beachAbsentFromLayers — which of the two nulls this is (D21)", () => {
+describe("beachAbsentFromLayers — which of the two nulls this is", () => {
   const index = buildSignalsIndex({ beaches: [beachAt("way/123")] });
 
   it("is true for an id not in the index and false for one that is", () => {
@@ -562,7 +553,7 @@ describe("determinism", () => {
     const first = waterClassSignals(index, row(1, "node/1"));
     const second = waterClassSignals(index, row(1, "node/1"));
     expect(second).toEqual(first);
-    // Canonical order is sortLayerFeatures order (type, then id ascending), NOT
+    // Canonical order is sortLayerFeatures order (type, then id ascending), not
     // the order the features were fed in: relation 100 precedes relation 900.
     expect(first.nearbyLakeQids).toEqual(["Q1383", "Q1169"]);
   });
@@ -594,7 +585,7 @@ describe("determinism", () => {
 // --- the one composed pipeline test ------------------------------------------------------
 
 describe("composed: index -> signals -> classifyWaterBody -> the caller's SQL decision", () => {
-  // The D21 wiring exactly as scripts/discovery-batch.js splices it: fetchSignals
+  // The wiring exactly as scripts/discovery-batch.js splices it: fetchSignals
   // is waterClassSignals bound to the index, and isKnownAbsent is
   // beachAbsentFromLayers ANDed with reconciliationAllowed(report).
   function classifyPass(index, rows, report) {

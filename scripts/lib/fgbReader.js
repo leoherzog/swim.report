@@ -1,77 +1,61 @@
 // scripts/lib/fgbReader.js — reads FlatGeobuf bytes into plain feature records.
 //
-// This is the ONE module in the repo with an npm dependency. It runs on Deno
-// (the offline layer pipeline: fetch-layers.js, clip-layers.js,
-// discovery-batch.js) and on Node under vitest (the tests build their fixtures
-// with the same library's serializer). Everything downstream of it is pure and
-// dependency-free again: the record shape below (LayerFeature) is the single
-// contract crossing the scripts/ to src/ boundary.
+// The one module in the repo with an npm dependency. It runs on Deno (the
+// offline layer pipeline) and on Node under vitest, and everything downstream of
+// it is pure and dependency-free: the LayerFeature record shape below is the
+// single contract crossing the scripts/ to src/ boundary.
 //
-// It reads a WHOLE file and scans it SEQUENTIALLY — it never uses the packed
-// R-tree — so it behaves identically on ogr2ogr-written layers (which carry an
-// index, indexNodeSize 16) and on the JS-serialized in-memory fixtures the
-// tests build (indexNodeSize 0, which cannot serve a bbox read at all).
+// It reads a whole file and scans it sequentially, never using the packed
+// R-tree, so it behaves identically on ogr2ogr-written layers (indexNodeSize 16)
+// and on the JS-serialized in-memory fixtures the tests build (indexNodeSize 0,
+// which cannot serve a bbox read at all).
 //
-// NEVER call deserialize(stream, rect). The library's dispatcher is
+// Never call deserialize(stream, rect). The library's dispatcher is
 //   deserialize(input, rect, headerMetaFn) =>
 //     input instanceof Uint8Array ? deserialize(input, rect, headerMetaFn)
 //     : input instanceof ReadableStream ? deserializeStream(input, headerMetaFn)
 //     : deserializeFiltered(...)
-// so for a STREAM the second positional argument is read as headerMetaFn and a
-// rect passed there is DISCARDED with no error. Measured during the migration
-// design: the same rect returned 0 features from a Uint8Array and 314,600 from
-// a stream. In this pipeline that would set coastlinePresent for every beach
-// and reclassify the whole table. The two call sites below therefore pass the
-// rect slot as an explicit undefined and never anything else.
+// so for a stream the second positional argument is read as headerMetaFn and a
+// rect passed there is discarded with no error, yielding the whole file instead
+// of the filtered subset. Here that would set coastlinePresent for every beach
+// and reclassify the whole table. Both call sites below pass the rect slot as an
+// explicit undefined and never anything else.
 //
-// A CORRUPT LAYER MUST NEVER READ AS AN EMPTY ONE. That is the single most
-// important property of this file, because an empty layer is indistinguishable
-// from "the world has no beaches here" and feeds the only DELETE-bearing job in
-// the repo. The library does not give us that for free: a buffer truncated
-// inside the feature area throws an opaque RangeError, but one truncated in the
-// header region yields ZERO features and no error at all (measured). So every
-// read here compares the number of features actually decoded against the
-// featuresCount the header declares and throws an identifiable Error on any
-// mismatch. Callers must let that throw propagate — never catch it into a
-// "layer is empty" branch.
+// A corrupt layer must never read as an empty one, because an empty layer is
+// indistinguishable from "the world has no beaches here" and feeds the only
+// delete-bearing job in the repo. The library does not give that for free: a
+// buffer truncated inside the feature area throws an opaque RangeError, but one
+// truncated in the header region yields zero features and no error. So every
+// read here compares the number of features decoded against the featuresCount
+// the header declares and throws an identifiable Error on any mismatch. Callers
+// must let that throw propagate, never catch it into a "layer is empty" branch.
 //
-// BARE SPECIFIER, per contract decision D17. Deno resolves it through the
-// committed deno.json import map ("flatgeobuf/": "npm:/flatgeobuf@4.4.0/") plus
-// deno.lock; vitest resolves it through the package.json devDependency and
-// node_modules. A literal npm: URL here would make every test that touches this
-// module fail at collection under vitest (npm: is a Deno-only URL scheme), and a
-// bare specifier WITHOUT the map would need an npm install on the runner, which
-// the workflows deliberately forbid (the private-registry E401 trap).
+// The flatgeobuf specifier is bare. Deno resolves it through the committed
+// deno.json import map ("flatgeobuf/": "npm:/flatgeobuf@4.4.0/") plus deno.lock;
+// vitest resolves it through the package.json devDependency and node_modules. A
+// literal npm: URL would make every test touching this module fail at collection
+// (npm: is a Deno-only URL scheme), and a bare specifier without the map would
+// need an npm install on the runner, which the workflows forbid.
 //
-// DENO INVOCATION REQUIREMENT (measured, and it is not optional): any deno
-// command whose module graph reaches this file must run with
-// DENO_NO_PACKAGE_JSON=1. Deno auto-discovers the repo's package.json as soon as
-// the graph contains an npm resolution and then eagerly resolves EVERY dependency
-// declared there — including @web.awesome.me/webawesome-pro and
-// @awesome.me/kit-*, which live behind token-gated private registries. On a CI
-// runner with no .npmrc token that fails the whole command
-// ("npm package '@awesome.me/kit-ddd41b2d81' does not exist"), which is exactly
-// the E401 trap the import map exists to avoid. DENO_NO_PACKAGE_JSON=1 stops the
-// package.json discovery; the import map still resolves flatgeobuf from the
-// global deno cache, with no node_modules on the runner.
-//
-// Project style: ES modules, const/let only, string concatenation with + (never
-// template literals), console for logging.
+// Any deno command whose module graph reaches this file must run with
+// DENO_NO_PACKAGE_JSON=1. Deno otherwise auto-discovers the repo's package.json
+// once the graph contains an npm resolution and eagerly resolves every
+// dependency declared there, including the token-gated private-registry
+// packages, which fails the whole command on a runner with no .npmrc token. The
+// env var stops that discovery; the import map still resolves flatgeobuf from
+// the global deno cache with no node_modules on the runner.
 
 import { deserialize } from "flatgeobuf/lib/mjs/geojson.js";
 
-// The OSM tag keys carried across the boundary. Everything the pure src/
-// modules branch on (natural, leisure, boundary, water, wikidata) plus the two
-// naming tags (name, loc_name). "type" is here because the published
-// other-relations layer promotes it (contract 1.4) and it is the only place a
-// consumer could ever need to tell a multipolygon relation from another relation
-// type; no consumer branches on it today, and copying it costs one string.
+// The OSM tag keys carried across the boundary: everything the pure src/ modules
+// branch on, plus the two naming tags, plus "type", which the other-relations
+// layer promotes so a consumer can tell a multipolygon relation from another
+// relation type.
 //
-// Values are copied VERBATIM (no trimming — src/osmSelect.js owns the loc_name
-// trim). A property that is absent, null, or the empty string is OMITTED rather
-// than carried as null, so tags.name behaves exactly like an Overpass
-// element.tags.name: GDAL writes an unpromoted/unset field as null, and a
-// downstream if (tags.name) and if (tags.name != null) must not disagree.
+// Values are copied verbatim; src/osmSelect.js owns the loc_name trim. A
+// property that is absent, null or empty is omitted rather than carried as null,
+// because GDAL writes an unpromoted field as null and a downstream
+// if (tags.name) and if (tags.name != null) must not disagree.
 export const LAYER_TAG_KEYS = [
   "name",
   "loc_name",
@@ -83,12 +67,11 @@ export const LAYER_TAG_KEYS = [
   "type"
 ];
 
-// A FlatGeobuf file is 8 magic bytes + a 4-byte header length + the header, so
-// anything shorter than 12 bytes cannot be a layer. The guard matters because
-// the library's magic-byte check is bytes.subarray(0, 3).every(...), and
-// Array.prototype.every on an EMPTY array is vacuously true — a zero-byte
-// download (a failed curl, a truncated artifact) would sail past it and read as
-// an empty layer.
+// A FlatGeobuf file is 8 magic bytes plus a 4-byte header length plus the
+// header, so anything shorter cannot be a layer. The guard matters because the
+// library's magic-byte check is bytes.subarray(0, 3).every(...), and
+// Array.prototype.every on an empty array is vacuously true: a zero-byte
+// download would sail past it and read as an empty layer.
 const MIN_FGB_BYTES = 12;
 
 function errorMessage(err) {
@@ -98,11 +81,9 @@ function errorMessage(err) {
   return String(err);
 }
 
-// The truncation trip-wire described in the header comment. declared is the
-// header's featuresCount. ogr2ogr always writes a real count; the library's own
-// JS serializer does too. A writer that leaves it at 0 (a streaming writer that
-// cannot know the count up front) disables the check rather than failing every
-// read — the check can only ever fire on a count the file itself asserted.
+// The truncation trip-wire. A writer that leaves featuresCount at 0 disables the
+// check rather than failing every read: it can only fire on a count the file
+// itself asserted.
 function assertCompleteRead(header, decoded, what) {
   if (!header || header.featuresCount === undefined || header.featuresCount === null) {
     return;
@@ -119,21 +100,18 @@ function assertCompleteRead(header, decoded, what) {
 
 // --- Pure record normalization ------------------------------------------------
 
-// osm_id vs osm_way_id is the way/relation discriminator, and it is load-bearing:
-// the id feeds "osm-" + osmType + "-" + osmId, which is the D1 primary key AND
-// the KV flag key, and src/layerSignals.js gates nearbyWayWater on type "way"
-// and nearbyLakeQids on type "relation". Getting it wrong silently orphans every
-// stored flag.
+// osm_id vs osm_way_id is the way/relation discriminator, and it is
+// load-bearing: the id feeds "osm-" + osmType + "-" + osmId, which is both the
+// D1 primary key and the KV flag key, and src/layerSignals.js gates
+// nearbyWayWater on type "way" and nearbyLakeQids on type "relation". Getting it
+// wrong silently orphans every stored flag.
 //
-// Contract 3.2 states the rule per GDAL SOURCE layer (points -> node, lines ->
-// way, multipolygons -> osm_way_id ? way : relation). The reader cannot branch on
-// that: its layerName argument is the LOGICAL layer ("beaches" spans the points,
-// lines AND multipolygons files), so the source layer is not recoverable from it.
-// The geometry type is, and it is in bijection with the source layer for exactly
-// the layers this pipeline publishes — the points layer only ever yields Point,
-// the lines layer LineString/MultiLineString, the multipolygons layer
-// Polygon/MultiPolygon, and other_relations GeometryCollection (always a
-// relation). So the derivation below is the same rule, read off the geometry.
+// The rule is stated per GDAL source layer (points -> node, lines -> way,
+// multipolygons -> osm_way_id ? way : relation), but layerName here is the
+// logical layer ("beaches" spans the points, lines and multipolygons files), so
+// the source layer is not recoverable from it. The geometry type is, and it is
+// in bijection with the source layer for the layers this pipeline publishes, so
+// the derivation below is the same rule read off the geometry.
 function osmIdentity(geometry, properties) {
   const type = geometry.type;
   if (type === "Point" || type === "MultiPoint") {
@@ -151,19 +129,18 @@ function osmIdentity(geometry, properties) {
   }
   if (type === "GeometryCollection") {
     // GDAL yields GeometryCollection for the other_relations layer, whose
-    // features are relations by definition. These are consumed by ENVELOPE ONLY
-    // downstream — they have no reliable ring structure and must never be fed to
-    // a point-in-polygon test.
+    // features are relations by definition. They are consumed by envelope only:
+    // they have no reliable ring structure and must never reach a
+    // point-in-polygon test.
     return { osmType: "relation", rawId: properties.osm_id };
   }
   return null;
 }
 
 // Recursive coordinate walk. GeoJSON nests positions to a different depth per
-// geometry type (Point, LineString/MultiPoint, Polygon/MultiLineString,
-// MultiPolygon), and a GeometryCollection mixes depths inside one feature, so
-// walking generically is both shorter and safer than a per-type switch. A
-// position with a third element (elevation) is fine — only [0] and [1] are read.
+// geometry type and a GeometryCollection mixes depths inside one feature, so
+// walking generically is safer than a per-type switch. A position carrying a
+// third element is fine: only [0] and [1] are read.
 function walkPositions(coords, visit) {
   if (!Array.isArray(coords) || coords.length === 0) {
     return;
@@ -179,10 +156,9 @@ function walkPositions(coords, visit) {
   }
 }
 
-// Bounds are computed HERE, by walking every coordinate — never taken from a
-// driver-provided envelope. That is what makes a node degenerate to a
-// zero-extent envelope exactly as the old Overpass elementBounds did, which is
-// in turn what makes a node beach's areaDeg2 zero and therefore always
+// Bounds are computed here by walking every coordinate, never taken from a
+// driver-provided envelope, so a node degenerates to a zero-extent envelope.
+// That is what makes a node beach's areaDeg2 zero and therefore always
 // pond-testable. Returns null when the geometry carries no usable position.
 export function geometryBounds(geometry) {
   if (!geometry || typeof geometry !== "object") {
@@ -234,17 +210,16 @@ function tagsFromProperties(properties) {
   return tags;
 }
 
-// Pure, exported for tests. Maps one decoded GeoJSON feature onto the record
-// shape the pure src/ modules consume:
+// Maps one decoded GeoJSON feature onto the record shape the pure src/ modules
+// consume:
 //
 //   { layer, osmType, osmId, tags, bounds, geometry }
 //
-// Returns null — SKIP, do not throw — when the geometry is null, the id is not a
+// Returns null (skip, never throw) when the geometry is null, the id is not a
 // finite number, or the geometry yields no coordinates. A skip is a per-feature
-// data problem (one row GDAL could not build a geometry for); a throw is an
-// artifact problem (the whole file is unreadable). Conflating the two is how a
-// bad download becomes an empty layer, so the two paths stay strictly separate
-// and the CALLER logs skips.
+// data problem; a throw is an artifact problem. Conflating the two is how a bad
+// download becomes an empty layer, so the paths stay separate and the caller
+// logs skips.
 export function toLayerFeature(feature, layerName) {
   if (!feature || typeof feature !== "object") {
     return null;
@@ -284,10 +259,10 @@ export function toLayerFeature(feature, layerName) {
 
 // --- Byte-level read ----------------------------------------------------------
 
-// bytes: Uint8Array. Returns an ARRAY of { geometry, properties } in FILE order.
-// Throws on undecodable bytes (a truncated or non-FlatGeobuf buffer) — a corrupt
-// download must never read as an empty layer. Not layer-aware and not Deno-bound,
-// so the tests exercise it directly on in-memory fixtures.
+// Returns an array of { geometry, properties } in file order. Throws on
+// undecodable bytes: a corrupt download must never read as an empty layer. Not
+// layer-aware and not Deno-bound, so the tests exercise it on in-memory
+// fixtures.
 export async function readFgb(bytes) {
   if (!(bytes instanceof Uint8Array)) {
     throw new Error("fgbReader: expected Uint8Array bytes, got " + typeof bytes);
@@ -300,10 +275,9 @@ export async function readFgb(bytes) {
   const onHeader = function (meta) { header = meta; };
   const features = [];
   try {
-    // Second argument is the rect slot and stays undefined FOREVER — see the
-    // header comment. This is the Uint8Array branch, which does honour a rect,
-    // but honouring it would mean trusting the packed R-tree that JS-serialized
-    // fixtures do not have.
+    // The second argument is the rect slot and stays undefined. This is the
+    // Uint8Array branch, which does honour a rect, but honouring it would mean
+    // trusting the packed R-tree that JS-serialized fixtures lack.
     for await (const feature of deserialize(bytes, undefined, onHeader)) {
       features.push({
         geometry: feature && feature.geometry !== undefined ? feature.geometry : null,
@@ -319,10 +293,9 @@ export async function readFgb(bytes) {
 
 // --- Deno file readers --------------------------------------------------------
 
-// Deno.readFile / Deno.open are referenced through globalThis so that merely
-// IMPORTING this module stays legal under Node (vitest imports it to test the
-// pure half). The two file readers below are the Deno-only surface and say so
-// when called anywhere else.
+// Deno.readFile and Deno.open are reached through globalThis so that importing
+// this module stays legal under Node, where vitest tests the pure half. The two
+// file readers below are the Deno-only surface and say so when called elsewhere.
 function requireDeno(what) {
   const runtime = globalThis.Deno;
   if (!runtime || typeof runtime.readFile !== "function" || typeof runtime.open !== "function") {
@@ -332,13 +305,12 @@ function requireDeno(what) {
   return runtime;
 }
 
-// Convenience for the batch: read a file path, decode, and normalize every
-// feature through toLayerFeature. Deno-only.
+// Reads a file path, decodes it and normalizes every feature. Deno-only.
 //
-// ONLY for layers whose whole geometry must be RETAINED — beaches and parks.
-// Never for coastline / water / lakes: GeoJSON coordinate pairs cost roughly
-// 10-20x their packed FlatGeobuf footprint in a JS heap, so a 120 MB water layer
-// is 1-2 GB live. Those go through readFgbStream.
+// Only for layers whose whole geometry must be retained: beaches and parks.
+// Never for coastline, water or lakes, where GeoJSON coordinate pairs cost
+// roughly 10-20x their packed FlatGeobuf footprint in a JS heap. Those go
+// through readFgbStream.
 export async function readLayerFile(path, layerName) {
   const runtime = requireDeno("readLayerFile");
   const bytes = await runtime.readFile(path);
@@ -361,10 +333,9 @@ export async function readLayerFile(path, layerName) {
 }
 
 // Best-effort close. A ReadableStream taken from a Deno.FsFile closes the file
-// itself once it is fully read or cancelled, so this second close usually throws
-// BadResource — which is exactly the case we want to swallow. What it protects
-// against is the OTHER case: a consumer that breaks out of the loop early, where
-// nothing else would ever close the descriptor.
+// once it is fully read or cancelled, so this second close usually throws
+// BadResource, which is the case being swallowed. It protects the other case: a
+// consumer that breaks out early, where nothing else closes the descriptor.
 function closeQuietly(file) {
   try {
     file.close();
@@ -373,9 +344,9 @@ function closeQuietly(file) {
   }
 }
 
-// THE STREAMING PATH. Async generator yielding one normalized LayerFeature at a
-// time from a file, never materialising the layer. Deno-only. Every consumer of a
-// coastline / water / lakes layer, and clip-layers.js for EVERY raw layer, must
+// The streaming path: an async generator yielding one normalized LayerFeature at
+// a time, never materialising the layer. Deno-only. Every consumer of a
+// coastline, water or lakes layer, and clip-layers.js for every raw layer, must
 // use this rather than readLayerFile.
 //
 // layerName is optional: pass it to stamp the logical layer onto each record
@@ -390,18 +361,16 @@ export async function* readFgbStream(path, layerName) {
   let completed = false;
   let iterator = null;
   try {
-    // file.readable is a web ReadableStream, so this takes the library's STREAM
-    // branch: the second argument is the rect slot the dispatcher DISCARDS for
-    // streams and the third is the headerMetaFn it actually reads. Passing the
-    // rect explicitly as undefined is the whole point — see the header comment.
+    // file.readable is a web ReadableStream, so this takes the library's stream
+    // branch, where the dispatcher discards the second argument and reads the
+    // third as headerMetaFn. The rect slot stays an explicit undefined.
     const source = deserialize(file.readable, undefined, onHeader);
     iterator = source[Symbol.asyncIterator]();
     while (true) {
       let step;
-      // Only the DECODE is inside the try. Yielding from inside it would let an
-      // exception thrown by the consumer be rewrapped as an artifact error, and
-      // "undecodable FlatGeobuf bytes" is a claim this reader must only ever make
-      // about bytes.
+      // Only the decode is inside the try. Yielding from inside it would let a
+      // consumer's exception be rewrapped as an artifact error, and "undecodable
+      // FlatGeobuf bytes" is a claim this reader makes only about bytes.
       try {
         step = await iterator.next();
       } catch (err) {
@@ -431,9 +400,9 @@ export async function* readFgbStream(path, layerName) {
     }
     closeQuietly(file);
   }
-  // Reached only when the loop ran to the end of the file. A consumer that breaks
-  // out early terminates the generator at the yield above, so a deliberate early
-  // exit can never be mistaken for a truncated artifact.
+  // Reached only when the loop ran to the end of the file. A consumer that
+  // breaks out early terminates the generator at the yield above, so a
+  // deliberate early exit is never mistaken for a truncated artifact.
   if (completed) {
     assertCompleteRead(header, decoded, path);
   }

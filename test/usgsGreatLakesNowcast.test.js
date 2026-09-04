@@ -1,8 +1,7 @@
 // test/usgsGreatLakesNowcast.test.js
 // Pure-parser unit tests for the USGS Great Lakes NowCast water-quality floor
 // source. No network — every case builds inline JSON fixtures modeled on the
-// live getbeaches.php / getconditions.php responses. Project style: ES modules,
-// NO template literals (string concat with +), function () {} callbacks.
+// live getbeaches.php / getconditions.php responses.
 
 import { describe, it, expect } from "vitest";
 import {

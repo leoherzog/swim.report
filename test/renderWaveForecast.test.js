@@ -1,9 +1,8 @@
-// test/renderWaveForecast.test.js
 // Covers the wave-forecast section on the detail page (src/frontend/render.js),
-// exercised through renderDetailPage (mirrors renderWebcam.test.js). Asserts the
-// section's placement, the colored flex-row strip and its per-segment tooltips,
-// the "now" stat, the buoy/legacy/absent variants, the stale warning, the
-// ESTIMATE badge, and that the footer disclaimer survives.
+// exercised through renderDetailPage. Asserts the section's placement, the
+// colored flex-row strip and its per-segment tooltips, the "now" stat, the
+// buoy/legacy/absent variants, the stale warning, the ESTIMATE badge, and that
+// the footer disclaimer survives.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
@@ -232,7 +231,7 @@ describe("wave-forecast section", () => {
       "<wa-relative-time date=\"2026-07-05T03:00:00.000Z\" sync></wa-relative-time>");
   });
 
-  it("does NOT warn on wave data a few hours old (within the 6-hourly cadence)", () => {
+  it("does not warn on wave data a few hours old, inside WAVE_STALE_MS", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,

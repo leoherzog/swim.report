@@ -217,9 +217,9 @@ describe("parseSouthHavenCsv", function() {
   });
 
   it("returns [] for the real off-season feed (every named flag Gray)", function() {
-    // Byte-for-byte layout of the live probe on 2026-07-05: all 14 named flags
-    // Gray (unmonitored / off-season) plus two Open pier lines. No site may be
-    // reported with a color; the whole feed collapses to no data.
+    // The off-season layout: every named flag Gray (unmonitored) plus two Open
+    // pier lines. No site may be reported with a color; the whole feed
+    // collapses to no data.
     const csv = southHavenCsv([
       "Flag #1 Newcome Beach is Gray",
       "Flag #2 Oak St. Beach is Gray",
@@ -824,11 +824,10 @@ describe("findScraper", function() {
 });
 
 // ---------------------------------------------------------------------------
-// Appended coverage: registry-wide scrape() failure contracts, southHaven
-// scrape() orchestration, resolveSiteForBeach names[] entry guard, and the
-// scrapeOfficialFlag unmatched-beach early return. All fetch stubbing goes
-// through installFetch (vi.stubGlobal); every block owns its own afterEach
-// cleanup per test/helpers/fetch.js.
+// Registry-wide scrape() failure contracts, southHaven scrape() orchestration,
+// the resolveSiteForBeach names[] entry guard, and the scrapeOfficialFlag
+// unmatched-beach early return. All fetch stubbing goes through installFetch
+// (vi.stubGlobal); every block owns its own afterEach cleanup.
 // ---------------------------------------------------------------------------
 
 // A timestamp at which EVERY registered scraper's pre-fetch gate passes, so

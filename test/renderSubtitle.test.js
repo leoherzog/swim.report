@@ -2,9 +2,7 @@
 // Covers the detail-page .beach-subtitle composition (src/frontend/render.js),
 // exercised through renderDetailPage: the park-first beach name plus an optional
 // NDBC water-temperature fragment ("Ottawa Beach • 72°F Water"). The temp is
-// DISPLAY-ONLY (never a flag input) and is shown only when fresh. Project style:
-// ES modules, NO template literals (string concat with +), function () {}
-// callbacks.
+// display-only, never a flag input, and is shown only when fresh.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";

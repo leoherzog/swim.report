@@ -1,36 +1,14 @@
-// test/layerDiscovery.test.js
-// Coverage for src/layerDiscovery.js — the replacement for runDiscovery(),
-// which answers the two Overpass discovery questions ("named beaches here" and
-// "beaches intersecting a named park polygon, plus the water near them")
-// locally against prebuilt FlatGeobuf layer arrays.
+// Coverage for src/layerDiscovery.js, which finds named beaches and beaches
+// inside a named park polygon locally against prebuilt FlatGeobuf layer arrays.
 //
-// The module is PURE and has no entrypoint at all, so there is no
-// import.meta.main guard to state and nothing to stub: no fetch, no Date, no
-// Deno, no filesystem. Every fixture below is built IN MEMORY from readable
-// primitives via one named builder per layer shape — no committed binaries, no
-// GDAL, no pretest step.
-//
-// Four things here are load-bearing beyond ordinary coverage, and each one is
-// a delete-path defect if it regresses:
-//
-//   1. REGION SCOPING. The published layers are cut with ONE -spat rectangle
-//      over the union of REGIONS, which encloses the whole continental
-//      interior. A row upserted from outside every REGIONS bbox is
-//      permanently UN-DELETABLE, because reconcileStaleRows scopes its delete
-//      candidates with pointInAnyRegion. The blanket assertion is that NO
-//      emitted row fails pointInAnyRegion.
-//   2. THE POOLED POND-EVIDENCE SET. Production pooled the water evidence
-//      once per tile, seeded by every small beach INCLUDING NAMED ONES. A
-//      per-beach 60 m set is a strict SUBSET of that, and a beach that loses
-//      its evidence is dropped, becomes a name === park_name stale row, and is
-//      deleted. Both directions of the difference are asserted below against a
-//      per-beach reference built from the module's own pool function.
-//   3. THE PARK TWO-TIER SPLIT. Membership is parks-polygon ONLY (map_to_area
-//      converts nothing for an unclosed way); naming is the wider tier.
-//   4. THE ID ROUND-TRIP. "osm-" + osmType + "-" + osmId is the primary key
-//      every KV flag and every enriched column hangs off. Getting it wrong
-//      silently orphans the lot, so a known production id is threaded end to
-//      end through mergeBeachRows.
+// Two things here are delete-path defects if they regress. A row upserted from
+// outside every REGIONS bbox is permanently undeletable, because
+// reconcileStaleRows scopes its delete candidates with pointInAnyRegion, so the
+// blanket assertion is that no emitted row fails pointInAnyRegion. And
+// "osm-" + osmType + "-" + osmId is the primary key every KV flag and enriched
+// column hangs off, so a known production id is threaded end to end through
+// mergeBeachRows. Park membership is parks-polygon only; naming is the wider
+// tier.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -317,10 +295,8 @@ describe("discoverFromLayers: the named pass", () => {
 
 // --- classifyLayerFeature: the parseParkBeachElements branch chain -------------
 //
-// These six are the re-fixtured parseParkBeachElements assertions. The chain
-// order (beach, then park, then water) was one if/else-if in the Overpass
-// parser and is load-bearing: a dual-tagged element is a beach ONLY, and a
-// named park-tagged lake is a PARK, not water.
+// The chain order (beach, then park, then water) is load-bearing: a dual-tagged
+// element is a beach only, and a named park-tagged lake is a park, not water.
 
 describe("classifyLayerFeature (the branch chain, re-fixtured onto layers)", () => {
   it("routes beaches, parks and water to their own branches", () => {
@@ -407,11 +383,11 @@ describe("discoverFromLayers: park membership is polygon-only and intersection-b
     expect(out.parkBeaches[0].parkName).toBe("Dune Park");
   });
 
-  it("admits a beach way that CROSSES a park ring with no vertex inside (m8)", () => {
-    // Overpass's (area.pa) is an intersection test: a way that enters a park
-    // and leaves again is in the area even with every vertex outside it. A
-    // vertex-in-polygon test alone is a strict SUBSET of that, and a subset of
-    // the membership set is a subset of the park-origin ROWS, which
+  it("admits a beach way that crosses a park ring with no vertex inside", () => {
+    // Park membership is an intersection test: a way that enters a park and
+    // leaves again is inside it even with every vertex outside. A
+    // vertex-in-polygon test alone is a strict subset of that, and a subset of
+    // the membership set is a subset of the park-origin rows, which
     // reconcileStaleRows reads as "gone from OSM" and deletes.
     const park = polyFeature("parks-polygon", "way", 210, { leisure: "park", name: "Ribbon Park" },
       box(43.20, -86.50, 43.21, -86.49));
@@ -502,9 +478,9 @@ describe("discoverFromLayers: park membership is polygon-only and intersection-b
     expect(beachInAnyParkPolygon(beach, beach.geometry, [], emptyGrid)).toBe(false);
   });
 
-  it("keeps leisure=beach_resort OUT of the park pass (Overpass parity)", () => {
-    // The park query ran nwr[natural=beach](area.pa) and nothing else, so a
-    // beach_resort never entered the park pass and never got a park name.
+  it("keeps leisure=beach_resort out of the park pass", () => {
+    // The park pass admits natural=beach and nothing else, so a beach_resort
+    // never gets a park name.
     const park = polyFeature("parks-polygon", "way", 260, { leisure: "park", name: "Resort Park" },
       box(43.20, -86.50, 43.21, -86.49));
     const resort = polyFeature("beaches-polygon", "way", 261,
@@ -557,11 +533,11 @@ describe("discoverFromLayers: park NAMING uses the wider parksName tier", () => 
   });
 
   it("resolves an equal-area park tie by the restored node-way-relation scan order", () => {
-    // Both parks have identical bboxes, so associateParkForBeach's tie-break
-    // is FIRST SEEN — and "first seen" is only stable because every layer
-    // array is re-sorted into Overpass's node/way/relation, id-ascending
-    // order before anything reads it. FlatGeobuf's Hilbert order reshuffles on
-    // every rebuild, which would otherwise flip the name.
+    // Both parks have identical bboxes, so associateParkForBeach's tie-break is
+    // first seen, which is only stable because every layer array is re-sorted
+    // into node/way/relation, id-ascending order before anything reads it.
+    // FlatGeobuf's Hilbert order reshuffles on every rebuild and would
+    // otherwise flip the name.
     const b = box(43.20, -86.50, 43.21, -86.49);
     const wayPark = polyFeature("parks-polygon", "way", 999, { leisure: "park", name: "Way Park" }, b);
     const relPark = polyFeature("parks-polygon", "relation", 1, { leisure: "park", name: "Relation Park" }, b);
@@ -590,7 +566,7 @@ describe("discoverFromLayers: park NAMING uses the wider parksName tier", () => 
   });
 });
 
-describe("discoverFromLayers: grid-backed association equals the full-list scan (MJ-8)", () => {
+describe("discoverFromLayers: grid-backed association equals the full-list scan", () => {
   // A deterministic LCG, so a failure is reproducible and the fixture never
   // changes between runs. Randomness here is about COVERAGE of the overlap
   // geometry, not about sampling.
@@ -658,7 +634,7 @@ describe("discoverFromLayers: grid-backed association equals the full-list scan 
   });
 });
 
-// --- step 6: the POOLED pond-evidence set (B1/BL-1) -----------------------------
+// --- step 6: the pooled pond-evidence set --------------------------------------
 
 describe("poolPondWaters", () => {
   it("returns an empty pool when there are no seeds or no waters", () => {
@@ -703,10 +679,10 @@ describe("poolPondWaters", () => {
   });
 });
 
-describe("discoverFromLayers: the pond pool is RUN-SCOPED, not per-beach (B1)", () => {
-  // The per-beach reference: the module's own pool function seeded with ONE
+describe("discoverFromLayers: the pond pool is run-scoped, not per-beach", () => {
+  // The per-beach reference: the module's own pool function seeded with one
   // beach. That is exactly the revision-1 behaviour this restructuring
-  // replaced, and it is a strict SUBSET of the pooled set.
+  // replaced, and it is a strict subset of the pooled set.
   function perBeachPondVerdict(beachFeature, waterFeatures) {
     const record = beachRecord(beachFeature);
     const seed = {
@@ -788,7 +764,7 @@ describe("discoverFromLayers: the pond pool is RUN-SCOPED, not per-beach (B1)", 
   it("skips the pond test entirely for a beach at or above POND_TEST_MAX_BEACH_AREA_DEG2", () => {
     // An oversized beach never seeded the evidence pool and cannot plausibly
     // sit only on pond-sized water, so skipping the test can only err toward
-    // keeping. Both beaches here sit ON THE SAME POND — the ONLY thing
+    // keeping. Both beaches here sit ON THE same pond — the only thing
     // separating them is which side of POND_TEST_MAX_BEACH_AREA_DEG2 their own
     // envelope falls on.
     const bigBox = box(43.0000, -86.5000, 43.0400, -86.4600);
@@ -809,12 +785,10 @@ describe("discoverFromLayers: the pond pool is RUN-SCOPED, not per-beach (B1)", 
     expect(out.layerCounts.droppedPond).toBe(1);
   });
 
-  it("keeps water RELATIONS out of the pool (MI-9: ways only, both layers)", () => {
-    // Overpass ran way[natural=water](around.b:60) and
-    // way[natural=coastline](around.b:60) — never relations, because an around
-    // on natural=water relations forces the Great Lakes multipolygons' full
-    // geometry to load and is pathological. If a relation could enter the pool
-    // here, the pond filter would see different evidence than production did.
+  it("keeps water relations out of the pool (ways only, both layers)", () => {
+    // The pond-evidence pool admits ways only, never relations: a relation would
+    // pull the Great Lakes multipolygons' full geometry into the pool and give
+    // the pond filter different evidence than the production rule.
     const park = polyFeature("parks-polygon", "way", 730, { leisure: "park", name: "Relation Water Park" },
       box(42.99800, -86.50200, 43.00200, -86.49800));
     const beach = polyFeature("beaches-polygon", "way", 731, { natural: "beach" },
@@ -863,13 +837,11 @@ describe("discoverFromLayers: the pond pool is RUN-SCOPED, not per-beach (B1)", 
 // --- step 7: the emitted record ------------------------------------------------
 
 describe("discoverFromLayers: the emitted park-beach record", () => {
-  // The re-fixtured fetchParkBeaches wiring fixture. Same elements, same ids,
-  // same expected answers as test/overpassFailover.test.js — the only thing
-  // that changed is the transport. Park polygons were added because Overpass
-  // performed the membership test server-side and the layers path does it here.
+  // The park-beach wiring fixture: park polygons are present because the layers
+  // path performs the membership test locally.
   const PARK_LAYERS = layersOf({
     beaches: [
-      // way/100: UNNAMED beach on pond water -> dropped by the filter
+      // way/100: unnamed beach on pond water -> dropped by the filter
       polyFeature("beaches-polygon", "way", 100, { natural: "beach" },
         box(42.0, -86.0001, 42.0002, -86.0)),
       // way/101: NAMED beach on the same pond -> kept (filter is unnamed-only)

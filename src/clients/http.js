@@ -1,19 +1,13 @@
-// src/clients/http.js
-// Shared fetch -> ok-check -> JSON-parse -> log-and-null wrapper for the API
-// clients in this directory. Every client here honors the same data-or-null
-// contract: any network error, non-2xx status, or JSON parse failure is
-// caught, logged with console.log, and resolved to null — never thrown across
-// a module boundary. This helper owns that transport/error layer so each
-// client keeps only its own headers, request body, and post-parse steps.
+// src/clients/http.js — the shared fetch, ok-check, JSON-parse, log-and-null
+// wrapper for every client in this directory. It owns the transport and error
+// layer so each client keeps only its own headers, request body and post-parse
+// steps, and every one of them honors the same data-or-null contract.
 //
 // opts: { method, headers, body, label, timeoutMs }. label prefixes every log
-// line, so callers pass their module tag plus any per-request detail — e.g.
-// "nws: alerts for MIZ001" logs as "nws: alerts for MIZ001 fetch failed:
-// HTTP 503". timeoutMs (optional) bounds a request at the transport layer via
-// AbortController — a hung connection aborts and resolves to null instead of
-// blocking forever (e.g. NWS_TIMEOUT_MS in src/clients/nws.js, so one hung
-// api.weather.gov socket cannot run a cron to its wall-clock ceiling). It is
-// armed ONLY when timeoutMs > 0, so a call site that omits it is genuinely
+// line, so callers pass their module tag plus any per-request detail.
+//
+// timeoutMs bounds a request at the transport layer via AbortController, and it
+// is armed only when timeoutMs > 0, so a call site that omits it is genuinely
 // unbounded. Returns the parsed JSON on success, null on any failure.
 
 export async function fetchJson(url, opts) {

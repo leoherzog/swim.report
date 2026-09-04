@@ -1,13 +1,8 @@
-// test/osmSelect.test.js
-// Pure-function coverage for src/osmSelect.js — the OSM SELECTION semantics of
-// beach discovery, relocated verbatim out of src/clients/overpass.js: the size
-// thresholds, the pond filter, the park association rule, the pond-evidence
-// seed set and the validated classification probe radii.
-//
-// These assertions moved here unchanged (from test/parkContainment.test.js and
-// test/waterClass.test.js) when the functions moved. That is the whole point of
-// the file: the rules survive the transport. src/osmSelect.js is pure — no
-// fetch, no Date, no Worker imports — so nothing here stubs a global.
+// Pure-function coverage for src/osmSelect.js, the OSM selection semantics of
+// beach discovery: the size thresholds, the pond filter, the park association
+// rule, the pond-evidence seed set and the validated classification probe
+// radii. src/osmSelect.js is pure, with no fetch, no Date and no Worker
+// imports, so nothing here stubs a global.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -123,7 +118,7 @@ describe("associateParkForBeach", () => {
 
 describe("pondWaterSeeds", () => {
   // The pond-water query (the around:60 water fetch that used to ride inside
-  // the single park query) is seeded ONLY with beaches small enough to
+  // the single park query) is seeded only with beaches small enough to
   // plausibly need the pond test. Oversized multipolygons (Beaver Islands /
   // Sleeping Bear scale) made the server-side around evaluation exceed
   // [timeout:180] and took park discovery down for days — they must never
@@ -158,7 +153,7 @@ describe("pondWaterSeeds", () => {
 
   it("returns [] when no UNNAMED beach is under the cutoff (query 2 is skipped)", () => {
     // Only named beaches under the cutoff: nothing can be pond-filtered, so
-    // there is no reason to spend an Overpass query on water evidence.
+    // there is no water evidence to gather.
     expect(pondWaterSeeds([
       beach("way", 1, "Named Beach", 1e-6),
       beach("relation", 2, null, 0.02) // unnamed but oversized: skips the pond test
@@ -182,19 +177,16 @@ describe("classification probe radii", () => {
 });
 
 // --- Golden-fixture replay (temporary shadow-period scaffolding) ----------
-// test/fixtures/overpass-golden.json holds REAL Overpass responses captured
-// against the live mirrors for the representative beaches of contract 9.1 —
-// a named shoreline beach, unnamed park beaches, the Hawthorn Pond sliver that
-// must drop, a Georgian Bay Great Lake beach, a set-back Sleeping Bear
-// multipolygon, an island-in-a-hole, an inland no-water beach — together with
-// the records and signals the pure functions derived from them AT CAPTURE
-// TIME, i.e. before the relocation.
+// test/fixtures/overpass-golden.json holds real captured responses for a
+// representative beach set (a named shoreline beach, unnamed park beaches, a
+// pond sliver that must drop, a Great Lake beach, a set-back multipolygon, an
+// island-in-a-hole, an inland no-water beach) together with the records and
+// signals the pure functions derived from them at capture time.
 //
-// Replaying those recorded inputs through the relocated functions is the only
-// mechanical proof that the move changed nothing on REAL data; the synthetic
-// fixtures above pin the rules, this pins the outcomes. The fixture and this
-// block are scaffolding for the prebuilt-layer migration's shadow period and
-// are deleted together once its delete path is armed.
+// The synthetic fixtures above pin the rules; replaying the recorded inputs
+// pins the outcomes on real data. The fixture and this block are scaffolding
+// for the prebuilt-layer migration's shadow period and are deleted together
+// once its delete path is armed.
 const golden = JSON.parse(
   readFileSync(new URL("./fixtures/overpass-golden.json", import.meta.url), "utf8")
 );
@@ -254,20 +246,13 @@ describe("overpass-golden fixture replay", () => {
 });
 
 // --- The prebuilt-layer half ---------------------------------------------------
-// Coverage for the NEW functions of src/osmSelect.js: the ones that reproduce
-// what Overpass QL was doing implicitly (scan order, the recurse-down probe
-// anchor) and the field derivations parseParkBeachElements used to own.
-//
-// Every fixture below is built IN MEMORY from readable primitives by the two
-// helpers that follow — no committed binaries, no GDAL, no pretest step. The
-// helpers take explicit MALFORMATION knobs (a null geometry, absent bounds, a
-// missing name) so a malformed case is a named argument rather than a
-// hand-rolled object that drifts away from the real record shape.
+// Coverage for the layer-side functions of src/osmSelect.js: the scan order, the
+// recurse-down probe anchor, and the field derivations.
 
-// One LayerFeature, the record shape scripts/lib/fgbReader.js produces. Note
-// that absent tags are OMITTED, never set to null — that is the documented
-// contract of toLayerFeature, and a builder that reads tags.name must cope with
-// the key simply not being there.
+// One LayerFeature, the record shape scripts/lib/fgbReader.js produces. Absent
+// tags are omitted, never set to null, which is the documented contract of
+// toLayerFeature, so a builder that reads tags.name must cope with the key
+// simply not being there.
 function layerFeature(overrides) {
   const base = {
     layer: "beaches",
@@ -309,11 +294,11 @@ function boundsOfPositions(positions) {
 }
 
 describe("POND_EVIDENCE_RADIUS_M", () => {
-  // Was the bare literal 60 inside the Overpass around.b:60 clause. Pinned
-  // here with the other radii because it is a product rule (how close mapped
-  // water counts as evidence), and widening it would silently change which
-  // unnamed beaches the pond filter can see large water for.
-  it("is the 60 m the Overpass around clause used", () => {
+  // (was the bare literal 60 inside the around.b:60 clause). Pinned here with
+  // the other radii because it is a product rule, how close mapped water counts
+  // as evidence, and widening it would silently change which unnamed beaches
+  // the pond filter can see large water for.
+  it("is 60 m", () => {
     expect(POND_EVIDENCE_RADIUS_M).toBe(60);
   });
 });
@@ -423,9 +408,8 @@ describe("probeVertices", () => {
     ]);
   });
 
-  it("returns hole-ring vertices too, matching Overpass recurse-down", () => {
-    // ">" returned the whole member-node set, holes included; an island-in-a-
-    // hole beach depends on those vertices existing.
+  it("returns hole-ring vertices too", () => {
+    // An island-in-a-hole beach depends on those vertices existing.
     const outer = squareRing(-86.0, 42.0, 0.1);
     const hole = squareRing(-85.97, 42.03, 0.02);
     const relation = layerFeature({
@@ -470,7 +454,7 @@ describe("probeVertices", () => {
   });
 
   it("falls back to the envelope centre when geometry yields no position", () => {
-    // NOT to an empty set: an empty probe set reads to classifyWaterBody as a
+    // not to an empty set: an empty probe set reads to classifyWaterBody as a
     // clean "nothing in range" and becomes "inland", silently hiding a real
     // shore beach on the strength of missing data.
     const broken = layerFeature({ geometry: null });
@@ -560,7 +544,7 @@ describe("beachRecord", () => {
   });
 
   it("applies NO tag test — branch precedence belongs to the caller", () => {
-    // An element tagged both natural=beach and park-ish is a beach ONLY, but
+    // An element tagged both natural=beach and park-ish is a beach only, but
     // that decision is made by src/layerDiscovery.js consulting beachRecord
     // first; this builder must not second-guess which layer a feature came from.
     const dualTagged = beachFeature({ natural: "beach", leisure: "park", name: "Dual" });
@@ -668,7 +652,7 @@ describe("waterRecord", () => {
     expect(record.shoreline).toBe(true);
     expect(record.areaDeg2).toBeLessThan(WATER_MIN_AREA_DEG2);
     // Proof of the consequence, not just of the boolean: a tiny beach beside a
-    // tiny coastline segment is NOT a pond beach.
+    // tiny coastline segment is not a pond beach.
     const beach = {
       bounds: { minLat: 42.7776, minLon: -86.0301, maxLat: 42.7777, maxLon: -86.0300 }
     };

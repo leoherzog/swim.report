@@ -18,28 +18,21 @@ import { winnetkaTowerBeach } from "./winnetkaTowerBeach.js";
 import { paDcnrPresqueIsle } from "./paDcnrPresqueIsle.js";
 import { nwsMarineBeachForecast } from "./nwsMarineBeachForecast.js";
 
-// Ordered most-specific-match first: findScraper returns the FIRST scraper
-// whose matches(beach) is true, so tight single-city boxes and fixed-site
-// scrapers come before regional tables, and broad statewide bboxes come last.
+// This registry holds hazard flags (surf, rip, closure) — the authoritative
+// version of what src/rules.js estimates. An official color overrides the
+// estimate everywhere it is shown (render.js markerFlagColor / titleColor), with
+// one bounded exception: once a reading has aged past the 2 h STALE_MS horizon a
+// fresher estimate may raise the displayed color but never lower it (render.js
+// displayFlagColor). The official card always reports the scraped color verbatim.
 //
-// Registry scope note: this product's official flags are HAZARD flags
-// (surf/rip/closure) — the authoritative version of what src/rules.js
-// estimates — and an official color OVERRIDES the estimate everywhere it is
-// shown (render.js markerFlagColor / titleColor), with one bounded exception:
-// once a reading has aged past the 2 h STALE_MS horizon, a fresher estimate may
-// RAISE the displayed color but never lower it (render.js displayFlagColor).
-// The OFFICIAL card always reports the scraped color verbatim regardless.
-// Water-quality (E. coli /
-// bacteria) monitoring sources were intentionally removed: a clean-water
-// reading is a DIFFERENT axis from surf hazard, and letting its "green" win
-// would mask a genuine hazard estimate (e.g. a gale-driven red). Only
-// hazard/flag/closure sources belong here.
-// Ordering is most-specific-first (findScraper is first-match-wins):
-//   - southHaven / metroparks / chicagoParkDistrict / nwsOmr /
-//     winnetkaTowerBeach / paDcnrPresqueIsle all have tight single-city,
-//     fixed-site, or narrow-park-cluster matches().
-//   - nwsMarineBeachForecast is LAST: its matches() is a broad Lake
-//     Erie/Ontario bbox, so every tighter scraper must be consulted first.
+// Water-quality (E. coli, bacteria) monitoring belongs in src/wqFloor/, not here:
+// a clean-water reading is a different axis from surf hazard, and letting its
+// green win would mask a genuine hazard estimate such as a gale-driven red.
+//
+// Ordered most-specific-first, since findScraper is first-match-wins: the tight
+// single-city, fixed-site and narrow-park-cluster scrapers come first, and
+// nwsMarineBeachForecast is last because its matches() is a broad Lake
+// Erie/Ontario bbox that would otherwise shadow them.
 export const scrapers = [
   southHaven,
   metroparks,
@@ -77,21 +70,20 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
     if (!result) {
       return null;
     }
-    // Optional per-source staleness contract, read off the SCRAPER OBJECT (like
-    // officialTtlSeconds in src/index.js), never off the per-fetch result. The
-    // frontend's 2 h stale warning is calibrated to OUR hourly recompute; a
-    // source that publishes once a day (an NWS morning product) or holds a
-    // human-posted status for days is not stale just because 2 h passed. A
-    // scraper declares its own horizon (staleMs) and, for point-in-time
-    // readings, a neutral note (readingNote) to show inside it.
+    // Optional per-source staleness contract, read off the scraper object like
+    // officialTtlSeconds in src/index.js, never off the per-fetch result. The
+    // frontend's 2 h stale warning is calibrated to the hourly recompute; a source
+    // that publishes once a day, or holds a human-posted status for days, is not
+    // stale just because 2 h passed. A scraper declares its own horizon (staleMs)
+    // and, for point-in-time readings, a neutral readingNote to show inside it.
     //
-    // Validated hard, because staleMs SUPPRESSES a safety warning: typeof alone
-    // admits NaN and Infinity (typeof NaN === "number"), and a NaN threshold
-    // makes the renderer's (now - updated) > NaN false forever — silently
-    // disabling the stale warning for that source. Invalid or absent -> OMIT the
-    // key entirely rather than write an undefined-valued one: it keeps the KV
-    // records (and the public /api/flag response) minimal and lets render fall
-    // back to its default.
+    // Validated hard, because staleMs suppresses a safety warning: typeof alone
+    // admits NaN and Infinity (typeof NaN === "number"), and a NaN threshold makes
+    // the renderer's (now - updated) > NaN false forever, silently disabling the
+    // stale warning for that source. Invalid or absent omits the key entirely
+    // rather than writing an undefined-valued one, keeping the KV records and the
+    // public /api/flag response minimal and letting render fall back to its
+    // default.
     const staleMs = typeof scraper.staleMs === "number" &&
       Number.isFinite(scraper.staleMs) && scraper.staleMs > 0
       ? scraper.staleMs
@@ -132,7 +124,7 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
         sources: result.sources,
         updated: updated
       };
-      // Attached AFTER the literal, never inline as staleMs: maybeNull — an
+      // Attached after the literal, never inline as staleMs: maybeNull — an
       // undefined-valued key is not the same as an absent one to consumers that
       // compare whole records.
       if (staleMs !== null) {

@@ -1,21 +1,13 @@
-// Tests for scripts/lib/fgbReader.js — the FlatGeobuf reader the offline layer
-// pipeline runs on Deno. The module has NO entrypoint and touches no I/O at
-// import time (Deno.readFile / Deno.open are reached through globalThis inside
-// the two file readers, exactly as scripts/build-marine-zones.js guards its main
-// with import.meta.main), so importing it under vitest is safe: no Deno access,
-// no network, no files.
+// Tests for scripts/lib/fgbReader.js, the FlatGeobuf reader the offline layer
+// pipeline runs on Deno. Deno.readFile and Deno.open are reached through
+// globalThis inside the two file readers, so importing the module under vitest
+// touches no Deno, no network and no files.
 //
-// Every fixture is built IN MEMORY with the same library's serializer, so there
-// are no committed binaries and no GDAL on anyone's machine. buildLayerBytes
-// carries the malformation knobs (truncateTo, emptyLayer) rather than each test
-// hand-rolling corrupt input.
-//
-// Half the budget here is on the artifact-is-corrupt paths and their EXACT throw
-// messages. That is deliberate and it is the reason this module exists in this
-// shape: a layer pipeline that half-parses is how you silently zero a layer, and
-// a zeroed layer feeds the only DELETE-bearing job in the repo. The library gives
-// us no protection for free — a buffer truncated in the header region decodes as
-// ZERO features with no error at all, which is asserted below.
+// Half the budget here is on the artifact-is-corrupt paths and their exact throw
+// messages. A layer pipeline that half-parses is how you silently zero a layer,
+// and a zeroed layer feeds the only delete-bearing job in the repo. The library
+// gives no protection for free: a buffer truncated in the header region decodes
+// as zero features with no error at all, which is asserted below.
 
 import { describe, it, expect } from "vitest";
 import { serialize } from "flatgeobuf/lib/mjs/geojson.js";

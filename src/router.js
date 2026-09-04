@@ -2,8 +2,7 @@ import { renderListPage, renderDetailPage, renderErrorPage, markerFlagColor } fr
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 
-// Re-exported so existing importers (tests) keep working after the haversine
-// consolidation into src/geo.js.
+// Re-exported so existing importers keep working.
 export { distanceMi };
 
 const HOME_LIST_LIMIT = 100;
@@ -15,23 +14,21 @@ const HOME_GEO_FETCH_LIMIT = 500;
 
 // Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
 // Cacheable routes are location-independent and short-lived: 60 s fresh, up to
-// 10 min served-stale-while-revalidating. stale-if-error is set EXPLICITLY
+// 10 min served stale while revalidating. stale-if-error is set explicitly
 // because Cloudflare's default on Worker error is to serve stale indefinitely,
-// which would freeze the pages' embedded staleness warnings (nowIso is baked
-// into the HTML) with no bound; 600 s caps that window. The home page must
-// never be cached: it is personalized by request.cf geolocation, which is not
-// part of the cache key and not expressible via Vary.
+// which would freeze the pages' embedded staleness warnings — nowIso is baked
+// into the HTML — with no bound. The home page must never be cached: it is
+// personalized by request.cf geolocation, which is not part of the cache key and
+// not expressible via Vary.
 const CACHE_CONTROL_CACHEABLE =
   "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
 const CACHE_CONTROL_NO_STORE = "no-store";
 
-// Throttle for the last_viewed demand stamp: at most one D1 write per beach
-// per hour. Consumers: runNwsEnrichment/runEcccEnrichment/runWebcamSync order
-// their candidate queues with last_viewed as a tiebreak (demand ordering, not
-// a filter), and runFlagRecompute/runWaterTempRefresh split their rotation
-// into a hot tier (viewed within HOT_VIEW_WINDOW_MS, always covered every run)
-// and a cold tier that rotates through the remaining budget — so an hourly
-// stamp is finer than any of them need.
+// Throttle for the last_viewed demand stamp: at most one D1 write per beach per
+// hour. The enrichment crons order their candidate queues with last_viewed as a
+// tiebreak, and the two beach-walking crons split their rotation into a hot tier
+// (viewed within HOT_VIEW_WINDOW_MS, covered every run) and a cold tier, so an
+// hourly stamp is finer than any of them need.
 const LAST_VIEWED_MIN_INTERVAL_MS = 3600000;
 
 // Escapes the LIKE wildcards (% and _) plus the escape character itself so a
@@ -80,12 +77,12 @@ function htmlResponse(html, status, cacheControl) {
   return new Response(html, { status: status, headers: headers });
 }
 
-// Demand signal for cron prioritization (migration 0007): stamp last_viewed
-// when a visitor opens a beach's detail page or flag API. Fire-and-forget via
-// ctx.waitUntil so it can never delay or fail the render; throttled to once
-// per LAST_VIEWED_MIN_INTERVAL_MS per beach. This is the request path's only
-// D1 write (PLAN.md sections 0 and 8) — still never an upstream
-// fetch. No-ops when ctx is absent (tests, non-Workers callers).
+// Demand signal for cron prioritization (migration 0007): stamp last_viewed when
+// a visitor opens a beach's detail page or flag API. Fire-and-forget via
+// ctx.waitUntil so it can never delay or fail the render, throttled to once per
+// LAST_VIEWED_MIN_INTERVAL_MS per beach. This is the request path's only D1 write
+// (PLAN.md sections 0 and 8) and still never an upstream fetch. No-ops when ctx
+// is absent.
 function touchLastViewed(env, ctx, beach) {
   if (!ctx || typeof ctx.waitUntil !== "function") {
     return;
@@ -114,12 +111,11 @@ async function readFlagAndOfficial(env, beachId) {
   return { estimate: results[0], official: results[1] };
 }
 
-// Optional ?q= search covers the ENTIRE beaches table, not just the rendered
+// Optional ?q= search covers the entire beaches table, not just the rendered
 // rows: a case-insensitive LIKE against both the display name
 // (COALESCE(park_name, name)) and the beach's own name, with user wildcards
-// escaped. When a user location resolves we filter first, then distance-sort
-// the matches, so proximity ordering is preserved for searches too. Stays on
-// the request path's D1+KV-only contract.
+// escaped. When a user location resolves, the filter runs first and the matches
+// are then distance-sorted, so proximity ordering holds for searches too.
 const LIKE_WHERE =
   " WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\\' OR name LIKE ?1 ESCAPE '\\')";
 
@@ -141,18 +137,19 @@ function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
   return hasQuery ? stmt.bind(pattern) : stmt;
 }
 
-// ORDER BY expression that puts the geographically nearest rows first so the
-// HOME_GEO_FETCH_LIMIT cap slices by DISTANCE, not by table scan order (without
-// it a visitor at the far end of the table gets a "nearest beaches" list with no
-// nearby beach in it). Planar squared distance in degrees with the longitude
-// axis scaled by cos(lat) — monotonic in true distance at this scale and cheap
-// enough for SQLite to compute per row; the JS haversine still decides the
-// rendered top-100 ordering. The three interpolated values are ALWAYS finite
-// Numbers rendered via String() (never raw request text), which is what keeps
-// this injection-safe: resolveUserLocation only ever returns Number.isFinite
-// coordinates, and the guard below re-checks before building the clause.
-// Returns null when the location is unusable, which keeps the old unordered
-// shape rather than emitting anything unsafe.
+// ORDER BY expression that puts the geographically nearest rows first, so the
+// HOME_GEO_FETCH_LIMIT cap slices by distance rather than by table scan order;
+// without it a visitor at the far end of the table gets a "nearest beaches" list
+// with no nearby beach in it. Planar squared distance in degrees with the
+// longitude axis scaled by cos(lat): monotonic in true distance at this scale and
+// cheap for SQLite per row, while the JS haversine still decides the rendered
+// top-100 ordering.
+//
+// The three interpolated values are always finite Numbers rendered via String()
+// and never raw request text, which is what keeps this injection-safe.
+// resolveUserLocation only returns Number.isFinite coordinates, and the guard
+// below re-checks before building the clause. Returns null for an unusable
+// location, keeping the unordered shape rather than emitting anything unsafe.
 function proximityOrderByClause(location) {
   const lat = Number(location.lat);
   const lon = Number(location.lon);
@@ -243,11 +240,10 @@ async function handleHome(env, location, rawQuery, nearParam) {
   // A home URL carrying an explicit "near" is fully URL-determined:
   // resolveUserLocation short-circuits on it and never reads request.cf, so the
   // response is location-independent per its cache key and safe for the Workers
-  // Cache (same short-lived policy the detail/API routes use). This is exactly
-  // the path live search and the geo upgrade hammer — one D1 LIKE + KV bulk read
-  // per keystroke otherwise. WITHOUT a near param the page IS personalized by
-  // request.cf (not in the cache key, not expressible via Vary), so it must stay
-  // no-store.
+  // Cache. That is exactly the path live search and the geo upgrade hammer, which
+  // would otherwise cost one D1 LIKE plus a KV bulk read per keystroke. Without a
+  // near param the page is personalized by request.cf, which is not in the cache
+  // key and not expressible via Vary, so it must stay no-store.
   const cacheControl = (nearParam !== null && nearParam !== undefined)
     ? CACHE_CONTROL_CACHEABLE
     : CACHE_CONTROL_NO_STORE;
@@ -287,17 +283,16 @@ async function handleDetail(env, ctx, beachId) {
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
 }
 
-// Cacheable GeoJSON directory of EVERY flag-worthy beach (no bbox): the homepage
-// map fetches this once on load and hands it to a native MapLibre clustered
-// GeoJSON source. Location-independent (no request.cf, no bbox) so it is fully
-// cacheable. Reads only D1 + KV — the two-path rule holds. Each feature is a
-// Point [lon, lat] (GeoJSON coordinate order) carrying { id, name, flag } where
-// flag is the collapsed color keyword (green|yellow|red|unknown, double-red →
+// Cacheable GeoJSON directory of every flag-worthy beach: the homepage map
+// fetches it once on load and hands it to a native MapLibre clustered GeoJSON
+// source. Location-independent, so fully cacheable, and it reads only D1 and KV.
+// Each feature is a Point [lon, lat] carrying { id, name, flag }, where flag is
+// the collapsed color keyword (green|yellow|red|unknown, double-red collapsing to
 // red) the browser keys its icon tint off. Beaches with non-finite coordinates
-// are skipped so no NaN coordinate is ever emitted. No LIMIT: the full
-// flag-worthy set (~613 today) is a few hundred KB and the 60 s edge cache
-// absorbs the cost; a server-clustering / paging story is needed before the
-// 10k–100k North America scaling target (see PLAN.md / TODO.md).
+// are skipped so no NaN coordinate is emitted. No LIMIT: the full flag-worthy set
+// is a few hundred KB and the 60 s edge cache absorbs the cost. A server
+// clustering or paging story is needed before the 10k-100k North America scaling
+// target (see PLAN.md / TODO.md).
 async function handleBeachesGeojson(env) {
   const result = await env.DB.prepare(
     "SELECT id, name, park_name, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL
@@ -349,13 +344,13 @@ async function handleBeachesGeojson(env) {
   });
 }
 
-// Bulk-reads flag:/official: KV for every row and stamps the collapsed color
-// keyword onto row.flag in place. nowIso feeds markerFlagColor's staleness gate
-// (an aged point-in-time official reading may be raised by a fresher, more
-// severe estimate — see render.js displayFlagColor). Chunked to the 100-key bulk-get ceiling and
-// read in parallel; with the full flag-worthy directory (~613 rows today) that
-// is ~7 chunks per key family, scaling linearly with row count. A missing or
-// expired KV value maps to the honest "unknown" keyword, never a green default.
+// Bulk-reads flag: and official: KV for every row and stamps the collapsed color
+// keyword onto row.flag in place. nowIso feeds markerFlagColor's staleness gate,
+// where an aged point-in-time official reading may be raised by a fresher, more
+// severe estimate (see render.js displayFlagColor). Chunked to the 100-key
+// bulk-get ceiling and read in parallel, scaling linearly with row count. A
+// missing or expired KV value maps to the honest "unknown" keyword, never a green
+// default.
 async function attachFeatureFlags(env, rows, nowIso) {
   if (!rows || rows.length === 0) {
     return;

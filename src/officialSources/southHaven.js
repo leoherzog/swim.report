@@ -1,11 +1,11 @@
 // src/officialSources/southHaven.js
 // Official scraper for the City of South Haven, Michigan beach flag program.
 //
-// The flag information page itself only contains a STATIC LEGEND (one image
-// each of Green/Yellow/Red/Grey2.png explaining what the colors mean) — it
-// must never be parsed for a live color. The real live feed is the published
-// Google Sheet linked from the page as the "text version" (ADA alternative):
-// a headerless CSV with one sentence per line, e.g.
+// The flag information page carries only a static legend, one image each of
+// Green/Yellow/Red/Grey2.png explaining what the colors mean, and must never be
+// parsed for a live color. The live feed is the published Google Sheet linked
+// from that page as the "text version" (the ADA alternative): a headerless CSV
+// with one sentence per line, for example
 //   "Flag #6 North Beach is Green"
 //   "North Pier is Open"
 // Flags #6-#9 all belong to North Beach and #10-#12 to South Beach (multiple
@@ -32,25 +32,22 @@ export const SOUTH_HAVEN_CSV_URL =
 // Workers' fetch sends none by default.
 export const SOUTH_HAVEN_USER_AGENT = "swim.report (hello@swim.report)";
 
-// Monitored season and daily hours, in America/Detroit local time. Sourced
-// from the flag page's own legend: "A GRAY FLAG ... conditions are not being
-// monitored (9pm-9am), or the Beach Safety Program is out-of-season (Sept. 15
-// - May 15)." The published Google Sheet carries NO timestamp, so an abandoned
-// sheet left on a colored value would republish that stale color forever.
-// Outside this window nobody is updating the sheet, so we drop colored output
-// to no-data — the Gray/unmonitored convention already implies these windows.
-// Boundaries are inclusive (roughly May 15 - Sept 15); hours are [9, 21).
+// Monitored season and daily hours in America/Detroit local time, from the flag
+// page's own legend: a gray flag means conditions are not being monitored
+// (9pm-9am) or the Beach Safety Program is out of season (Sept 15 - May 15). The
+// sheet carries no timestamp, so an abandoned sheet left on a colored value would
+// republish that stale color forever; outside this window colored output drops to
+// no-data. Boundaries are inclusive; hours are [9, 21).
 const MONITOR_SEASON_START = { month: 5, day: 15 }; // May 15
 const MONITOR_SEASON_END = { month: 9, day: 15 };   // Sept 15
 const MONITOR_HOUR_START = 9;  // 9am local
 const MONITOR_HOUR_END = 21;   // 9pm local (exclusive)
 
-// Pure. Given the cron's passed-in ISO timestamp, is South Haven within its
-// monitored season AND monitored hours in America/Detroit local time? Parses
-// the passed-in string only (no Date.now()); uses Intl for the DST-correct
-// local wall-clock. A missing/unparseable timestamp is treated as monitored
-// (do not gate on a clock we do not have; scrape always supplies one, and the
-// pure CSV tests exercise the parse without a clock).
+// Pure. Is South Haven within both its monitored season and monitored hours in
+// America/Detroit local time? Parses the passed-in string only, with Intl for the
+// DST-correct local wall clock. A missing or unparseable timestamp is treated as
+// monitored, because gating on a clock that was never supplied would be worse;
+// scrape always supplies one.
 export function isSouthHavenMonitored(nowIso) {
   if (typeof nowIso !== "string" || nowIso.length === 0) {
     return true;
@@ -112,12 +109,11 @@ const SITE_DEFS = [
   { csvName: "woodman st. beach", siteId: "woodman-st-beach", label: "Woodman St. Beach", names: ["woodman"], lat: 42.4075, lon: -86.2785 },
   { csvName: "north beach", siteId: "north-beach", label: "North Beach", names: ["north beach"], lat: 42.4059, lon: -86.2795 },
   { csvName: "south beach", siteId: "south-beach", label: "South Beach", names: ["south beach"], lat: 42.4008, lon: -86.2865 },
-  // NOTE: names[] deliberately omits "van buren" — Van Buren State Park is a
-  // SEPARATE DNR-monitored beach ~3 mi south that still falls inside the
-  // matches() bbox, and "van buren" as a substring would wrongly resolve that
-  // park's beach to this city stairway's flag (a wrong-beach, wrong-color
-  // trap). "brown stairs" is unambiguous; the real Van Buren St. stairway
-  // beach still resolves here by proximity.
+  // names[] deliberately omits "van buren": Van Buren State Park is a separate
+  // DNR-monitored beach ~3 mi south that still falls inside the matches() bbox,
+  // so that substring would resolve its beach to this city stairway's flag —
+  // wrong beach, wrong color. "brown stairs" is unambiguous, and the real Van
+  // Buren St. stairway beach still resolves here by proximity.
   { csvName: "brown stairs (van buren st.)", siteId: "brown-stairs", label: "Brown Stairs (Van Buren St.)", names: ["brown stairs"], lat: 42.3968, lon: -86.2895 },
   { csvName: "blue stairs (kids corner)", siteId: "blue-stairs", label: "Blue Stairs (Kids Corner)", names: ["blue stairs", "kids corner"], lat: 42.3985, lon: -86.2885 }
 ];
@@ -134,13 +130,12 @@ const PIER_LINE_RE = /^(North|South) Pier is (Open|Closed)$/;
 // officialSources/index.js); FLAG_SEVERITY (imported above) makes it outrank
 // red in the same-site rollup.
 
-// Pure. Canonicalize a raw color phrase to a known South Haven flag color, or
-// null if it is not one. Case-insensitive; collapses interior spaces/hyphens
-// so "Double Red", "Double-Red", and "DoubleRed" all map to "double-red".
-// Uses an explicit allowlist (never a prototype-chain membership test) so a
-// value like "constructor" can never smuggle itself past the guard. Never
-// guesses a color from an unrecognized word — returns null so the caller skips
-// the line.
+// Pure. Canonicalizes a raw color phrase to a known South Haven flag color, or
+// null. Case-insensitive, collapsing interior spaces and hyphens so "Double Red",
+// "Double-Red" and "DoubleRed" all map to "double-red". Uses an explicit
+// allowlist rather than a prototype-chain membership test, so a value like
+// "constructor" cannot smuggle itself past the guard, and never guesses a color
+// from an unrecognized word.
 function normalizeSouthHavenColor(raw) {
   if (typeof raw !== "string") {
     return null;
@@ -164,29 +159,25 @@ function normalizeSouthHavenColor(raw) {
   return null;
 }
 
-// Pure. CSV text (+ the cron's ISO timestamp) -> sites[] (contract shape (b)
-// sites), [] when there is no reportable data, or null when the feed is
-// unusable. Rules:
-//   - outside the monitored season/hours (isSouthHavenMonitored) the sheet is
-//     unattended, so any color it still shows is stale: return [] (no data),
-//     never a color;
-//   - a line that matches neither FLAG_LINE_RE nor PIER_LINE_RE is LOGGED and
-//     SKIPPED (only that line drops), so one novel line never discards every
-//     site's official data — but if NOTHING in the feed is recognized the
-//     parse returns null (do not present no-data as "all monitored and clear");
-//   - a flag line whose color is not recognized is skipped and, if it names a
-//     known site, TAINTS that site so it is omitted (we never guess a color,
-//     and never report a color we cannot fully confirm for the site), while
-//     every other site still comes through;
-//   - "Double Red"/"Double-Red"/"DoubleRed" normalize to double-red;
-//   - gray/grey = unmonitored; a site whose flags are all gray is omitted;
-//   - a site mixing gray with real colors is omitted too (status of the whole
-//     site cannot be confirmed — omitting is safer than a partial rollup);
-//   - same-named flags roll up to the MOST SEVERE color (double-red > red >
-//     yellow > green) so repeated names never silently resolve to a favorable
-//     flag;
-//   - a flag line naming an unknown beach is skipped (it cannot map to a
-//     site, and failing known sites because of a new one helps no one).
+// Pure. CSV text plus the cron's ISO timestamp -> sites[], [] when there is no
+// reportable data, or null when the feed is unusable. Rules:
+//   - outside the monitored season or hours the sheet is unattended, so any color
+//     it still shows is stale: return [], never a color;
+//   - a line matching neither FLAG_LINE_RE nor PIER_LINE_RE is logged and
+//     skipped, so one novel line never discards every site's data — but if
+//     nothing in the feed is recognized the parse returns null, rather than
+//     presenting no-data as "all monitored and clear";
+//   - a flag line whose color is unrecognized is skipped and, if it names a known
+//     site, taints that site so it is omitted, while every other site comes
+//     through;
+//   - "Double Red", "Double-Red" and "DoubleRed" normalize to double-red;
+//   - gray or grey means unmonitored, and a site whose flags are all gray is
+//     omitted;
+//   - a site mixing gray with real colors is omitted too, since its whole status
+//     cannot be confirmed and omitting beats a partial rollup;
+//   - same-named flags roll up to the most severe color, so repeated names never
+//     resolve to a favorable flag;
+//   - a flag line naming an unknown beach is skipped.
 export function parseSouthHavenCsv(text, nowIso) {
   if (typeof text !== "string" || text.length === 0) {
     return null;
@@ -306,11 +297,11 @@ export function parseSouthHavenCsv(text, nowIso) {
   return sites;
 }
 
-// Pure. Flag-page HTML -> CSV export URL or null. The page links the "text
-// version" as a docs.google.com/spreadsheets .../pubhtml (or /pub) viewer
-// URL with HTML-entity-encoded ampersands; rebuild the canonical
-// pub?gid=...&single=true&output=csv export from its publish ID and gid so a
-// re-published sheet does not silently break the scraper.
+// Pure. Flag-page HTML -> CSV export URL, or null. The page links the "text
+// version" as a docs.google.com/spreadsheets .../pubhtml (or /pub) viewer URL
+// with HTML-entity-encoded ampersands; the canonical
+// pub?gid=...&single=true&output=csv export is rebuilt from its publish id and
+// gid so a re-published sheet does not silently break the scraper.
 export function extractSouthHavenCsvUrl(html) {
   if (typeof html !== "string" || html.length === 0) {
     return null;
@@ -359,7 +350,7 @@ export const southHaven = {
     }
     // Best effort: discover the current CSV href from the flag page so a
     // re-published sheet keeps working; fall back to the known CSV URL. The
-    // legend images on the page are NEVER parsed for a color.
+    // legend images on the page are never parsed for a color.
     const pageHtml = await fetchText(SOUTH_HAVEN_URL, {
       headers: { "User-Agent": SOUTH_HAVEN_USER_AGENT },
       logPrefix: "southHaven: flag page fetch failed"

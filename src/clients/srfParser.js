@@ -4,8 +4,8 @@
 
 // Ordered most-specific/most-common first; parseRipCurrentRisk returns the first
 // regex that matches anywhere in the product (each regex itself matches its
-// FIRST occurrence, so a multi-period product resolves to the earliest period).
-// The ocean "Rip Current Risk" wordings (regexes 0-2) are listed BEFORE the
+// first occurrence, so a multi-period product resolves to the earliest period).
+// The ocean "Rip Current Risk" wordings (regexes 0-2) are listed before the
 // Great Lakes "Swim Risk" variant (regex 3) so any product carrying the explicit
 // rip wording keeps resolving exactly as before; the Swim Risk regex only fires
 // on Great Lakes beach-hazard products that use that label and no rip wording.

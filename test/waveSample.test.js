@@ -193,10 +193,10 @@ describe("nearestWetSample", function () {
     expect(nearestWetSample(grid(), h, data, 0, 0)).toBe(null);
   });
 
-  it("resolves ONE cell that stays fixed across all 24 forecast hours", function () {
-    // Hour 0 has two wet cells and the spiral picks the nearer one. Later hours mask
-    // that cell and wet a DIFFERENT one: re-running the spiral per hour would jump to
-    // it, which is exactly what must not happen.
+  it("resolves one cell that stays fixed across all 24 forecast hours", function () {
+    // Hour 0 has two wet cells and the spiral picks the nearer one. Later hours
+    // mask that cell and wet a different one, so re-running the spiral per hour
+    // would jump to it, which is exactly what must not happen.
     const h = header();
     const hour0 = plane(h, [[2, 1, 0.5], [1, 1, 4.0]]);
     const resolved = nearestWetSample(grid(), h, hour0, 0, 0);

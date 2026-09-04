@@ -1,8 +1,8 @@
 // src/officialSources/metroparks.js
 // Official scraper for the Huron-Clinton Metroparks "Park Closures" page.
-// This is a CLOSURE-ONLY source: it reports a plain Open/Closed facility
+// This is a closure-only source: it reports a plain Open/Closed facility
 // status per park amenity, not a rip-current/flag color. "Closed" maps to
-// red (beach access closed); "Open" is NOT an affirmative water-quality
+// red (beach access closed); "Open" is not an affirmative water-quality
 // all-clear, so it is simply omitted (no site, no green).
 //
 // Empty-success semantics: a scrape that fetches and parses the page cleanly
@@ -65,7 +65,7 @@ function slicePanel(html, panelId) {
 // Pure. Finds <strong>Label:</strong> within panelHtml, normalizes the run of
 // spaces/tabs/nbsp that follows, and returns the first word lowercased if (and
 // only if) it is exactly "open" or "closed". Anything else (missing label,
-// embedded sentence, ALL CAPS variant handled by case-insensitive match,
+// embedded sentence, all CAPS variant handled by case-insensitive match,
 // unexpected word) returns null rather than guessing.
 function extractBeachStatus(panelHtml, label) {
   if (!panelHtml) {
@@ -107,7 +107,7 @@ export function parseMetroparksHtml(html) {
 
   const sites = [];
 
-  // Sites are resolved by NAME ONLY (no lat/lon/radiusMi). The two beaches in
+  // Sites are resolved by NAME only (no lat/lon/radiusMi). The two beaches in
   // a park sit on the same small lake and would have to share the same
   // park-centroid coordinates, so proximity resolution cannot tell them apart:
   // an OPEN beach (which produces no site) would resolve by proximity to its
@@ -164,16 +164,14 @@ export const metroparks = {
       return true;
     }
 
-    // A bare beach-NAME match ("Maple Beach", "Eastwood Beach", ...) is only
-    // trusted when we cannot geographically rule the beach out, i.e. it has no
-    // coordinates at all. A namesake beach elsewhere on the Great Lakes (there
-    // are other "Maple Beach"es on Michigan inland lakes) has coordinates far
-    // from BOTH parks; if we matched it here it would then resolve — by the
-    // same name — to a Kensington/Stony Creek closure and be published as a
-    // FALSE OFFICIAL RED on an unrelated beach. Requiring "no coordinates"
-    // means only a coordinate-less row (never produced by OSM discovery) can
-    // match purely on name; every real beach must be geographically near a
-    // park to be attributed a closure.
+    // A bare beach-name match is trusted only when the beach cannot be
+    // geographically ruled out, meaning it carries no coordinates at all. A
+    // namesake beach elsewhere — there are other "Maple Beach"es on Michigan
+    // inland lakes — sits far from both parks, and matching it here would
+    // resolve it by name to a Kensington or Stony Creek closure and publish a
+    // false official red on an unrelated beach. Requiring no coordinates means
+    // only a coordinate-less row, which OSM discovery never produces, can match
+    // on name alone.
     if (!hasCoords) {
       const name = (beach.name || "").toLowerCase();
       const knownNames = ["martindale beach", "maple beach", "baypoint beach", "eastwood beach"];
@@ -195,11 +193,10 @@ export const metroparks = {
     }
     try {
       const sites = parseMetroparksHtml(html);
-      // null means a real parse failure (neither panel found / bad input) and
-      // must surface as a failure. An empty array means the page parsed cleanly
-      // with every beach Open — a successful scrape with nothing to report, so
-      // it flows through as an empty perBeachResult (resolves to no site for
-      // every beach, writes no official KV) and counts as a health success.
+      // null is a real parse failure and must surface as one. An empty array
+      // means the page parsed cleanly with every beach Open: a successful scrape
+      // with nothing to report, flowing through as an empty perBeachResult that
+      // resolves to no site, writes no official KV, and counts as healthy.
       if (sites === null) {
         return null;
       }

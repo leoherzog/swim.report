@@ -6,41 +6,35 @@
 //   deno run --allow-read --allow-write scripts/build-wave-kv.js --mode emit \
 //     --dir ./dl --pointer ./dl/current.json --out ./kv
 //
-// NO --allow-net. The workflow shell does the HTTPS reads into a QUARANTINE
-// directory that nothing but this script consumes, and this script verifies byte
-// length and sha256 against the manifest before a single record is parsed. Byte
-// length is checked as well as the digest not because a matching digest could
-// coexist with a wrong length — it cannot — but because the length check produces a
-// legible message for the overwhelmingly likelier failure, a truncated transfer.
+// No --allow-net. The workflow shell does the HTTPS reads into a quarantine
+// directory nothing else consumes, and this script verifies byte length and
+// sha256 against the manifest before a record is parsed. Length is checked as
+// well as the digest for a legible message on the likelier failure, a truncated
+// transfer.
 //
-// THE UNITS CONTRACT (restated because this file assembles what production reads)
-// -----------------------------------------------------------------------------
-// Every waveHeightFt and hoursFt cell arriving here is already FEET (metres *
-// 3.28084, metersToFeet in src/geo.js) and every windSpeedMph is already MPH (m/s *
-// 2.2369362920544, metersPerSecondToMph in src/waveGrids.js). windGustMph is always
-// null: gfswave publishes no GUST element. Nothing here converts anything — it
-// stringifies and stamps an expiration — so a unit error upstream is invisible from
-// this file, which is why test/buildWaveKv.test.js pins both conversions directly.
+// Units, restated because this file assembles what production reads. Every
+// waveHeightFt and hoursFt cell arriving here is already feet (metersToFeet in
+// src/geo.js) and every windSpeedMph is already mph (metersPerSecondToMph in
+// src/waveGrids.js). windGustMph is always null: gfswave publishes no GUST
+// element. Nothing here converts anything, it stringifies and stamps an
+// expiration, so a unit error upstream is invisible from this file — which is
+// why test/buildWaveKv.test.js pins both conversions directly.
 //
-// ABSOLUTE EXPIRATION, NEVER A TTL
-// --------------------------------
-// Each pair carries "expiration": validStartEpoch + 25200, so a key expires 7 h
-// after the hour it DESCRIBES regardless of when the job ran. A TTL measured from
-// write time is wrong for a scheduler that skips occurrences: a run firing 9 h late
-// would grant 7 more hours of life to data already 9 h old. Republishing an old
-// cycle therefore yields a short or negative lease and is refused by construction —
-// you cannot roll KV back to stale data, you can only stop writing.
+// Absolute expiration, never a TTL. Each pair carries
+// "expiration": validStartEpoch + 25200, so a key expires 7 h after the hour it
+// describes regardless of when the job ran. A TTL measured from write time is
+// wrong for a scheduler that skips occurrences: a run firing 9 h late would grant
+// 7 more hours of life to data already 9 h old. Republishing an old cycle
+// therefore yields a short or negative lease and is refused by construction.
 //
-// THE SPELLING TRAP. The pair field is snake_case "expiration" / "expiration_ttl".
-// The Worker runtime's camelCase expirationTtl is accepted by wrangler as an
-// unexpected property, WARNED about, and IGNORED, with exit 0 — producing a key that
-// NEVER EXPIRES. Because runFlagRecompute never reads waveinput.updated, expiration
-// is the only staleness control on the color path, so that key would color flags
-// from dead data indefinitely. ttlSpellingRefusals is applied to every emitted pair,
-// and the workflow additionally greps wrangler's output for "unexpected properties".
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with +
-// (never template literals), console for logging.
+// The spelling trap: the pair field is snake_case "expiration" /
+// "expiration_ttl". wrangler accepts the Worker runtime's camelCase
+// expirationTtl as an unexpected property, warns, ignores it and exits 0,
+// producing a key that never expires. Because runFlagRecompute never reads
+// waveinput.updated, expiration is the only staleness control on the color path,
+// so that key would color flags from dead data indefinitely. ttlSpellingRefusals
+// is applied to every emitted pair, and the workflow greps wrangler's output for
+// "unexpected properties".
 
 import {
   EXPECTED_WAVE_ARTIFACTS,
@@ -51,9 +45,8 @@ import {
 import { gridsDigest } from "../src/waveGrids.js";
 import { ttlSpellingRefusals, parseNdjson } from "./build-wave-manifest.js";
 
-// wrangler accepts up to 10,000 pairs and 100 MB per request. 5,000 leaves room for
-// the largest plausible waves: payload without approaching either ceiling, and keeps
-// a failed chunk cheap to retry.
+// wrangler accepts up to 10,000 pairs and 100 MB per request. 5,000 stays clear
+// of both ceilings and keeps a failed chunk cheap to retry.
 export const MAX_PAIRS_PER_CHUNK = 5000;
 
 // The pointer is remote input that becomes a URL path, so its charset is constrained
@@ -140,8 +133,8 @@ export function parseWavePointer(text) {
 // --- artifact verification -------------------------------------------------------------
 
 // Returns null when the downloaded bytes match the manifest entry, or a reason
-// string. The manifest entry itself is validated first: bytes and sha256 are the
-// ENTIRE integrity story for a file this script cannot otherwise judge.
+// string. The entry is validated first: bytes and sha256 are the entire integrity
+// story for a file this script cannot otherwise judge.
 export function verifyArtifact(entry, observed) {
   if (!isPlainObject(entry)) {
     return "manifest describes no entry";
@@ -166,10 +159,10 @@ export function verifyArtifact(entry, observed) {
   return null;
 }
 
-// The manifest entry for one artifact key, or null. The LIST of keys always comes
-// from EXPECTED_WAVE_ARTIFACTS and never from manifest.artifacts[].key: a manifest
-// describing a third file is a cycle this code cannot decode, not one to consume
-// as-is, and it keeps every downloaded filename a compile-time constant of this repo.
+// The manifest entry for one artifact key, or null. The list of keys comes from
+// EXPECTED_WAVE_ARTIFACTS and never from manifest.artifacts[].key: a manifest
+// describing a third file is a cycle this code cannot decode, and this keeps
+// every downloaded filename a compile-time constant of this repo.
 export function manifestArtifact(manifest, key) {
   if (!isPlainObject(manifest) || !Array.isArray(manifest.artifacts)) {
     return null;
@@ -185,14 +178,14 @@ export function manifestArtifact(manifest, key) {
 
 // --- the consumer report ----------------------------------------------------------------
 
-// Assembles the object src/waveManifest.js consumes, folding in the two conjuncts the
-// producer deliberately leaves ABSENT — gridsDigestMatches and secondsRemaining, which
-// are facts about THIS code and the clock at consume time, not about the cycle.
+// Assembles the object src/waveManifest.js consumes, folding in the two conjuncts
+// the producer leaves absent: gridsDigestMatches and secondsRemaining are facts
+// about this code and the clock at consume time, not about the cycle.
 //
-// secondsRemaining is derived from validStartIso, not from manifest.kvExpirationEpoch:
-// an unparseable validStartIso then yields NaN, which fails the range check, and that
-// is CORRECT. Refusing because we cannot tell how old the data is is the same answer
-// as refusing because it is too old.
+// secondsRemaining is derived from validStartIso, not manifest.kvExpirationEpoch,
+// so an unparseable validStartIso yields NaN and fails the range check. That is
+// correct: refusing because the age is unknowable is the same answer as refusing
+// because it is too old.
 export function buildConsumerReport(input) {
   const manifest = isPlainObject(input.manifest) ? input.manifest : null;
   const pointer = isPlainObject(input.pointer) ? input.pointer : null;
@@ -213,8 +206,8 @@ export function buildConsumerReport(input) {
     artifactsPresent: artifactsPresent,
     artifactsExpected: artifactsExpected,
     buildStatus: manifest !== null ? manifest.buildStatus : null,
-    // Copied through verbatim from the build's own verdict: this code cannot re-derive
-    // them (it never sees a GRIB band) and an absent field refuses fail-closed.
+    // Copied verbatim from the build's own verdict: this code never sees a GRIB
+    // band and cannot re-derive them, and an absent field refuses fail-closed.
     validTimesPassed: sanity !== null ? sanity.validTimesPassed : null,
     sentinelScanPassed: sanity !== null ? sanity.sentinelScanPassed : null,
     minimumRecordsPassed: sanity !== null ? sanity.minimumRecordsPassed : null,
@@ -233,8 +226,8 @@ export function buildConsumerReport(input) {
     validStartEpoch: manifest !== null ? manifest.validStartEpoch : null,
     kvExpirationEpoch: manifest !== null ? manifest.kvExpirationEpoch : null,
     localGridsDigest: input.localGridsDigest || null,
-    // Provenance: what the build managed to do with each grid. NOT a conjunct — a
-    // gate on it would refuse every manifest built before the field existed.
+    // Provenance: what the build managed with each grid. Not a conjunct, because
+    // a gate on it would refuse a manifest that carries no per-grid counts.
     gridStatus: manifest !== null && isPlainObject(manifest.gridStatus)
       ? manifest.gridStatus : null,
     artifacts: verified.slice(),
@@ -244,10 +237,10 @@ export function buildConsumerReport(input) {
 
 // --- pair assembly -----------------------------------------------------------------------
 
-// One beach's pairs, kept together. There is no cross-BEACH invariant, so chunking is
-// otherwise free — but a beach's waveinput and waves must land in the same request, or
-// a partially applied chunk set can leave a detail page showing a 24 h strip that
-// disagrees with the flag card above it.
+// One beach's pairs, kept together. Chunking is otherwise free, but a beach's
+// waveinput and waves must land in the same request or a partially applied chunk
+// set leaves a detail page showing a 24 h strip that disagrees with the flag card
+// above it.
 export function kvPairGroups(waveinputRecords, wavesRecords, expiration) {
   const groups = [];
   const byBeach = new Map();
@@ -274,9 +267,9 @@ export function kvPairGroups(waveinputRecords, wavesRecords, expiration) {
     };
     const group = byBeach.get(record.beachId);
     if (group === undefined) {
-      // A series with no waveinput cannot happen through waveRecordsForBeach, but a
-      // hand-edited artifact could produce one; it still gets its own group rather
-      // than being dropped silently.
+      // waveRecordsForBeach cannot produce a series with no waveinput, but a
+      // hand-edited artifact could; it gets its own group rather than being
+      // dropped silently.
       byBeach.set(record.beachId, [pair]);
       groups.push([pair]);
       continue;
@@ -287,8 +280,7 @@ export function kvPairGroups(waveinputRecords, wavesRecords, expiration) {
 }
 
 // Packs whole groups into chunks of at most maxPairs pairs. A group larger than
-// maxPairs still ships as one chunk: keeping a beach whole outranks the chunk size,
-// and a group is two pairs.
+// maxPairs still ships as one chunk: keeping a beach whole outranks chunk size.
 export function chunkGroups(groups, maxPairs) {
   const limit = isFiniteNumber(maxPairs) && maxPairs > 0 ? maxPairs : MAX_PAIRS_PER_CHUNK;
   const chunks = [];
@@ -334,8 +326,8 @@ async function runPlan(args) {
   const plan = {
     cycleId: pointer.cycleId,
     prefix: pointer.prefix,
-    // manifest.json is fetched too but stays OUT of SHA256SUMS: it is the gate's sole
-    // input and is byte-compared on its own.
+    // manifest.json is fetched too but stays out of SHA256SUMS: it is the gate's
+    // sole input and is byte-compared on its own.
     files: ["manifest.json"].concat(EXPECTED_WAVE_ARTIFACTS)
   };
   await Deno.writeTextFile(args.out, JSON.stringify(plan, null, 2) + "\n");

@@ -5,39 +5,30 @@
 //   deno run --allow-net --allow-read --allow-write scripts/fetch-wave-grids.js \
 //     --dest ./.waves
 //
-// This is the ONLY network-touching script in the wave pipeline. Everything
-// downstream of it — band planning, point sampling, the gates, the KV pair
-// assembly — is pure local math over the bytes this script put on disk, and
+// The only network-touching script in the wave pipeline. Everything downstream of
+// it — band planning, point sampling, the gates, the KV pair assembly — is pure
+// local math over the bytes this script put on disk, and
 // .github/workflows/test.yml asserts that machine-side by refusing --allow-net on
 // any of the other three scripts.
 //
-// CYCLE RESOLUTION HAPPENS AT RUNTIME, NOT BY CRON OFFSET
-// -------------------------------------------------------
-// validStart is the top of the current UTC hour: the hour the published series
-// DESCRIBES. GFS cycles are then walked newest-first back 24 h, and the first cycle
-// whose f(k)..f(k+23) all exist is taken, where k is the whole-hour offset from that
-// cycle to validStart. Measured publish latency is about T+3h33m and steps run to
-// f357, so a 21:52 run resolving to the 12z cycle and sampling f010..f033 is an
-// ordinary, healthy outcome — the cadence of the job and the cadence of the model
-// are deliberately decoupled. GLWU resolves independently on its own hourly cycle.
+// Cycle resolution happens at runtime, not by cron offset. validStart is the top
+// of the current UTC hour, the hour the published series describes. GFS cycles are
+// walked newest-first back 24 h and the first cycle whose f(k)..f(k+23) all exist
+// is taken, where k is the whole-hour offset from that cycle to validStart. The
+// job's cadence and the model's are deliberately decoupled, so a run resolving to
+// a several-hours-old cycle is an ordinary, healthy outcome. GLWU resolves
+// independently on its own hourly cycle.
 //
-// NOMADS PACING
-// -------------
-// NOMADS documents a 10 second wait between scripted fetches. GLWU is therefore ONE
-// whole-file fetch of ~22 MB carrying all 49 steps, every NOMADS request is spaced by
-// NOMADS_MIN_GAP_MS, and the total is capped. The AWS mirror publishes no such rule
-// and is Range-sliced freely.
+// NOMADS documents a 10 second wait between scripted fetches. GLWU is therefore
+// one whole-file fetch carrying all 49 steps, every NOMADS request is spaced by
+// NOMADS_MIN_GAP_MS, and the total is capped. The AWS mirror publishes no such
+// rule and is Range-sliced freely.
 //
-// FAILURE POLICY
-// --------------
-// A grid in REQUIRED_GRID_IDS that resolves no complete cycle inside its age window
-// exits 1 and publishes nothing: the previous cycle's KV rides its lease and the
-// flags age out to unknown, which is gray and honest. Any OTHER grid failing is
-// recorded as a problem and leaves gridsComplete false, which the consumer gate
-// treats as DEGRADED — less data, not wrong data.
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with +
-// (never template literals), console for logging.
+// A grid in REQUIRED_GRID_IDS that resolves no complete cycle inside its age
+// window exits 1 and publishes nothing: the previous cycle's KV rides its lease
+// and the flags age out to unknown, which is gray and honest. Any other grid
+// failing is recorded as a problem and leaves gridsComplete false, which the
+// consumer gate treats as degraded — less data, not wrong data.
 
 import {
   GRIDS,
@@ -53,23 +44,22 @@ export { REQUIRED_GRID_IDS };
 
 export const DEFAULT_DEST = "./.waves";
 
-// Per-request wall clock. Generous because the GLWU whole file is ~22 MB over a
-// government host, but NOT unbounded: an AbortController is armed unconditionally
-// here (unlike src/clients/http.js, where the timeout is optional) because there is
-// exactly one caller and a hung socket that never resolves burns the whole workflow
-// budget and produces no report at all.
+// Per-request wall clock, generous because the GLWU whole file is ~22 MB over a
+// government host, but never unbounded: the AbortController is armed
+// unconditionally here, because a hung socket burns the whole workflow budget and
+// produces no report at all.
 export const FETCH_TIMEOUT_MS = 300000;
 
-// Bounded retries with linear backoff. The failure being absorbed is a transient 5xx
-// or a dropped connection, never a wrong path: a 404 on a resolved cycle means the
-// object is genuinely not there and retrying it only delays the refusal.
+// Bounded retries with linear backoff, absorbing a transient 5xx or a dropped
+// connection but never a wrong path: a 404 on a resolved cycle means the object
+// is genuinely not there.
 export const FETCH_ATTEMPTS = 3;
 export const FETCH_RETRY_BASE_MS = 1000;
 
-// The documented NOMADS spacing between scripted fetches, plus a hard cap on how
-// many NOMADS requests one run may make at all.
-export const NOMADS_MIN_GAP_MS = 10000;
-export const NOMADS_MAX_REQUESTS = 6;
+// The documented NOMADS spacing between scripted fetches, plus a cap on how many
+// NOMADS requests one run may make at all.
+const NOMADS_MIN_GAP_MS = 10000;
+const NOMADS_MAX_REQUESTS = 6;
 
 function log(msg) {
   console.error("fetch-wave-grids: " + msg);
@@ -102,9 +92,9 @@ export function pad3(n) {
   return s;
 }
 
-// The hour the published series DESCRIBES: the top of the current UTC hour. Both
-// startIso and updated on every emitted record are this value, never the run clock,
-// so a cycle republished late cannot claim to be fresher than its data.
+// The hour the published series describes: the top of the current UTC hour. Both
+// startIso and updated on every emitted record are this value, never the run
+// clock, so a cycle republished late cannot claim to be fresher than its data.
 export function validStartEpochFor(nowMs) {
   return Math.floor(nowMs / 3600000) * 3600;
 }
@@ -161,7 +151,7 @@ export function cycleCandidates(grid, validStartEpoch) {
 // --- .idx parsing --------------------------------------------------------------------
 
 // A wgrib2 .idx line is "recnum:byteoffset:d=YYYYMMDDHH:ELEMENT:level:forecast:".
-// A record's byte range ends at the NEXT record's offset; the last record runs to
+// A record's byte range ends at the next record's offset; the last record runs to
 // EOF and gets no range end.
 //
 // Throws rather than degrading: an .idx this code cannot read is a file whose byte
@@ -178,7 +168,8 @@ export function parseIdx(text) {
       throw new Error("fetch-wave-grids: unreadable .idx line: " + line);
     }
     // Digits-only, because Number("") is 0 and finite: a blank offset field would
-    // parse as offset 0 and make the PREVIOUS record's end -1, emitting bytes=X--1.
+    // parse as offset 0 and make the previous record's end -1, emitting
+    // bytes=X--1.
     if (!/^\d+$/.test(parts[0]) || !/^\d+$/.test(parts[1])) {
       throw new Error("fetch-wave-grids: unreadable .idx line: " + line);
     }
@@ -192,9 +183,9 @@ export function parseIdx(text) {
   if (records.length === 0) {
     throw new Error("fetch-wave-grids: .idx is empty");
   }
-  // The end chain below assumes ascending offsets. Slicing a file whose .idx
+  // The end chain below assumes ascending offsets; slicing a file whose .idx
   // offsets do not ascend produces a valid GRIB2 message describing the wrong
-  // variable, which is why this throws rather than degrading.
+  // variable.
   for (let i = 0; i + 1 < records.length; i = i + 1) {
     if (records[i + 1].offset <= records[i].offset) {
       throw new Error("fetch-wave-grids: .idx offsets must ascend: record " +
@@ -209,13 +200,14 @@ export function parseIdx(text) {
   return records;
 }
 
-// The byte ranges for the requested elements at the "surface" level, in ASCENDING
-// OFFSET ORDER. Concatenating the slices in file order yields a standalone GRIB2
-// file GDAL reads with correct georeferencing and a band order that mirrors the
+// The byte ranges for the requested elements at the "surface" level, in ascending
+// offset order. Concatenating the slices in file order yields a standalone GRIB2
+// file GDAL reads with correct georeferencing and a band order mirroring the
 // original, which is what the bandIdentity gate then asserts.
 //
-// Missing element -> throw. Slicing a file that does not carry HTSGW yields a valid
-// GRIB2 with the wrong variable in the band the sampler reads as wave height.
+// A missing element throws: slicing a file that does not carry HTSGW yields a
+// valid GRIB2 with the wrong variable in the band the sampler reads as wave
+// height.
 export function idxRangesFor(records, elements) {
   const out = [];
   for (let e = 0; e < elements.length; e = e + 1) {
@@ -245,8 +237,8 @@ function sleep(ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
-// NOMADS pacing state. Every NOMADS request goes through this, so the documented
-// 10 s spacing is a property of the module rather than of a caller remembering.
+// Every NOMADS request goes through this, so the documented 10 s spacing is a
+// property of the module rather than of a caller remembering.
 let nomadsLastAt = 0;
 let nomadsRequests = 0;
 
@@ -263,9 +255,9 @@ async function paceNomads() {
   nomadsLastAt = Date.now();
 }
 
-// One timeout-bounded request with bounded retries. notFoundOk lets the cycle probe
-// treat a 404 as an answer ("this step is not published yet") rather than an error;
-// on a resolved path a 404 is thrown on the first attempt and never retried.
+// One timeout-bounded request with bounded retries. notFoundOk lets the cycle
+// probe read a 404 as "this step is not published yet" rather than an error; on a
+// resolved path a 404 throws on the first attempt and is never retried.
 async function request(url, options) {
   const opts = options || {};
   let lastError = null;
@@ -409,8 +401,8 @@ async function downloadStepped(grid, candidate, destDir) {
       url: url,
       bytes: bytes.length,
       sha256: await sha256Hex(bytes),
-      // Band order in the concatenated file mirrors ascending byte offset, which is
-      // the original file order. The bandIdentity gate asserts it rather than
+      // Band order in the concatenated file mirrors ascending byte offset, the
+      // original file order. The bandIdentity gate asserts it rather than
       // trusting it.
       elements: elements
     });
@@ -452,8 +444,8 @@ export function selectedGrids(gridIds) {
 }
 
 // A required grid's failure ends the cycle with no publication; any other grid's
-// failure is recorded and the run continues, so one regional upstream being out costs
-// that grid's beaches their records and nothing else.
+// failure is recorded and the run continues, so one regional upstream being out
+// costs that grid's beaches their records and nothing else.
 export function gridFailureIsFatal(gridId, requiredIds) {
   const required = Array.isArray(requiredIds) ? requiredIds : REQUIRED_GRID_IDS;
   return required.indexOf(gridId) !== -1;
@@ -480,7 +472,7 @@ async function main() {
     validStartCompact: compactIso(validStartEpoch),
     forecastHours: FORECAST_HOURS,
     elements: GRID_ELEMENTS.slice(),
-    // Every grids-report.json carries this, including the one written on the fatal
+    // Carried by every grids-report.json, including the one written on the fatal
     // early-exit path: the workflow shell reads it to decide whether a per-grid
     // failure is fatal, and a shell that hardcoded the id would drift from the
     // refusals the scripts enforce.
@@ -538,9 +530,6 @@ async function main() {
     String(report.gridsComplete) + ")");
 }
 
-// import.meta.main is Deno-only and falsy under vitest/node, so importing the pure
-// exports above never reads Deno.args, never touches the network and never writes a
-// file.
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("fetch-wave-grids: FATAL: " + (err && err.stack ? err.stack : err));

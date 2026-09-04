@@ -4,11 +4,10 @@
 // SOURCE: Winnetka Park District — Tower Road Beach (single beach, Lake
 // Michigan, Illinois). Server-rendered status page at
 //   https://rainoutline.com/search/extension/8475633131/9
-// (live shape confirmed via curl on 2026-07-22: a
-// <span class="status2">Open|Closed</span>&nbsp;-&nbsp;<free text reason>
-// line, followed by a <span class="clue"><em>Last updated at M/D/YY H:MM am|pm
-// ... </em></span> line). If the site's markup or URL ever changes shape
-// this MUST degrade to null, never a wrong color.
+// whose shape is a <span class="status2">Open|Closed</span>&nbsp;-&nbsp;<free
+// text reason> line followed by a <span class="clue"><em>Last updated at
+// M/D/YY H:MM am|pm ... </em></span> line. If the markup or URL ever changes
+// shape this must degrade to null, never to a wrong color.
 //
 // COLOR / FLOOR MAPPING (dangerous-conditions closure, hazard axis only):
 //   status "Open"                                              -> green
@@ -17,7 +16,7 @@
 //      dangerous surf/conditions, high surf)
 //   status "Closed" AND reason mentions a WATER-QUALITY keyword -> null
 //     (e.coli, bacteria, water quality, advisory — that signal belongs to
-//      the separate src/wqFloor raise-only mechanism, NOT this registry)
+//      the separate src/wqFloor raise-only mechanism, not this registry)
 //   status "Closed" for any other/unrecognized reason           -> null
 //     (season, maintenance, staffing, or anything we cannot confirm)
 //   unrecognized/missing status, or markup we cannot parse      -> null
@@ -25,7 +24,7 @@
 // KNOWN AMBIGUITY: the generic "advisory" water-quality keyword can collide
 // with a hazard product NAME that happens to include the word "advisory"
 // (e.g. an NWS "High Surf Advisory" quoted verbatim in the closure reason).
-// Per the never-a-wrong-color rule the water-quality check runs FIRST, so
+// Per the never-a-wrong-color rule the water-quality check runs first, so
 // such a reason degrades to null (no site) rather than red. That is the
 // safe-fail direction (a missed red beats a red asserted from an
 // unconfirmed reading), but it does mean a hazard closure phrased with the
@@ -50,7 +49,7 @@ import { fetchText, perBeachResult, containsAny } from "./util.js";
 
 export const TOWER_BEACH_URL =
   "https://rainoutline.com/search/extension/8475633131/9";
-export const TOWER_BEACH_LABEL = "Winnetka Park District";
+const TOWER_BEACH_LABEL = "Winnetka Park District";
 
 export const TOWER_BEACH_SITE_ID = "tower-road-beach";
 const TOWER_BEACH_NAMES = ["tower road"];
@@ -226,11 +225,11 @@ export const winnetkaTowerBeach = {
   // am|pm" line, which rainoutline.com stamps when a park-district staffer
   // POSTS a status change — a status-change time, not a page-regeneration time,
   // and nothing ever advances it automatically. Evidence (all Winnetka beach
-  // extensions on 8475633131, sampled 2026-07-23T02:31Z): ext 6/7/8/9 were all
-  // stamped 7/21/26 4:43-4:46 pm — one human batch posting — and were still
-  // unchanged ~29 h later while the posted status was accurate and current; the
-  // site itself renders that as "Updated yesterday". Dormant extensions on the
-  // same account carry untouched 2019-2021 stamps, confirming there is no
+  // extensions on 8475633131): several were stamped within minutes of each other
+  // by one human batch posting and were still unchanged ~29 h later while the
+  // posted status was accurate and current; the site itself renders that as
+  // "Updated yesterday". Dormant extensions on the same account carry stamps years
+  // old, confirming there is no
   // auto-refresh. 72 h covers the worst realistic in-season gap (a
   // Friday-afternoon post read Monday morning is ~63 h) while still warning once
   // a swim-season posting has gone unattended for more than a long weekend —
@@ -250,10 +249,9 @@ export const winnetkaTowerBeach = {
     return inTowerBeachBbox(beach);
   },
   scrape: async function (nowIso) {
-    // NOTE: URL/shape confirmed live via curl on 2026-07-22 — the response
-    // is plain server-rendered HTML with no auth/bot wall observed. If this
-    // ever starts requiring auth or renders differently, fetchText's
-    // ok-check / parseTowerBeachStatus's regex both fail closed to null.
+    // The response is plain server-rendered HTML with no auth or bot wall. If
+    // that ever changes, fetchText's ok-check and parseTowerBeachStatus's regex
+    // both fail closed to null.
     const text = await fetchText(TOWER_BEACH_URL, {
       logPrefix: "winnetkaTowerBeach: fetch failed"
     });

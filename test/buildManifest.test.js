@@ -1,29 +1,23 @@
-// Tests for scripts/build-manifest.js — the BUILD-SIDE GATE of contract 5.3,
-// which is the primary defence against mass deletion. The module's entrypoint is
-// guarded by import.meta.main (falsy under vitest/node), so importing the pure
-// exports is safe: no Deno access, no subprocess, no file system.
+// Tests for scripts/build-manifest.js, the build-side gate that is the primary
+// defence against mass deletion. Importing its pure exports touches no Deno, no
+// subprocess and no file system.
 //
-// Every fixture is built in memory from readable primitives via one named helper
-// per artifact kind (a layer measurement, a manifest, a floors file, an ogrinfo
-// dump), each with explicit MALFORMATION knobs, because the failure this file
-// exists to catch is a gate that waves through a half-built layer set. Roughly
-// half the budget goes to the refusals rather than the happy path, for the same
-// reason scripts/lib/fgbReader.js spends its budget on the corrupt-artifact
-// paths: a pipeline that half-passes is how you silently zero a layer.
+// Every fixture is built in memory by one named helper per artifact kind, each
+// carrying explicit malformation knobs rather than being hand-corrupted per
+// test, because the failure this file exists to catch is a gate that waves
+// through a half-built layer set. Roughly half the budget goes to the refusals
+// rather than the happy path: a pipeline that half-passes is how you silently
+// zero a layer.
 
 import { describe, it, expect } from "vitest";
 import { EXPECTED_LAYER_KEYS, LAYER_SCHEMA_VERSION } from "../src/layerManifest.js";
 import { GREAT_LAKE_QIDS } from "../src/waterClass.js";
 import {
   BUILD_SHRINK_MIN_RATIO,
-  BUILD_BYTES_MIN_RATIO,
-  BUILD_GROWTH_WARN_RATIO,
-  BUILD_DECAY_MIN_RATIO,
   REGION_FLOOR_MIN,
   HISTORY_RETAIN,
   REQUIRED_LAYER_FIELDS,
   REGION_LAYER_NAMES,
-  REGION_COUNT_FIELDS,
   UNCLIPPED_LAYER_KEYS,
   parseOgrinfoLayer,
   lakesWikidataFrom,
@@ -215,7 +209,7 @@ describe("parseOgrinfoLayer", () => {
 });
 
 describe("lakesWikidataFrom", () => {
-  // ogrinfo -json is SUMMARY ONLY (measured: it emits no features array at any
+  // ogrinfo -json is summary only (measured: it emits no features array at any
   // verbosity), so the six QIDs are read with the pipeline's own FlatGeobuf
   // reader instead — which also brings that reader's truncation trip-wire to
   // bear on the one layer with no clip-layers.js sidecar to cross-check.
@@ -267,7 +261,7 @@ describe("aggregateRegionCounts", () => {
 });
 
 describe("regionCountsToManifest / regionCountsFromManifest", () => {
-  it("round-trips through the manifest field names of contract 5.1", () => {
+  it("round-trips through the manifest field names", () => {
     const logical = { "beaches": 1487, "parks-polygon": 3120, "parks-line": 214,
       "coastline": 0, "water": 9022, "other-relations": 31 };
     const flat = regionCountsToManifest(logical);
@@ -288,7 +282,7 @@ describe("regionCountsToManifest / regionCountsFromManifest", () => {
   });
 });
 
-// --- Level 1: floors keyed by regionsDigest (D20/MJ-10) --------------------------------
+// --- Level 1: floors keyed by regionsDigest ------------------------------------
 
 describe("floorsEntryFor", () => {
   it("returns the seeded entry and allows auto-publish", () => {
@@ -298,7 +292,7 @@ describe("floorsEntryFor", () => {
     expect(result.reason).toBe(null);
   });
 
-  // The MJ-10 property: appending a Pacific box changes the digest, the new
+  // Appending a Pacific box changes the digest, so the new
   // footprint has NO entry here, and the pointer is withheld until a human seeds
   // one — instead of silently mass-hiding every ocean beach.
   it("REFUSES to auto-publish a regionsDigest with no entry", () => {
@@ -348,13 +342,10 @@ describe("absoluteFloorRefusals", () => {
     expect(out[0].overridable).toBe(false);
   });
 
-  // The guard used to sit on parks-line, reasoning that named park ways exist
-  // unconditionally. That is an Overpass-era invariant: Overpass's way[leisure=park]
-  // [name] returns closed AND unclosed ways, while GDAL's lines layer holds only
-  // UNCLOSED ways (a closed area-tagged way is routed to multipolygons). The first
-  // real build measured parks-line 0 against parks-polygon 6457 and the refusal
-  // blocked an entirely correct build.
-  it("accepts a parks-line count of ZERO, which is legitimate for a GDAL layer set", () => {
+  // GDAL's lines layer holds only unclosed ways, because a closed area-tagged
+  // way is routed to the polygon layer, so a parks-line count of zero is
+  // legitimate where a parks-polygon count of zero is a hard refusal.
+  it("accepts a parks-line count of zero, which is legitimate for a GDAL layer set", () => {
     const layers = layerSet({ "parks-line.fgb": { featureCount: 0 } });
     const out = absoluteFloorRefusals(layerCountsOf(layers), { layers: {} });
     expect(out).toEqual([]);
@@ -431,7 +422,7 @@ describe("lakesIdentityRefusals", () => {
 
 // --- integrity: the sidecar cross-check and the schema assertion ------------------------
 
-describe("sidecarRefusals (MJ-7)", () => {
+describe("sidecarRefusals", () => {
   it("passes when every sidecar equals ogrinfo", () => {
     const layers = layerSet();
     expect(sidecarRefusals(layerCountsOf(layers), sidecarCountsOf(layers))).toEqual([]);
@@ -535,7 +526,7 @@ describe("schemaRefusals (m10/B3)", () => {
   });
 });
 
-// --- Level 2: per-REGION floors on EVERY clipped layer (BL-1) ----------------------------
+// --- Level 2: per-region floors on every clipped layer -------------------------
 
 describe("regionFloorRefusals", () => {
   it("passes a steady region", () => {
@@ -544,9 +535,9 @@ describe("regionFloorRefusals", () => {
     expect(regionFloorRefusals(current, previous, { regions: {} })).toEqual([]);
   });
 
-  // The BL-1 case: a 15% single-region PARKS regression is ~4-5% globally, so it
+  // A 15% single-region parks regression is ~4-5% globally, so it
   // passes a global ratio and a beaches-only per-region floor untouched — and
-  // park-origin rows are the ONLY delete candidates.
+  // park-origin rows are the only delete candidates.
   it("refuses a 15% single-region PARKS regression that a global ratio would pass", () => {
     const current = regionCounts({ "Lake Michigan": { "beaches": 1487, "parks-polygon": 2652,
       "parks-line": 214, "coastline": 0, "water": 9022, "other-relations": 31 } });
@@ -622,7 +613,7 @@ describe("shrinkRatioRefusals", () => {
   });
 
   // 0.95 and not 0.90: the build gate must always be strictly tighter than the
-  // 0.05 delete rail, so the build is always the FIRST refusal.
+  // 0.05 delete rail, so the build is always the first refusal.
   it("refuses at just under 0.95x and passes at just over", () => {
     const under = layerSet({ "beaches-polygon.fgb": { featureCount: 949 } });
     const over = layerSet({ "beaches-polygon.fgb": { featureCount: 951 } });
@@ -689,7 +680,7 @@ describe("regionShrinkRefusals", () => {
   });
 });
 
-// --- Level 3b: monotone decay against the OLDEST retained build (BL-3) ----------------------
+// --- Level 3b: monotone decay against the oldest retained build ----------------
 
 describe("decayRefusals", () => {
   // The check ratio-to-previous structurally cannot make. Lake Michigan
@@ -720,7 +711,7 @@ describe("decayRefusals", () => {
   });
 });
 
-// --- history (contract 5.1) --------------------------------------------------------------
+// --- history -------------------------------------------------------------------
 
 describe("historyEntryFor / buildHistory / oldestRetained", () => {
   it("describes a manifest by its layer counts and region tallies", () => {
@@ -804,7 +795,7 @@ describe("previousLayerIndex / previousRegionIndex", () => {
   });
 });
 
-// --- SHA256SUMS (MJ-11) ---------------------------------------------------------------
+// --- SHA256SUMS ----------------------------------------------------------------
 
 describe("sha256SumsText", () => {
   it("covers exactly the .fgb files, sorted, in sha256sum format", () => {
@@ -901,7 +892,7 @@ describe("parseArgs", () => {
 describe("evaluateGates", () => {
   // The sidecars are derived from whatever layers the override supplies, so a
   // test that moves a feature count is exercising the gate it names rather than
-  // tripping the MJ-7 cross-check by accident.
+  // tripping the sidecar cross-check by accident.
   function goodInput(overrides) {
     const over = overrides === undefined ? {} : overrides;
     const layers = over.layers === undefined ? layerSet() : over.layers;
@@ -929,7 +920,7 @@ describe("evaluateGates", () => {
   });
 
   // Level 4. Build 1 has no previous manifest: the ratio checks are skipped, the
-  // absolute floors still apply, and the pointer is NOT written automatically.
+  // absolute floors still apply, and the pointer is not written automatically.
   it("skips every ratio on a bootstrap build and withholds auto-publish", () => {
     const verdict = evaluateGates(goodInput({
       previousManifest: null,

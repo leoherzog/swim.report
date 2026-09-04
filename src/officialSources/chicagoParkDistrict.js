@@ -9,46 +9,40 @@
 //   { title, type, nid, date_1, date (unix seconds string), parent (beach
 //     name, sometimes with a trailing space), weight, flag, url, description }.
 //
-// Two product hazards this parser must defend against (both would surface a
-// WRONG official color, the worst possible bug):
-//   1. Stale prior-season rows are mixed in — an individual (beach, category)
-//      record can be ~1 year old while its siblings are fresh. We keep only the
-//      newest record per beach AND hard-discard it if older than 36 hours.
+// Two hazards this parser defends against, both of which would surface a wrong
+// official color:
+//   1. Stale prior-season rows are mixed in: an individual (beach, category)
+//      record can be a year old while its siblings are fresh. Only the newest
+//      record per beach is kept, and it is discarded outright past 36 hours.
 //   2. "Red Afterhours - Swimming Prohibited" is CPD's blanket nightly
-//      no-lifeguard closure that fires at every beach outside 11am-7pm — it is
-//      a closure, not a hazard signal. We still report it as red (swimming IS
-//      prohibited) but the reason string preserves the after-hours distinction
+//      no-lifeguard closure, firing at every beach outside 11am-7pm. It is a
+//      closure, not a hazard signal, so it is still reported red — swimming is
+//      prohibited — but the reason string preserves the after-hours distinction
 //      so it is never conflated with a genuine daytime hazard ban.
 //
-// Each beach carries THREE category rows: Surf Conditions (the real-time
-// hazard flag), Weather, and Water Quality (bacteria). These rows disagree and
-// carry independent timestamps. Water Quality is frequently the FRESHEST row
-// while reading "Green", even while the Surf/Weather rows say
-// "Red Afterhours - Swimming Prohibited". Picking the single newest row per
-// beach would therefore report an official GREEN for a beach where swimming is
-// prohibited — the worst possible bug. Instead we take the MOST SEVERE color
-// among the beach's fresh rows (double-red > red > yellow > green): a "green"
-// water-quality row can never override a "red" surf row, so we never
-// under-report a hazard. Over-reporting (a bacteria red while surf is green) is
-// safe and honest for a hazard product that must never emit a wrong green.
+// The three category rows per beach disagree and carry independent timestamps.
+// Water Quality is frequently the freshest while reading "Green" even when the
+// Surf and Weather rows say "Red Afterhours - Swimming Prohibited", so picking
+// the single newest row would report an official green for a beach where
+// swimming is prohibited. Instead the most severe color among the beach's fresh
+// rows wins (double-red > red > yellow > green): a green water-quality row can
+// never override a red surf row. Over-reporting, a bacteria red while surf is
+// green, is the safe direction for a product that must never emit a wrong green.
 //
-// CATEGORY-AWARE STALENESS (the residual false-green path): most-severe-wins
-// protects a fresh RED surf row, but not a STALE one. If a beach's Surf row
-// goes >36h stale (dropped by the per-row gate) while its Water Quality row
-// stays fresh and green, most-severe among the survivors is that lone green —
-// a false official green for a beach whose actual surf state is unknown. So a
-// beach may report GREEN only when its OWN Surf/flag row is fresh and
-// classifiable. A fresh green Water Quality (or Weather) row alone, with the
-// Surf row stale or missing, yields NO DATA for that beach rather than green.
-// Red/yellow/double-red resolutions keep the plain most-severe gate — those are
-// the safe direction. We always fail toward no-data, never toward a wrong color.
+// Most-severe-wins protects a fresh red surf row but not a stale one. If a
+// beach's Surf row goes stale while its Water Quality row stays fresh and green,
+// the most severe survivor is that lone green — a false official green for a
+// beach whose surf state is unknown. So a beach may report green only when its
+// own Surf row is fresh and classifiable; a fresh green Water Quality or Weather
+// row alone yields no data for that beach. Red, yellow and double-red keep the
+// plain most-severe gate, which is the safe direction.
 
 import { fetchText, FLAG_SEVERITY, perBeachResult } from "./util.js";
 
 export const CHICAGO_FLAG_STATUS_URL =
   "https://www.chicagoparkdistrict.com/flag-status";
 
-export const CHICAGO_PROGRAM_LABEL =
+const CHICAGO_PROGRAM_LABEL =
   "Chicago Park District Beach Flag Program";
 
 // The endpoint returns 200 to a browser-like User-Agent; Workers' fetch sends
@@ -58,7 +52,7 @@ export const CHICAGO_USER_AGENT =
 
 // Records whose newest timestamp is older than this (relative to nowIso) are
 // treated as stale prior-season leftovers and dropped.
-export const CHICAGO_MAX_AGE_HOURS = 36;
+const CHICAGO_MAX_AGE_HOURS = 36;
 
 // Build the ?q= cachebust from the digits of nowIso — deterministic, and never
 // reads the wall clock.
@@ -96,7 +90,7 @@ function classifyFlag(flag) {
   if (typeof flag !== "string" || flag.length === 0) {
     return null;
   }
-  // Double red = water fully closed, the most severe status. Checked FIRST so it
+  // Double red = water fully closed, the most severe status. Checked first so it
   // can never be down-graded to a plain "red" (or dropped to no-data, which
   // would let the beach fall back to a benign swim.report estimate — an
   // effective under-report of an official water-closed).
@@ -120,11 +114,10 @@ function classifyFlag(flag) {
   return null;
 }
 
-// True when a record is the beach's Surf Conditions (real-time hazard flag)
-// category — the only row that can justify a GREEN resolution. CPD labels the
-// category in both the title (" - Surf Conditions") and type fields; match
-// either defensively so a label change on one field still classifies. Weather
-// and Water Quality rows return false and can never, on their own, produce green.
+// True when a record is the beach's Surf Conditions category, the only row that
+// can justify a green resolution. CPD labels the category in both the title
+// (" - Surf Conditions") and the type field; either matching is enough, so a
+// label change on one field still classifies.
 function isSurfCategory(record) {
   const title = typeof record.title === "string" ? record.title : "";
   const type = typeof record.type === "string" ? record.type : "";
@@ -142,16 +135,13 @@ function reasonForBeach(afterhours, parentTrimmed) {
     parentTrimmed;
 }
 
-// Pure, exported for tests. (text, nowIso) -> sites[] | null.
-// null only on malformed / non-array JSON or unparseable nowIso. Groups the
-// three category rows by trimmed parent, discards any INDIVIDUAL row older than
-// CHICAGO_MAX_AGE_HOURS relative to nowIso, and resolves each beach to the MOST
-// SEVERE color among its surviving fresh rows (so a fresh "green" water-quality
-// row can never override a "red" surf row). A beach with no fresh, confidently
-// classifiable row is omitted entirely — never assigned a guessed color. A beach
-// that resolves to GREEN is ALSO omitted unless its own Surf row is among the
-// fresh classified rows: a green resting only on a fresh Water Quality/Weather
-// row (Surf row stale or missing) is no-data, never a false official green.
+// Pure. (text, nowIso) -> sites[] | null; null only on malformed or non-array
+// JSON, or an unparseable nowIso. Groups the three category rows by trimmed
+// parent, discards any individual row older than CHICAGO_MAX_AGE_HOURS, and
+// resolves each beach to the most severe color among its surviving fresh rows. A
+// beach with no fresh, confidently classifiable row is omitted rather than given
+// a guessed color, and a beach resolving to green is omitted too unless its own
+// Surf row is among the fresh classified rows.
 export function parseChicagoFlags(text, nowIso) {
   let data;
   try {
@@ -228,11 +218,10 @@ export function parseChicagoFlags(text, nowIso) {
   const parents = Object.keys(byBeach);
   for (const parent of parents) {
     const entry = byBeach[parent];
-    // Category-aware staleness: a GREEN resolution is trustworthy only when the
-    // beach's own Surf/flag row is fresh. If green rests solely on a fresh Water
-    // Quality / Weather row while the Surf row is stale or missing, the real surf
-    // state is unknown — omit the beach (no data) rather than emit a false green.
-    // Yellow/red/double-red keep the plain gate: those are the safe direction.
+    // A green resolution is trustworthy only when the beach's own Surf row is
+    // fresh. If green rests solely on a fresh Water Quality or Weather row, the
+    // real surf state is unknown, so omit the beach rather than emit a false
+    // green. Yellow, red and double-red keep the plain gate.
     if (entry.color === "green" && !entry.hasFreshSurf) {
       continue;
     }

@@ -1,12 +1,7 @@
-// Tests for scripts/clip-layers.js — the build-side region filter (predicate A)
-// and proximity clip (predicate B). The module's entrypoint is guarded by
-// import.meta.main (falsy under vitest/node), so importing the pure exports is
-// safe: no Deno access, no file system, no subprocess.
-//
-// Every fixture here is built in memory from readable primitives — plain bounds
-// records and tag bags — with explicit malformation knobs, because the failure
-// this file exists to catch is a predicate that silently keeps or drops the
-// wrong half of a continent.
+// Tests for scripts/clip-layers.js, the build-side region filter (predicate A)
+// and proximity clip (predicate B). Importing its pure exports touches no Deno,
+// no file system and no subprocess. The failure this file exists to catch is a
+// predicate that silently keeps or drops the wrong half of a continent.
 
 import { describe, it, expect } from "vitest";
 import { REGIONS } from "../src/regions.js";
@@ -233,7 +228,7 @@ describe("proximityKeep (predicate B)", () => {
   });
 });
 
-// --- attribute predicates (the -where column of contract 1.4) ---------------------
+// --- attribute predicates (the -where column of the layer plan) ----------------
 
 describe("attribute predicates", () => {
   it("isBeachTags matches natural=beach OR leisure=beach_resort", () => {
@@ -311,7 +306,7 @@ describe("LAYER_PLAN", () => {
 // --- serialization ------------------------------------------------------------------
 
 describe("layerPropertyKeys / toGeoJsonFeature", () => {
-  it("emits every field contract 1.4 says the consumer branches on", () => {
+  it("emits every field the consumer branches on", () => {
     for (const entry of LAYER_PLAN) {
       const keys = layerPropertyKeys(entry);
       for (const field of PUBLISHED_LAYER_FIELDS[entry.key]) {

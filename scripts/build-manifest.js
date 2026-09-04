@@ -1,4 +1,4 @@
-// scripts/build-manifest.js — THE BUILD-SIDE GATE (contract section 5.3).
+// scripts/build-manifest.js — the build-side gate (PLAN.md section 5).
 //
 // Runs on Deno as the last step of .github/workflows/build-layers.yml before
 // anything is uploaded:
@@ -10,136 +10,91 @@
 //     --allow-shrink "$ALLOW_SHRINK" --counts "$WORK/clipped" \
 //     --relation-warnings "$REL_ASSEMBLY_WARNINGS" --out "$WORK/layers/manifest.json"
 //
-// It shells ogrinfo for the exact feature count AND schema of every published
-// layer, hashes every .fgb, applies the Level 1-4 gates of contract 5.3, and
-// either writes manifest.json plus SHA256SUMS or EXITS 1 with a specific reason.
+// It shells ogrinfo for the exact feature count and schema of every published
+// layer, hashes every .fgb, applies the Level 1-4 gates, and either writes
+// manifest.json plus SHA256SUMS or exits 1 with a specific reason.
 //
-// THIS IS THE PRIMARY DEFENCE AGAINST MASS DELETION, and it sits UPSTREAM of the
+// This is the primary defence against mass deletion and sits upstream of the
 // delete rail on purpose. scripts/discovery-batch.js's proportional rail
-// (RECONCILE_MAX_DELETE_FRACTION, 0.05) is the LAST line of defence; every
-// threshold here is strictly tighter than it, so any regression large enough to
-// reach the delete path has already been refused right here. A refused build
-// fails SAFE: nothing is uploaded, the pointer stays on the last good set, and
-// discovery keeps running on slightly older OSM data — which is delete-safe,
-// because an older extract is OVER-inclusive.
+// (RECONCILE_MAX_DELETE_FRACTION, 0.05) is the last line of defence; every
+// threshold here is strictly tighter than it, so a regression large enough to
+// reach the delete path has already been refused here. A refused build fails
+// safe: nothing is uploaded, the pointer stays on the last good set, and
+// discovery keeps running on slightly older OSM data, which is delete-safe
+// because an older extract is over-inclusive.
 //
-// WHAT REVISION 2 CHANGED, AND WHY EACH ONE MATTERS (do not "simplify" these
-// back):
-//
-//   * NO ABSOLUTE FLOOR IS EVER A CONTINENTAL MEASUREMENT. Revision 1's headline
-//     floor (beaches >= 60,000) was measured over a North America bbox and then
-//     applied to a Great-Lakes-only mask measuring ~4,031 raw elements. It was
-//     either a day-one hard refusal that makes the pipeline unpublishable or —
-//     if the union rectangle's interior surplus cleared it — a floor satisfied
-//     entirely by inland-lake beaches, passing a build in which every Great
-//     Lakes shoreline beach is missing. A floor whose basis is a different
-//     bounding box than the mask is not a floor. Every floor now lives in
-//     data/layer-floors.json, SEEDED FROM BUILD 1 UNDER THE PUBLISHED MASK and
-//     KEYED BY regionsDigest.
-//
-//   * A regionsDigest WITH NO FLOORS ENTRY REFUSES TO AUTO-PUBLISH (D20/MJ-10).
-//     That is what turns "remember to add a coastline floor when the first
-//     saltwater box lands" from prose into a build-time behaviour: appending a
-//     Pacific box changes the digest, the new footprint has no entry, and the
-//     pointer is withheld until a human seeds one. Without it, the first build
-//     after that commit would silently mass-hide every ocean beach.
-//
-//   * BUILD FLOORS ARE 0.95x, NOT 0.90x. The build gate must always be strictly
-//     tighter than the delete rail so the build is always the FIRST refusal.
-//
-//   * THE MONOTONE-DECAY CHECK (Level 3b) EXISTS BECAUSE RATIO-TO-PREVIOUS
-//     STRUCTURALLY CANNOT CATCH A SLOW BLEED. A regression removing 20% of a
-//     region's features per build passes every ratio-to-previous check forever:
-//     523 -> 418 -> 335 -> ... reaches double digits inside three months with
-//     60-80 silent DELETEs a week and not one refusal. So current counts are
-//     ALSO compared against the OLDEST RETAINED build in manifest.history.
-//
-//   * PER-REGION FLOORS COVER PARKS, NOT JUST BEACHES (BL-1). The delete
-//     candidate set is EXCLUSIVELY park-origin rows, and producing those rows
-//     requires the parks layers. A 15% single-region parks regression is ~4-5%
-//     globally: it passes a global ratio, passes a beaches-only per-region
-//     floor untouched, and lands ~45 deletes in Lake Michigan.
-//
-// PURITY. Every gate is a pure exported function over plain data — no file
-// system, no subprocess, no clock — so all of it is unit-tested in
+// Every gate is a pure exported function over plain data — no file system, no
+// subprocess, no clock — so all of it is unit-tested in
 // test/buildManifest.test.js. main() does the I/O and calls them. Deno is
 // reached through globalThis so importing this module under vitest is legal.
-//
-// Project style: ES modules, const/let only, string concatenation with + (never
-// template literals), console for logging.
 
 import { EXPECTED_LAYER_KEYS, LAYER_SCHEMA_VERSION, regionsDigestInput } from "../src/layerManifest.js";
 import { REGIONS } from "../src/regions.js";
 import { GREAT_LAKE_QIDS } from "../src/waterClass.js";
 import { readFgbStream } from "./lib/fgbReader.js";
 
-// --- gate constants (contract 5.3) ---------------------------------------------
+// --- gate constants ------------------------------------------------------------
 
-// Level 3 / Level 2 ratio against the PREVIOUS accepted manifest. 0.95 and not
-// 0.90: the build gate must refuse strictly before the delete rail can fire.
+// Level 3 / Level 2 ratio against the previous accepted manifest. It is strictly
+// tighter than the delete rail, so the build is always the first refusal.
 export const BUILD_SHRINK_MIN_RATIO = 0.95;
 
-// Byte size ratio. Looser than the count ratio on purpose — FlatGeobuf packing
-// and Hilbert ordering make byte size legitimately noisier than feature count —
-// but it catches the one thing the count cannot: a truncated write carrying a
-// plausible header count.
+// Byte size ratio, looser than the count ratio because FlatGeobuf packing and
+// Hilbert ordering make byte size legitimately noisier. It catches the one thing
+// the count cannot: a truncated write carrying a plausible header count.
 export const BUILD_BYTES_MIN_RATIO = 0.80;
 
-// Growth WARNS rather than refuses because the consequences are asymmetric:
-// extra features cause extra UPSERTs, which are idempotent and self-correcting,
-// while missing features cause DELETEs, which are not.
+// Growth warns rather than refuses because the consequences are asymmetric: extra
+// features cause extra UPSERTs, which are idempotent and self-correcting, while
+// missing features cause DELETEs, which are not.
 export const BUILD_GROWTH_WARN_RATIO = 1.50;
 
-// Level 3b, against the OLDEST retained build. Looser per step than the 0.95
-// ratio-to-previous because it spans up to eight builds; the point is not
-// sensitivity to one build, it is that a decay which is invisible step by step
-// becomes visible across the window.
+// Level 3b, against the oldest retained build. It exists because a
+// ratio-to-previous check structurally cannot see a slow bleed: a regression
+// removing a fifth of a region's features per build passes every step-to-step
+// comparison forever while deleting rows every week. Looser per step than
+// BUILD_SHRINK_MIN_RATIO because it spans up to eight builds.
 export const BUILD_DECAY_MIN_RATIO = 0.85;
 
-// Level 2's absolute minimum per region per layer. The tail is tiny — Niagara
-// has 7 rows — so a floor of 3 keeps a one- or two-polygon mapper edit in the
-// smallest regions from being read as a regression by the ratio alone.
+// Level 2's absolute minimum per region per layer. The tail is single-digit, so
+// this keeps a one- or two-polygon mapper edit in the smallest regions from
+// reading as a regression by the ratio alone.
 //
-// IT IS CLAMPED TO THE PREVIOUS COUNT (see regionFloorRefusals). Contract 5.3
-// writes the rule as max(3, floor(0.95 * previous)), and taken literally that
-// INVERTS its own stated purpose for any region/layer with fewer than three
-// features: an unchanged region of 1 would be required to reach 3 and would
-// refuse every build forever. Measured against real data on the first end-to-end
-// run of this script — six region/layer pairs refused with "1 is below max(3,
-// floor(0.95 * 1)) = 3" while nothing had changed at all. Region/layer pairs
-// that small are ordinary here (coastline is legitimately zero-to-tiny at Great
-// Lakes scope, and Niagara River carries single digits), so the 3 is applied as
-// a RELAXATION of the ratio, never as a requirement to grow. Nothing is loosened
-// above previous = 3, and the Level 3 region-shrink and Level 3b decay checks
-// still apply to the tail unchanged.
+// It is clamped to the previous count (see regionFloorRefusals). Read literally,
+// max(3, floor(0.95 * previous)) inverts its own purpose for any region/layer
+// under three features: an unchanged region of 1 would be required to reach 3 and
+// would refuse every build forever. Region/layer pairs that small are ordinary
+// here, so the 3 is a relaxation of the ratio, never a requirement to grow.
+// Nothing is loosened above previous = 3, and the Level 3 region-shrink and Level
+// 3b decay checks still apply to the tail unchanged.
 export const REGION_FLOOR_MIN = 3;
 
-// Rolling window carried forward in manifest.history. Eight is ~one month of
-// twice-weekly builds, and it is what makes Level 3b possible without N extra
-// R2 fetches.
+// Rolling window carried forward in manifest.history: about a month of
+// twice-weekly builds, which is what makes Level 3b possible without N extra R2
+// fetches.
 export const HISTORY_RETAIN = 8;
 
-// The ratio a human uses when SEEDING data/layer-floors.json from build 1. Not
-// applied by this script (seeding is a reviewed commit, never automatic) — it
-// lives here so the number is stated once, next to the gates it feeds.
+// The ratio a human uses when seeding data/layer-floors.json from build 1. Not
+// applied by this script, since seeding is a reviewed commit; it lives here so
+// the number is stated once, next to the gates it feeds.
 export const FLOOR_SEED_RATIO = 0.75;
 
-// The fields the CONSUMER branches on, per published layer — the "fields" column
-// of contract 1.4, asserted against ogrinfo's reported schema.
+// The fields the consumer branches on, per published layer, asserted against
+// ogrinfo's reported schema.
 //
-// WHY THIS IS A HARD REFUSAL (m10/B3). GDAL's GeoJSON schema inference scans
+// A missing field is a hard refusal. GDAL's GeoJSON schema inference scans
 // features and creates only the fields it sees, so a field absent from the early
 // features of a GeoJSONSeq file is silently dropped from the published layer. A
-// dropped "wikidata" is the silent mass-hide of every Great Lakes beach
-// (src/waterClass.js matches shoreline by QID); a dropped "natural" is the same
-// for the coastline and pond-evidence branches of src/layerSignals.js. Neither
-// shows up as an error anywhere — the layer parses, the counts look right, and
-// the classification simply decides "inland" for everything.
+// dropped "wikidata" mass-hides every Great Lakes beach, since src/waterClass.js
+// matches shoreline by QID; a dropped "natural" does the same to the coastline
+// and pond-evidence branches of src/layerSignals.js. Neither shows up as an
+// error: the layer parses, the counts look right, and the classification decides
+// "inland" for everything.
 //
-// This table is DUPLICATED in scripts/clip-layers.js, deliberately: that script
-// is the PRODUCER and this one is the GATE, and a gate that imported its
-// expectations from the thing it gates would be checking the producer against
-// itself. Both copies cite contract 1.4 and both must move together.
+// This table is duplicated in scripts/clip-layers.js deliberately. That script is
+// the producer and this one is the gate, and a gate importing its expectations
+// from the thing it gates would be checking the producer against itself. Both
+// copies must move together.
 export const REQUIRED_LAYER_FIELDS = {
   "beaches-point.fgb": ["osm_id", "name", "loc_name", "natural", "leisure"],
   "beaches-line.fgb": ["osm_id", "name", "loc_name", "natural", "leisure"],
@@ -162,7 +117,7 @@ export const UNCLIPPED_LAYER_KEYS = ["lakes-polygon.fgb"];
 // published layers that feed each. These names are the ones committed in
 // data/layer-floors.json regions[<name>]; the manifest emits the same tallies
 // under the field names of REGION_COUNT_FIELDS.
-export const REGION_LAYER_SOURCES = {
+const REGION_LAYER_SOURCES = {
   "beaches": ["beaches-point", "beaches-line", "beaches-polygon"],
   "parks-polygon": ["parks-polygon"],
   "parks-line": ["parks-line"],
@@ -173,9 +128,9 @@ export const REGION_LAYER_SOURCES = {
 
 export const REGION_LAYER_NAMES = Object.keys(REGION_LAYER_SOURCES);
 
-// Logical region-layer name -> the manifest.regions[] field name of contract
-// 5.1. Two vocabularies exist because the floors file is keyed by layer and the
-// manifest region entry is a flat record; this table is the only place they meet.
+// Logical region-layer name -> manifest.regions[] field name. Two vocabularies
+// exist because the floors file is keyed by layer and the manifest region entry
+// is a flat record; this table is the only place they meet.
 export const REGION_COUNT_FIELDS = {
   "beaches": "beachCount",
   "parks-polygon": "parkPolyCount",
@@ -197,13 +152,11 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// Every gate speaks this shape. overridable says whether --allow-shrink may
-// demote it to a warning: COUNT-SHRINK refusals may (that is what the flag is
-// for, "a KNOWN legitimate shrink"), INTEGRITY and IDENTITY refusals may NOT.
-// A torn GeoJSONSeq tail, a dropped schema field or a lakes layer that is not
-// the six Great Lakes are not "a legitimate shrink" under any circumstances, and
-// a flag an operator reaches for during an incident must not be able to wave
-// them through.
+// Every gate speaks this shape. overridable says whether --allow-shrink may demote
+// it to a warning: count-shrink refusals may, integrity and identity refusals may
+// not. A torn GeoJSONSeq tail, a dropped schema field or a lakes layer that is not
+// the six Great Lakes is never a legitimate shrink, and a flag an operator reaches
+// for during an incident must not wave them through.
 function refusal(check, subject, message, overridable) {
   return {
     check: check,
@@ -225,9 +178,8 @@ function ratioText(current, previous, ratio) {
 // Parsed here rather than in main() so the whole schema/count gate is testable
 // against captured GDAL output with no GDAL on the machine.
 //
-// Throws rather than returning a default on anything unexpected. An ogrinfo
-// output this code cannot read is an artifact it cannot vouch for, and the one
-// outcome worse than refusing is guessing a feature count.
+// Throws rather than defaulting on anything unexpected: the one outcome worse than
+// refusing is guessing a feature count.
 export function parseOgrinfoLayer(text, what) {
   let parsed = null;
   try {
@@ -267,15 +219,12 @@ export function parseOgrinfoLayer(text, what) {
 
 // The wikidata QID carried by each record of the lakes layer.
 //
-// MEASURED: ogrinfo -json is SUMMARY ONLY — it emits no "features" array at any
-// verbosity, so attribute VALUES cannot be read from it. Rather than adding a
-// second tool invocation with its own text format to parse, the six values are
-// read with scripts/lib/fgbReader.js, the very reader the discovery batch will
-// use on this artifact. That makes the identity check an end-to-end property
-// ("the pipeline's own reader can decode this published file and finds exactly
-// the six Great Lakes") and it brings the reader's own truncation trip-wire —
-// decoded count versus the header's declared featuresCount — to bear on the ONE
-// layer that has no clip-layers.js sidecar to cross-check against.
+// ogrinfo -json is summary only and emits no "features" array at any verbosity,
+// so attribute values cannot be read from it. The six values are read instead with
+// scripts/lib/fgbReader.js, the same reader the discovery batch uses on this
+// artifact, which makes the identity check an end-to-end property and brings the
+// reader's truncation trip-wire to bear on the one layer that has no
+// clip-layers.js sidecar to cross-check against.
 export function lakesWikidataFrom(records) {
   const out = [];
   const list = Array.isArray(records) ? records : [];
@@ -289,12 +238,11 @@ export function lakesWikidataFrom(records) {
 
 // --- sidecar aggregation (pure) --------------------------------------------------
 
-// clip-layers.js writes one <layer>.count sidecar per clipped layer, carrying
-// the global kept count AND the per-REGION envelope tallies. Those tallies are
-// the only per-region counts in the pipeline: this script has ogrinfo but no
-// geometry, so it cannot compute them itself. The global count IS independently
-// cross-checked against ogrinfo below (MJ-7), and a torn tail would fail that
-// equality before any per-region number could matter.
+// clip-layers.js writes one <layer>.count sidecar per clipped layer, carrying the
+// global kept count and the per-region envelope tallies. Those tallies are the
+// only per-region counts in the pipeline: this script has ogrinfo but no geometry.
+// The global count is cross-checked against ogrinfo below, and a torn tail fails
+// that equality before any per-region number could matter.
 export function aggregateRegionCounts(sidecars, regionNames) {
   const names = Array.isArray(regionNames) ? regionNames : [];
   const out = {};
@@ -333,9 +281,8 @@ export function regionCountsToManifest(byLogical) {
 
 // The inverse, for reading a previous manifest's regions[] entry or a history
 // entry back into the logical vocabulary the gates speak. A missing field comes
-// back as null (NOT zero): "the previous build did not record this" and "the
-// previous build recorded zero" must not be conflated, because the first must
-// skip the ratio and the second must fail it.
+// back as null, never zero: "the previous build did not record this" must skip the
+// ratio where "the previous build recorded zero" must fail it.
 export function regionCountsFromManifest(entry) {
   const out = {};
   for (let i = 0; i < REGION_LAYER_NAMES.length; i = i + 1) {
@@ -349,14 +296,14 @@ export function regionCountsFromManifest(entry) {
 // --- Level 1: absolute floors and identity ---------------------------------------
 
 // The floors entry for this footprint, plus whether the pointer may be written
-// automatically (D20/MJ-10).
+// automatically.
 //
-// A MISSING DIGEST IS NOT A BUILD FAILURE — it is a refusal to AUTO-PUBLISH. The
+// A missing digest is not a build failure, it is a refusal to auto-publish. The
 // build still produces and uploads an immutable prefix, so a human can read the
 // manifest and seed the floors from it; what it must not do is quietly make an
-// ungated footprint live. status "bootstrap" is treated the same way, and the
-// floors file says so in its own words: "status bootstrap is NOT a licence to
-// auto-publish".
+// ungated footprint live. Appending a region box changes the digest, so the first
+// build after that commit withholds the pointer instead of mass-hiding every
+// beach in the new box. status "bootstrap" is treated the same way.
 export function floorsEntryFor(floorsFile, regionsDigest) {
   const floors = isPlainObject(floorsFile) && isPlainObject(floorsFile.floors)
     ? floorsFile.floors
@@ -384,14 +331,9 @@ export function floorsEntryFor(floorsFile, regionsDigest) {
   return { entry: entry, status: status, autoPublishAllowed: true, reason: null };
 }
 
-// Level 1. A null floor means NO FLOOR HAS BEEN SEEDED YET and the check does not
-// apply — deliberate and reviewable, where an invented number would either block
+// Level 1. A null floor means no floor has been seeded yet and the check does not
+// apply: deliberate and reviewable, where an invented number would either block
 // every build forever or bless a broken one.
-//
-// parks-line's ZERO rule is separate and unconditional: named park ways exist
-// unconditionally in this scope, so zero means the carve is broken, and the
-// visible consequence is unnamed beaches plus DELETED park-origin rows (982 of
-// 1669 rows are park-origin). It is NOT overridable.
 export function absoluteFloorRefusals(layerCounts, floorsEntry) {
   const out = [];
   const floors = isPlainObject(floorsEntry) && isPlainObject(floorsEntry.layers)
@@ -404,26 +346,15 @@ export function absoluteFloorRefusals(layerCounts, floorsEntry) {
       out.push(refusal("absolute-floor", key, "no feature count was measured", false));
       continue;
     }
-    // The hard zero refusal belongs on parks-POLYGON, not parks-line.
+    // The hard zero refusal belongs on parks-polygon, never on parks-line. GDAL
+    // routes a closed area-tagged way to the multipolygons layer, so a lines layer
+    // holds unclosed ways only; essentially every mapped Great Lakes park is closed
+    // or a relation, which makes parks-line legitimately empty.
     //
-    // It was originally on parks-line, reasoning that "named park ways exist
-    // unconditionally in this scope". That is an Overpass-era invariant and it does
-    // NOT survive the move to a GDAL-derived layer set. Overpass's way[leisure=park]
-    // [name] selector returns closed AND unclosed ways; GDAL's lines layer holds
-    // ONLY unclosed ways, because a closed way carrying an area tag is routed to
-    // multipolygons instead. Verified on GDAL 3.12.4: a closed named leisure=park
-    // way lands in multipolygons (as osm_way_id), an unclosed one lands in lines.
-    // Essentially every mapped Great Lakes park is closed or a relation, so
-    // parks-line is legitimately EMPTY (the first real build measured 0 against
-    // 6457 in parks-polygon) and the refusal blocked a correct build.
-    //
-    // parks-polygon is where the guard actually belongs. Park MEMBERSHIP is
-    // parks-polygon and nothing else (D7/M1 in src/layerDiscovery.js), membership is
-    // what produces park-origin rows, and park-origin rows are the ENTIRE
-    // delete-candidate set. parks-line feeds only parksName, which is naming-only
-    // and cannot move a row into or out of the delete set. So zero parks-polygon is
-    // the genuinely catastrophic case and had no hard refusal at all — on a
-    // bootstrap build its floor is null, so nothing would have caught it.
+    // parks-polygon is where the guard belongs. Park membership comes from
+    // parks-polygon alone, membership is what produces park-origin rows, and
+    // park-origin rows are the entire delete-candidate set. parks-line feeds only
+    // parksName, which cannot move a row into or out of the delete set.
     if (key === "parks-polygon.fgb" && count === 0) {
       out.push(refusal("parks-polygon-empty", key,
         "a parks-polygon count of ZERO is never legitimate — park MEMBERSHIP comes " +
@@ -443,12 +374,12 @@ export function absoluteFloorRefusals(layerCounts, floorsEntry) {
   return out;
 }
 
-// Level 1, the ONLY hardcoded absolute in the set, and the sharpest canary in it:
-// the six Great Lake relations are the largest and most reference-heavy objects
-// in the data, so if the GDAL node index broke, lakes-polygon.fgb goes empty
-// first. This is an IDENTITY — exactly six features carrying exactly these six
-// QIDs — not a heuristic, so it never moves with the mask and --allow-shrink can
-// never wave it through.
+// Level 1, the only hardcoded absolute in the set and the sharpest canary in it:
+// the six Great Lake relations are the largest and most reference-heavy objects in
+// the data, so a broken GDAL node index empties lakes-polygon.fgb first. This is
+// an identity — exactly six features carrying exactly these six QIDs — not a
+// heuristic, so it never moves with the mask and --allow-shrink cannot wave it
+// through.
 export function lakesIdentityRefusals(featureCount, wikidataValues, expectedQids) {
   const out = [];
   const expected = Array.isArray(expectedQids) ? expectedQids.slice() : Object.keys(GREAT_LAKE_QIDS);
@@ -475,14 +406,13 @@ export function lakesIdentityRefusals(featureCount, wikidataValues, expectedQids
   return out;
 }
 
-// --- integrity: sidecar cross-check and schema (MJ-7, m10/B3) ---------------------
+// --- integrity: sidecar cross-check and schema -----------------------------------
 
-// MJ-7. GeoJSONSeq is line-delimited and ogr2ogr on a truncated final line WARNS
-// and exits 0, silently dropping the tail — and because FlatGeobuf is
-// Hilbert-ordered, that tail is SPATIALLY CONTIGUOUS, which is precisely the
-// shape the proportional delete rails are worst at catching. So the count
-// clip-layers.js says it wrote and the count ogrinfo reads back must be EQUAL,
-// with no tolerance and no override.
+// GeoJSONSeq is line-delimited and ogr2ogr on a truncated final line warns and
+// exits 0, silently dropping the tail; because FlatGeobuf is Hilbert-ordered that
+// tail is spatially contiguous, which is the shape the proportional delete rails
+// are worst at catching. So the count clip-layers.js says it wrote and the count
+// ogrinfo reads back must be equal, with no tolerance and no override.
 export function sidecarRefusals(layerCounts, sidecarCounts) {
   const out = [];
   for (let i = 0; i < EXPECTED_LAYER_KEYS.length; i = i + 1) {
@@ -512,21 +442,19 @@ export function sidecarRefusals(layerCounts, sidecarCounts) {
   return out;
 }
 
-// m10/B3. See the REQUIRED_LAYER_FIELDS comment for why a missing field is a
-// silent mass-hide rather than a cosmetic problem.
+// See the REQUIRED_LAYER_FIELDS comment for why a missing field is a silent
+// mass-hide rather than a cosmetic problem.
 //
-// A layer with ZERO features is EXEMPT, and that exemption is not a loophole.
-// coastline-line.fgb is legitimately empty at Great Lakes scope (the lakes are
-// mapped as water relations, not natural=coastline ways), GDAL cannot infer a
-// field list from no features, and an empty layer contributes to no decision
-// downstream. An UNEXPECTEDLY empty layer is caught by the count gates instead —
-// the absolute floor, the 0.95x ratio and the decay check all fire on zero, and
-// parks-polygon and lakes-polygon each have their own hard zero refusal. (The
-// line layers — beaches-line, parks-line, water-line — and other-relations are
-// legitimately empty at Great Lakes scope for the same reason coastline-line is:
-// GDAL routes closed area-tagged ways to multipolygons, so only unclosed ways
-// reach a lines layer.) Asserting
-// a schema here would instead make the very first Great Lakes build fail.
+// A layer with zero features is exempt, and that exemption is not a loophole.
+// coastline-line.fgb is legitimately empty at Great Lakes scope, since the lakes
+// are mapped as water relations rather than natural=coastline ways; the line
+// layers and other-relations are legitimately empty for the same reason
+// coastline-line is, because GDAL routes closed area-tagged ways to multipolygons.
+// GDAL cannot infer a field list from no features, and an empty layer contributes
+// to no decision downstream. An unexpectedly empty layer is caught by the count
+// gates instead: the absolute floor, the ratio and the decay check all fire on
+// zero, and parks-polygon and lakes-polygon each have their own hard zero
+// refusal.
 export function schemaRefusals(layerFields, requiredFields, layerCounts) {
   const required = isPlainObject(requiredFields) ? requiredFields : REQUIRED_LAYER_FIELDS;
   const out = [];
@@ -563,14 +491,19 @@ export function schemaRefusals(layerFields, requiredFields, layerCounts) {
   return out;
 }
 
-// --- Level 2: per-REGION floors on EVERY clipped layer ---------------------------
+// --- Level 2: per-region floors on every clipped layer ---------------------------
 
-// regionLayerCount >= max(REGION_FLOOR_MIN, floor(0.95 * previous))
-//   AND regionLayerCount >= the seeded data/layer-floors.json floor.
+// regionLayerCount >= max(REGION_FLOOR_MIN, floor(BUILD_SHRINK_MIN_RATIO * previous))
+//   and regionLayerCount >= the seeded data/layer-floors.json floor.
 //
-// The ratio half is skipped when there is no previous build (bootstrap) or when
-// the previous build did not record that region/layer (a newly added region), so
-// a first build is never refused for having nothing to compare against.
+// These cover parks as well as beaches: the delete-candidate set is exclusively
+// park-origin rows, and a single-region parks regression is small enough globally
+// to pass a global ratio and a beaches-only per-region floor while landing dozens
+// of deletes in that one region.
+//
+// The ratio half is skipped when there is no previous build, or when the previous
+// build did not record that region/layer, so a first build is never refused for
+// having nothing to compare against.
 export function regionFloorRefusals(regionCounts, previousRegionCounts, floorsEntry) {
   const out = [];
   const seeded = isPlainObject(floorsEntry) && isPlainObject(floorsEntry.regions)
@@ -593,9 +526,9 @@ export function regionFloorRefusals(regionCounts, previousRegionCounts, floorsEn
       }
       const previousCount = isPlainObject(previous) ? previous[logical] : null;
       if (isFiniteNumber(previousCount) && previousCount > 0) {
-        // The clamp to previousCount is the correction described on
-        // REGION_FLOOR_MIN: the 3 relaxes the ratio for a tiny region, it never
-        // demands that a region GROW to three features.
+        // The clamp to previousCount is the rule described on REGION_FLOOR_MIN:
+        // the 3 relaxes the ratio for a tiny region, it never demands that a
+        // region grow to three features.
         const floor = Math.min(previousCount, Math.max(REGION_FLOOR_MIN,
           Math.floor(BUILD_SHRINK_MIN_RATIO * previousCount)));
         if (count < floor) {
@@ -629,9 +562,9 @@ export function shrinkRatioRefusals(layers, previousLayers) {
     const layer = list[i];
     const prior = previous[layer.key];
     if (!isPlainObject(prior)) {
-      // A layer the previous build did not describe (a layer added since) has
-      // nothing to compare against. Not a refusal; the absolute floors and the
-      // identity checks still apply to it.
+      // A layer the previous build did not describe has nothing to compare
+      // against. Not a refusal; the absolute floors and identity checks still
+      // apply to it.
       continue;
     }
     if (isFiniteNumber(prior.featureCount) && prior.featureCount > 0) {
@@ -654,12 +587,11 @@ export function shrinkRatioRefusals(layers, previousLayers) {
   return { refusals: refusals, warnings: warnings };
 }
 
-// Level 3's per-region half. Deliberately SEPARATE from regionFloorRefusals and
-// deliberately NOT redundant with it: Level 2 compares against
-// max(3, floor(0.95 * previous)) and this compares against 0.95 * previous
-// exactly, so for any previous count above 3 this one is strictly tighter (a
-// region of 7 falling to 6 clears floor(6.65) = 6 but not 6.65). Both are in the
-// contract, and folding them together would silently loosen one of them.
+// Level 3's per-region half, separate from regionFloorRefusals and not redundant
+// with it: Level 2 compares against max(3, floor(0.95 * previous)) and this
+// against 0.95 * previous exactly, so above a previous count of 3 this one is
+// strictly tighter — a region of 7 falling to 6 clears floor(6.65) = 6 but not
+// 6.65. Folding them together would silently loosen one of them.
 export function regionShrinkRefusals(regionCounts, previousRegionCounts) {
   const out = [];
   const regions = isPlainObject(regionCounts) ? regionCounts : {};
@@ -686,14 +618,14 @@ export function regionShrinkRefusals(regionCounts, previousRegionCounts) {
   return out;
 }
 
-// --- Level 3b: monotone decay against the OLDEST retained build ------------------
+// --- Level 3b: monotone decay against the oldest retained build ------------------
 
-// Every check above is a ratio to the PREVIOUS build, which permits an unbounded
-// slow bleed: a regression removing 20% of a region's features per build passes a
-// per-region floor, passes a global ratio, and lands 20% of that region's
-// candidates as deletes under the proportional rail — EVERY BUILD, FOREVER, with
-// not one refusal. This is the check a ratio-to-previous design structurally
-// cannot make, and it costs one carried-forward array.
+// Every check above is a ratio to the previous build, which permits an unbounded
+// slow bleed: a regression removing a fifth of a region's features per build
+// passes the per-region floor, passes the global ratio, and lands that fraction of
+// the region's candidates as deletes every build, forever, with no refusal. This
+// is the check a ratio-to-previous design structurally cannot make, and it costs
+// one carried-forward array.
 export function decayRefusals(layers, regionCounts, oldest) {
   const out = [];
   if (!isPlainObject(oldest)) {
@@ -739,10 +671,10 @@ export function decayRefusals(layers, regionCounts, oldest) {
   return out;
 }
 
-// --- history (contract 5.1) -------------------------------------------------------
+// --- history -----------------------------------------------------------------------
 
-// One history entry describing a manifest: its buildId, its per-layer global
-// counts and its per-region tallies in the LOGICAL vocabulary the gates speak.
+// One history entry describing a manifest: its buildId, its per-layer global counts
+// and its per-region tallies in the logical vocabulary the gates speak.
 export function historyEntryFor(manifest) {
   if (!isPlainObject(manifest)) {
     return null;
@@ -773,8 +705,8 @@ export function historyEntryFor(manifest) {
 
 // The rolling window this build carries forward: the previous manifest's own
 // history plus an entry describing the previous manifest itself, newest last,
-// capped at HISTORY_RETAIN. The CURRENT build is deliberately not in its own
-// history — the next build appends it.
+// capped at HISTORY_RETAIN. The current build is not in its own history; the next
+// build appends it.
 export function buildHistory(previousManifest, retain) {
   const cap = isFiniteNumber(retain) && retain > 0 ? Math.floor(retain) : HISTORY_RETAIN;
   if (!isPlainObject(previousManifest)) {
@@ -853,14 +785,13 @@ export function previousRegionIndex(previousManifest) {
 
 // Every gate, in one pure pass. main() supplies measurements; this decides.
 //
-// BOOTSTRAP (Level 4): with no previous manifest the ratio checks (Level 3, 3b
-// and the ratio half of Level 2) have nothing to compare against and are
-// SKIPPED, the absolute floors still apply, and the pointer must not be written
-// automatically.
+// Bootstrap: with no previous manifest the ratio checks have nothing to compare
+// against and are skipped, the absolute floors still apply, and the pointer must
+// not be written automatically.
 //
-// OVERRIDE (Level 4): --allow-shrink demotes the OVERRIDABLE refusals to
-// warnings and stamps sanity.overridden true, visible forever. It cannot touch
-// the integrity and identity refusals — see the comment on refusal().
+// Override: --allow-shrink demotes the overridable refusals to warnings and stamps
+// sanity.overridden true, visible forever. It cannot touch the integrity and
+// identity refusals — see the comment on refusal().
 export function evaluateGates(input) {
   const layers = Array.isArray(input.layers) ? input.layers : [];
   const layerCounts = {};
@@ -935,13 +866,13 @@ export function evaluateGates(input) {
       bootstrap: bootstrap,
       overridden: overridden,
       // Consumed by scripts/fetch-layers.js as report.buildSanityPassed, which
-      // src/layerManifest.js treats as an INCOMPLETE-tier conjunct: anything but
-      // an explicit true stops both deletes AND classification.
+      // src/layerManifest.js treats as an incomplete-tier conjunct: anything but
+      // an explicit true stops both deletes and classification.
       passed: passed,
-      // Consumed by the workflow's pointer step (D20/MJ-10). False means the
-      // prefix is uploaded and readable but must not be made live without a
-      // human: an unseeded footprint, a "bootstrap"-status floors entry, or a
-      // build with no previous manifest to ratio against.
+      // Consumed by the workflow's pointer step. False means the prefix is
+      // uploaded and readable but must not be made live without a human: an
+      // unseeded footprint, a "bootstrap"-status floors entry, or a build with no
+      // previous manifest to ratio against.
       autoPublishAllowed: passed && floorsResult.autoPublishAllowed && !bootstrap,
       floors: {
         digest: input.regionsDigest,
@@ -957,9 +888,9 @@ export function evaluateGates(input) {
   };
 }
 
-// A gate "passed" when none of its refusals survived into the final list — i.e.
-// it either produced none or every one it produced was overridden. Reported per
-// gate so an overridden build still says exactly which gate it overrode.
+// A gate passed when none of its refusals survived into the final list, whether it
+// produced none or every one was overridden. Reported per gate so an overridden
+// build still says which gate it overrode.
 function countUnrefused(produced, refusals) {
   for (let i = 0; i < produced.length; i = i + 1) {
     if (refusals.indexOf(produced[i]) !== -1) {
@@ -969,13 +900,13 @@ function countUnrefused(produced, refusals) {
   return true;
 }
 
-// --- SHA256SUMS (MJ-11) -----------------------------------------------------------
+// --- SHA256SUMS ---------------------------------------------------------------------
 
-// SCOPE: the .fgb files and NOTHING ELSE. It cannot cover LICENSE.txt (copied in
-// after this script runs) and it must not cover manifest.json (which would make
+// Scope is the .fgb files and nothing else. It cannot cover LICENSE.txt, copied in
+// after this script runs, and it must not cover manifest.json, which would make
 // the workflow's read-back check fail every run for a file it does not download
-// through that loop). manifest.json is instead read back and byte-compared on
-// its own. Format is sha256sum's: hash, two spaces, filename.
+// through that loop; manifest.json is read back and byte-compared on its own.
+// Format is sha256sum's: hash, two spaces, filename.
 export function sha256SumsText(layers) {
   const list = Array.isArray(layers) ? layers.slice() : [];
   list.sort(function (a, b) {
@@ -1031,17 +962,17 @@ export function parseArgs(argv) {
   return args;
 }
 
-// --- source verification (contract 5.1) --------------------------------------------
+// --- source verification -------------------------------------------------------------
 
-// sourcesVerified is the download-completeness proof that replaces the Overpass
-// era's "did every tile fetch": a mid-download Geofabrik extract rotation shows
-// as an md5 mismatch and can never publish. src/layerManifest.js treats anything
-// but an explicit true as INCOMPLETE, which stops deletes AND classification.
+// sourcesVerified is the download-completeness proof: a mid-download Geofabrik
+// extract rotation shows as an md5 mismatch and can never publish.
+// src/layerManifest.js treats anything but an explicit true as incomplete, which
+// stops deletes and classification.
 //
 // It is derived here, never asserted by a flag: the workflow passes --sources
 // pointing at the JSON array it accumulated while downloading, and this reads it.
-// With NO --sources there is no evidence, so sourcesVerified is FALSE and the
-// build says so loudly rather than claiming a proof it does not have.
+// With no --sources there is no evidence, so sourcesVerified is false and the
+// build says so rather than claiming a proof it does not have.
 export function verifySources(sources) {
   if (!Array.isArray(sources) || sources.length === 0) {
     return {
@@ -1132,9 +1063,8 @@ async function runCommand(runtime, bin, cmdArgs) {
   };
 }
 
-// "ubuntu24/20260815.1" from the runner's own env vars, or null off a runner.
-// Null rather than an empty string: an empty string reads as "we recorded the
-// image and it was blank", which is a different and untrue claim.
+// The runner image from its own env vars, or null off a runner. Null rather than
+// an empty string, which would read as a recorded-but-blank image.
 export function runnerImageOf(imageOs, imageVersion) {
   const os = typeof imageOs === "string" ? imageOs : "";
   const version = typeof imageVersion === "string" ? imageVersion : "";
@@ -1200,10 +1130,10 @@ async function main() {
       " feature(s), " + String(stat.size) + " bytes, fields [" + parsed.fields.join(",") + "]");
   }
 
-  // lakes-polygon identity: six features carrying exactly the six Great Lake
-  // QIDs. Read with the pipeline's OWN reader (see lakesWikidataFrom), streamed
-  // so the simplified megapolygons are never all resident at once, and left to
-  // THROW on a truncated artifact rather than degrading to an empty list.
+  // lakes-polygon identity: six features carrying exactly the six Great Lake QIDs.
+  // Read with the pipeline's own reader (see lakesWikidataFrom), streamed so the
+  // simplified megapolygons are never all resident at once, and left to throw on a
+  // truncated artifact rather than degrading to an empty list.
   const lakesPath = args.layers + "/lakes-polygon.fgb";
   const lakesRecords = [];
   for await (const record of readFgbStream(lakesPath, "lakes")) {
@@ -1214,8 +1144,8 @@ async function main() {
     String(lakesRecords.length) + " feature(s), wikidata [" +
     lakesWikidata.join(",") + "]");
 
-  // The clip-layers.js sidecars: the global kept count MJ-7 cross-checks, and the
-  // per-region envelope tallies this script has no geometry to compute itself.
+  // The clip-layers.js sidecars: the global kept count the cross-check compares
+  // against, and the per-region tallies this script has no geometry to compute.
   const sidecars = {};
   const sidecarCounts = {};
   for (let i = 0; i < EXPECTED_LAYER_KEYS.length; i = i + 1) {
@@ -1312,11 +1242,11 @@ async function main() {
     history: history,
     relationAssemblyWarnings: args.relationWarnings,
     sanity: verdict.sanity,
-    // LAST, and assigned only here. src/layerManifest.js treats any value other
-    // than "complete" as an INCOMPLETE-tier failure, and this script reaches this
-    // line only after every gate passed — so a manifest that claims completeness
-    // is a manifest that earned it. Emitted as the final key so a torn write
-    // cannot produce a file that both parses and claims to be complete.
+    // Assigned only here, and last. src/layerManifest.js treats any value other
+    // than "complete" as an incomplete-tier failure, and this line is reached only
+    // after every gate passed, so a manifest claiming completeness earned it.
+    // Emitted as the final key, so a torn write cannot produce a file that both
+    // parses and claims to be complete.
     buildStatus: "complete"
   };
 

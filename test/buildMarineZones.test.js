@@ -1,8 +1,7 @@
-// Tests for scripts/build-marine-zones.js — the manual ~biannual generator for
-// data/marine-zones-greatlakes.json. The module's entrypoint is guarded by
-// import.meta.main (falsy under vitest/node), so importing the pure exports is
-// safe: no Deno access, no network. All fixtures here are synthetic in-memory
-// buffers built with DataView — no files, no fetch.
+// Tests for scripts/build-marine-zones.js, the manual generator for
+// data/marine-zones-greatlakes.json, regenerated roughly biannually. Importing
+// its pure exports touches no Deno and no network; every fixture is a synthetic
+// in-memory buffer built with DataView.
 
 import { describe, it, expect } from "vitest";
 import {

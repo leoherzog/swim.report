@@ -1,39 +1,35 @@
-// src/clients/nws.js
-// Thin client for api.weather.gov. Every function here is fetch-based, async,
-// and NEVER throws across the module boundary: any network error, non-2xx
-// status, or JSON parse failure is caught, logged with console.log, and the
-// function resolves to null.
+// src/clients/nws.js — the api.weather.gov client. Every function is async and
+// never throws across the module boundary: any network error, non-2xx status or
+// JSON parse failure is caught, logged, and resolved to null.
 
 import { fetchJson } from "./http.js";
 import { matchedAlerts, pickIsoString } from "./alertMatch.js";
 
 export const NWS_USER_AGENT = "swim.report (hello@swim.report)";
 
-// src/clients/http.js arms its AbortController ONLY when timeoutMs > 0, so a
-// call site that omits it is genuinely unbounded: one hung socket runs the
-// hourly cron to the 900 s scheduled ceiling and kills it mid-run. Wall-clock
-// deadlines cannot save it — they are checked BETWEEN units of work, never
-// inside a pending fetch. 45 s is generous
-// against the national /alerts/active payload (the largest response this
-// wrapper carries) while still bounding the invocation.
+// src/clients/http.js arms its AbortController only when timeoutMs > 0, so a call
+// site that omits it is genuinely unbounded: one hung socket runs the hourly cron
+// to the 900 s scheduled ceiling and kills it mid-run. A wall-clock deadline
+// cannot save it, because deadlines are checked between units of work, never
+// inside a pending fetch. 45 s is generous against the national /alerts/active
+// payload, the largest response this wrapper carries, while still bounding the
+// invocation.
 const NWS_TIMEOUT_MS = 45000;
 
 // The national active-alerts endpoint fetched once per hourly run; zone
 // matching happens locally in nwsAlertsForZone.
 export const NWS_ACTIVE_ALERTS_URL = "https://api.weather.gov/alerts/active";
 
-// Per-zone provenance URL for FlagEstimate source entries — no longer what
-// the cron fetches (that is NWS_ACTIVE_ALERTS_URL), but the zone-scoped view
-// is the more useful pointer for a given beach's payload.
+// Per-zone provenance URL for FlagEstimate source entries. The cron fetches
+// NWS_ACTIVE_ALERTS_URL; the zone-scoped view is the more useful pointer for a
+// given beach's payload.
 export function alertsUrlForZone(zoneId) {
   return "https://api.weather.gov/alerts/active?zone=" + zoneId;
 }
 
-// Shared fetch-JSON wrapper for every api.weather.gov request: sends the
-// required User-Agent/Accept headers, checks response.ok, parses JSON, and
-// NEVER throws across the module boundary — any network error, non-2xx
-// status, or JSON parse failure is caught, logged with console.log, and
-// resolves to null.
+// Shared fetch-JSON wrapper for every api.weather.gov request: sends the required
+// User-Agent and Accept headers, checks response.ok, parses JSON, and resolves to
+// null on any failure rather than throwing.
 function fetchNwsJson(url, label) {
   return fetchJson(url, {
     headers: {
@@ -140,7 +136,7 @@ export function wfoFromGridUrl(nwsGridUrl) {
 // returns the newest matching product object with productText inline — no need
 // for the old two-leg (list -> @graph[0].id -> /products/{id}) dance. Success ->
 //   { text, productId: "SRF <wfo>", sourceUrl }  (sourceUrl is the /latest URL)
-// Any fetch failure or a response missing productText -> null (data-or-null
+// any fetch failure or a response missing productText -> null (data-or-null
 // contract, consumed by parseRipCurrentRisk and the hourly cron).
 export async function fetchLatestSrfText(wfo) {
   const latestUrl = "https://api.weather.gov/products/types/SRF/locations/" + wfo + "/latest";

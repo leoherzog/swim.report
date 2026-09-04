@@ -1,22 +1,17 @@
-// src/wqFloor/mnBeaches.js
+// src/wqFloor/mnBeaches.js — a raise-only water-quality floor source; see
+// src/wqFloor/index.js for the floor contract.
 //
-// KIND: wq (raise-only water-quality floor source for src/wqFloor's
-// registry — NOT an official-source override; see src/officialSources/).
-//
-// SOURCE: mnbeaches.org — Minnesota Department of Health beach monitoring for
+// Source: mnbeaches.org — Minnesota Department of Health beach monitoring for
 // Lake Superior (Duluth) beaches. No-auth JSON endpoint:
 //   https://mnbeaches.org/map/data/results.json
-// Live shape confirmed by fetch on 2026-07-22:
+// Wire shape:
 //   { MNBdataUpdated, MNBsiteactive, MNBmessage,
 //     MNBstatus: [ { StnID, Date, Status, Reason, Name, lng, lat, Region, ... } ],
 //     MNBregions: [...] }
-// NOTE: the "confirm the fetch URL" caveat from the brief does not apply —
-// this exact URL was fetched live and returned the documented shape with no
-// auth/bot wall. If it ever starts requiring auth or changes shape, parseMnBeaches
-// below fails closed to null (see below).
+// The endpoint needs no auth and has no bot wall. If it ever starts requiring
+// auth or changes shape, parseMnBeaches below fails closed to null.
 //
-// FLOOR MAPPING (raise-only; consumed by src/wqFloor/index.js ->
-// src/rules.js estimateFlag's waterQualityAdvisory input):
+// Floor mapping:
 //   Status "Water Contact Not Recommended" + Reason indicating a harmful
 //     algal bloom / toxic algae -> floorColor "red"
 //   Status "Water Contact Not Recommended" (any other/no reason)         -> floorColor "yellow"

@@ -1,27 +1,22 @@
 // Tests for src/layerGrid.js — the two-mode in-process spatial index (envelope
 // grid for beaches/parks, segment grid for coastline/water/lakes).
 //
-// The module is pure and has no entrypoint at all (no import.meta.main guard is
-// needed: there is nothing to guard), imports src/geo.js and nothing else, and
-// touches no network, no clock and no filesystem. Every fixture below is built
-// IN MEMORY from readable primitives via one named builder per shape — no
-// committed binaries, no GDAL, no pretest step.
+// The module is pure, imports src/geo.js and nothing else, and touches no
+// network, no clock and no filesystem.
 //
 // Two things here are load-bearing beyond ordinary coverage:
 //
-//   1. GRID-VS-LINEAR EQUALITY of queryGridByBounds, including ORDER. Every
-//      consumer's tie-break
-//      (associateParkForBeach's smallest-area-then-first-seen, nearbyLakeQids'
-//      push order) rides on candidates arriving in ascending original index
-//      order, so the grid is only correct if it is bit-identical to the full
-//      scan it replaces.
-//   2. THE SEGMENT-GRID BENCHMARK at the bottom. The defect this module exists
-//      to fix — a probe against a giant polygon degenerating into a full scan of
-//      its ring — is completely invisible in a correctness test and only shows
-//      up as a job that runs for hours. The benchmark asserts the deterministic
-//      quantity (segments examined per probe), with wall clock as a secondary
-//      check, so a regression back to the quadratic behaviour fails the suite
-//      rather than the nightly build.
+//   1. Grid-versus-linear equality of queryGridByBounds, including order. Every
+//      consumer's tie-break (associateParkForBeach's
+//      smallest-area-then-first-seen, nearbyLakeQids' push order) rides on
+//      candidates arriving in ascending original index order, so the grid is
+//      only correct if it is bit-identical to the full scan it replaces.
+//   2. The segment-grid benchmark at the bottom. A probe against a giant polygon
+//      degenerating into a full scan of its ring is invisible in a correctness
+//      test and shows up only as a job that runs for hours. The benchmark
+//      asserts segments examined per probe, with wall clock as a secondary
+//      check, so a regression to the quadratic behaviour fails the suite rather
+//      than the nightly build.
 
 import { describe, it, expect } from "vitest";
 import {

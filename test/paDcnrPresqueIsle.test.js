@@ -1,9 +1,8 @@
 // test/paDcnrPresqueIsle.test.js
 // Unit tests for the PA DCNR Presque Isle official HAZARD scraper. Pure parse
-// functions are exercised against INLINE synthetic fixtures (the live payload
-// is 100% off-axis boilerplate, so hazard mapping is only provable
-// synthetically). Project style: ES modules, NO template literals, string
-// concat with +, function () {} callbacks.
+// functions are exercised against inline synthetic fixtures, because the live
+// payload is entirely off-axis boilerplate and hazard mapping is only provable
+// synthetically.
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   parsePresqueIsleAdvisories,

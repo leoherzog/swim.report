@@ -1,6 +1,5 @@
-// src/wqFloor/greyBruceRecWater.js
-//
-// KIND: wq (src/wqFloor raise-only water-quality floor source).
+// src/wqFloor/greyBruceRecWater.js — a raise-only water-quality floor source; see
+// src/wqFloor/index.js for the floor contract.
 //
 // Source: Grey Bruce Health Unit (Lake Huron east shore / Bruce Peninsula,
 // Ontario) recreational water testing table, published at
@@ -9,20 +8,16 @@
 // Location, Test Result, Date Tested, Posted, Note) listing the health unit's
 // monthly bacteriological samples for its public bathing areas.
 //
-// FLOOR MAPPING (RAISE-ONLY, low confidence):
+// Floor mapping:
 //   Posted == "Yes"                      -> yellow floor (advisory posted)
-//   Posted == "No" / Test Result == Pass / row absent / unrecognized -> NO SITE
-// There is no red mapping: this source carries only a boolean "posted"
-// advisory flag, never a severity tier, so it can only ever raise a clean or
-// unknown estimate to yellow, exactly like the other wqFloor sources. A
-// "Pass" or unposted row is represented as the ABSENCE of a site, never as an
-// affirmative green (green is not a valid wqFloor color at all — see
-// src/wqFloor/index.js's WQ_FLOOR_COLORS gate, which independently rejects
-// anything other than "yellow"/"red").
+//   Posted == "No" / Test Result == Pass / row absent / unrecognized -> no site
+// There is no red mapping: this source carries only a boolean posted flag, never
+// a severity tier, so it can only raise a clean or unknown estimate to yellow. A
+// Pass or unposted row is the absence of a site, never an affirmative green.
 //
 // COVERAGE: the health unit's public table lists public bathing areas across
 // all of Grey and Bruce counties (Georgian Bay + Lake Huron). This module is
-// curated to the Lake Huron east-shore / Bruce Peninsula beaches ONLY (see
+// curated to the Lake Huron east-shore / Bruce Peninsula beaches only (see
 // LAKE_HURON_SITES below) by name substring, mirroring the resolveSiteForBeach
 // names-win convention used across src/officialSources/. The curated list was
 // assembled from the health unit's own beach naming, not a live crawl of every
@@ -57,9 +52,9 @@
 // If the header text or table structure ever changes, parseGreyBruceRecWaterTable
 // degrades to null (fail closed), never a wrong color.
 //
-// INTEGRATOR DEDUP NOTE: this is the ONLY Grey Bruce Health Unit source in the
+// INTEGRATOR DEDUP NOTE: this is the only Grey Bruce Health Unit source in the
 // project; it does not overlap with any existing hazard scraper or wave/alert
-// client. It must be registered ONLY in src/wqFloor/index.js's wqFloorSources
+// client. It must be registered only in src/wqFloor/index.js's wqFloorSources
 // array (raise-only), never in src/officialSources/index.js's scrapers array
 // (hazard-override) — a clean/"Pass" reading here says nothing about surf
 // hazard and must never be able to produce or mask a color on its own.

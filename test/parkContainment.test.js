@@ -1,17 +1,10 @@
-// test/parkContainment.test.js
-// Pure-function coverage for the park-containment discovery path DOWNSTREAM of
+// Pure-function coverage for the park-containment discovery path downstream of
 // the OSM reader: the sync merge policy in src/discovery.js and the
 // park-name-first display treatment in src/frontend/render.js. Both are
-// provider-agnostic — they take already-derived records — so every assertion
-// here is byte-identical either side of the move off Overpass, which is
-// precisely what makes them the regression net for that move.
+// provider-agnostic, taking already-derived records.
 //
-// The upstream halves live elsewhere now. The pure SELECTION rules (isPondBeach,
-// associateParkForBeach, pondWaterSeeds and their thresholds) moved to
-// src/osmSelect.js and are covered, unchanged, in test/osmSelect.test.js; the
-// element reader that used to be tested here as parseParkBeachElements is
-// re-fixtured onto layer features as discoverFromLayers in
-// test/layerDiscovery.test.js, same beaches, same ids, same expected answers.
+// The upstream halves live elsewhere: the selection rules in
+// test/osmSelect.test.js, and the layer reader in test/layerDiscovery.test.js.
 
 import { describe, it, expect } from "vitest";
 import { mergeBeachRows } from "../src/discovery.js";

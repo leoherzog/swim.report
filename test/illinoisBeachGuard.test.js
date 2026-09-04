@@ -2,8 +2,6 @@
 // Pure-parser + pure-resolver unit tests for src/wqFloor/illinoisBeachGuard.js
 // (KIND: wq raise-only water-quality floor). No network — every case builds
 // an inline HTML fixture and exercises the exported pure functions directly.
-// Project style: ES modules, no template literals, string concat with +,
-// function () {} callbacks.
 
 import { describe, it, expect, vi } from "vitest";
 import {

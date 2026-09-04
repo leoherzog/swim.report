@@ -1,21 +1,12 @@
-// Discovery merge logic — the pure, dependency-light half of the discovery sync.
+// src/discovery.js — the merge, park-association and unnamed-suffix logic of
+// beach discovery. It is provider-agnostic: it consumes already-parsed
+// beach/park records and never knows where they came from.
+// src/layerDiscovery.js builds those records from the layer set and hands them
+// to mergeBeachRows.
 //
-// Extracted from src/index.js so BOTH the in-Worker cron (src/index.js) and the
-// offline batch discovery job (scripts/discovery-batch.js, run from GitHub
-// Actions on Deno) import the SAME merge/park-association/unnamed-suffix logic
-// instead of forking it. This module imports ONLY src/geo.js (itself
-// dependency-free), so it carries no Worker-only baggage and is safe to import
-// from a plain Deno/Node process — the same reuse pattern src/geo.js established
-// for the distance/units math.
-//
-// It is also entirely PROVIDER-AGNOSTIC and survived the FlatGeobuf migration
-// verbatim: it consumes already-parsed beach/park records and never knows where
-// they were sourced. src/layerDiscovery.js now builds those records from the
-// layer set (src/osmSelect.js beachRecord/parkRecord) and hands them to
-// mergeBeachRows exactly as the previous element parser did.
-//
-// Pure: no fetch, no Date, no env. String concatenation with + only (never
-// template literals), const/let only — the project style rules apply here too.
+// Imports only src/geo.js, which is itself dependency-free, so it carries no
+// Worker-only baggage and loads in a plain Deno process. Pure: no fetch, no
+// Date, no env. Imported by scripts/discovery-batch.js and by tests.
 
 import { distanceKm, toRadians } from "./geo.js";
 
@@ -65,7 +56,7 @@ function deriveUnnamedSuffix(beach, primary) {
   return null;
 }
 
-// Adds an unnamed-origin park beach row whose display name AND park_name are
+// Adds an unnamed-origin park beach row whose display name and park_name are
 // both displayName. Unnamed-origin rows are identified downstream (render's
 // park-name-first treatment, the sync's stale-row reconciliation) by
 // name === park_name, so both fields must carry the same value — whether it is

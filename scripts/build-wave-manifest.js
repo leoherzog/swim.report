@@ -1,4 +1,4 @@
-// scripts/build-wave-manifest.js — THE BUILD-SIDE GATE for the NOAA GRIB2 wave
+// scripts/build-wave-manifest.js — the build-side gate for the NOAA GRIB2 wave
 // pipeline. Runs on Deno as the last step before anything is uploaded:
 //
 //   deno run --allow-read --allow-write --allow-env=ImageOS,ImageVersion \
@@ -8,49 +8,35 @@
 //     --allow-shrink false --out ./.waves/out/manifest.json
 //
 // It re-reads the two emitted NDJSON artifacts, applies every gate, and either
-// writes manifest.json plus SHA256SUMS or EXITS 1 with a specific reason. A refused
-// cycle fails SAFE: nothing is uploaded, waves/current.json stays on the last good
+// writes manifest.json plus SHA256SUMS or exits 1 with a specific reason. A refused
+// cycle fails safe: nothing is uploaded, waves/current.json stays on the last good
 // cycle, and that cycle's KV rides an expiration derived from its own model valid
-// time. The failure mode is the flag aging out to unknown — gray and honest — never
-// a stale wave height deciding a color.
+// time, so the failure mode is a flag aging out to unknown rather than a stale wave
+// height deciding a color.
 //
-// WHICH GATES ARE HARD, AND WHY
-// -----------------------------
-// Everything that could produce a WRONG NUMBER is NON-OVERRIDABLE: grid identity,
+// Everything that could produce a wrong number is non-overridable: grid identity,
 // band identity, valid times, the sentinel scan, series alignment, the distribution
 // checks and the KV pair spelling. A flag an operator reaches for during an incident
-// must not be able to wave a wrong wave height into src/rules.js.
+// must not wave a wrong wave height into src/rules.js. Everything that is merely
+// less data is overridable by --allow-shrink and warns: the coverage floors, the
+// per-grid floors and the two ratios. The minimum record rails are the exception in
+// that family, since a cycle carrying no wave value cannot color a flag.
 //
-// Everything that is merely LESS DATA is overridable by --allow-shrink and warns:
-// the coverage floors, the per-grid floors, the shrink ratio against the previous
-// cycle and the monotone-decay ratio against the oldest retained one. The minimum
-// record rails are the exception inside that family: a cycle carrying no wave value
-// at all cannot color a flag, so it is non-overridable and independent of the
-// seeded floors.
+// A broken or missing grid must produce zero records for its own beaches without
+// blocking the others, so every count gate is scoped by sampleReport.gridStatus: a
+// floor or ratio is evaluated only for a grid whose status is "sampled" and which is
+// present on both sides of the comparison, and every skip warns. An absent grid is
+// not a count of zero; scoring it as one refuses the whole cycle on behalf of a grid
+// that never ran.
 //
-// PER-GRID ISOLATION
-// ------------------
-// A broken or missing grid must produce ZERO records for its own beaches and must
-// not block the other grids. Every count gate is therefore scoped by
-// sampleReport.gridStatus, which carries one entry for EVERY grid in GRIDS: a floor
-// or a ratio is evaluated only for a grid whose status is "sampled" and which is
-// present on both sides of the comparison, and every skip becomes a warning. An
-// absent grid is NOT a count of zero — scoring it as one refuses the whole cycle on
-// behalf of a grid that never ran.
+// distinctValues and meanPlausibility exist because every other gate counts things
+// and a constant plane counts perfectly: 24 aligned hours, no sentinels, no
+// out-of-range values, full coverage, every beach reading the same number. They are
+// the only gates that can tell a real ocean from a filled buffer.
 //
-// WHY distinctValues AND meanPlausibility EXIST. Every other gate here counts
-// things, and a constant plane counts perfectly: 24 aligned hours, no sentinels, no
-// out-of-range values, full coverage, and every beach reading exactly the same
-// number. Those two are the only gates that can tell a real ocean from a filled
-// buffer.
-//
-// PURITY. Every gate is a pure exported function over plain data — no file system,
-// no subprocess, no clock — so all of it is unit-tested in
-// test/buildWaveManifest.test.js. main() does the I/O and calls them. Deno is
+// Every gate is a pure exported function over plain data, so all of it is
+// unit-tested in test/buildWaveManifest.test.js. main() does the I/O. Deno is
 // reached through globalThis so importing this module under vitest is legal.
-//
-// Project style: plain JS, ES modules, const/let only, string concatenation with +
-// (never template literals), console for logging.
 
 import {
   WAVE_SCHEMA_VERSION,
@@ -69,51 +55,50 @@ import { metersToFeet } from "../src/geo.js";
 
 // --- gate constants ----------------------------------------------------------------
 
-// Ratio against the PREVIOUS accepted cycle. Coverage is a beach count, which moves
-// only when discovery adds rows or a grid stops answering, so 0.95 is loose enough
+// Ratio against the previous accepted cycle. Coverage is a beach count, which moves
+// only when discovery adds rows or a grid stops answering, so this is loose enough
 // for ordinary growth and tight enough that a lost grid is unmissable.
 export const WAVE_SHRINK_MIN_RATIO = 0.95;
 
-// Against the OLDEST retained cycle. A hit rate bleeding 5% per cycle passes every
-// ratio-to-previous check forever, so the window comparison is the only thing that
-// can see it.
+// Against the oldest retained cycle. A hit rate bleeding a few percent per cycle
+// passes every ratio-to-previous check forever, so the window comparison is the only
+// thing that can see it.
 export const WAVE_DECAY_MIN_RATIO = 0.85;
 
 // Rolling window carried forward in manifest.history. Eight cycles is one day at the
 // 3-hourly cadence, which is the right span for a decay check whose unit is a cycle.
 export const HISTORY_RETAIN = 8;
 
-// The ratio a human uses when SEEDING data/wave-floors.json from a first real cycle.
-// Not applied by this script — seeding is a reviewed commit, never automatic.
+// The ratio a human uses when seeding data/wave-floors.json from a first real cycle.
+// Not applied by this script: seeding is a reviewed commit, never automatic.
 export const FLOOR_SEED_RATIO = 0.75;
 
 // Distribution rails. A wave field with fewer than 20 distinct values across the
 // whole beach set is not a wave field, and a mean outside [0.05, 25] ft is either a
 // dead-calm constant or a unit error.
 export const MIN_DISTINCT_WAVE_VALUES = 20;
-export const MIN_MEAN_WAVE_FT = 0.05;
-export const MAX_MEAN_WAVE_FT = 25;
+const MIN_MEAN_WAVE_FT = 0.05;
+const MAX_MEAN_WAVE_FT = 25;
 
 // Nothing emitted may exceed this. 9999 m is 32808.4 ft; a real sea state is not
 // within two orders of magnitude of 100 ft.
 export const MAX_EMITTED_FT = 100;
 
-// The same rail for the wind path, in mph and deliberately separate from the feet
-// one so a later change to either cannot silently move the other. The 9000 m/s
-// magnitude rail in src/waveGrids.js bounds the RAW sample, so a corrupt WIND plane
-// can still emit 20,132 mph; a real sustained wind is not within an order of
-// magnitude of 200.
+// The same rail for the wind path, in mph and deliberately separate from the feet one
+// so a later change to either cannot silently move the other. The magnitude rail in
+// src/waveGrids.js bounds the raw sample, so a corrupt WIND plane can still emit tens
+// of thousands of mph; a real sustained wind is not within an order of magnitude
+// of 200.
 export const MAX_EMITTED_MPH = 200;
 
 export const ATTRIBUTION = "NOAA / NWS / NCEP — US Government work, public domain";
 
-// The KV pair fields the pinned wrangler validator accepts. unexpectedKVKeyValueProps
-// produces a WARNING ONLY and the command exits 0, so a camelCase expirationTtl —
-// which is the spelling the Worker runtime itself uses, making it the likeliest
-// mistake in the whole change — is silently dropped and the key NEVER EXPIRES.
-// Because runFlagRecompute never reads waveinput.updated, expiration is the only
-// staleness control on the color path, so that key would color flags from dead data
-// indefinitely.
+// The KV pair fields the pinned wrangler validator accepts. It warns and exits 0 on
+// an unexpected property, so a camelCase expirationTtl — the spelling the Worker
+// runtime uses, making it the likeliest mistake here — is silently dropped and the
+// key never expires. runFlagRecompute never reads waveinput.updated, so expiration is
+// the only staleness control on the color path and that key would color flags from
+// dead data indefinitely.
 export const ALLOWED_PAIR_FIELDS = ["key", "value", "expiration", "expiration_ttl", "base64", "metadata"];
 
 // --- small pure helpers ---------------------------------------------------------------
@@ -127,7 +112,7 @@ function isPlainObject(value) {
 }
 
 // Every gate speaks this shape. overridable says whether --allow-shrink may demote it
-// to a warning: COUNT-SHRINK refusals may, IDENTITY and INTEGRITY refusals may not.
+// to a warning: count-shrink refusals may, identity and integrity refusals may not.
 function refusal(check, subject, message, overridable) {
   return {
     check: check,
@@ -145,9 +130,8 @@ function ratioText(current, previous, ratio) {
 
 // --- gridStatus, the per-grid scoping contract -------------------------------------------
 
-// The ids of every grid this build knows about. The authoritative set is GRIDS, never
-// the keys of the report being judged: a grid missing from gridStatus must read as an
-// unproven grid, not as an absent one.
+// The authoritative set is GRIDS, never the keys of the report being judged: a grid
+// missing from gridStatus reads as unproven, not as absent.
 export function gridIdsOf(grids) {
   const source = Array.isArray(grids) ? grids : GRIDS;
   const out = [];
@@ -159,7 +143,7 @@ export function gridIdsOf(grids) {
 
 // The status sample-waves.js recorded for one grid, or "absent" when the report
 // carries no entry. "absent" is deliberately not "unfetched": a missing entry means
-// the producer said nothing at all, which is not a measurement either.
+// the producer said nothing, which is not a measurement either.
 export function gridStatusOf(gridStatus, id) {
   if (!isPlainObject(gridStatus) || !isPlainObject(gridStatus[id]) ||
       typeof gridStatus[id].status !== "string") {
@@ -174,10 +158,9 @@ export function gridSampled(gridStatus, id) {
   return gridStatusOf(gridStatus, id) === "sampled";
 }
 
-// The grids that did NOT sample. A non-empty list retires the GLOBAL coverage floor
-// and the global ratio fallback for this cycle: a number seeded from a complete cycle
-// says nothing about a cycle missing a grid, and the minimum record rails above are
-// the absolute floor in that case.
+// The grids that did not sample. A non-empty list retires the global coverage floor
+// and the global ratio fallback, because a number seeded from a complete cycle says
+// nothing about a cycle missing a grid; the minimum record rails are then the floor.
 export function notSampledGrids(gridStatus, grids) {
   const ids = gridIdsOf(grids);
   const out = [];
@@ -189,9 +172,8 @@ export function notSampledGrids(gridStatus, grids) {
   return out;
 }
 
-// True when a history entry carries per-grid counts. False for every manifest written
-// before this shape existed, which is the one condition under which the global ratio
-// gates still apply as a fallback.
+// True when a history entry carries per-grid counts. A manifest carrying none is the
+// one condition under which the global ratio gates still apply as a fallback.
 export function hasGridCounts(gridCounts) {
   return isPlainObject(gridCounts) && Object.keys(gridCounts).length > 0;
 }
@@ -199,9 +181,9 @@ export function hasGridCounts(gridCounts) {
 // --- NON-OVERRIDABLE: identity -----------------------------------------------------------
 
 // The decoded raster of every sampled grid must match data/wave-grids.json: size,
-// geotransform origin, cell size and nodata. A grid whose raster moved is a grid
-// whose cell indices point somewhere else on earth, and it decodes cleanly, samples
-// without error, and returns wave heights from the wrong place.
+// geotransform origin, cell size and nodata. A grid whose raster moved has cell
+// indices pointing somewhere else on earth, and it decodes cleanly, samples without
+// error and returns wave heights from the wrong place.
 export function gridIdentityRefusals(observedGrids, expectDoc) {
   const out = [];
   if (!isPlainObject(expectDoc) || !isPlainObject(expectDoc.grids)) {
@@ -256,12 +238,12 @@ export function gridIdentityRefusals(observedGrids, expectDoc) {
       out.push(refusal("gridIdentity", id, "nodata is " + String(observed.nodata) +
         ", expected " + String(want.nodata), false));
     }
-    // The identity above is the hour-0 wave plane alone. noaa_gfswave is ONE
-    // downloaded file per forecast hour, so a later hour can carry a shifted origin
-    // with identical dimensions and decode, sample and gate cleanly while reading
-    // the wrong cells; the sampler compares every plane it read and reports the
+    // The identity above is the hour-0 wave plane alone. noaa_gfswave downloads one
+    // file per forecast hour, so a later hour can carry a shifted origin with
+    // identical dimensions and decode, sample and gate cleanly while reading the
+    // wrong cells; the sampler compares every plane it read and reports the
     // disagreements here. A report carrying no count refuses rather than passing
-    // vacuously, the same way an absent decoded identity does.
+    // vacuously, as an absent decoded identity does.
     const entry = observedGrids[id];
     if (!isFiniteNumber(entry.identityPlanes) || entry.identityPlanes < 1) {
       out.push(refusal("gridIdentity", id,
@@ -336,21 +318,19 @@ export function validTimeRefusals(bands, validStartEpoch) {
 
 // --- NON-OVERRIDABLE: the emitted numbers -------------------------------------------------
 
-// Rescans the emitted records rather than trusting the sampler's own summary. It
-// covers waveinput.waveHeightFt, waveinput.windSpeedMph and every waves.hoursFt cell
-// — which is every number that will reach a KV value. waves.byModel[gridId] and
-// hoursFt are the same array object assigned twice by the sampler, so a
-// producer-side divergence between them is impossible and byModel is not scanned
+// Rescans the emitted records rather than trusting the sampler's summary, covering
+// waveinput.waveHeightFt, waveinput.windSpeedMph and every waves.hoursFt cell, which
+// is every number that will reach a KV value. waves.byModel[gridId] and hoursFt are
+// the same array object assigned twice by the sampler, so byModel is not scanned
 // separately.
 //
-// nodataValues is the set of header sentinels across every grid in three forms — raw,
-// converted to FEET and converted to MPH — because a sentinel that survived a unit
-// conversion is still a sentinel, and the raw form is what would have been written
-// had containment failed upstream.
+// nodataValues is the set of header sentinels in three forms — raw, feet and mph —
+// because a sentinel that survived a unit conversion is still a sentinel, and the raw
+// form is what would have been written had containment failed upstream.
 //
-// Wind is counted in its OWN fields. Folding mph into the height distribution would
-// turn meanWaveFt and distinctWaveValues into a mixed ft/mph measurement, and a
-// constant wave plane could then pass distinctValues on wind variance alone.
+// Wind is counted in its own fields: folding mph into the height distribution would
+// make meanWaveFt and distinctWaveValues a mixed measurement, and a constant wave
+// plane could then pass distinctValues on wind variance alone.
 export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
   const sentinels = Array.isArray(nodataValues) ? nodataValues : [];
   const stats = {
@@ -387,7 +367,7 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
     if (record.windGustMph !== null) {
       stats.shapeProblems = stats.shapeProblems + 1;
     }
-    // Scanned BEFORE the wave branch below, which returns early for a null height:
+    // Scanned before the wave branch below, which returns early for a null height:
     // windSpeedMph is populated only when waveHeightFt is null, so for exactly the
     // beaches that carry it, wind is the sole input deciding a color.
     const wind = record.windSpeedMph;
@@ -443,7 +423,7 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
       if (isSentinel(cell, sentinels)) { stats.sentinelHits = stats.sentinelHits + 1; }
       if (cell > MAX_EMITTED_FT || cell < 0) { stats.outOfRange = stats.outOfRange + 1; }
     }
-    // hoursFt[0] and waveinput.waveHeightFt are two writes of ONE sample. A
+    // hoursFt[0] and waveinput.waveHeightFt are two writes of one sample. A
     // divergence means the spiral ran twice, and the detail page's "now" stat would
     // contradict its own first bar.
     if (heightById.has(record.beachId) && heightById.get(record.beachId) !== record.hoursFt[0]) {
@@ -468,11 +448,11 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
   return stats;
 }
 
-// A value is a sentinel when it matches a grid's raw header nodata OR that nodata
-// converted to feet OR to mph. All three forms are checked because containment could
-// have failed before or after either unit conversion, and the match is the same tolerant one
-// src/waveGrids.js uses (gdalinfo prints a large nodata with about eight significant
-// digits, so exact equality would miss every GLWU sentinel).
+// A value is a sentinel when it matches a grid's raw header nodata, or that nodata
+// converted to feet or to mph. All three are checked because containment could have
+// failed before or after either conversion, and the match is the same tolerant one
+// src/waveGrids.js uses: gdalinfo prints a large nodata with about eight significant
+// digits, so exact equality would miss every GLWU sentinel.
 function isSentinel(value, sentinels) {
   for (let i = 0; i < sentinels.length; i = i + 1) {
     if (matchesNodata(value, sentinels[i])) { return true; }
@@ -556,10 +536,10 @@ export function distributionRefusals(stats) {
 //
 //   input = { kvExpirationEpoch, validStartEpoch, pairs }
 //
-// pairs may be empty at manifest time (no pairs exist yet); the epoch arithmetic is
-// checked either way. ABSOLUTE expiration, never a TTL: a TTL measured from write
-// time is wrong for a scheduler that skips occurrences, because a run firing 9 h
-// late would grant 7 more hours of life to data already 9 h old.
+// pairs may be empty at manifest time; the epoch arithmetic is checked either way.
+// Absolute expiration, never a TTL: a TTL measured from write time is wrong for a
+// scheduler that skips occurrences, because a run firing 9 h late would grant 7 more
+// hours of life to data already 9 h old.
 export function ttlSpellingRefusals(input) {
   const out = [];
   const validStartEpoch = isPlainObject(input) ? input.validStartEpoch : null;
@@ -584,8 +564,8 @@ export function ttlSpellingRefusals(input) {
     if (typeof pair.key !== "string" || pair.key === "") {
       out.push(refusal("ttlSpelling", subject, "key is not a non-empty string", false));
     }
-    // The validator rejects a nested-object value outright, which at least fails
-    // loudly — but only a STRING is ever correct, so it is asserted here too.
+    // The validator rejects a nested-object value outright, which fails loudly, but
+    // only a string is ever correct, so it is asserted here too.
     if (typeof pair.value !== "string") {
       out.push(refusal("ttlSpelling", subject, "value is " + typeof pair.value +
         ", not a JSON string", false));
@@ -608,11 +588,11 @@ export function ttlSpellingRefusals(input) {
 // --- NON-OVERRIDABLE: the minimum record rails ----------------------------------------
 
 // The absolute floor under every count gate, independent of data/wave-floors.json.
-// Without it a ZERO-record cycle passes everything: distributionRefusals returns
+// Without it a zero-record cycle passes everything: distributionRefusals returns
 // early when waveValues is 0, an unseeded floors entry applies no floor, and the
-// ratio gates are skipped on a bootstrap cycle. Publishing that cycle is also
-// ABSORBING, because shrinkRatioRefusals skips a field whose previous count is <= 0,
-// so every later zero-record cycle would sail through forever.
+// ratio gates are skipped on a bootstrap cycle. It is also absorbing, because
+// shrinkRatioRefusals skips a field whose previous count is <= 0, so every later
+// zero-record cycle would sail through.
 //
 // Every refusal here is non-overridable and reads only the sample report, so neither
 // --allow-shrink nor an absent floors entry can reach it.
@@ -648,11 +628,11 @@ export function minimumRecordRefusals(stats, sampleBeaches, gridStats, gridStatu
         "status is sampled but the sample report carries no counts for it", false));
       continue;
     }
-    // A required grid offered beaches and resolved none: that is a wrong or empty
-    // plane, not coverage variation. There is deliberately no tuned resolution RATE
-    // here — candidateGrids offers every NULL-water_class beach to any grid whose
-    // domain box contains it, so gfswave's assignedBeaches is diluted by inland rows
-    // by an unmeasured amount, and a tuned rate could refuse every cycle forever.
+    // A required grid offered beaches and resolved none: a wrong or empty plane, not
+    // coverage variation. There is deliberately no tuned resolution rate here, because
+    // candidateGrids offers every NULL-water_class beach to any grid whose domain box
+    // contains it, so assignedBeaches is diluted by inland rows by an unmeasured
+    // amount and a tuned rate could refuse every cycle forever.
     if (isFiniteNumber(counts.assignedBeaches) && counts.assignedBeaches > 0 &&
         counts.resolvedBeaches === 0) {
       out.push(refusal("minimumRecords", id, String(counts.assignedBeaches) +
@@ -660,10 +640,10 @@ export function minimumRecordRefusals(stats, sampleBeaches, gridStats, gridStatu
     }
   }
 
-  // validPercent is otherwise published and gated by nothing: the all-nodata grid
-  // that reported 0.00 was caught only by the overridable ratio rails. Scoped to a
-  // grid already claiming status "sampled", which cannot have had zero usable cells,
-  // so it needs no tuned threshold and cannot fire for the wrong reason.
+  // validPercent is otherwise published and gated by nothing, leaving an all-nodata
+  // grid to the overridable ratio rails alone. Scoped to a grid already claiming
+  // status "sampled", which cannot have had zero usable cells, so it needs no tuned
+  // threshold and cannot fire for the wrong reason.
   const ids = gridIdsOf();
   for (let i = 0; i < ids.length; i = i + 1) {
     const id = ids[i];
@@ -680,9 +660,9 @@ export function minimumRecordRefusals(stats, sampleBeaches, gridStats, gridStatu
   return out;
 }
 
-// A non-required grid that resolved nothing WARNS and never refuses: it contributes
-// zero records either way, and refusing on its behalf is the whole-cycle refusal
-// this scoping exists to remove.
+// A non-required grid that resolved nothing warns and never refuses: it contributes
+// zero records either way, and refusing on its behalf is the whole-cycle refusal this
+// scoping exists to remove.
 export function zeroResolutionWarnings(gridStats, gridStatus) {
   const out = [];
   const ids = gridIdsOf();
@@ -703,8 +683,8 @@ export function zeroResolutionWarnings(gridStats, gridStatus) {
 
 // --- OVERRIDABLE: coverage ------------------------------------------------------------
 
-// Resolves the floors entry for this grid set. An UNSEEDED digest withholds
-// auto-publish and does NOT fail the build: appending a grid to src/waveGrids.js
+// Resolves the floors entry for this grid set. An unseeded digest withholds
+// auto-publish and does not fail the build: appending a grid to src/waveGrids.js
 // changes the digest by construction, and the right response is a human seeding
 // floors from the first real cycle, not a red build.
 export function floorsEntryFor(floorsFile, digest) {
@@ -726,10 +706,10 @@ export function floorsEntryFor(floorsFile, digest) {
 }
 
 // Global coverage floors. A null floor means none has been seeded and the check does
-// not apply — a deliberate, reviewable gap, unlike an invented number that either
+// not apply: a deliberate, reviewable gap, unlike an invented number that either
 // blocks every cycle forever or blesses a broken one.
 //
-// The caller applies this only when EVERY grid sampled: a floor seeded from a
+// The caller applies this only when every grid sampled: a floor seeded from a
 // complete cycle measures nothing about a cycle missing a grid.
 export function coverageFloorRefusals(counts, floorsEntry) {
   const out = [];
@@ -749,12 +729,12 @@ export function coverageFloorRefusals(counts, floorsEntry) {
   return out;
 }
 
-// A grid's seeded floor, scored ONLY against a grid whose status is "sampled".
+// A grid's seeded floor, scored only against a grid whose status is "sampled".
 // sampleReport.grids carries only grids that sampled, so an unfetched grid is
-// indistinguishable there from a grid that resolved nothing — and treating that
-// absence as a count of zero is what refuses the whole cycle, ocean included, when
-// one regional grid's upstream is out. An unsampled grid produces no refusal here;
-// perGridFloorStatus reports it as "not evaluated" and warns.
+// indistinguishable there from one that resolved nothing, and reading that absence as
+// zero would refuse the whole cycle, ocean included, when one regional grid's upstream
+// is out. An unsampled grid produces no refusal here; perGridFloorStatus reports it as
+// not evaluated and warns.
 export function perGridFloorRefusals(gridCounts, floorsEntry, gridStatus) {
   const out = [];
   if (!isPlainObject(floorsEntry) || !isPlainObject(floorsEntry.grids) || !isPlainObject(gridCounts)) {
@@ -767,8 +747,8 @@ export function perGridFloorRefusals(gridCounts, floorsEntry, gridStatus) {
     if (!gridSampled(gridStatus, ids[i])) { continue; }
     const entry = gridCounts[ids[i]];
     if (!isPlainObject(entry) || !isFiniteNumber(entry.resolvedBeaches)) {
-      // "sampled" with no count is an inconsistent report, not a zero: refuse on the
-      // inconsistency rather than inventing the number the floor would be scored on.
+      // "sampled" with no count is an inconsistent report, not a zero: refuse on
+      // that rather than inventing the number the floor would be scored on.
       out.push(refusal("perGridFloor", ids[i],
         "status is sampled but the sample report carries no resolvedBeaches count", true));
       continue;
@@ -809,17 +789,17 @@ export function perGridFloorStatus(floorsEntry, gridStatus) {
   return { grids: grids, warnings: warnings };
 }
 
-// One per-grid ratio comparison. A grid is compared ONLY when it sampled this cycle
-// AND the other side carries a positive count for it; every other case is a skip that
-// WARNS, because a silent skip and a pass are indistinguishable in a manifest.
+// One per-grid ratio comparison. A grid is compared only when it sampled this cycle
+// and the other side carries a positive count for it; every other case is a skip
+// that warns, because a silent skip and a pass are indistinguishable in a manifest.
 //
 // These are strictly tighter than the global ratios for any grid present on both
-// sides: a global 0.95 is satisfiable by one grid collapsing while another grows.
+// sides: a global ratio is satisfiable by one grid collapsing while another grows.
 function perGridRatioRefusals(check, minRatio, gridCounts, otherGrids, gridStatus, otherLabel) {
   const refusals = [];
   const warnings = [];
-  // How many field comparisons were actually SCORED. shrinkRatiosPassed reads true on
-  // zero of them, so the count is what tells a reader whether the flag means anything.
+  // How many field comparisons were scored. shrinkRatiosPassed reads true on zero of
+  // them, so the count is what tells a reader whether the flag means anything.
   let compared = 0;
   const seen = {};
   const ids = [];
@@ -874,21 +854,20 @@ function perGridRatioRefusals(check, minRatio, gridCounts, otherGrids, gridStatu
   return { refusals: refusals, warnings: warnings, compared: compared };
 }
 
-// Per grid, against the PREVIOUS accepted cycle.
+// Per grid, against the previous accepted cycle.
 export function perGridShrinkRefusals(gridCounts, previousGrids, gridStatus) {
   return perGridRatioRefusals("shrinkRatio", WAVE_SHRINK_MIN_RATIO, gridCounts,
     previousGrids, gridStatus, "the previous cycle");
 }
 
-// Per grid, against the OLDEST retained cycle.
+// Per grid, against the oldest retained cycle.
 export function perGridDecayRefusals(gridCounts, oldestGrids, gridStatus) {
   return perGridRatioRefusals("decay", WAVE_DECAY_MIN_RATIO, gridCounts,
     oldestGrids, gridStatus, "the oldest retained cycle");
 }
 
-// The GLOBAL shrink ratio, summed across grids. It is a FALLBACK: the caller applies
-// it only when the previous entry carries no per-grid counts AND every grid sampled,
-// which covers the single cycle after per-grid history is introduced.
+// The global shrink ratio, summed across grids. A fallback: the caller applies it
+// only when the previous entry carries no per-grid counts and every grid sampled.
 export function shrinkRatioRefusals(counts, previousCounts) {
   const out = [];
   if (!isPlainObject(counts) || !isPlainObject(previousCounts)) {
@@ -907,7 +886,7 @@ export function shrinkRatioRefusals(counts, previousCounts) {
   return out;
 }
 
-// Against the OLDEST retained cycle, because a hit rate bleeding a few percent per
+// Against the oldest retained cycle, because a hit rate bleeding a few percent per
 // cycle passes every ratio-to-previous check forever.
 export function decayRefusals(counts, oldest) {
   const out = [];
@@ -929,10 +908,9 @@ export function decayRefusals(counts, oldest) {
 
 // --- history --------------------------------------------------------------------------
 
-// The per-grid record counts of a manifest, lifted off its grids ARRAY into the
-// keyed form the per-grid ratio gates read. A manifest written before those counts
-// existed yields {}, which is exactly the condition that keeps the global ratio
-// fallback alive for one cycle.
+// The per-grid record counts of a manifest, lifted off its grids array into the keyed
+// form the per-grid ratio gates read. A manifest carrying none yields {}, which is
+// the condition that keeps the global ratio fallback alive.
 export function gridCountsFromManifest(manifest) {
   const out = {};
   if (!isPlainObject(manifest) || !Array.isArray(manifest.grids)) {
@@ -964,14 +942,14 @@ export function historyEntryFor(manifest) {
     validStartIso: manifest.validStartIso || null,
     waveinputRecords: isFiniteNumber(beaches.waveinputRecords) ? beaches.waveinputRecords : null,
     wavesRecords: isFiniteNumber(beaches.wavesRecords) ? beaches.wavesRecords : null,
-    // Carried forward so the decay ratio can be scored PER GRID against the oldest
+    // Carried forward so the decay ratio can be scored per grid against the oldest
     // retained cycle; the globals alone cannot see one grid collapsing while another
     // grows.
     grids: gridCountsFromManifest(manifest)
   };
 }
 
-// Newest LAST, retained to a fixed window. The previous manifest's own entry is
+// Newest last, retained to a fixed window. The previous manifest's own entry is
 // appended to its history, so a chain of manifests carries a rolling window without
 // N extra fetches.
 export function buildHistory(previousManifest, retain) {
@@ -1000,15 +978,15 @@ export function oldestRetained(history) {
 
 // --- the verdict --------------------------------------------------------------------
 
-// One evaluation of every gate, with --allow-shrink demoting the OVERRIDABLE ones to
+// One evaluation of every gate, with --allow-shrink demoting the overridable ones to
 // warnings and stamping sanity.overridden true, visible forever downstream. It cannot
 // touch identity or integrity: sentinelScan, gridIdentity, bandIdentity, validTimes,
 // alignment, distinctValues, meanPlausibility, minimumRecords and ttlSpelling are
 // refusals in every mode.
 //
-// The count gates are scoped by input.gridStatus. A grid that did not sample is
-// never scored — not against its own floor, not against a ratio, and not through the
-// global gates, which are skipped entirely while any grid is missing.
+// The count gates are scoped by input.gridStatus. A grid that did not sample is never
+// scored: not against its own floor, not against a ratio, and not through the global
+// gates, which are skipped entirely while any grid is missing.
 export function evaluateWaveGates(input) {
   const floorsResult = floorsEntryFor(input.floorsFile, input.gridsDigest);
   const bootstrap = !isPlainObject(input.previousManifest);
@@ -1047,9 +1025,9 @@ export function evaluateWaveGates(input) {
     ? { refusals: [], warnings: [], compared: 0 }
     : perGridDecayRefusals(input.gridStats, input.oldestGridCounts, gridStatus);
 
-  // The global ratios survive ONLY as the fallback for a previous/oldest entry
-  // written before per-grid counts existed, and only for a complete cycle. Without
-  // this the cycle after the shape change would have no ratio coverage at all.
+  // The global ratios survive only as the fallback for a previous or oldest entry
+  // that carries no per-grid counts, and only for a complete cycle. Without this such
+  // a cycle would have no ratio coverage at all.
   const shrinkFallback = !bootstrap && !hasGridCounts(input.previousGridCounts) &&
     everyGridSampled;
   const decayFallback = !bootstrap && !hasGridCounts(input.oldestGridCounts) &&
@@ -1058,13 +1036,12 @@ export function evaluateWaveGates(input) {
     ? shrinkRatioRefusals(input.counts, input.previousCounts) : [];
   const decay = decayFallback ? decayRefusals(input.counts, input.oldest) : [];
 
-  // A previous manifest with no per-grid counts AND a grid missing this cycle scores
-  // NO ratio comparison at all: the global fallback is retired by the missing grid
-  // and every per-grid comparison skips for want of a previous entry. Refusing here
-  // would be a false alarm on behalf of a grid that never ran — a missing grid can
-  // only reduce the global count — so the response is to withhold auto-publish and
-  // make a human read the manifest, the way an unseeded floor and a bootstrap cycle
-  // already do.
+  // A previous manifest with no per-grid counts and a grid missing this cycle scores
+  // no ratio comparison at all: the global fallback is retired by the missing grid
+  // and every per-grid comparison skips for want of a previous entry. Refusing would
+  // be a false alarm on behalf of a grid that never ran, so the response is to
+  // withhold auto-publish and make a human read the manifest, as an unseeded floor
+  // and a bootstrap cycle already do.
   const ratioCoverage = shrinkFallback || perGridShrink.compared > 0;
 
   const all = gridIdentity
@@ -1168,8 +1145,8 @@ function refusalsOfCheck(list, check) {
   return list.filter(function (r) { return r.check === check; });
 }
 
-// A gate "passed" when none of its refusals survived into the final list — i.e. it
-// either produced none or every one it produced was overridden.
+// A gate passed when none of its refusals survived into the final list, whether it
+// produced none or every one was overridden.
 function countUnrefused(produced, refusals) {
   for (let i = 0; i < produced.length; i = i + 1) {
     if (refusals.indexOf(produced[i]) !== -1) {
@@ -1181,9 +1158,9 @@ function countUnrefused(produced, refusals) {
 
 // --- SHA256SUMS ---------------------------------------------------------------------
 
-// SCOPE: the two .ndjson artifacts and NOTHING ELSE. manifest.json must stay outside
-// its own checksum scope — it is the sole INPUT to the consumer gate and is read back
-// and byte-compared with cmp on its own.
+// Scope is the two .ndjson artifacts and nothing else. manifest.json must stay
+// outside its own checksum scope: it is the sole input to the consumer gate and is
+// read back and byte-compared with cmp on its own.
 export function sha256SumsText(artifacts) {
   const list = Array.isArray(artifacts) ? artifacts.slice() : [];
   list.sort(function (a, b) {
@@ -1326,7 +1303,7 @@ export async function main() {
   const digest = await gridsDigest();
   console.log("build-wave-manifest: gridsDigest " + digest);
 
-  // Measure every artifact from its own bytes, then RESCAN the records rather than
+  // Measure every artifact from its own bytes, then rescan the records rather than
   // trusting the sampler's summary.
   const artifacts = [];
   const parsed = {};
@@ -1408,8 +1385,8 @@ export async function main() {
       forecastOffset: isPlainObject(fetched) ? fetched.forecastOffset : null,
       assignedBeaches: s.assignedBeaches,
       resolvedBeaches: s.resolvedBeaches,
-      // Carried so the NEXT cycle can score its shrink and decay ratios per grid
-      // instead of against a sum in which one grid's collapse hides behind another's
+      // Carried so the next cycle can score its shrink and decay ratios per grid
+      // rather than against a sum in which one grid's collapse hides behind another's
       // growth.
       waveinputRecords: s.waveinputRecords,
       wavesRecords: s.wavesRecords,
@@ -1435,8 +1412,8 @@ export async function main() {
     ? gridsReport.grids.noaa_gfswave.cycleIso : null;
   const glwu = isPlainObject(gridsReport.grids) && isPlainObject(gridsReport.grids.noaa_glwu)
     ? gridsReport.grids.noaa_glwu.cycleIso : null;
-  // The OLDEST contributing cycle, kept separate from generated: freshness is
-  // measured against the DATA, never against the build's own wall clock.
+  // The oldest contributing cycle, kept separate from generated: freshness is
+  // measured against the data, never against the build's own wall clock.
   let dataCutoff = null;
   for (let i = 0; i < sources.length; i = i + 1) {
     const iso = sources[i].cycleIso;
@@ -1460,11 +1437,11 @@ export async function main() {
     sources: sources,
     sourcesVerified: gridsReport.problems === undefined || gridsReport.problems.length === 0,
     // Both halves, because they answer different questions: the sample report's own
-    // flag says every grid was FETCHED, and everyGridSampled says every grid produced
+    // flag says every grid was fetched, and everyGridSampled says every grid produced
     // records. A grid lost at plan or extraction time is fetch-complete and still
     // contributed nothing, and without the second half that cycle reaches
-    // src/waveManifest.js as tier "ok" — no ::warning::, no degraded line in the
-    // completion log — while the beaches it serves age out to unknown.
+    // src/waveManifest.js as tier "ok" while the beaches it serves age out to
+    // unknown.
     gridsComplete: sampleReport.gridsComplete === true &&
       verdict.sanity.everyGridSampled === true,
     tools: {
@@ -1474,9 +1451,9 @@ export async function main() {
     },
     gridsDigest: digest,
     grids: gridEntries,
-    // PROVENANCE ONLY: one entry per grid in GRIDS saying what this cycle managed to
-    // do with it. Never a conjunct of the consumer gate in src/waveManifest.js —
-    // adding one would refuse every manifest built before the field existed.
+    // Provenance only: one entry per grid in GRIDS saying what this cycle managed to
+    // do with it. Never a conjunct of the consumer gate in src/waveManifest.js, where
+    // it would refuse a manifest that carries no per-grid counts.
     gridStatus: isPlainObject(sampleReport.gridStatus) ? sampleReport.gridStatus : null,
     beaches: {
       total: sampleReport.beaches.total,
@@ -1493,11 +1470,10 @@ export async function main() {
     artifacts: artifacts,
     history: history,
     sanity: verdict.sanity,
-    // LAST, and assigned only here. src/waveManifest.js treats any other value as a
-    // FATAL failure, and this line is reached only after every gate passed — so a
-    // manifest that claims completeness is one that earned it. Emitted as the final
-    // key so a torn write cannot produce a file that both parses and claims to be
-    // complete.
+    // Assigned only here, and last. src/waveManifest.js treats any other value as a
+    // fatal failure, and this line is reached only after every gate passed, so a
+    // manifest claiming completeness earned it. Emitted as the final key, so a torn
+    // write cannot produce a file that both parses and claims to be complete.
     buildStatus: "complete"
   };
 

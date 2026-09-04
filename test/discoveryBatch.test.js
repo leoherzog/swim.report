@@ -4,7 +4,7 @@
 // mirrors the statements the Worker upsert used, that classification queueing
 // matches the Worker's semantics, and — the part that carries the real risk —
 // that every one of the four safety rails refuses what it is supposed to refuse.
-// The Deno-bound layer reading is NOT exercised here; only main()'s argument
+// The Deno-bound layer reading is not exercised here; only main()'s argument
 // guards are, which all fire before a single layer byte is read.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -15,6 +15,7 @@ import {
   parseSnapshot,
   parseArgs,
   joinLayerPath,
+  LAYER_FILES,
   layerFilePlanProblems,
   splitOtherRelations,
   upsertSql,
@@ -44,7 +45,7 @@ import { WATER_CLASS_VERSION, WATER_CLASS_MAX_ATTEMPTS } from "../src/waterClass
 import { EXPECTED_LAYER_KEYS } from "../src/layerManifest.js";
 import { buildMarineZoneIndex, nearestMarineZone } from "../src/marineZones.js";
 
-// A layer report every conjunct of src/layerManifest.js accepts. Tests knock ONE
+// A layer report every conjunct of src/layerManifest.js accepts. Tests knock one
 // field out at a time, which is the realistic shape of the failure: the report is
 // assembled by three separate scripts and a field going missing is far likelier
 // than one going explicitly false.
@@ -274,7 +275,7 @@ describe("classify UPDATE builders mirror classifyBeaches", function () {
 describe("SQL literal delivery is statement-split safe", function () {
   // The whole delta is shipped as one file to 'wrangler d1 execute --file', which
   // splits on statement boundaries. A single OSM name containing ; \n or -- must
-  // NOT be able to break out of its quoted literal — only ' is special in SQLite
+  // not be able to break out of its quoted literal — only ' is special in SQLite
   // string literals, and sqlStr doubles it. Prove the dangerous chars stay inside
   // the quotes (the literal has exactly one opening and one closing quote).
   it("keeps semicolons, newlines, and -- inside the quoted literal", function () {
@@ -294,8 +295,8 @@ describe("SQL literal delivery is statement-split safe", function () {
 });
 
 describe("reconciliationAllowed / classificationAllowed gate on a VERIFIED layer set", function () {
-  // THE SAFETY INVARIANT, restated for the layers transport: a DELETE may be
-  // emitted ONLY when the manifest PROVES the set is a complete, intact,
+  // THE safety invariant, restated for the layers transport: a DELETE may be
+  // emitted only when the manifest proves the set is a complete, intact,
   // in-scope, fresh view of OSM. Under the old transport failure was noisy and
   // delete-safe; under prebuilt layers a wrong tag filter exits 0 with a
   // well-formed manifest and every checksum matching, so the proof has to be
@@ -307,7 +308,7 @@ describe("reconciliationAllowed / classificationAllowed gate on a VERIFIED layer
   it("refuses BOTH when the view is genuinely incomplete", function () {
     // Incompleteness is the one failure that must also stop classification: a
     // partial water view makes the classifier's clean-but-empty branch decide
-    // inland, which HIDES beaches.
+    // inland, which hides beaches.
     const cases = [
       { buildStatus: "partial" },
       { sourcesVerified: false },
@@ -331,7 +332,7 @@ describe("reconciliationAllowed / classificationAllowed gate on a VERIFIED layer
     expect(classificationAllowed(stale)).toBe(true);
   });
   it("is strict about the boolean true — any non-true (null/undefined/truthy) refuses", function () {
-    // Ported verbatim in intent from the per-tile era, and it matters MORE now:
+    // Ported verbatim in intent from the per-tile era, and it matters more now:
     // the report is assembled by three separate scripts, so a MISSING field is
     // the realistic failure and must refuse exactly as an explicit false does.
     expect(reconciliationAllowed(verifiedReport({ layersVerified: 1 }))).toBe(false);
@@ -418,7 +419,7 @@ describe("reconcileStaleRows / deleteBeachSql single-source the delete set", fun
 
   it("re-drains rows parked unclassified by the pre-decisive classifier (version IS NULL at the cap)", function () {
     // The ~409 production rows left NULL at attempts=5 by the old clean-but-empty
-    // null path. A version bump can NEVER reach them (the version clause is ANDed
+    // null path. A version bump can never reach them (the version clause is ANDed
     // with attempts < cap), so the version-IS-NULL legacy marker admits them.
     const row = function (id, extra) {
       return Object.assign({
@@ -619,7 +620,7 @@ describe("regionForPoint buckets a row deterministically", function () {
   it("returns the FIRST REGIONS entry containing the point (boxes overlap)", function () {
     expect(regionForPoint(43.0, -86.0)).toBe("Lake Michigan");
     expect(regionForPoint(43.3, -79.0)).toBe("Niagara River");
-    // (43.0, -79.0) is inside BOTH Lake Erie and Niagara River; Erie is earlier
+    // (43.0, -79.0) is inside both Lake Erie and Niagara River; Erie is earlier
     // in the fixed REGIONS order, so it wins, always.
     expect(regionForPoint(43.0, -79.0)).toBe("Lake Erie");
   });
@@ -632,7 +633,7 @@ describe("regionForPoint buckets a row deterministically", function () {
 
 describe("the per-REGION delete rail catches what the global rail structurally cannot", function () {
   // The global rail's protection asymptotes toward zero as the number of
-  // independently breakable clip masks grows: a bug that zeroes ONE region's
+  // independently breakable clip masks grows: a bug that zeroes one region's
   // parks is a small fraction of the global candidate set and passes. The small
   // regions are exactly the ones it can never protect — Niagara has 5
   // park-origin candidates in production, so a floor of 10 would be vacuous.
@@ -660,7 +661,7 @@ describe("the per-REGION delete rail catches what the global rail structurally c
     expect(rail.region).toBe("Niagara River");
     expect(rail.staleCount).toBe(3);
     expect(rail.allowance).toBe(2);
-    // And the composed builder emits NOTHING — not even the Lake Michigan rows.
+    // And the composed builder emits nothing — not even the Lake Michigan rows.
     expect(reconciliationDeletes(snap, produced, 1)).toEqual([]);
   });
   it("admits a delete set within every region's own allowance", function () {
@@ -763,7 +764,7 @@ describe("marineZoneSql", function () {
 describe("classifyQueue per-beach error isolation", function () {
   // The try/catch around fetchSignals is the batch's error-isolation contract:
   // a throwing or null (transient) fetch must emit NO SQL for that beach and
-  // must NOT abort the loop — the row stays queued for the next run.
+  // must not abort the loop — the row stays queued for the next run.
   it("a thrown fetch and a null fetch emit no SQL and do not stop later beaches", async function () {
     const queue = [
       { id: "osm-node-throw", water_class_attempts: 0 },
@@ -788,7 +789,7 @@ describe("classifyQueue per-beach error isolation", function () {
     expect(result.counts.classified).toBe(1);
     expect(result.counts.inland).toBe(1);
     expect(result.counts.bumped).toBe(0);
-    // ONLY the healthy beach gets a statement — no UPDATE of any kind for the
+    // only the healthy beach gets a statement — no UPDATE of any kind for the
     // thrown/null beaches (they stay queued, attempts untouched).
     expect(result.statements).toEqual([classifyUpdateSql("osm-node-ok", "inland")]);
   });
@@ -824,7 +825,7 @@ describe("classifyQueue bump path (clean fetch, empty classification)", function
 
 describe("classifyQueue limit cap keeps attempts-ASC group ordering", function () {
   // When limit caps a larger queue, the loop reshuffles within equal-attempts
-  // groups but MUST keep attempts ASC across groups: the attempts-2 group is
+  // groups but must keep attempts ASC across groups: the attempts-2 group is
   // never selected before the attempts-0 group is exhausted. The invariant is
   // group membership, not order within the group, so run it a few times to be
   // robust to the shuffle.
@@ -923,7 +924,7 @@ describe("buildClassifyQueue", function () {
   });
 });
 
-describe("classifyQueue absent-from-layers bump (the D21 attempts semantics)", function () {
+describe("classifyQueue absent-from-layers bump (the attempts semantics)", function () {
   // Under the old per-beach probe there was no such thing as "absent": the
   // server answered for any id. Under a VERIFIED layer set, absent means GONE
   // FROM OSM, which is a real answer and must bump attempts — otherwise the row
@@ -994,7 +995,7 @@ describe("classifyQueue absent-from-layers bump (the D21 attempts semantics)", f
 });
 
 describe("classificationFlipRailAllows — the rail on mass RE-classification", function () {
-  // Deciding inland HIDES a beach: the same product loss as deleting the row,
+  // Deciding inland hides a beach: the same product loss as deleting the row,
   // arriving faster, and invisible in the row count. There were four rails on
   // deletes and none here, while 100% of the served flag-worthy rows classify
   // through one code path — so one broken build plus a version bump re-decides
@@ -1093,7 +1094,7 @@ describe("main's argument guards", function () {
     });
 
   it("refuses discovery or classification without a layer set", async function () {
-    // The layers are the ONLY data source: without them discovery would read an
+    // The layers are the only data source: without them discovery would read an
     // empty world and reconciliation would call every row stale.
     await expect(run([])).rejects.toThrow(
       "--layers <dir> is required for discovery and classification " +
@@ -1109,6 +1110,39 @@ describe("the layer file plan", function () {
     // logical layer, which is precisely the valid-looking failure the manifest
     // gate exists for. main() asserts it too, before any SQL is emitted.
     expect(layerFilePlanProblems()).toEqual({ missing: [], unexpected: [] });
+  });
+
+  it("covers every published key, with parks-polygon.fgb as the one double", function () {
+    // The self-check above reports drift; this pins the shape it checks, so a
+    // reader who edits LAYER_FILES sees which key moved. parks-polygon.fgb feeds
+    // both the membership tier and the naming tier and is the only file two
+    // logical layers may share.
+    const uses = {};
+    const keys = Object.keys(LAYER_FILES);
+    for (let i = 0; i < keys.length; i = i + 1) {
+      const list = LAYER_FILES[keys[i]];
+      expect(Array.isArray(list)).toBe(true);
+      expect(list.length).toBeGreaterThan(0);
+      for (let j = 0; j < list.length; j = j + 1) {
+        uses[list[j]] = (uses[list[j]] || 0) + 1;
+      }
+    }
+    for (let i = 0; i < EXPECTED_LAYER_KEYS.length; i = i + 1) {
+      expect(uses[EXPECTED_LAYER_KEYS[i]]).toBeGreaterThan(0);
+    }
+    const doubled = Object.keys(uses).filter(function (file) { return uses[file] > 1; });
+    expect(doubled).toEqual(["parks-polygon.fgb"]);
+    expect(uses["parks-polygon.fgb"]).toBe(2);
+  });
+
+  it("names other-relations.fgb, which no other list may absorb", function () {
+    // A beach arriving only as an unassemblable relation would vanish if this
+    // layer were dropped from the plan.
+    expect(LAYER_FILES.otherRelations).toEqual(["other-relations.fgb"]);
+    const others = Object.keys(LAYER_FILES).filter(function (key) {
+      return key !== "otherRelations" && LAYER_FILES[key].indexOf("other-relations.fgb") !== -1;
+    });
+    expect(others).toEqual([]);
   });
   it("joins a layer directory and a file name with exactly one separator", function () {
     expect(joinLayerPath("/tmp/layers", "report.json")).toBe("/tmp/layers/report.json");

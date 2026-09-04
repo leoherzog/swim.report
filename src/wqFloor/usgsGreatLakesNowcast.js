@@ -1,15 +1,8 @@
-// src/wqFloor/usgsGreatLakesNowcast.js
+// src/wqFloor/usgsGreatLakesNowcast.js — a raise-only water-quality floor source
+// (predicted bacteria, yellow only); see src/wqFloor/index.js for the floor
+// contract.
 //
-// KIND: wq — RAISE-ONLY water-quality floor source (NOT an official override).
-//   Feeds rules.js estimateFlag's "waterQualityAdvisory" input (step 7) via the
-//   src/wqFloor registry: an active predicted-bacteria advisory can RAISE a flag
-//   UP to yellow, but can NEVER pull a hazard estimate down. A clean/absent
-//   reading is the ABSENCE of an advisory (no site -> resolves to null -> zero
-//   effect), so a "Good" reading can never mask a wave/rip/alert red. This is
-//   why it lives here and NOT in src/officialSources/ (an official color would
-//   OVERRIDE the estimate everywhere).
-//
-// SOURCE: USGS Great Lakes NowCast (predicted E. coli), two no-auth JSON
+// Source: USGS Great Lakes NowCast (predicted E. coli), two no-auth JSON
 //   endpoints on pa.water.usgs.gov:
 //     - getbeaches.php          -> beach roster with LATITUDE/LONGITUDE/STATE/COOP_ID
 //     - getconditions.php?queryDate=YYYY-MM-DD&timeFrame=7
@@ -23,24 +16,24 @@
 // COLOR / FLOOR MAPPING (raise-only, worst-of yellow):
 //     BEACH_CONDITIONS "Advisory" -> floorColor "yellow"
 //     BEACH_CONDITIONS "Closed"   -> floorColor "yellow"  (this is a BACTERIA
-//                                    closure, NOT a surf hazard -> NEVER red)
+//                                    closure, not a surf hazard -> never red)
 //     "Good" / "" / anything else -> NO site (no floor)
-//   Only NY / OH / PA beaches (Lake Erie + Lake Ontario US south shore) are
+//   only NY / OH / PA beaches (Lake Erie + Lake Ontario US south shore) are
 //   emitted; other states (e.g. MI Monroe) are dropped. Readings older than
 //   MAX_NOWCAST_AGE_DAYS are dropped so a prior-season advisory never
 //   republishes forever.
 //
-// INTEGRATOR / DEDUP NOTE: this is a NEW axis (water quality), disjoint from
+// INTEGRATOR / DEDUP NOTE: this is a New axis (water quality), disjoint from
 //   every hazard source (NWS/ECCC alerts, SRF rip, NOAA waves) — no
 //   dedup concern. Register by appending "usgsGreatLakesNowcast" to
 //   wqFloorSources in src/wqFloor/index.js (most-specific matches() first). The
 //   resolver (scrapeWqFloorFromResult) reads site.floorColor + site.reason and
-//   the source object's .label; it does NOT read result.source. Resolution is
-//   PROXIMITY-ONLY (lat/lon) — names[] is deliberately omitted because NowCast
+//   the source object's .label; it does not read result.source. Resolution is
+//   proximity-only (lat/lon) — names[] is deliberately omitted because NowCast
 //   beach names are generic ("Ontario", "Lake Erie", "Cuyahoga") and a loose
 //   substring would misattribute an advisory to a namesake beach.
 //
-// scrape() runs CRON-SIDE ONLY (does the fetch). Every parse helper is pure,
+// scrape() runs CRON-SIDE only (does the fetch). Every parse helper is pure,
 // takes the passed-in nowIso (no Date.now()), and degrades to null on any
 // schema/markup change — never a wrong color.
 //
@@ -50,17 +43,17 @@
 
 import { fetchText, ageDays, perBeachResult } from "../officialSources/util.js";
 
-export const NOWCAST_BEACHES_URL =
+const NOWCAST_BEACHES_URL =
   "https://pa.water.usgs.gov/apps/nowcast/getbeaches.php";
-export const NOWCAST_CONDITIONS_BASE =
+const NOWCAST_CONDITIONS_BASE =
   "https://pa.water.usgs.gov/apps/nowcast/getconditions.php";
-export const NOWCAST_INFO_URL =
+const NOWCAST_INFO_URL =
   "https://pa.water.usgs.gov/apps/nowcast/";
-export const NOWCAST_LABEL = "USGS Great Lakes NowCast";
+const NOWCAST_LABEL = "USGS Great Lakes NowCast";
 
 // Some USGS endpoints 403 requests without a User-Agent; Workers' fetch sends
 // none by default. A benign contact UA keeps the fetch from being bot-filtered.
-export const NOWCAST_USER_AGENT = "swim.report (hello@swim.report)";
+const NOWCAST_USER_AGENT = "swim.report (hello@swim.report)";
 
 // Only Lake Erie + Lake Ontario US south-shore states carry NowCast data.
 const ALLOWED_STATES = ["NY", "OH", "PA"];
@@ -72,7 +65,7 @@ const MAX_NOWCAST_AGE_DAYS = 14;
 
 // Pure. Map a raw BEACH_CONDITIONS value to a floor color, or null.
 // Advisory AND Closed both mean predicted bacteria exceedance -> yellow floor.
-// "Closed" is a WATER-QUALITY closure, NOT a surf hazard, so it is NEVER red.
+// "Closed" is a WATER-QUALITY closure, not a surf hazard, so it is never red.
 // "Good", blank, or any unrecognized value -> null (no floor). Explicit
 // allowlist, never a prototype-chain membership test.
 export function normalizeNowcastCondition(raw) {
@@ -191,7 +184,7 @@ export function parseNowcastBeaches(text) {
 
 // Pure. getconditions.php body -> [{ key, coopId, beachName, conditions, date }]
 // or null. Records without a valid ISO DATE are dropped (DATE is required for
-// latest-wins ordering + staleness). A non-empty body that yields ZERO usable
+// latest-wins ordering + staleness). A non-empty body that yields zero usable
 // rows is treated as a schema change -> null; a genuinely empty array [] is a
 // legitimate no-data run -> [].
 export function parseNowcastConditions(text) {

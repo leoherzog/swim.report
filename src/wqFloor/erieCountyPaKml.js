@@ -1,20 +1,12 @@
-// src/wqFloor/erieCountyPaKml.js
+// src/wqFloor/erieCountyPaKml.js — a raise-only water-quality floor source; see
+// src/wqFloor/index.js for the floor contract.
 //
-// KIND: water-quality FLOOR source (src/wqFloor). RAISE-ONLY. This is NOT an
-// official-source scraper: it feeds rules.js estimateFlag's
-// waterQualityAdvisory input (step 7), where an active advisory can lift a
-// flag UP to yellow/red (worst-of) but can NEVER pull a hazard estimate down. A
-// clean/open reading is modeled as the ABSENCE of an advisory (no site -> null
-// -> zero effect), so a clean-water "green" can never mask a wave/rip/alert red.
-// That is precisely why a water-quality source must live here and NEVER in
-// src/officialSources/ (an official color OVERRIDES the estimate everywhere).
-//
-// SOURCE: Erie County (PA) Department of Health beach + HAB monitoring for
+// Source: Erie County (PA) Department of Health beach + HAB monitoring for
 // Presque Isle State Park, published as a Google MyMaps map. The county's
 // public status scheme (from the Beach Water Testing Results page) is:
 //   green  = beach is OPEN to swimming
 //   yellow = precautionary / swimming advisory with risk-reduction guidance
-//   red    = swimming is NOT PERMITTED until water quality improves
+//   red    = swimming is not PERMITTED until water quality improves
 // plus a separate Harmful Algal Bloom (HAB) task force that samples toxins
 // (microcystin, etc.); a toxin EXCEEDANCE is a red-tier closure.
 //
@@ -27,24 +19,18 @@
 // double-red / green / unknown are never emitted (WQ floors are yellow|red only;
 // the registry resolver and rules.js step 7 both independently reject others).
 //
-// FETCH URL STATUS: **UNCONFIRMED**. The Google MyMaps KML export URL
-// (https://www.google.com/maps/d/kml?mid=<MID>&forcekml=1) requires the map's
-// opaque mid, which is not present in the raw HTML of the county pages fetched
-// during authoring (the map is embedded via a client-side widget). Per the
-// build brief this ships the PURE, tested parser and FAILS CLOSED: scrape()
-// returns null (no fetch, no floor) until an integrator fills in a confirmed
-// no-auth KML endpoint at ERIE_COUNTY_PA_KML_URL. Set it via the standard
-// forcekml export once the mid is verified against the live MyMaps page. Do NOT
-// probe for hidden endpoints or bypass any bot/auth protection to obtain it.
+// The fetch URL is unconfirmed. The Google MyMaps KML export
+// (https://www.google.com/maps/d/kml?mid=<MID>&forcekml=1) needs the map's opaque
+// mid, which is not in the raw HTML of the county pages — the map is embedded via
+// a client-side widget. So this ships the pure, tested parser and fails closed:
+// scrape() returns null, no fetch and no floor, until ERIE_COUNTY_PA_KML_URL
+// carries a confirmed no-auth KML endpoint. Never probe for hidden endpoints or
+// bypass bot or auth protection to obtain it.
 //
-// DEDUP NOTE FOR THE INTEGRATOR: this is a NEW axis (water quality) for a NEW
-// region (Presque Isle / Erie, PA). It does not overlap any registered hazard
-// scraper or the Ohio/Chicago/Michigan water sources. No dedup concern.
-//
-// scrape() runs cron-side ONLY. parseErieCountyPaKml / classifyErieStatus are
-// pure and exported for tests. There is NO DOMParser in Workers, so parsing is
-// defensive regex/string work: any markup or schema change degrades to null (or
-// omits the affected placemark), NEVER a wrong color.
+// scrape() runs cron-side only; the parsers are pure. There is no DOMParser in
+// Workers, so parsing is defensive regex and string work: any markup or schema
+// change degrades to null, or omits the affected placemark, never a wrong
+// color.
 
 import { fetchText, perBeachResult } from "../officialSources/util.js";
 
@@ -52,7 +38,7 @@ import { fetchText, perBeachResult } from "../officialSources/util.js";
 export const ERIE_COUNTY_PA_LABEL = "Erie County (PA) Department of Health";
 
 // Confirmed human-readable page (used as the estimate-card infoUrl). This is an
-// HTML info page, NOT the KML feed — never parse it for a color.
+// HTML info page, not the KML feed — never parse it for a color.
 export const ERIE_COUNTY_PA_INFO_URL =
   "https://eriecountypa.gov/departments/health/services-and-programs/health-and-wellness/beach-water-testing-results/";
 
@@ -128,7 +114,7 @@ function detectHab(text) {
 // Pure, exported for tests. Classify one placemark's raw description into a
 // water-quality FLOOR color, or null. null means "clean / open / unrecognized"
 // -> NO floor (the absence of an advisory), which is the safe default: a floor
-// can only ever RAISE a flag, so failing to a floor of null never masks a
+// can only ever raise a flag, so failing to a floor of null never masks a
 // hazard. Never emits green/double-red/unknown. Never throws.
 //
 // Priority is worst-of: RED (closure / toxin exceedance) is checked before
@@ -143,7 +129,7 @@ export function classifyErieStatus(rawDescription) {
 
   // --- RED: affirmative closure or a toxin/bacteria threshold exceedance. ---
   // These phrases match the county's own "swimming is not permitted" red state
-  // and a HAB "exceeds" reading. "closed"/"closure" are deliberately NOT used
+  // and a HAB "exceeds" reading. "closed"/"closure" are deliberately not used
   // as red triggers because "not closed" / "no closure" would false-red; the
   // documented red wording is "not permitted", which is unambiguous.
   if (/\bnot permitted\b/.test(text)) {
@@ -263,7 +249,7 @@ function parseCoordinates(raw) {
   return { lat: lat, lon: lon };
 }
 
-// Pure. Extract the inner text of the FIRST <tag>...</tag> in block, or "".
+// Pure. Extract the inner text of the first <tag>...</tag> in block, or "".
 function firstTag(block, tag) {
   const re = new RegExp("<" + tag + "\\b[^>]*>([\\s\\S]*?)<\\/" + tag + ">", "i");
   const m = re.exec(block);
