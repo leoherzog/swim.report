@@ -24,8 +24,8 @@ import {
 } from "./waveStrip.js";
 
 // The flag estimate recomputes hourly, so 2 h without an update is genuinely
-// stale. The wave strip is refreshed on the 6-hourly wave cron (its KV lives
-// 7 h and the marine models only publish every 6–12 h), so it is only stale
+// stale. The wave strip is refreshed on the offline NOAA wave cycle (its KV
+// lives 7 h and the marine models only publish every 6–12 h), so it is only stale
 // once it has clearly missed a cycle — an 8 h threshold, not the 2 h flag one.
 //
 // STALE_MS is the DEFAULT horizon, not a universal one: it is calibrated to our
@@ -342,7 +342,7 @@ function renderSourceLabels(sources) {
 
 // Official cards are the one place a source renders as a hyperlink: the
 // scraped page is where a visitor can verify the posted flag upstream.
-// Estimate sources (NWS, Open-Meteo, GLOS) stay plain text — see
+// Estimate sources (NWS, ECCC, NOAA wave models) stay plain text — see
 // renderSourceLabels. Returns "" when the url is missing or not URL-like.
 function renderOfficialSourceLink(url) {
   if (!isUrlLike(url)) {
@@ -478,8 +478,7 @@ function renderFooter() {
     "<a href=\"https://www.openstreetmap.org\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
     "for beach locations, " +
     "<a href=\"https://www.weather.gov\" rel=\"noopener noreferrer\">NOAA/NWS</a> + " +
-    "<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a> + " +
-    "<a href=\"https://open-meteo.com/en/docs/marine-weather-api\" rel=\"noopener noreferrer\">Open-Meteo</a> " +
+    "<a href=\"https://weather.gc.ca\" rel=\"noopener noreferrer\">ECCC</a> " +
     "for marine and weather data, and " +
     "<a href=\"https://www.windy.com/webcams\" rel=\"noopener noreferrer\">Windy.com</a> " +
     "for webcams.</small><br>" +
@@ -1070,8 +1069,8 @@ export function renderDetailPage(data) {
   // to null so the wave forecast section simply omits itself.
   const waves = (data.waves === undefined || data.waves === null) ? null : data.waves;
   // NDBC water-temperature reading (DISPLAY-ONLY, never a flag input). Absent
-  // until the wave cron writes it, so default to null; the subtitle omits the
-  // temp fragment when it is null or stale.
+  // until the water-temperature cron writes it, so default to null; the
+  // subtitle omits the temp fragment when it is null or stale.
   const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
   const title = displayName(beach) + " — Swim Report";
   const lat = Number(beach.lat).toFixed(4);

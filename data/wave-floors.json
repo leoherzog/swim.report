@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "_readme": [
+    "data/wave-floors.json - the committed COVERAGE floors for the NOAA GRIB2 wave pipeline, read",
+    "by scripts/build-wave-manifest.js before waves/current.json is written.",
+    "",
+    "WHY THIS FILE EXISTS. Every count gate in this pipeline is a ratio against the previous cycle",
+    "or against the oldest retained one, and a ratio cannot answer 'is this enough coverage at",
+    "all'. A cycle that resolves 40 beaches out of 16,000 passes every ratio check the moment the",
+    "cycle before it also resolved 40. The floors here are the absolute answer, and they are SEEDED",
+    "FROM A REAL CYCLE, cross-checked by a human against D1 truth, and moved only by a reviewed",
+    "commit - the same discipline data/layer-floors.json already has.",
+    "",
+    "WHY IT IS KEYED BY gridsDigest. The digest is sha256 over gridsDigestInput(GRIDS) from",
+    "src/waveGrids.js: id, domain, cell size, url template, variables and cap km, sorted, canonical",
+    "JSON. Adding a grid, moving a domain edge or changing a search cap changes the digest, so the",
+    "new grid set has NO entry here and the build refuses to auto-publish until someone seeds one.",
+    "The BEACH SET is deliberately not in the digest: it grows daily, and a digest that changes",
+    "daily would withhold auto-publish forever.",
+    "",
+    "HOW TO SEED A NEW DIGEST.",
+    "  1. Run waves.yml by workflow_dispatch with publish true. Auto-publish is withheld (an",
+    "     unseeded digest and a bootstrap cycle both withhold it), so the prefix is uploaded and",
+    "     readable but waves/current.json is not moved.",
+    "  2. Read the produced manifest.json. Cross-check beaches.resolved against the D1 row count and",
+    "     the per-grid split against where the beaches actually are before trusting any of it.",
+    "  3. Commit an entry under the new digest with status \"seeded\", seededFromCycleId set to that",
+    "     manifest cycleId, and each floor set to 0.75x the observed count (rounded down).",
+    "",
+    "SHAPE.",
+    "  floors[<gridsDigest>].status               \"bootstrap\" | \"seeded\"",
+    "  floors[<gridsDigest>].waveinputRecords     global floor on emitted waveinput: records",
+    "  floors[<gridsDigest>].wavesRecords         global floor on emitted waves: records",
+    "  floors[<gridsDigest>].grids[<gridId>]      per-grid floor on beaches resolved to that grid,",
+    "                                             keyed by the ids in src/waveGrids.js GRIDS",
+    "",
+    "A null floor means NO FLOOR HAS BEEN SEEDED YET and that check does not apply. A null is",
+    "deliberate and reviewable; an invented number is not. A floors file carrying made-up counts is",
+    "strictly worse than one carrying nulls, because a wrong floor either blocks every cycle",
+    "forever or blesses a broken one.",
+    "",
+    "status \"bootstrap\" is NOT a licence to auto-publish. It records that the grid set is known and",
+    "its floors are still pending. Do not add a bootstrap entry for a NEW digest just to get past a",
+    "refusal - that defeats the entire purpose of keying this file by digest."
+  ],
+  "floors": {
+    "sha256:c4eafd4a4b0045968b45b70dfcace999395cb3f1af218a69167cb9cef2d7be9b": {
+      "status": "bootstrap",
+      "seededFromCycleId": null,
+      "waveinputRecords": null,
+      "wavesRecords": null,
+      "grids": {
+        "noaa_glwu": null,
+        "noaa_gfswave": null,
+        "noaa_gfswave_arctic": null
+      }
+    }
+  }
+}

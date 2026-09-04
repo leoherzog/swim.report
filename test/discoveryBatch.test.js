@@ -4,12 +4,12 @@
 // mirrors the statements the Worker upsert used, that classification queueing
 // matches the Worker's semantics, and — the part that carries the real risk —
 // that every one of the four safety rails refuses what it is supposed to refuse.
-// The Deno-bound layer reading and the main() orchestration are NOT exercised
-// here; the entrypoint is guarded by import.meta.main so importing this module
-// never triggers it.
+// The Deno-bound layer reading is NOT exercised here; only main()'s argument
+// guards are, which all fire before a single layer byte is read.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  main,
   sqlStr,
   sqlNum,
   parseSnapshot,
@@ -1071,6 +1071,35 @@ describe("classificationFlipRailAllows — the rail on mass RE-classification", 
     expect(rendered).toContain("ocean->{");
     expect(rendered).toContain("inland->{");
     expect(rendered).toContain("unclassified->{");
+  });
+});
+
+describe("main's argument guards", function () {
+  // All three fire before any layer byte is read, so a Deno stub carrying nothing but
+  // args reaches them. Everything past them needs real FlatGeobuf bytes.
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  function run(argv) {
+    vi.stubGlobal("Deno", { args: argv });
+    return main();
+  }
+
+  it("refuses a run with no discovery, no classification and no marine pass",
+    async function () {
+      await expect(run(["--no-discovery", "--no-classify"])).rejects.toThrow(
+        "nothing to do — pick at least one of discovery, classify, --marine-zones");
+    });
+
+  it("refuses discovery or classification without a layer set", async function () {
+    // The layers are the ONLY data source: without them discovery would read an
+    // empty world and reconciliation would call every row stale.
+    await expect(run([])).rejects.toThrow(
+      "--layers <dir> is required for discovery and classification " +
+      "(run scripts/fetch-layers.js first); use --no-discovery --no-classify for a " +
+      "marine-only run");
+    await expect(run(["--no-discovery"])).rejects.toThrow("--layers <dir> is required");
   });
 });
 

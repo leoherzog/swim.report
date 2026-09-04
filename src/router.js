@@ -28,7 +28,7 @@ const CACHE_CONTROL_NO_STORE = "no-store";
 // Throttle for the last_viewed demand stamp: at most one D1 write per beach
 // per hour. Consumers: runNwsEnrichment/runEcccEnrichment/runWebcamSync order
 // their candidate queues with last_viewed as a tiebreak (demand ordering, not
-// a filter), and runFlagRecompute/runWaveRefresh split the recompute rotation
+// a filter), and runFlagRecompute/runWaterTempRefresh split their rotation
 // into a hot tier (viewed within HOT_VIEW_WINDOW_MS, always covered every run)
 // and a cold tier that rotates through the remaining budget — so an hourly
 // stamp is finer than any of them need.

@@ -23,14 +23,15 @@ enabled = true
 
 # 7 * * * *        — hourly flag recompute (estimates + official scrapes -> KV).
 #                    Offset off the congested top-of-hour :00 slot the repo's own
-#                    GH workflows deliberately avoid; still reads (never fetches)
-#                    the waveinput: KV the :15 wave cron last wrote.
-# 15 */6 * * *     — 6-hourly wave/wind refresh (Open-Meteo/GLOS -> KV). The run is
-#                    wall-clock bounded inside runWaveRefresh (gather stops at T+480s,
-#                    the KV write pool yields at T+840s) against the 900s scheduled
-#                    ceiling; a truncated run persists a prefix and advances its own
-#                    wave_updated cursor, so shortening this cadence is never the fix
-#                    for a slow run — and it would double the daily Open-Meteo quota.
+#                    GH workflows deliberately avoid. It READS (never fetches) the
+#                    waveinput: KV that .github/workflows/waves.yml writes out of
+#                    band from NOAA GRIB2 model output. Those keys carry an ABSOLUTE
+#                    expiration derived from the model valid time rather than from
+#                    write time, so no schedule ordering between this cron and that
+#                    workflow is required or implied: a late or missing pipeline run
+#                    ages a beach out to unknown instead of serving stale data.
+# 15 */6 * * *     — 6-hourly water-temperature refresh. Sole writer of watertemp:,
+#                    and sole writer and reader of the wave_updated rotation cursor.
 #
 # EVERY interval here must stay >= 1 hour. Cloudflare gives a scheduled invocation
 # 15 minutes of CPU only at hourly-or-longer intervals; below that the allowance
@@ -50,8 +51,14 @@ enabled = true
 # layers, fetched from R2 by the GitHub Actions job — never by this Worker) and
 # water-body classification also run only in that offline batch
 # (scripts/discovery-batch.js), which emits an idempotent SQL delta bulk-loaded
-# into D1 out-of-band. The request path still reads only D1/KV — which is why
-# there is deliberately no [[r2_buckets]] binding anywhere in this file.
+# into D1 out-of-band. The NOAA wave cycle is published to the same bucket under
+# waves/<cycleId>/ and is likewise read only by GitHub Actions, which bulk-writes
+# the resulting waveinput:/waves: pairs into KV.
+#
+# The request path still reads only D1/KV, and the cron path only the upstreams
+# named above — which is why there is deliberately no [[r2_buckets]] binding
+# anywhere in this file. Adding one would put an offline artifact store within
+# reach of the request path and break the two-path rule at the config layer.
 [triggers]
 crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 

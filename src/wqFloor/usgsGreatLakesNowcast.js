@@ -31,7 +31,7 @@
 //   republishes forever.
 //
 // INTEGRATOR / DEDUP NOTE: this is a NEW axis (water quality), disjoint from
-//   every hazard source (NWS/ECCC alerts, SRF rip, Open-Meteo/GLOS waves) — no
+//   every hazard source (NWS/ECCC alerts, SRF rip, NOAA waves) — no
 //   dedup concern. Register by appending "usgsGreatLakesNowcast" to
 //   wqFloorSources in src/wqFloor/index.js (most-specific matches() first). The
 //   resolver (scrapeWqFloorFromResult) reads site.floorColor + site.reason and

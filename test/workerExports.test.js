@@ -47,7 +47,7 @@ describe("Worker entry module exports", function () {
   });
 });
 
-// Guards the TWO-PATH RULE against the prebuilt-layer migration.
+// Guards the TWO-PATH RULE for both offline pipelines.
 //
 // The layer pipeline (src/layer*.js, scripts/lib/fgbReader.js) reads FlatGeobuf
 // files and is OFFLINE-ONLY: it runs in the Deno batch under GitHub Actions and
@@ -56,6 +56,14 @@ describe("Worker entry module exports", function () {
 // cannot load, so the Worker would fail at startup rather than at test time; and
 // more importantly, the request path is contractually limited to D1 and KV, so a
 // module that opens layer bytes has no business in its import closure.
+//
+// The wave pipeline (src/waveGrids.js, src/waveManifest.js) is the same class of
+// module: GRIB grid geometry and the fail-closed publication gate, consumed only
+// by scripts/ under Actions. Importing either from the Worker would put GRIB
+// decoding — which needs native binaries and cannot run in workerd — on the cron
+// path. src/waveModels.js is deliberately NOT offline: it is the static label
+// table runFlagRecompute reads, and the assertion below pins it inside the
+// closure so the two are never confused.
 //
 // Static analysis, deliberately: importing src/index.js and inspecting it at
 // runtime would only catch what the module graph happens to evaluate. Walking
@@ -107,7 +115,11 @@ describe("Worker import closure (two-path rule)", function () {
     return { modules: seen, bare: bare };
   }
 
-  it("never reaches flatgeobuf or any offline layer module from src/index.js", function () {
+  // Offline-only src/ modules, by exact name. Both pipelines are listed here so a
+  // new one is added deliberately rather than by matching a naming convention.
+  const OFFLINE_ONLY = ["waveGrids.js", "waveManifest.js"];
+
+  it("never reaches flatgeobuf or any offline module from src/index.js", function () {
     const walked = walkFromIndex();
 
     // 1. No npm/bare specifier naming the layer reader's dependency.
@@ -119,12 +131,13 @@ describe("Worker import closure (two-path rule)", function () {
     });
     expect(bareOffenders).toEqual([]);
 
-    // 2. No offline layer module in the closure. These are Deno-batch modules;
-    //    if one shows up here, something in the request or cron path started
-    //    importing the layer pipeline.
+    // 2. No offline module in the closure. These are Deno-batch modules; if one
+    //    shows up here, something in the request or cron path started importing
+    //    the layer or wave pipeline.
     const offlineOffenders = [];
     walked.modules.forEach(function (rel) {
-      if (/^layer[A-Z]/.test(rel) || rel.indexOf("lib/fgbReader") !== -1) {
+      if (/^layer[A-Z]/.test(rel) || rel.indexOf("lib/fgbReader") !== -1 ||
+        OFFLINE_ONLY.indexOf(rel) !== -1) {
         offlineOffenders.push(rel);
       }
     });
@@ -136,6 +149,10 @@ describe("Worker import closure (two-path rule)", function () {
     expect(walked.modules.size).toBeGreaterThan(20);
     expect(walked.modules.has("router.js")).toBe(true);
     expect(walked.modules.has("rules.js")).toBe(true);
+    // waveModels.js is the label table runFlagRecompute reads, so it belongs in
+    // the closure. Pinning it here keeps assertion 2 from being read as "no
+    // wave module may be imported".
+    expect(walked.modules.has("waveModels.js")).toBe(true);
   });
 
   it("uses no real dynamic import() in src/, which would evade the static walk", function () {

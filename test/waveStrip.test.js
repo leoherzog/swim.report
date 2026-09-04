@@ -121,27 +121,27 @@ describe("trimWaveSeries", () => {
   it("keeps only well-formed model arrays and drops malformed ones", () => {
     const out = trimWaveSeries(wavesWith({
       byModel: {
-        ecmwf_wam025: constHours(2.0),
-        ncep_gfswave025: [1, 2, 3],            // wrong length -> dropped
-        meteofrance_wave: constHours("2.0"),   // non-number entries -> dropped
+        noaa_glwu: constHours(2.0),
+        noaa_gfswave: [1, 2, 3],            // wrong length -> dropped
+        noaa_gfswave_arctic: constHours("2.0"),   // non-number entries -> dropped
         bogus_extra: constHours(3.0)
       }
     }), START);
-    expect(Object.keys(out.byModel).sort()).toEqual(["bogus_extra", "ecmwf_wam025"]);
-    expect(out.byModel.ecmwf_wam025).toHaveLength(24);
+    expect(Object.keys(out.byModel).sort()).toEqual(["bogus_extra", "noaa_glwu"]);
+    expect(out.byModel.noaa_glwu).toHaveLength(24);
   });
 
   it("applies the same elapsed offset to byModel as to hoursFt", () => {
     const model = [];
     for (let i = 0; i < 24; i++) { model.push(i); }
     const out = trimWaveSeries(
-      wavesWith({ byModel: { ecmwf_wam025: model } }),
+      wavesWith({ byModel: { noaa_glwu: model } }),
       "2026-07-05T02:00:00.000Z"
     );
     expect(out.hoursFt).toHaveLength(22);
-    expect(out.byModel.ecmwf_wam025).toHaveLength(22);
-    expect(out.byModel.ecmwf_wam025[0]).toBe(2);
-    expect(out.byModel.ecmwf_wam025[21]).toBe(23);
+    expect(out.byModel.noaa_glwu).toHaveLength(22);
+    expect(out.byModel.noaa_glwu[0]).toBe(2);
+    expect(out.byModel.noaa_glwu[21]).toBe(23);
   });
 
   it("drops a model whose trimmed slice is entirely null", () => {
@@ -151,10 +151,10 @@ describe("trimWaveSeries", () => {
     // After 22 h elapsed only indices 22,23 remain — both null here.
     const nulled = constHours(null);
     const out = trimWaveSeries(
-      wavesWith({ byModel: { ecmwf_wam025: nulled, ncep_gfswave025: constHours(2.0) } }),
+      wavesWith({ byModel: { noaa_glwu: nulled, noaa_gfswave: constHours(2.0) } }),
       "2026-07-05T22:00:00.000Z"
     );
-    expect(Object.keys(out.byModel)).toEqual(["ncep_gfswave025"]);
+    expect(Object.keys(out.byModel)).toEqual(["noaa_gfswave"]);
   });
 
   it("never lets a garbage byModel block the main strip", () => {
@@ -167,9 +167,9 @@ describe("trimWaveSeries", () => {
 
 describe("modelDisplayName", () => {
   it("maps known ids to their display names and passes unknown ids through", () => {
-    expect(modelDisplayName("ecmwf_wam025")).toBe("ECMWF");
-    expect(modelDisplayName("ncep_gfswave025")).toBe("NOAA GFS");
-    expect(modelDisplayName("meteofrance_wave")).toBe("Météo-France");
+    expect(modelDisplayName("noaa_glwu")).toBe("NOAA Great Lakes");
+    expect(modelDisplayName("noaa_gfswave")).toBe("NOAA GFS");
+    expect(modelDisplayName("noaa_gfswave_arctic")).toBe("NOAA GFS Arctic");
     expect(modelDisplayName("some_new_model")).toBe("some_new_model");
   });
 });
@@ -178,11 +178,11 @@ describe("orderedModelIds", () => {
   it("orders known ids by display order then unknown ids in payload-key order", () => {
     const ids = orderedModelIds({
       zeta_extra: [],
-      meteofrance_wave: [],
-      ecmwf_wam025: [],
+      noaa_gfswave_arctic: [],
+      noaa_glwu: [],
       alpha_extra: []
     });
-    expect(ids).toEqual(["ecmwf_wam025", "meteofrance_wave", "zeta_extra", "alpha_extra"]);
+    expect(ids).toEqual(["noaa_glwu", "noaa_gfswave_arctic", "zeta_extra", "alpha_extra"]);
   });
 
   it("returns [] for malformed input", () => {
@@ -196,14 +196,14 @@ describe("modelNowEntries", () => {
     const trimmed = {
       totalHours: 24,
       byModel: {
-        meteofrance_wave: constHours(2.9),
-        ecmwf_wam025: constHours(2.6),
-        ncep_gfswave025: constHours(2.4)
+        noaa_gfswave_arctic: constHours(2.9),
+        noaa_glwu: constHours(2.6),
+        noaa_gfswave: constHours(2.4)
       }
     };
     const entries = modelNowEntries(trimmed);
     expect(entries.map(function (e) { return e.name; }))
-      .toEqual(["ECMWF", "NOAA GFS", "Météo-France"]);
+      .toEqual(["NOAA Great Lakes", "NOAA GFS", "NOAA GFS Arctic"]);
     expect(entries.map(function (e) { return e.valueFt; })).toEqual([2.6, 2.4, 2.9]);
   });
 
@@ -212,10 +212,10 @@ describe("modelNowEntries", () => {
     withNull[0] = null;
     const trimmed = {
       totalHours: 24,
-      byModel: { ecmwf_wam025: constHours(2.6), ncep_gfswave025: withNull }
+      byModel: { noaa_glwu: constHours(2.6), noaa_gfswave: withNull }
     };
     expect(modelNowEntries(trimmed).map(function (e) { return e.id; }))
-      .toEqual(["ecmwf_wam025"]);
+      .toEqual(["noaa_glwu"]);
   });
 
   it("returns [] for null / empty trimmed", () => {
@@ -229,17 +229,17 @@ describe("modelNowCaption", () => {
     const trimmed = {
       totalHours: 24,
       byModel: {
-        ecmwf_wam025: constHours(2.63),
-        ncep_gfswave025: constHours(2.44),
-        meteofrance_wave: constHours(2.9)
+        noaa_glwu: constHours(2.63),
+        noaa_gfswave: constHours(2.44),
+        noaa_gfswave_arctic: constHours(2.9)
       }
     };
     expect(modelNowCaption(trimmed))
-      .toBe("ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft");
+      .toBe("NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft · NOAA GFS Arctic 2.9 ft");
   });
 
   it("returns '' with fewer than two now-hour models", () => {
-    expect(modelNowCaption({ totalHours: 24, byModel: { ecmwf_wam025: constHours(2.6) } }))
+    expect(modelNowCaption({ totalHours: 24, byModel: { noaa_glwu: constHours(2.6) } }))
       .toBe("");
     expect(modelNowCaption({ totalHours: 24, byModel: {} })).toBe("");
   });
@@ -247,13 +247,13 @@ describe("modelNowCaption", () => {
 
 describe("buildWaveModelChartConfig", () => {
   function threeModelTrimmed() {
-    const ecmwf = constHours(2.63);
+    const glwu = constHours(2.63);
     const gfs = constHours(2.44);
-    const mf = constHours(2.9);
+    const arctic = constHours(2.9);
     gfs[1] = null; // a null hour to prove gaps are preserved
     return {
       totalHours: 24,
-      byModel: { meteofrance_wave: mf, ecmwf_wam025: ecmwf, ncep_gfswave025: gfs }
+      byModel: { noaa_gfswave_arctic: arctic, noaa_glwu: glwu, noaa_gfswave: gfs }
     };
   }
 
@@ -261,7 +261,7 @@ describe("buildWaveModelChartConfig", () => {
     const config = buildWaveModelChartConfig(threeModelTrimmed());
     expect(config.type).toBeUndefined();
     expect(config.data.datasets.map(function (d) { return d.label; }))
-      .toEqual(["ECMWF", "NOAA GFS", "Météo-France"]);
+      .toEqual(["NOAA Great Lakes", "NOAA GFS", "NOAA GFS Arctic"]);
   });
 
   it("labels the category axis 'Now', '+1 h', ... with length = totalHours", () => {
@@ -310,14 +310,14 @@ describe("waveModelSummary", () => {
     const trimmed = {
       totalHours: 24,
       byModel: {
-        ecmwf_wam025: constHours(2.63),
-        ncep_gfswave025: constHours(2.44),
-        meteofrance_wave: constHours(2.9)
+        noaa_glwu: constHours(2.63),
+        noaa_gfswave: constHours(2.44),
+        noaa_gfswave_arctic: constHours(2.9)
       }
     };
     expect(waveModelSummary(trimmed)).toBe(
-      "Wave height by model, next 24 hours — ECMWF now 2.6 ft, " +
-      "NOAA GFS now 2.4 ft, Météo-France now 2.9 ft.");
+      "Wave height by model, next 24 hours — NOAA Great Lakes now 2.6 ft, " +
+      "NOAA GFS now 2.4 ft, NOAA GFS Arctic now 2.9 ft.");
   });
 
   it("marks a model that is null at the now-hour as having no current reading", () => {
@@ -325,10 +325,10 @@ describe("waveModelSummary", () => {
     gfs[0] = null;
     const trimmed = {
       totalHours: 12,
-      byModel: { ecmwf_wam025: constHours(2.6), ncep_gfswave025: gfs }
+      byModel: { noaa_glwu: constHours(2.6), noaa_gfswave: gfs }
     };
     expect(waveModelSummary(trimmed)).toBe(
-      "Wave height by model, next 12 hours — ECMWF now 2.6 ft, " +
+      "Wave height by model, next 12 hours — NOAA Great Lakes now 2.6 ft, " +
       "NOAA GFS (no current reading).");
   });
 

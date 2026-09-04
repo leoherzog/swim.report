@@ -1,9 +1,9 @@
 # Swim Report (swim.report)
 
 Swim Report estimates beach hazard flag status (green / yellow / red / double-red /
-unknown) for US and Canadian Great Lakes beaches using public NWS, Environment and
-Climate Change Canada (ECCC), and Open-Meteo data, and — where a municipality
-publishes one — surfaces the real official flag alongside it.
+unknown) for US and Canadian Great Lakes beaches using public NOAA/NWS and Environment
+and Climate Change Canada (ECCC) data, and — where a municipality publishes one —
+surfaces the real official flag alongside it.
 
 ## Estimated vs. official
 
@@ -13,7 +13,7 @@ Every color shown by Swim Report is either:
 
 - an **ESTIMATE** (`official: false`) — a deterministic, versioned guess computed from
   NWS alerts (or Environment Canada alerts for Canadian beaches), NWS Surf Zone
-  Forecast rip current risk, and Open-Meteo wave/wind data.
+  Forecast rip current risk, and NOAA wave-model wave/wind data.
   It is not a substitute for the flag actually flying at the beach.
 - an **OFFICIAL** reading (`official: true`) — scraped directly from a municipality's
   or health department's own published status page/API, when Swim Report has a
@@ -41,7 +41,7 @@ that flag — and any lifeguard on duty — is the actual authority, not this si
 The HTTP request path never calls any upstream API. It only reads pre-computed data
 from D1 (beach directory) and KV (flag estimates / official readings), which are kept
 fresh by scheduled cron jobs (see [Cron jobs](#cron-jobs) below — the hourly recompute
-and a 6-hourly wave refresh).
+and a 6-hourly water-temperature refresh) and by the offline NOAA wave cycle.
 
 ### `GET /api/beaches.geojson`
 
@@ -109,14 +109,14 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.5.0",
+        "rules_version": "1.5.1",
         "official": false,
         "waveHeightFt": 2.62,
         "alertDetails": [],
         "ripCurrentRisk": null,
         "sources": [
-          { "label": "ECMWF Wave Forecast",
-            "url": "https://open-meteo.com/en/docs/marine-weather-api" }
+          { "label": "NOAA GFS Wave Model",
+            "url": "https://polar.ncep.noaa.gov/waves/" }
         ],
         "updated": "2026-07-04T15:00:03.000Z"
       },
@@ -162,7 +162,7 @@ estimate card (on the "waves now" stat line) and is omitted entirely for beaches
 with no wave series (e.g. buoy-only readings, which still show the "now" stat).
 
 When two or more wave models resolve for a beach, the section also shows each model's
-current reading ("ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft") and a
+current reading ("NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft") and a
 collapsed "Compare wave models" line chart of the per-model 24-hour series. The flag
 estimate itself still derives from the composite first-finite-model series — the
 per-model data (`byModel` in the KV `waves:` payload) is stored for transparency and
@@ -218,7 +218,7 @@ IP-derived location and must never be shared across visitors.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.5.0`. Given the same inputs it always returns the same output.
+`rules_version` is `1.5.1`. Given the same inputs it always returns the same output.
 
 Precedence is strict: the first matching rule (steps 1–5) wins, evaluated top to
 bottom. Steps 6, 6b and 7 are the exceptions — they are raise-only *floors*
@@ -248,14 +248,14 @@ each raise a lower result but never downgrade a higher color (see the notes belo
 | 1b | Active ECCC alert | `weather-alerts` | Event = "wind warning" | red | "Active Environment Canada alert: wind warning" |
 | 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product, regex-parsed | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
 | 2 | Rip current risk | same | MODERATE | yellow | "NWS surf zone forecast rip current risk: MODERATE" |
-| 3 | Wave height | Open-Meteo Marine API (m converted to ft, `m * 3.28084`) | >= 4 ft | red | "Estimated wave height X.X ft (at or above 4 ft)" |
+| 3 | Wave height | NOAA wave-model HTSGW (m converted to ft, `m * 3.28084`) | >= 4 ft | red | "Estimated wave height X.X ft (at or above 4 ft)" |
 | 3 | Wave height | same | >= 2 ft | yellow | "Estimated wave height X.X ft (at or above 2 ft)" |
 | 3 | Wave height | same | < 2 ft, non-null | green | "Estimated wave height X.X ft (below 2 ft)" |
-| 4 | Wind (fallback only when wave height is null) | Open-Meteo standard forecast API | sustained >= 25 mph OR gusts >= 35 mph | red | "No wave data; wind S mph sustained, G mph gusts (at or above 25 mph sustained or 35 mph gust threshold)" |
+| 4 | Wind (fallback only when wave height is null) | NOAA wave-model WIND (m/s converted to mph, `m/s * 2.2369362920544`); gusts are always null | sustained >= 25 mph OR gusts >= 35 mph | red | "No wave data; wind S mph sustained, G mph gusts (at or above 25 mph sustained or 35 mph gust threshold)" |
 | 4 | Wind | same | sustained >= 15 mph OR gusts >= 25 mph | yellow | "No wave data; wind S mph sustained, G mph gusts (at or above 15 mph sustained or 25 mph gust threshold)" |
 | 4 | Wind | same | below both thresholds | green | "No wave data; wind S mph sustained, G mph gusts (below advisory thresholds)" |
 | 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
-| 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models" |
+| 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models" |
 | 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Tornado, Severe Thunderstorm, High Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
 | 6b | ECCC marine yellow floor (Canadian beaches) | `marineweather-realtime` collection | Event = "strong wind warning" or "marine weather advisory", **and** the decided color is green/unknown | yellow | "Active Environment Canada alert: <event>" |
 | 7 | Water-quality advisory floor (raise-only) | `src/wqFloor/` registry (E. coli / bacteria / HAB advisories) | An active advisory whose floor color (yellow or red) **outranks** the color steps 1–6b decided | yellow or red | "Water-quality advisory (<source>): <detail>" |
@@ -322,14 +322,14 @@ Notes on the precedence design (all intentional, see `src/rules.js` and
 - Rip current risk beats wave height even when the wave height alone would imply a
   worse (or better) color. A MODERATE rip risk yields yellow even with a 6 ft wave
   height reading.
-- Wind is used **only** as a fallback when every wave model returned null (common on
-  the Great Lakes, where wave model grid points are frequently masked). It is never
-  blended with wave data.
-- On the Great Lakes, a beach whose Open-Meteo wave reading is null may be
-  gap-filled from the nearest GLOS Seagull wave buoy (within 25 km, freshest
-  observation within 2 h — `src/clients/glerl.js`) before wind is considered.
-  The `sources` array on each estimate names whichever wave source was actually
-  used.
+- Wind is used **only** as a fallback when the wave reading is null. It is never
+  blended with wave data. Gust is always null on this data source, so the wind red
+  test is effectively sustained speed alone and the reason string renders `n/a` for
+  the gust.
+- A wave model masks land, and real beach coordinates frequently land on a masked
+  cell, so the offline sampler resolves each beach to the nearest wet cell within a
+  per-grid cap. A beach with no wet cell inside its cap has no wave reading at all,
+  and the `sources` array on each estimate names whichever grid supplied the number.
 - An empty alerts array (`[]`, i.e. a successful fetch with zero active alerts) does
   not by itself count as "usable data" — with everything else null the result is
   still `unknown`, not `green`.
@@ -378,8 +378,8 @@ wrangler commands — this machine has no `wrangler login` session).
 
 In production the webcam token is a Worker secret, set once with
 `npx wrangler secret put WINDY_WEBCAM_API_TOKEN`. The webcam cron skips hydration
-(with a log line) when the token is unset; everything else — NWS, Open-Meteo, GLOS
-Seagull, and every official-source scraper — is unauthenticated.
+(with a log line) when the token is unset; everything else — NWS, ECCC, NOAA, and
+every official-source scraper — is unauthenticated.
 
 The frontend `<head>` loads Web Awesome Pro from the account's version-pinned CDN
 kit (`WA_KIT_BASE` in `src/frontend/render.js`) with matching
@@ -411,8 +411,8 @@ and neither is `marine_zone` (the sixth bullet below records the retired probe).
   line reports a `hot=` count alongside the usual totals. It fetches the fast-changing
   safety signals (alerts and SRF
   rip-current risk) and reads each beach's stored wave inputs from KV (the
-  `waveinput:` key the wave cron below writes) for the current wave height and the
-  wind fallback — it performs **no** Open-Meteo or GLOS fetch itself. Both
+  `waveinput:` key the offline wave cycle writes) for the current wave height and the
+  wind fallback — it performs **no** wave or wind fetch itself. Both
   alert authorities are fetched nationally once per run and matched to beaches
   locally — one `api.weather.gov/alerts/active` fetch matched by `nws_zone`, and one
   GeoMet `weather-alerts` fetch matched per beach by alert-region polygon
@@ -431,48 +431,29 @@ and neither is `marine_zone` (the sixth bullet below records the retired probe).
   also carries the scraper's optional `staleMs` / `readingNote` when it declares
   them — a display-side staleness horizon for the UI, not a TTL. The
   `7` minute offset keeps this hourly burst off the congested top-of-hour `:00` slot;
-  it only **reads** the `waveinput:` KV the `:15` wave cron wrote, so the ordering is
-  unchanged. A missing `waveinput:` key (wave cron hasn't run, or its data aged out) just
+  it only **reads** `waveinput:`, whose keys expire on an absolute schedule tied to the
+  model valid time rather than to write time, so no ordering against the wave pipeline is
+  required. A missing `waveinput:` key (the cycle has not landed, or its keys expired) just
   means no wave input that run — the estimate falls back to wind or `unknown`, never
   a wrong flag.
-- `15 */6 * * *` (6-hourly) — `runWaveRefresh`: owns **all** upstream wave and wind
-  fetching, in a fixed order — marine wave heights from Open-Meteo, then a Great-Lakes
-  gap-fill for wave-null beaches from the nearest GLOS Seagull wave buoy (within 25 km,
-  freshest observation within 2 h, `src/clients/glerl.js`), then the ordered supplemental
-  fallback wave sources for beaches still wave-null, then the Open-Meteo wind fallback for
-  whatever is *still* wave-null, then the NDBC water-temperature fetch, and finally one
-  per-beach write pass. It runs 6-hourly rather than hourly because Open-Meteo's
-  marine models only publish every 6–12 h; the fetches are paced (one batch of 100 at a
-  time, a 12 s gap between batches, one 60 s backoff retry on a throttled batch) to stay
-  under Open-Meteo's per-minute weighted rate limit — ~400 locations/min against a
-  documented 600/min ceiling. Every upstream client on this path also carries a transport
-  timeout, so no single hung socket can run out the invocation.
-  The write pass writes three KV shapes per beach at a 7 h TTL — `waveinput:` + beachId
-  (the wave height + wind fallback the hourly estimate reads), `waves:` + beachId (the
-  detail page's 24 h forecast strip, only when a real hourly series exists), and
-  `watertemp:` + beachId (the WTMP water temperature from the nearest station able to serve
-  that reading — see "Water temperature stations" below — deduped by station id so each
-  station file is fetched once and fanned to every beach sharing it) — through the same bounded-concurrency pool. The water-temp write is independent of
-  the wave skip guards: a failed marine fetch says nothing about a buoy reading. That
-  reading is **display-only**: the detail page appends it to the beach subtitle (e.g.
-  "Ottawa Beach • 72°F Water") when it is fresh, but it never feeds `src/rules.js` and
-  cannot change a flag color. The 7 h TTL outlives the gap between runs, so a transient
-  throttle leaves the strip showing slightly-older-but-still-model-current data rather than
-  blanking it. A beach whose fetch merely failed is left untouched so its last-good KV
-  survives.
-  The whole run is bounded in wall clock against the 900 s scheduled ceiling: no new
-  upstream work starts after T+480 s (with a 120 s sub-budget on the supplemental sources,
-  so they can never starve the wind fallback), and the write pool yields at T+840 s instead
-  of being killed. Reads beaches with the same hot-first ordering as `runFlagRecompute`
-  (`last_viewed` within `HOT_VIEW_WINDOW_MS`), then oldest-`wave_updated`-first — its **own**
-  rotation cursor (migration 0012), which it stamps incrementally as the write pool reaches
-  each beach. The two crons deliberately do *not* share a cursor: `runFlagRecompute` rewrites
-  `recompute_updated` to one timestamp for its whole run every hour, which flattens the
-  column and collapsed the wave cron's rotation to `id ASC`, starving a fixed tail of the
-  table. Because the cursor advances incrementally, a run that yields early persists
-  everything it finished and the beaches it never reached sort first next time; its
-  completion log line reports `beaches= stamped= unattempted= inputs= series= watertemp=
-  truncated= elapsedMs=`.
+- `15 */6 * * *` (6-hourly) — `runWaterTempRefresh`: the sole writer of `watertemp:` +
+  beachId, the WTMP water temperature from the nearest station able to serve that reading
+  (see "Water temperature stations" below), deduped by station id so each station file is
+  fetched once and fanned to every beach sharing it, written at a 7 h TTL through a
+  bounded-concurrency pool. That reading is **display-only**: the detail page appends it to
+  the beach subtitle (e.g. "Ottawa Beach • 72°F Water") when it is fresh, but it never feeds
+  `src/rules.js` and cannot change a flag color. A beach whose fetch merely failed is left
+  untouched so its last-good KV survives. The run is bounded in wall clock against the 900 s
+  scheduled ceiling: no new upstream work starts after T+480 s, and the write pool yields at
+  T+840 s instead of being killed. It reads beaches with the same hot-first ordering as
+  `runFlagRecompute` (`last_viewed` within `HOT_VIEW_WINDOW_MS`), then
+  oldest-`wave_updated`-first — its **own** rotation cursor (migration 0012), which it stamps
+  incrementally as the write pool reaches each beach. The two crons deliberately do *not*
+  share a cursor: `runFlagRecompute` rewrites `recompute_updated` to one timestamp for its
+  whole run every hour, which flattens the column and collapses any second cron's rotation to
+  `id ASC`, starving a fixed tail of the table. Because the cursor advances incrementally, a
+  run that yields early persists everything it finished and the beaches it never reached sort
+  first next time.
 - `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 75 beaches per run (≤300/day) with
   `nws_zone` NULL get their NWS forecast zone + gridpoint URL from
   api.weather.gov/points. A beach without `nws_zone` silently skips the alert and
@@ -542,12 +523,12 @@ developing via the scheduled-handler endpoint:
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=17+3,9,15,21+*+*+*"   # NWS point enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=29+4,10,16,22+*+*+*"  # ECCC zone enrichment
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
-    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly wave refresh
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly water-temperature refresh
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=7+*+*+*+*"            # hourly flag recompute
     # (marine_zone is derived offline by the discovery batch — not a cron; see npm run seed:marine)
 
 `npm run seed:enrich` / `npm run seed:eccc` /
-`npm run seed:webcams` / `npm run seed:waves` / `npm run seed:flags` wrap these
+`npm run seed:webcams` / `npm run seed:watertemp` / `npm run seed:flags` wrap these
 enrichment/wave/flag crons. `npm run seed:marine` is NOT a cron wrapper — it runs the
 offline `marine_zone` derivation against local D1 (snapshot `SELECT` →
 `discovery-batch.js --marine-zones` → `apply-local-sql.js`), so run it after
@@ -563,26 +544,25 @@ zones (and `npm run seed:eccc` afterwards for the Canadian rows NWS parks — no
 NWS attempts cap means a fresh local database needs ~5 `seed:enrich` passes before
 Canadian rows become ECCC candidates). There is no `npm run seed:classify` any more:
 classification was opt-in only because it was expensive, and a local spatial join is not.
-Run `seed:waves` before `seed:flags` so the recompute has wave inputs to read.
+For wave data, run `npm run seed:wavegrids` (downloads one NOAA GRIB2 cycle — the only
+network step), then `npm run seed:waveplanes` (GDAL: one raster plane per band), then
+`npm run seed:waves` (samples every beach and bulk-writes the KV pairs locally). Run
+`seed:waves` before `seed:flags` so the recompute has wave inputs to read.
 
 ### Water temperature stations
 
 `src/waveSources/ndbcBuoys.js` holds one curated table of Great Lakes stations served by
-NDBC's `realtime2` endpoint. Every row declares which readings it may serve:
+NDBC's `realtime2` endpoint, selected with `nearestWaterTempStation(lat, lon)`:
 
 | Capability | Constant | Stations | Cap | Consumer |
 | --- | --- | --- | --- | --- |
-| Wave height | `CAP_WAVES` | 10 (frozen) | `NDBC_MAX_DISTANCE_KM` = 40 km | `src/rules.js` — moves flag colors |
 | Water temperature | `CAP_WATER_TEMP` | 72 | `NDBC_WATER_TEMP_MAX_DISTANCE_KM` = 25 km | detail-page subtitle — display only |
 
-Select with `nearestWaveStation(lat, lon)` or `nearestWaterTempStation(lat, lon)`. There is
-no capability-agnostic selector and no default capability, on purpose: the list originally
-admitted stations on a wave criterion ("reports standard-met WVHT") because wave height was
-its only consumer, and when water temperature was added as a second consumer it silently
-inherited that filter. That excluded the entire NOAA **National Ocean Service** water-level
-network — gauges that report WTMP on a 6-minute cadence, frequently a few hundred metres from
-a served beach, and no wave height at all. 913 of 1102 beaches had no water-temp station in
-range, some of them with a live NOS gauge 300 m offshore. Coverage is now 519 of 1102 (47%).
+Station admission is on a water-temperature criterion, not a wave one. That distinction is
+load-bearing: a wave criterion ("reports standard-met WVHT") excludes the entire NOAA
+**National Ocean Service** water-level network — gauges that report WTMP on a 6-minute
+cadence, frequently a few hundred metres from a served beach, and no wave height at all.
+Admitting them raised coverage from 189 to 519 of 1102 beaches (47%).
 
 NDBC serves those files under UPPERCASE names while the master station table spells the NOS
 stations lowercase, and the path is case-sensitive, so `stationUrl` upcases (a no-op for the
@@ -608,9 +588,12 @@ coverage rests on the handful of stations that overwinter: 15 of the 72 have Jan
 readings in the 2025 archive (13 NOS gauges plus the buoys 45213 and 45215), which is not the
 same set as the 15 NOS gauges, and covers ~153 beaches rather than 519.
 
-Wave capability is a separate decision with a larger blast radius: it feeds `src/rules.js`,
-so adding one requires a `RULES_VERSION` discussion. `test/ndbcBuoys.test.js` asserts the ten
-wave ids literally, so that cannot happen by accident.
+Water temperature is the only capability these stations carry, and it is display-only —
+`NDBC_CAPABILITIES` has one entry and `test/ndbcBuoys.test.js` pins every station to it.
+The capability machinery survives a single-capability table on purpose: adding a reading
+that feeds `src/rules.js` is a color-path change needing a `RULES_VERSION` discussion, and
+the per-capability distance caps stop such a reading from inheriting an eligibility rule
+written for another.
 
 ### Discovery and classification (offline)
 
@@ -704,34 +687,54 @@ and never touching the delete path. The committed geometry file is regenerated
 (https://www.weather.gov/gis/MarineZones) — by running `scripts/build-marine-zones.js`
 (see `docs/offline-discovery.md` for the file format and refresh procedure).
 
+### Wave data (offline)
+
+Wave height and the wind fallback come from NOAA GRIB2 model output, downloaded and
+point-sampled in `.github/workflows/waves.yml` (`52 */3 * * *`) and bulk-written into the
+same `waveinput:` and `waves:` KV keys the hourly cron already read. Three grids are
+sampled in ordered fallthrough, constrained by each beach's `water_class`: NOAA's Great
+Lakes Wave model (GLWU, 2.5 km) for the lakes, GFS-Wave `global.0p16` for ocean coasts, and
+GFS-Wave `arctic.9km` above 52.58°N.
+
+A wave model masks land, and real beach coordinates frequently land on a masked cell, so
+each beach is resolved to the nearest wet cell within a per-grid cap. That search is only
+possible with the whole grid in hand, which is a genuine capability gain over asking a
+coordinate API. GRIB2 uses JPEG 2000 compression and has no pure-JavaScript decoder, so
+decoding requires GDAL and can never happen inside the Worker.
+
+Publication follows the layer build exactly: an immutable `waves/<cycleId>/` prefix holding
+the manifest, the two NDJSON artifacts and `SHA256SUMS`, with the small `waves/current.json`
+pointer written last so a reader can never see a torn cycle.
+
+Each KV pair carries an **absolute** expiration of the model's valid hour plus 7 h, not a
+TTL measured from write time. A run that fires late therefore gets a correspondingly shorter
+lease rather than seven fresh hours on old data, and republishing an older cycle yields a
+negative lease and is refused. A failed or refused cycle writes nothing and leaves the
+previous cycle's keys in place, so the failure mode is a flag aging out to `unknown` — gray
+and honest — never a stale wave height deciding a color. See `docs/offline-waves.md`.
+
+NOAA data is a US Government work in the public domain; the credit on every page is a
+courtesy, not an obligation.
+
 **Paid-plan assumption**: the cron subrequest budgets exceed the free plan's
 50-subrequest ceiling (the paid plan allows 10,000 per invocation). At the current
 `MAX_BEACHES_PER_RUN = 1200`, the hourly `runFlagRecompute` runs alert + SRF + scraper
 fetches plus up to ~3,850 KV reads/writes in its worst case (every beach carrying an active
-water-quality advisory), and the 6-hourly `runWaveRefresh` runs the paced Open-Meteo marine +
-GLOS buoy gap-fill + supplemental + wind fetches plus up to ~3,600
-`waveinput:`/`waves:`/`watertemp:` KV writes, ~4,360 subrequests all told — each well under
-10,000 but far past the free ceiling. Production deployment assumes the Workers Paid plan.
+water-quality advisory), and the 6-hourly `runWaterTempRefresh` runs one Range-limited read
+per distinct station plus its `watertemp:` KV writes — each well under 10,000 but far past
+the free ceiling. Production deployment assumes the Workers Paid plan.
 
-**Wall clock, not subrequest count, is the binding limit.** The run that forced the current
-design used ~1,470 subrequests of 10,000 — and 899.989 s of its 900 s scheduled ceiling,
-where it was SIGKILLed mid-write-loop. Two platform facts drive the budgets above: a
-scheduled invocation gets 900 s, and Cloudflare caps an invocation at **six simultaneous
-open connections** with KV `get`/`put` counting toward that cap — so a write pool wider than
-~6 buys no throughput (the platform queues the excess) and all wall-clock sizing here is done
-at 6, roughly 13 puts/second.
+**Wall clock, not subrequest count, is the binding limit.** Two platform facts drive the
+budgets above: a scheduled invocation gets 900 s, and Cloudflare caps an invocation at **six
+simultaneous open connections** with KV `get`/`put` counting toward that cap — so a write
+pool wider than ~6 buys no throughput (the platform queues the excess) and all wall-clock
+sizing here is done at 6, roughly 13 puts/second.
 
-`runWaveRefresh` also logs a per-run **Open-Meteo weighted-call** estimate (each batched
-location counts as ~1 weighted call, and one backoff retry doubles a throttled batch) against
-Open-Meteo's free-tier **10,000 weighted calls/day** ceiling, alongside the run's rolling
-**per-minute peak** against the documented 600/min ceiling — the per-minute limit is the one
-that actually produces HTTP 429s. At 1200 beaches a summer run costs ~1,200 weighted calls
-(~4,800/day, 48% of the daily ceiling) and a fully wave-null winter run ~2,400 (~9,600/day,
-96%, and that counter is a known over-count). That daily ceiling — not the Workers
-subrequest budget and not wall clock — is what bounds any further increase of
-`MAX_BEACHES_PER_RUN`, and it binds outright once nationwide pagination removes the cap
-(accounting only for now; see `TODO.md`). See `TODO.md` for a free-plan-friendly fallback
-(lower `MAX_BEACHES_PER_RUN`).
+Wave and wind data is not fetched by the Worker at all. It is sampled from NOAA GRIB2 model
+output in GitHub Actions and bulk-written into the `waveinput:` / `waves:` keys the hourly
+cron reads, which is what makes the beach count independent of any upstream per-day request
+quota. See `docs/offline-waves.md`. See `TODO.md` for a free-plan-friendly fallback (lower
+`MAX_BEACHES_PER_RUN`).
 
 ## Deployment
 

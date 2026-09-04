@@ -27,13 +27,14 @@ const BAND_DEFS = {
 
 // Ordered known-model mapping: model id -> display name. The order here IS the
 // display order for the per-model caption, the comparison chart's dataset
-// sequence, and the prose summary. Kept local (not imported from src/clients/)
-// so a backend id rename can't silently reorder the UI. Unknown ids fall back
-// to the raw id and sort after every known model, in payload-key order.
+// sequence, and the prose summary. Kept local (not imported
+// from src/waveModels.js) so a backend id rename can't silently reorder the UI.
+// Unknown ids fall back to the raw id and sort after every known model, in
+// payload-key order, so every id src/waveModels.js can label must appear here.
 const MODEL_DISPLAY = [
-  { id: "ecmwf_wam025", name: "ECMWF" },
-  { id: "ncep_gfswave025", name: "NOAA GFS" },
-  { id: "meteofrance_wave", name: "Météo-France" }
+  { id: "noaa_glwu", name: "NOAA Great Lakes" },
+  { id: "noaa_gfswave", name: "NOAA GFS" },
+  { id: "noaa_gfswave_arctic", name: "NOAA GFS Arctic" }
 ];
 
 // Precomputed lookups over the fixed MODEL_DISPLAY list: known-id membership
@@ -381,7 +382,7 @@ export function modelNowEntries(trimmed) {
 }
 
 // Quiet caption text comparing each model's current reading, e.g.
-// "ECMWF 2.6 ft · NOAA GFS 2.4 ft · Météo-France 2.9 ft". Only meaningful with
+// "NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft". Only meaningful with
 // two or more models finite at the now-hour (a single model just repeats the
 // stat) — returns "" for 0-1. Values via toFixed(1), " · " separator.
 export function modelNowCaption(trimmed) {
@@ -451,9 +452,9 @@ export function buildWaveModelChartConfig(trimmed) {
 }
 
 // Prose summary for the comparison chart's aria description and its pre-upgrade
-// fallback paragraph, e.g. "Wave height by model, next 24 hours — ECMWF now
-// 2.6 ft, NOAA GFS now 2.4 ft, Météo-France now 2.9 ft." A model that is null
-// at the now-hour but has data later reads "ECMWF (no current reading)".
+// fallback paragraph, e.g. "Wave height by model, next 24 hours — NOAA Great
+// Lakes now 2.6 ft, NOAA GFS now 2.4 ft." A model that is null at the now-hour
+// but has data later reads "NOAA GFS (no current reading)".
 // Deterministic; "" when no models.
 export function waveModelSummary(trimmed) {
   const t = readTrimmed(trimmed);

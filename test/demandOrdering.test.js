@@ -11,7 +11,7 @@
 //   - runFlagRecompute (hourly rotation, cursor = recompute_updated):
 //       ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
 //                recompute_updated ASC, id ASC
-//   - runWaveRefresh (6-hourly rotation, cursor = wave_updated — migration
+//   - runWaterTempRefresh (6-hourly rotation, cursor = wave_updated — migration
 //     0012; identical to the hourly clause EXCEPT the cursor column, which
 //     selectRunBeaches picks from the two-entry ROTATION_COLUMNS whitelist):
 //       ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
@@ -54,7 +54,7 @@ function makeBeachesDb(rows) {
     "eccc_attempts INTEGER, " +
     "webcam_checked TEXT, " +
     "recompute_updated TEXT, " +
-    // Migration 0012: the wave cron's own rotation cursor. Nullable with no
+    // Migration 0012: the 6-hourly cron's own rotation cursor. Nullable with no
     // backfill, exactly as the migration ships it, so the NULL-sorts-first
     // behavior every never-refreshed row depends on is what these tests see.
     "wave_updated TEXT, " +
@@ -129,16 +129,16 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite (F8)", funct
     });
   });
 
-  // The wave cron's clause differs from the hourly one in EXACTLY one token —
-  // the rotation cursor column. It is repeated verbatim here rather than
+  // The 6-hourly cron's clause differs from the hourly one in EXACTLY one token
+  // — the rotation cursor column. It is repeated verbatim here rather than
   // generated from a shared string on purpose: these tests exist so a drift in
   // either cron's SQL shows up as a diff in this file.
-  describe("runWaveRefresh hybrid clause (cursor = wave_updated, migration 0012)", function () {
+  describe("runWaterTempRefresh hybrid clause (cursor = wave_updated, migration 0012)", function () {
     const CLAUSE =
       "ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, " +
       "wave_updated ASC, id ASC";
 
-    it("keeps the hot-first demand term: a recently-viewed beach outranks an earlier wave rotation turn", function () {
+    it("keeps the hot-first demand term: a recently-viewed beach outranks an earlier rotation turn", function () {
       const db = makeBeachesDb([
         { id: "cold", wave_updated: "2026-07-01T00:00:00.000Z", last_viewed: null },
         { id: "hot", wave_updated: "2026-07-22T00:00:00.000Z", last_viewed: recentIso },
@@ -168,7 +168,7 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite (F8)", funct
       // recompute_updated with one shared nowIso for the whole table every hour,
       // so under the OLD shared clause both rows below tied and the sort fell
       // through to id ASC forever, starving a fixed tail. On wave_updated the
-      // wave cron's own rotation still decides.
+      // 6-hourly cron's own rotation still decides.
       const db = makeBeachesDb([
         {
           id: "a-recently-waved",

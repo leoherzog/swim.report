@@ -5,7 +5,9 @@ derivation** are *pipeline* concerns — they run occasionally, tolerate hours o
 latency, and produce a table — not *serving* concerns. They run outside the
 Cloudflare Worker, in offline GitHub Actions jobs that bulk-load production D1.
 The Worker keeps everything else: serving, the hourly flag recompute, the
-6-hourly wave refresh, and NWS/ECCC/webcam enrichment.
+6-hourly water-temperature refresh, and NWS/ECCC/webcam enrichment. The NOAA
+wave cycle is a pipeline concern too and runs in its own offline job
+(`docs/offline-waves.md`).
 
 All three are now **pure local math over a prebuilt spatial layer set**. The job
 that produces the SQL makes zero upstream data queries and runs with **no network
@@ -380,7 +382,7 @@ query transport with prebuilt layers and merged the separate hourly classificati
 workflow back into the daily discovery run.
 
 The Worker's remaining cron path is: hourly flag recompute (`"7 * * * *"`, offset
-off the congested `:00` slot), 6-hourly wave refresh (`"15 */6 * * *"`), and the
+off the congested `:00` slot), 6-hourly water-temperature refresh (`"15 */6 * * *"`), and the
 NWS/ECCC/webcam enrichment crons (`"17 3,9,15,21"`, `"29 4,10,16,22"`,
 `"31 9"`). Discovery, classification, and marine-zone derivation are the offline
 job's alone.

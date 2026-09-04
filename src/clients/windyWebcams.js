@@ -17,7 +17,7 @@
 // here" the caller can persist), while any transport/API failure resolves to
 // null (unknown — the caller leaves the row untouched and retries later).
 
-import { distanceKm } from "./glerl.js";
+import { distanceKm } from "../geo.js";
 import { fetchJson } from "./http.js";
 
 export const WINDY_WEBCAMS_API_URL = "https://api.windy.com/webcams/api/v3/webcams";

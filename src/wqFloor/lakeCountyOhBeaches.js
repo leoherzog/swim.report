@@ -52,7 +52,7 @@
 // or a pre-cleared User-Agent) before wiring scrape() into production.
 //
 // DEDUP: this is a NEW axis (Lake County, OH bacteria prediction), disjoint
-// from the SRF rip lane, NWS/ECCC alert lane, and Open-Meteo/GLOS wave lane.
+// from the SRF rip lane, NWS/ECCC alert lane, and the NOAA wave lane.
 // No overlap with any other registered source for these two beaches.
 //
 // scrape() runs CRON-SIDE ONLY (one fetch per run). extractStatusForBeach,

@@ -34,7 +34,7 @@
 //
 // DEDUP: this is a NEW axis (Evanston operational/hazard closure) surfaced
 // through the water-quality floor mechanism. It does not overlap the NWS/ECCC
-// alert lane, the SRF rip lane, or the Open-Meteo/GLOS wave lane — it only
+// alert lane, the SRF rip lane, or the NOAA wave lane — it only
 // RAISES, never competes with, those estimates. No dedup concern.
 //
 // FETCH-URL / MARKUP CONFIRMATION: the live page renders through JS/markdown so

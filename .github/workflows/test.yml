@@ -92,20 +92,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Lint the workflow files
+        # A YAML or ${{ }} typo in build-layers/discovery/waves currently surfaces only
+        # when the cron fires, inside the jobs that delete production rows and publish
+        # to R2. actionlint checks expressions, needs/uses references and runner labels
+        # statically. Pinned as a content-addressed image rather than a marketplace
+        # wrapper, matching how every other third-party dependency here is pinned.
+        #
+        # -shellcheck= disables the shellcheck integration. Enabling it is a deliberate
+        # follow-up: it reports nine findings across three workflow files, and each one
+        # has to be fixed or given an inline "# shellcheck disable=" before the flag can
+        # come off, or every workflow-touching PR goes red on pre-existing shell style.
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color -shellcheck=
+
       - name: Set up Deno
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
       - name: Check the offline scripts against the frozen lockfile
+        # Every offline script belongs here, including scripts/build-marine-zones.js,
+        # which no workflow invokes — an operator runs it by hand when NWS publishes a
+        # new marine-zone shapefile, roughly twice a year, which is exactly the cadence
+        # at which unchecked rot is most expensive.
         run: |
           set -euo pipefail
           deno check --lock=deno.lock --frozen \
             scripts/discovery-batch.js \
             scripts/fetch-layers.js \
+            scripts/build-marine-zones.js \
             scripts/clip-layers.js \
             scripts/build-manifest.js \
-            scripts/print-spat-bbox.js
+            scripts/print-spat-bbox.js \
+            scripts/print-flag-worthy-sql.js \
+            scripts/fetch-wave-grids.js \
+            scripts/sample-waves.js \
+            scripts/build-wave-manifest.js \
+            scripts/build-wave-kv.js
 
       - name: Assert deno.lock is unchanged
         # Belt to the --frozen brace: --frozen is the documented refusal, and this is
@@ -120,15 +145,21 @@ jobs:
           fi
           echo "deno.lock unchanged"
 
-      - name: Assert no --allow-net reaches discovery-batch.js
-        # The machine-enforced form of the offline-path contract: the batch makes zero
+      - name: Assert no --allow-net reaches an offline-only script
+        # The machine-enforced form of the offline-path contract: these scripts make zero
         # upstream requests, and the absence of the permission flag is the proof.
-        # Whole-line YAML comments are stripped first (discovery.yml states the rule in
-        # prose, which would otherwise match), and backslash continuations are joined so
-        # the comparison is per COMMAND rather than per source line — a permission flag
-        # and a script name three lines apart are still one invocation. test.yml is
-        # excluded because this guard's own command line necessarily contains both
-        # tokens.
+        # Whole-line YAML comments are stripped first (discovery.yml and waves.yml state
+        # the rule in prose, which would otherwise match), and backslash continuations are
+        # joined so the comparison is per COMMAND rather than per source line — a
+        # permission flag and a script name three lines apart are still one invocation.
+        # test.yml is excluded because this guard's own command line necessarily contains
+        # both tokens.
+        #
+        # The list must name EVERY pure-math offline script, in both pipelines: a script
+        # missing from it is a script whose network silence nothing enforces.
+        # scripts/fetch-layers.js, scripts/fetch-wave-grids.js and
+        # scripts/build-marine-zones.js are the only network-capable offline scripts in
+        # the repo and are deliberately absent.
         run: |
           set -euo pipefail
           joined=$(mktemp)
@@ -136,8 +167,76 @@ jobs:
             sed -e "s/^[[:space:]]*#.*$//" "$f" \
               | sed -e ":a" -e "/\\\\$/{N;s/\\\\[[:space:]]*\\n[[:space:]]*/ /;ta}" >> "$joined"
           done
-          if grep -n -- "--allow-net" "$joined" | grep -- "discovery-batch"; then
-            echo "::error::a discovery-batch.js invocation was given --allow-net — the offline path makes no upstream requests"
+          for script in discovery-batch clip-layers build-manifest print-spat-bbox \
+                        print-flag-worthy-sql sample-waves build-wave-manifest build-wave-kv; do
+            if grep -n -- "--allow-net" "$joined" | grep -- "$script"; then
+              echo "::error::a $script.js invocation was given --allow-net — that script is pure local math over bytes on disk"
+              exit 1
+            fi
+            echo "no --allow-net on any $script.js invocation"
+          done
+
+  worker-bundle:
+    # Nothing else in CI bundles or boots the Worker. vitest imports src/index.js as a
+    # plain ES module, which every valid and several invalid Workers happily satisfy,
+    # and the deno-lock job never touches it. Two steps, catching different things:
+    #
+    #   deploy --dry-run  — a broken wrangler.toml, an unresolvable import, a missing
+    #                       binding, the bundle size cap. Needs no auth.
+    #   wrangler dev      — the workerd entrypoint contract. workerd rejects any named
+    #                       export of the entry module that is not a function or an
+    #                       ExportedHandler, and dry-run does NOT catch it: a bare
+    #                       "export const FOO = 123" in src/index.js bundles clean and
+    #                       then kills the isolate at startup. This is the only step in
+    #                       the repo that sees that. test/workerExports.test.js stays as
+    #                       the fast static guard on the one known instance.
+    #
+    # No npm install anywhere: package.json's two runtime dependencies come from private
+    # registries this job has no tokens for (see the header), so wrangler is fetched on
+    # its own through npx, exactly as discovery.yml and waves.yml do it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Pin to the wrangler MAJOR line, matching package.json's ^4 and the two other
+      # wrangler-using workflows.
+      WRANGLER_VERSION: "4"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node (for wrangler)
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Bundle the Worker
+        run: npx --yes "wrangler@${WRANGLER_VERSION}" deploy --dry-run
+
+      - name: Boot the Worker under workerd
+        # wrangler dev runs workerd locally against emulated bindings and contacts no
+        # Cloudflare API, so this needs no secrets either. ANY HTTP status proves the
+        # isolate started and accepted the entry module — the response body is not the
+        # subject here and must never become one; request behaviour is vitest's job.
+        run: |
+          set -euo pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" dev --port 8787 --inspector-port 9229 > dev.log 2>&1 &
+          dev_pid=$!
+          code=""
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$dev_pid" 2>/dev/null; then
+              break
+            fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8787/" || true)
+            if [ -n "$code" ] && [ "$code" != "000" ]; then
+              break
+            fi
+            sleep 2
+          done
+          kill "$dev_pid" 2>/dev/null || true
+          wait "$dev_pid" 2>/dev/null || true
+          cat dev.log
+          if [ -z "$code" ] || [ "$code" = "000" ]; then
+            echo "::error::the Worker did not boot under workerd"
             exit 1
           fi
-          echo "no --allow-net on any discovery-batch.js invocation"
+          echo "workerd answered with HTTP $code"

@@ -1,7 +1,7 @@
 // Tests for the remaining untested src/geo.js helpers: distanceMi (used by the
-// router's distance sort) and metersToFeet (used by the Open-Meteo/GLOS wave
-// clients). distanceKm and pointInGeometry already have coverage in
-// test/glerl.test.js and test/eccc.test.js. Pure math, no mocks needed.
+// router's distance sort) and metersToFeet (used by the offline NOAA wave
+// sampler). distanceKm and pointInGeometry already have coverage in
+// test/waveGrids.test.js and test/eccc.test.js. Pure math, no mocks needed.
 
 import { describe, it, expect } from "vitest";
 import { distanceKm, distanceMi, metersToFeet } from "../src/geo.js";
@@ -48,8 +48,8 @@ describe("metersToFeet", function () {
   });
 
   it("passes null through as null (masked/no-data convention)", function () {
-    // The wave clients rely on this to propagate Open-Meteo/GLOS masked
-    // cells without fabricating 0 ft waves.
+    // The offline wave sampler relies on this to propagate masked grid cells
+    // without fabricating 0 ft waves.
     expect(metersToFeet(null)).toBeNull();
   });
 

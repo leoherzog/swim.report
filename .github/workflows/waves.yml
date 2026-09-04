@@ -1,0 +1,893 @@
+name: Wave cycle
+
+# Pulls one NOAA GRIB2 wave cycle, point-samples it against the beach table, publishes
+# the result to the swim-report R2 bucket (public at https://map.swim.report) and bulk
+# writes it into the "waveinput:" / "waves:" KV the hourly flag cron already reads.
+#
+# NOT COLOR-BEARING ON FAILURE. This job never writes a flag color. A failed or refused
+# cycle leaves the previous cycle's KV in place under an expiration derived from the
+# model valid time, so the failure mode is the flag aging out to unknown — gray and
+# honest — never a stale wave height deciding a color. That is what tells you which
+# gates are hard: everything that could produce a WRONG NUMBER is non-overridable, and
+# everything that is merely LESS DATA is overridable and warns.
+#
+# Publication is atomic by construction: every artifact is written under an immutable
+# per-cycle prefix nobody is reading, and only then is the small waves/current.json
+# pointer overwritten. A reader can never see a torn set.
+#
+# ABSOLUTE EXPIRATION, NOT TTL. Every emitted pair carries
+# "expiration": validStartEpoch + 25200, so a key expires 7 h after the hour it
+# DESCRIBES regardless of when this job ran. runFlagRecompute never reads
+# waveinput.updated, so that expiration is the ONLY staleness control on the color
+# path. A TTL measured from write time would be wrong for a scheduler that skips
+# occurrences: a run firing 9 h late would grant 7 more hours of life to data already
+# 9 h old.
+#
+# UNCLOSED RISK, NAMED LOUDLY. GitHub does not merely DEFER this repo's schedules, it
+# SKIPS occurrences — build-layers.yml's header records the retired hourly workflow
+# firing 4-6 of its 24 daily slots. At 8 slots a day against a 7 h expiration this
+# tolerates two consecutive misses and no more. That is this design's single largest
+# exposure and it is NOT closed here. The permanent fix is to carry hoursFt + startIso
+# in waveinput: and have runFlagRecompute index the current hour, which turns one
+# landed cycle into 24 h of coverage.
+#
+# MEASURE THE EXPOSURE, do not assume it. No second wave source is left to shadow
+# against, so read the slot hit rate from this workflow's own run history and the
+# per-beach coverage from manifest.beaches.resolved across consecutive cycles. Two
+# consecutive misses is the whole margin, so treat a run of missed slots as the
+# trigger for the permanent fix above, not as noise.
+#
+# REQUIRED REPOSITORY SECRETS. Neither job holds both halves, and the job that can
+# write production KV cannot write R2:
+#   sample:     CLOUDFLARE_R2_ACCESS_KEY / CLOUDFLARE_R2_SECRET_ACCESS_KEY (S3-API keys
+#               on the swim-report bucket) and CLOUDFLARE_D1_READ_TOKEN (a READ-scoped
+#               D1 token, NOT the edit-scoped CLOUDFLARE_API_TOKEN discovery.yml uses).
+#   publish-kv: CLOUDFLARE_KV_WRITE_TOKEN (Workers KV Storage: Edit) and no AWS keys.
+# OPERATOR PREREQUISITE THAT CANNOT BE VERIFIED FROM CODE: both tokens must be
+# provisioned before the first run, or the first bulk put fails after every other step
+# has already succeeded.
+#
+# It needs no npm private-registry tokens: it never runs npm install / npm ci in the
+# repo root (which would reify package.json's private @web.awesome.me / @fortawesome
+# deps and fail E401). Every wrangler call goes through npx --yes wrangler@<pin>.
+
+on:
+  # 8 slots a day. Minute 52 is clear of every existing cron minute in this repo
+  # (7, 15, 17, 29, 31, 41, 47) and off the congested top of the hour. The cron picks
+  # no model cycle: a RUNTIME resolver walks GFS cycles newest-first and takes the
+  # first one whose f(k)..f(k+23) all exist, so the job cadence and the model cadence
+  # are deliberately decoupled.
+  schedule:
+    - cron: "52 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Write waves/current.json (false = build and upload the prefix only, do not make it live)"
+        type: boolean
+        default: true
+      apply:
+        description: "Bulk write the KV pairs (false = gate and emit the chunks only)"
+        type: boolean
+        default: true
+      allow_shrink:
+        description: "Demote coverage refusals to warnings (use only for a KNOWN legitimate shrink)"
+        type: boolean
+        default: false
+      force_publish:
+        description: "Publish even when build-wave-manifest.js withheld auto-publish (bootstrap / unseeded floors). Read the manifest FIRST."
+        type: boolean
+        default: false
+
+concurrency:
+  # Two runs writing waves/current.json is the one race this design cannot absorb.
+  group: waves
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# Workflow-scoped so it covers EVERY deno invocation in EVERY job and step, present and
+# future. The repo-root deno.lock is auto-discovered by Deno for every deno invocation
+# here, and without this Deno also wants a workspace.packageJson block for
+# package.json's npm deps: "deno cache --frozen" then FAILS with "The lockfile is out of
+# date", and a plain "deno run" SILENTLY REWRITES the checked-in deno.lock.
+env:
+  DENO_NO_PACKAGE_JSON: "1"
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    # Budget: apt ~1 min + D1 snapshot ~30 s + ~26 MB of Range slices 2-5 min +
+    # ~150 gdal invocations 2-4 min + sampling 1-2 min + upload/read-back ~1 min.
+    # Realistic 10-18 min.
+    timeout-minutes: 30
+    outputs:
+      # publish-kv reads this. Without it, a run that WITHHELD the pointer would send
+      # job 2 at the previous cycle, whose absolute expiration has already been spent —
+      # a guaranteed red "expired" refusal that says nothing about what actually
+      # happened here.
+      published: ${{ steps.publish.outputs.published }}
+    env:
+      # The bucket is swim-report with a HYPHEN. The zone is swim.report with a dot and
+      # the public R2 domain is map.swim.report, so the dotted form reads naturally and
+      # is wrong: R2 returns AccessDenied (never NoSuchBucket) for a bucket the token
+      # cannot see, so the wrong name looks exactly like a bad secret.
+      R2_BUCKET: swim-report
+      R2_PUBLIC_BASE: https://map.swim.report
+      AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_ENDPOINT_URL: https://0e01552527359dfcce6edc27ebedb530.r2.cloudflarestorage.com
+      # The AWS CLI has defaulted to sending CRC32 integrity headers since 2.23; R2 has
+      # historically answered "not implemented". when_required is Cloudflare's
+      # documented mitigation.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      AWS_MAX_ATTEMPTS: "5"
+      AWS_RETRY_MODE: standard
+      AWS_PAGER: ""
+      # READ-scoped, deliberately not the edit-scoped token discovery.yml uses: this
+      # job only ever SELECTs from D1.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_READ_TOKEN }}
+      # A minimal D1-only API token cannot enumerate GET /accounts to auto-discover the
+      # account, so wrangler needs it handed over explicitly. Account IDs are not secret
+      # (they ship in wrangler.toml and dashboard URLs).
+      CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
+      DB_NAME: swim-report
+      # Pin to the wrangler MAJOR line (matches package.json's ^4), so the unattended
+      # job gets 4.x fixes automatically but a future wrangler 5 can never silently
+      # change flags or --file parsing under a scheduled run.
+      WRANGLER_VERSION: "4"
+      SNAPSHOT_PAGE: "5000"
+      PUBLISH: ${{ github.event_name == 'schedule' && 'true' || inputs.publish }}
+      ALLOW_SHRINK: ${{ github.event_name == 'schedule' && 'false' || inputs.allow_shrink }}
+      # NEVER settable on a schedule. Auto-publish is withheld by
+      # scripts/build-wave-manifest.js exactly when the evidence for publishing is
+      # missing (no previous manifest to ratio against, or a floors entry that is absent
+      # or still status "bootstrap" for this gridsDigest). A human reads the manifest and
+      # dispatches with this on; a scheduler never decides that on its own.
+      FORCE_PUBLISH: ${{ github.event_name == 'schedule' && 'false' || inputs.force_publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # Resolve the dependency tree from the COMMITTED deno.lock, once, explicitly, and
+      # fail loudly if it drifts. --frozen refuses any lockfile change.
+      - name: Cache Deno dependencies (frozen lockfile)
+        run: |
+          deno cache --lock=deno.lock --frozen \
+            scripts/print-flag-worthy-sql.js \
+            scripts/fetch-wave-grids.js \
+            scripts/sample-waves.js \
+            scripts/build-wave-manifest.js \
+            scripts/build-wave-kv.js
+
+      - name: Install GDAL and prove it can decode GRIB2 JPEG 2000
+        # gfswave packs with DRS template 5.40, which is JPEG 2000, and
+        # --no-install-recommends is exactly the flag build-layers.yml's own comment
+        # names as the first suspect for a missing format driver. The format list is
+        # checked first because it fails in one line; it is NOT sufficient on its own,
+        # so a real slice is decoded below and asserted to carry data.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gdal-bin
+          gdalinfo --version
+          gdalinfo --formats | grep -q JP2OpenJPEG
+          gdalinfo --formats | grep -qi grib
+          echo "GDAL carries the JP2OpenJPEG and GRIB drivers"
+
+      - name: Configure aws CLI for R2
+        # The AWS CLI is PREINSTALLED on ubuntu-latest — never add an install step.
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.aws
+          # PATH-STYLE, pinned deliberately. The bucket name carries no dot, so the
+          # wildcard certificate for *.r2.cloudflarestorage.com would in fact cover
+          # virtual-hosted addressing today. It is pinned anyway because this is the only
+          # publish path and path-style is what R2 documents: a future rename to a DOTTED
+          # bucket would otherwise produce <bucket>.<account>.r2.cloudflarestorage.com,
+          # which that wildcard does NOT cover, and the failure would be a TLS error at
+          # upload time rather than anything resembling a naming mistake.
+          cat > ~/.aws/config <<'AWSCFG'
+          [default]
+          s3 =
+              addressing_style = path
+              multipart_threshold = 64MB
+              multipart_chunksize = 64MB
+              max_concurrent_requests = 8
+          AWSCFG
+          aws --version
+          # Cheap Class B fail-fast so a bad secret surfaces now, not after an hour of
+          # downloading and sampling.
+          aws s3api list-objects-v2 --bucket "$R2_BUCKET" --max-items 1 > /dev/null
+          echo "R2 credentials and endpoint verified"
+
+      - name: Prepare workspace and fetch the previous manifest
+        run: |
+          set -euo pipefail
+          # WORK is resolved HERE, not in the job-level env block: the runner context is
+          # not available to jobs.<id>.env, only to steps, and a job-level env value is
+          # never re-expanded by the shell either.
+          WORK="$RUNNER_TEMP/waves"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+          echo "PLANES=$WORK/planes" >> "$GITHUB_ENV"
+          mkdir -p "$WORK/grib" "$WORK/planes" "$WORK/out" "$WORK/verify"
+          # Previous manifest, for the shrink-ratio and decay gates. Absent on the very
+          # first cycle; build-wave-manifest.js then skips the ratio checks and withholds
+          # auto-publish.
+          if curl -sfL --retry 3 "$R2_PUBLIC_BASE/waves/current.json?cb=$GITHUB_RUN_ID" -o "$WORK/prev-current.json"; then
+            prev_prefix=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prefix)" "$WORK/prev-current.json")
+            echo "previous prefix: $prev_prefix"
+            curl -sfL --retry 3 "$R2_PUBLIC_BASE/$prev_prefix/manifest.json" -o "$WORK/prev-manifest.json" || rm -f "$WORK/prev-manifest.json"
+          else
+            echo "no previous pointer — this is a bootstrap cycle"
+          fi
+
+      - name: Snapshot flag-worthy beaches from D1
+        # Read-only, and PAGINATED FROM DAY ONE. discovery.yml's own comment says a
+        # paginated snapshot is required before the North America expansion, and this
+        # workflow reaches 16k rows first, so it must not inherit the un-paginated
+        # version. The count guard still applies on top.
+        run: |
+          set -euo pipefail
+          # ONE spelling of the hide-until-flag-worthy gate, from
+          # src/waterClass.js FLAG_WORTHY_WATER_SQL, used by BOTH the paginated
+          # SELECT and the count guard below. An empty value would snapshot the whole
+          # table and the guard, comparing the same predicate against itself, would
+          # bless it — so the step fails here instead.
+          FLAG_WORTHY=$(deno run --lock=deno.lock --frozen --allow-read scripts/print-flag-worthy-sql.js)
+          if [ -z "$FLAG_WORTHY" ]; then
+            echo "::error::scripts/print-flag-worthy-sql.js printed nothing — refusing to run an unbounded snapshot query"
+            exit 1
+          fi
+          echo "flag-worthy predicate: $FLAG_WORTHY"
+          offset=0
+          : > "$WORK/pages.json"
+          while : ; do
+            # --json writes API errors (bad token, missing DB) to STDOUT, so a naive
+            # redirect swallows them and the step fails with a blank log.
+            if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
+              --command "SELECT id, lat, lon, water_class, last_viewed FROM beaches WHERE ${FLAG_WORTHY} ORDER BY id LIMIT ${SNAPSHOT_PAGE} OFFSET ${offset}" \
+              > "$WORK/page.json"; then
+              echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_D1_READ_TOKEN secret) — response below"
+              cat "$WORK/page.json"
+              exit 1
+            fi
+            got=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < "$WORK/page.json")
+            echo "page at offset $offset: $got row(s)"
+            cat "$WORK/page.json" >> "$WORK/pages.json"
+            if [ "$got" -lt "$SNAPSHOT_PAGE" ]; then break; fi
+            offset=$((offset + SNAPSHOT_PAGE))
+          done
+          node -e "
+            const fs = require('fs');
+            const raw = fs.readFileSync(process.argv[1], 'utf8');
+            const rows = [];
+            for (const part of raw.split('\n')) {
+              if (part.trim() === '') { continue; }
+              const parsed = JSON.parse(part);
+              const list = Array.isArray(parsed) ? parsed : [parsed];
+              for (const envelope of list) {
+                for (const row of (envelope.results || [])) { rows.push(row); }
+              }
+            }
+            fs.writeFileSync(process.argv[2], JSON.stringify([{ results: rows }]));
+            console.log('assembled ' + rows.length + ' row(s)');
+          " "$WORK/pages.json" "$WORK/snapshot.json"
+          total=$(npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
+            --command "SELECT COUNT(*) AS n FROM beaches WHERE ${FLAG_WORTHY}" \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r[0].results[0].n)})")
+          snap=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);console.log(p[0].results.length)})" < "$WORK/snapshot.json")
+          echo "snapshot rows: $snap / db rows: $total"
+          if [ "$snap" != "$total" ]; then
+            echo "::error::snapshot truncated ($snap of $total rows) — aborting so the coverage gates never measure a partial table"
+            exit 1
+          fi
+
+      - name: Fetch the GRIB2 cycle
+        # The ONLY network-touching script in this pipeline, and the only one carrying
+        # --allow-net. Range-slices HTSGW and WIND off the .idx sidecars (~1 MB per
+        # forecast hour against an 11 MB whole file) and takes GLWU as one whole-file
+        # NOMADS fetch, spaced by the documented 10 s.
+        run: |
+          set -euo pipefail
+          deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
+            scripts/fetch-wave-grids.js --dest "$WORK/grib"
+          node -e "
+            const fs = require('fs');
+            const r = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            const gfs = (r.grids.noaa_gfswave || {}).cycleCompact || 'none';
+            const lines = [
+              'VALID_START_COMPACT=' + r.validStartCompact,
+              'VALID_START_ISO=' + r.validStartIso,
+              'GFS_CYCLE_COMPACT=' + gfs
+            ];
+            fs.appendFileSync(process.env.GITHUB_ENV, lines.join('\n') + '\n');
+            console.log(lines.join(' '));
+          " "$WORK/grib/grids-report.json"
+
+      - name: Smoke decode one slice
+        # A format-list grep is not proof. GDAL has a documented mode where it returns an
+        # EMPTY result with exit status ZERO (build-layers.yml greps stderr for "Cannot
+        # read node" for exactly this reason), so the only thing that proves the JPEG
+        # 2000 path works is decoding real data and finding some.
+        run: |
+          set -euo pipefail
+          slice=$(ls "$WORK/grib/noaa_gfswave"/*.grib2 | head -n 1)
+          echo "smoke decoding $slice"
+          if ! gdalinfo -json -stats "$slice" > "$WORK/smoke.json" 2> "$WORK/smoke.err"; then
+            cat "$WORK/smoke.err"
+            exit 1
+          fi
+          if grep -qE "ERROR|Warning 1:" "$WORK/smoke.err"; then
+            cat "$WORK/smoke.err"
+            echo "::error::gdalinfo emitted an error or a Warning 1 while decoding the first slice"
+            exit 1
+          fi
+          node -e "
+            const info = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+            let worst = null;
+            for (const band of info.bands) {
+              const meta = (band.metadata || {})[''] || {};
+              const pct = Number(meta.STATISTICS_VALID_PERCENT);
+              console.log('band ' + band.band + ' ' + meta.GRIB_ELEMENT + ' validPercent ' + pct);
+              if (worst === null || pct < worst) { worst = pct; }
+            }
+            if (!(worst > 5)) {
+              console.error('::error::decoded valid percent ' + worst + ' is at or below 5 — the JPEG 2000 path returned an empty result');
+              process.exit(1);
+            }
+          " "$WORK/smoke.json"
+
+      - name: Capture gdalinfo for every source file
+        # PER GRID, not per cycle. A grid whose file gdalinfo cannot read — or reads with
+        # an ERROR or a "Warning 1:" on stderr — is marked usable:false in
+        # grids-report.json and contributes nothing from here on; it does not take the
+        # grids that decoded down with it. A grid in requiredGridIds failing this sweep is
+        # still a whole-cycle refusal, and that id is read from the report rather than
+        # spelled here, so the shell and the scripts can never disagree about which grid
+        # the cycle cannot do without.
+        run: |
+          set -euo pipefail
+          report="$WORK/grib/grids-report.json"
+          : > "$WORK/grid-unusable.tsv"
+          # An assignment carries the substitution's exit status, so a grids-report.json
+          # that does not parse fails HERE rather than silently sweeping nothing.
+          gids=$(node -e "
+            const r = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+            console.log(Object.keys(r.grids || {}).join(' '));
+          " "$report")
+          if [ -z "$gids" ]; then
+            echo "::error::grids-report.json lists no grids — there is nothing to decode"
+            exit 1
+          fi
+          for gid in $gids; do
+            dir=$(node -e "
+              const r = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+              console.log(r.grids[process.argv[2]].dir);
+            " "$report" "$gid")
+            failed=""
+            while read -r f; do
+              [ -z "$f" ] && continue
+              if ! gdalinfo -json "$f" > "$f.info.json" 2> "$WORK/gdal.err"; then
+                failed="gdalinfo failed on $f: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+              elif grep -qE "ERROR|Warning 1:" "$WORK/gdal.err"; then
+                failed="gdalinfo emitted an error or a Warning 1 on $f: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+              fi
+              if [ -n "$failed" ]; then
+                cat "$WORK/gdal.err"
+                break
+              fi
+            done <<< "$(find "$dir" -name '*.grib2' -print | sort)"
+            if [ -n "$failed" ]; then
+              echo "::warning::$gid: $failed"
+              printf '%s\t%s\n' "$gid" "$failed" >> "$WORK/grid-unusable.tsv"
+            fi
+          done
+          node -e "
+            const fs = require('fs');
+            const path = process.argv[1];
+            const report = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const raw = fs.readFileSync(process.argv[2], 'utf8').split('\n');
+            const required = Array.isArray(report.requiredGridIds) ? report.requiredGridIds : [];
+            const fatal = [];
+            let marked = 0;
+            for (const line of raw) {
+              if (line.trim() === '') { continue; }
+              const parts = line.split('\t');
+              const gid = parts[0];
+              const reason = parts.slice(1).join(' ');
+              const entry = (report.grids || {})[gid];
+              if (entry) { entry.usable = false; entry.unusableReason = reason; }
+              if (!Array.isArray(report.problems)) { report.problems = []; }
+              report.problems.push(gid + ': ' + reason);
+              if (required.indexOf(gid) !== -1) { fatal.push(gid); }
+              marked = marked + 1;
+            }
+            if (marked > 0) { report.gridsComplete = false; }
+            fs.writeFileSync(path, JSON.stringify(report, null, 2) + '\n');
+            if (fatal.length > 0) {
+              console.error('::error::required grid(s) ' + fatal.join(',') +
+                ' failed the gdalinfo sweep — refusing the cycle');
+              process.exit(1);
+            }
+            console.log('gdalinfo sweep: ' + marked + ' grid(s) marked unusable');
+          " "$report" "$WORK/grid-unusable.tsv"
+          echo "captured $(find "$WORK/grib" -name "*.info.json" | wc -l) gdalinfo sidecar(s)"
+
+      - name: Plan the bands
+        # Band indices are DISCOVERED from gdalinfo and matched on GRIB_VALID_TIME, never
+        # assumed. Assuming a layout is how an .idx off-by-one becomes a complete,
+        # plausible, silently time-shifted 24 h series.
+        run: |
+          set -euo pipefail
+          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+            scripts/sample-waves.js --mode plan --dest "$WORK/grib" --out "$WORK/grib/band-plan.json"
+
+      - name: Extract every band as a flat lat/lon raster
+        # -r near is MANDATORY on the warp: any interpolating resampler smears wave
+        # values across the land mask and manufactures readings on shore.
+        #
+        # The two projected grids go through gdal_translate -of VRT first rather than
+        # gdalwarp -srcband. -srcband is GDAL 3.7+; -b on gdal_translate and a plain VRT
+        # are ancient, cost nothing (a VRT copies no pixels), and keep this step working
+        # on whatever GDAL the runner image happens to ship.
+        #
+        # -of EHdr is NOT usable here (it errors on Float64); ENVI with -ot Float32 is
+        # lossless at these values.
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            const plan = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            const out = [];
+            for (const e of plan.entries) {
+              const warp = e.warp;
+              const fields = [
+                e.gridId,
+                e.key,
+                warp ? 'warp' : 'translate',
+                e.sourceFile,
+                String(e.band),
+                warp ? warp.te.join(' ') : '',
+                warp ? warp.tr.join(' ') : '',
+                e.nodata === null ? '' : String(e.nodata)
+              ];
+              out.push(fields.join('\t'));
+            }
+            fs.writeFileSync(process.argv[2], out.join('\n') + '\n');
+            console.log('planned ' + out.length + ' band extraction(s)');
+          " "$WORK/grib/band-plan.json" "$WORK/plan.tsv"
+          : > "$WORK/plane-unusable.tsv"
+          skipped=""
+          while IFS=$'\t' read -r gid key mode src band te tr nodata; do
+            [ -z "$key" ] && continue
+            case " $skipped " in *" $gid "*) continue ;; esac
+            img="$PLANES/$key.img"
+            fail=""
+            # A warp with an unknown mask value would manufacture readings out of the
+            # land mask, so this refusal keeps its meaning exactly — for THIS grid.
+            if [ "$mode" = "warp" ] && [ -z "$nodata" ]; then
+              fail="$key needs a warp but gdalinfo reported no band nodata — refusing to warp with an unknown mask value"
+            elif [ "$mode" = "warp" ]; then
+              if ! gdal_translate -q -of VRT -b "$band" "$src" "$PLANES/$key.vrt" 2> "$WORK/gdal.err"; then
+                fail="gdal_translate -of VRT failed for $key: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+              # shellcheck disable=SC2086
+              elif ! gdalwarp -q -t_srs EPSG:4326 -te $te -tr $tr -r near \
+                -dstnodata "$nodata" -ot Float32 -of ENVI \
+                "$PLANES/$key.vrt" "$img" 2> "$WORK/gdal.err"; then
+                fail="gdalwarp failed for $key: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+              fi
+            else
+              if ! gdal_translate -q -of ENVI -ot Float32 -b "$band" "$src" "$img" 2> "$WORK/gdal.err"; then
+                fail="gdal_translate failed for $key: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+              fi
+            fi
+            if [ -z "$fail" ] && grep -qE "ERROR|Warning 1:" "$WORK/gdal.err"; then
+              fail="gdal emitted an error or a Warning 1 extracting $key: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+            fi
+            if [ -z "$fail" ] && ! gdalinfo -json -stats "$img" > "$PLANES/$key.info.json" 2> "$WORK/gdal.err"; then
+              fail="gdalinfo failed on the extracted plane $key: $(head -c 400 "$WORK/gdal.err" | tr '\n\t' '  ')"
+            fi
+            # The byte-size check is what proves a plane is COMPLETE, and it is the only
+            # thing standing between a truncated raster and a sampler that would read it
+            # as a valid buffer.
+            if [ -z "$fail" ] && ! node -e "
+              const fs = require('fs');
+              const info = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+              const bytes = fs.statSync(process.argv[2]).size;
+              const expected = info.size[0] * info.size[1] * 4;
+              if (bytes !== expected) {
+                console.error(process.argv[3] + ': raster is ' + bytes +
+                  ' bytes, expected ' + expected);
+                process.exit(1);
+              }
+            " "$PLANES/$key.info.json" "$img" "$key" 2> "$WORK/size.err"; then
+              fail="$(cat "$WORK/size.err" | tr '\n\t' '  ')"
+            fi
+            if [ -n "$fail" ]; then
+              cat "$WORK/gdal.err" || true
+              # DELETE the partials. A half-written .img whose plane key still matches the
+              # plan is the worst outcome available here: the sampler reads it as a plane.
+              rm -f "$img" "$img.hdr" "$img.aux.xml" "$PLANES/$key.vrt" "$PLANES/$key.info.json"
+              echo "::warning::$gid: $fail"
+              printf '%s\t%s\n' "$gid" "$fail" >> "$WORK/plane-unusable.tsv"
+              skipped="$skipped $gid"
+            fi
+          done < "$WORK/plan.tsv"
+          node -e "
+            const fs = require('fs');
+            const planPath = process.argv[1];
+            const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+            const raw = fs.readFileSync(process.argv[2], 'utf8').split('\n');
+            const required = Array.isArray(plan.requiredGridIds) ? plan.requiredGridIds : [];
+            const affected = [];
+            for (const line of raw) {
+              if (line.trim() === '') { continue; }
+              const parts = line.split('\t');
+              const gid = parts[0];
+              const reason = parts.slice(1).join(' ');
+              if (affected.indexOf(gid) === -1) { affected.push(gid); }
+              const status = (plan.gridStatus || {})[gid];
+              if (status) {
+                status.status = 'unplanned';
+                status.elements = [];
+                if (!Array.isArray(status.reasons)) { status.reasons = []; }
+                status.reasons.push(reason);
+              }
+            }
+            plan.entries = (plan.entries || []).filter(function (e) {
+              return affected.indexOf(e.gridId) === -1;
+            });
+            fs.writeFileSync(planPath, JSON.stringify(plan, null, 2) + '\n');
+            const fatal = affected.filter(function (gid) { return required.indexOf(gid) !== -1; });
+            if (fatal.length > 0) {
+              console.error('::error::required grid(s) ' + fatal.join(',') +
+                ' lost a plane during extraction — refusing the cycle');
+              process.exit(1);
+            }
+            if (plan.entries.length === 0) {
+              console.error('::error::no grid survived band extraction — refusing the cycle');
+              process.exit(1);
+            }
+            console.log('band plan carries ' + plan.entries.length + ' entr(ies) after extraction' +
+              '; unusable grid(s): ' + (affected.length === 0 ? 'none' : affected.join(',')));
+          " "$WORK/grib/band-plan.json" "$WORK/plane-unusable.tsv"
+          echo "extracted $(ls "$PLANES"/*.img | wc -l) plane(s)"
+
+      - name: Sample every beach
+        # NO --allow-net and NO --allow-run: GDAL ran in this shell and never from the
+        # script, so the sampler is pure local math over bytes on disk.
+        run: |
+          set -euo pipefail
+          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+            scripts/sample-waves.js --mode sample --dest "$WORK/grib" \
+            --planes "$PLANES" --snapshot "$WORK/snapshot.json" --out "$WORK/out"
+          cat "$WORK/out/sample-report.json"
+
+      - name: Build the manifest and apply the gates
+        run: |
+          set -euo pipefail
+          CYCLE_ID="${VALID_START_COMPACT}-g${GFS_CYCLE_COMPACT}-${GITHUB_SHA::7}"
+          echo "CYCLE_ID=$CYCLE_ID" >> "$GITHUB_ENV"
+          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+            --allow-env=ImageOS,ImageVersion \
+            scripts/build-wave-manifest.js \
+            --sample "$WORK/out" \
+            --grids-report "$WORK/grib/grids-report.json" \
+            --expect data/wave-grids.json \
+            --floors data/wave-floors.json \
+            --previous "$WORK/prev-manifest.json" \
+            --cycle-id "$CYCLE_ID" \
+            --git-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --allow-shrink "$ALLOW_SHRINK" \
+            --gdal "$(gdalinfo --version)" \
+            --out "$WORK/out/manifest.json"
+          cat "$WORK/out/manifest.json"
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            const sanity = m.sanity || {};
+            const lines = ['AUTO_PUBLISH=' + String(sanity.autoPublishAllowed === true)];
+            fs.appendFileSync(process.env.GITHUB_ENV, lines.join('\n') + '\n');
+            console.log(lines.join(' '));
+          " "$WORK/out/manifest.json"
+
+      - name: Upload the immutable prefix
+        run: |
+          set -euo pipefail
+          PREFIX="waves/$CYCLE_ID"
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          cd "$WORK/out"
+          for f in waveinput.ndjson waves.ndjson manifest.json SHA256SUMS; do
+            case "$f" in
+              *.json) ct=application/json ;;
+              *.ndjson) ct=application/x-ndjson ;;
+              *) ct=text/plain ;;
+            esac
+            aws s3 cp "$f" "s3://$R2_BUCKET/$PREFIX/$f" \
+              --cache-control "public, max-age=31536000, immutable" \
+              --content-type "$ct" --only-show-errors
+          done
+
+      - name: Read back through the public domain and verify
+        run: |
+          set -euo pipefail
+          cd "$WORK/verify"
+          # SHA256SUMS covers the two .ndjson artifacts and NOTHING ELSE. manifest.json
+          # must stay outside its own checksum scope: it is the sole INPUT to the
+          # consumer gate and is byte-compared on its own.
+          cp "$WORK/out/SHA256SUMS" .
+          # --retry-all-errors is load-bearing: plain --retry does not retry the 404 that
+          # a few seconds of edge propagation produces on a just-written key.
+          for f in waveinput.ndjson waves.ndjson; do
+            curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/$f" -o "$f"
+          done
+          sha256sum -c SHA256SUMS
+          curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/manifest.json" -o manifest.json
+          cmp manifest.json "$WORK/out/manifest.json"
+          echo "read-back verified at $PREFIX"
+
+      - name: Explain a withheld publish
+        # Loud, and NOT a failure: the prefix is uploaded and complete, it simply is not
+        # live. This is the bootstrap path (seed data/wave-floors.json from this
+        # manifest, commit it, then re-dispatch with force_publish) and the unseeded
+        # gridsDigest path (someone changed a grid in src/waveGrids.js).
+        if: ${{ env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
+        run: |
+          echo "::warning::build-wave-manifest.js withheld auto-publish (bootstrap cycle, or no seeded floors entry for this gridsDigest). The cycle is uploaded at $PREFIX but waves/current.json was NOT moved. Read the manifest above, seed data/wave-floors.json at 0.75x the observed counts, commit it, then re-dispatch with force_publish true."
+
+      - name: Publish the pointer
+        id: publish
+        # Two conjuncts, both required. PUBLISH is the operator's intent; AUTO_PUBLISH is
+        # build-wave-manifest.js's verdict on whether the evidence supports going live.
+        # FORCE_PUBLISH is the human override for the bootstrap deadlock and is
+        # unavailable on a scheduled run.
+        if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
+        run: |
+          set -euo pipefail
+          printf '{"cycleId":"%s","prefix":"%s"}\n' "$CYCLE_ID" "$PREFIX" > current.json
+          # no-store, and JSON is not in Cloudflare's default-cached extension set, so the
+          # pointer is never served stale. Every object it names is immutable, so caching
+          # those is a pure win.
+          aws s3 cp current.json "s3://$R2_BUCKET/waves/current.json" \
+            --cache-control "no-store" --content-type application/json --only-show-errors
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "published $CYCLE_ID"
+
+      - name: Prune old wave cycles
+        # Same gate as Publish, deliberately: a run that did not move the pointer has left
+        # an extra non-live prefix behind, and pruning on that run would be deleting
+        # cycles to make room for one nobody is reading. 24 cycles is three days at the
+        # 3-hourly cadence. An age-based R2 lifecycle rule is deliberately NOT used: if
+        # the job broke for longer than the rule's age it would delete the LIVE cycle.
+        if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
+        run: |
+          set -euo pipefail
+          LIVE_PREFIX=$(curl -sfL "$R2_PUBLIC_BASE/waves/current.json?cb=$GITHUB_RUN_ID" \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.parse(s).prefix)})")
+          echo "live prefix: $LIVE_PREFIX"
+          aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "waves/" --delimiter "/" \
+            --query 'CommonPrefixes[].Prefix' --output text \
+            | tr '\t' '\n' | sed '/^$/d' | sort | head -n -24 \
+            | while read -r p; do
+                case "$p" in *"$LIVE_PREFIX"*) continue ;; esac
+                case "$p" in *"$CYCLE_ID"*) continue ;; esac
+                echo "pruning $p"
+                aws s3 rm "s3://$R2_BUCKET/$p" --recursive --only-show-errors
+              done
+
+      - name: Upload the manifest and sample report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: wave-cycle-reports
+          path: |
+            ${{ env.WORK }}/out/manifest.json
+            ${{ env.WORK }}/out/sample-report.json
+            ${{ env.WORK }}/grib/grids-report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish-kv:
+    needs: sample
+    # Only when this run actually moved the pointer. A withheld publish (bootstrap, or
+    # an unseeded gridsDigest) leaves the previous cycle live, and re-writing that
+    # cycle's KV would either refuse as expired or extend nothing.
+    if: ${{ needs.sample.outputs.published == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      R2_PUBLIC_BASE: https://map.swim.report
+      # Workers KV Storage: Edit. This job holds NO AWS keys, so the job that can write
+      # production KV cannot write R2 and the job that can write R2 cannot write KV.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_KV_WRITE_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
+      KV_NAMESPACE_ID: d7814f3408de401e8fef467754c18381
+      WRANGLER_VERSION: "4"
+      APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Cache Deno dependencies (frozen lockfile)
+        run: deno cache --lock=deno.lock --frozen scripts/build-wave-kv.js
+
+      - name: Read the pointer ONCE and plan the download
+        # Re-reading the pointer per file would let a cycle completing mid-run hand you a
+        # set that passes every checksum (each file matches its OWN manifest) while
+        # describing a world that never existed.
+        run: |
+          set -euo pipefail
+          DL="$RUNNER_TEMP/wavedl"
+          echo "DL=$DL" >> "$GITHUB_ENV"
+          mkdir -p "$DL/quarantine" "$DL/kv"
+          curl -sfL --retry 5 --retry-all-errors --retry-delay 5 \
+            "$R2_PUBLIC_BASE/waves/current.json?cb=$GITHUB_RUN_ID" -o "$DL/current.json"
+          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+            scripts/build-wave-kv.js --mode plan --pointer "$DL/current.json" --out "$DL/plan.json"
+          cat "$DL/plan.json"
+
+      - name: Download the cycle into quarantine
+        # QUARANTINE, not a working directory: nothing but scripts/build-wave-kv.js reads
+        # this path, and that script verifies byte length AND sha256 against the manifest
+        # before a single record is parsed. The download list comes from
+        # EXPECTED_WAVE_ARTIFACTS in code, never from manifest.artifacts[].key.
+        run: |
+          set -euo pipefail
+          prefix=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prefix)" "$DL/plan.json")
+          for f in $(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).files.join(' '))" "$DL/plan.json"); do
+            curl -sfL --retry 5 --retry-all-errors --retry-delay 5 \
+              "$R2_PUBLIC_BASE/$prefix/$f" -o "$DL/quarantine/$f"
+          done
+          ls -l "$DL/quarantine"
+
+      - name: Apply the consumer gate and emit the KV chunks
+        run: |
+          set -euo pipefail
+          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+            scripts/build-wave-kv.js --mode emit --dir "$DL/quarantine" \
+            --pointer "$DL/current.json" --out "$DL/kv"
+          cat "$DL/kv/kv-report.json"
+
+      - name: Warn on a degraded cycle
+        # Names the grid, why it is missing and what a reader will see, because "a grid
+        # contributed nothing" leaves the operator to guess which beaches went gray.
+        # manifest.gridStatus is provenance: an older manifest without it degrades this
+        # line to the generic wording rather than failing the step.
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            if (report.tier !== 'degraded') { process.exit(0); }
+            const generic = '::warning::the wave cycle passed the gate in the DEGRADED tier — a grid contributed nothing, or a coverage gate was overridden. See kv-report.json.';
+            let status = null;
+            try {
+              const m = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+              status = (m && typeof m.gridStatus === 'object' && m.gridStatus !== null) ? m.gridStatus : null;
+            } catch (err) {
+              status = null;
+            }
+            if (status === null) { console.log(generic); process.exit(0); }
+            const missing = Object.keys(status).filter(function (id) {
+              return !status[id] || status[id].status !== 'sampled';
+            });
+            if (missing.length === 0) { console.log(generic); process.exit(0); }
+            const parts = missing.map(function (id) {
+              const reasons = Array.isArray(status[id].reasons) ? status[id].reasons.join('; ') : '';
+              return id + ' is ' + status[id].status + (reasons === '' ? '' : ' (' + reasons + ')');
+            });
+            console.log('::warning::the wave cycle passed the gate in the DEGRADED tier: ' +
+              parts.join(', ') + '. Every beach those grids serve — the Great Lakes for ' +
+              'noaa_glwu, the ocean for the gfswave grids — has no wave record this cycle ' +
+              'and ages out to unknown, while the grids that sampled were written normally.');
+          " "$DL/kv/kv-report.json" "$DL/quarantine/manifest.json"
+
+      - name: Bulk write the KV pairs
+        # Chunks are idempotent (same key, same value, same ABSOLUTE expiration), so
+        # GitHub's "Re-run failed jobs" repairs a half-landed write against the pinned
+        # immutable prefix.
+        if: ${{ env.APPLY == 'true' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          start=$(date +%s%3N)
+          chunks=0
+          for f in "$DL"/kv/wave-kv-*.json; do
+            chunks=$((chunks + 1))
+            ok=0
+            for attempt in 1 2 3; do
+              if npx --yes "wrangler@${WRANGLER_VERSION}" kv bulk put \
+                --namespace-id "$KV_NAMESPACE_ID" --remote "$f" 2>&1 | tee "$DL/put.log"; then
+                ok=1
+              fi
+              # wrangler WARNS and exits 0 on an unexpected pair property, so a camelCase
+              # expirationTtl would write keys that never expire and exit green. The grep
+              # is what turns that warning into a failure.
+              if grep -q "unexpected properties" "$DL/put.log"; then
+                echo "::error::wrangler reported unexpected properties in $f — the pair spelling is wrong and those keys would never expire"
+                exit 1
+              fi
+              if [ "$ok" = "1" ]; then break; fi
+              echo "attempt $attempt failed for $f"
+              sleep $((attempt * 10))
+            done
+            if [ "$ok" != "1" ]; then
+              echo "::error::bulk put failed for $f after 3 attempts"
+              exit 1
+            fi
+          done
+          elapsed=$(( $(date +%s%3N) - start ))
+          node -e "
+            const fs = require('fs');
+            const r = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            const m = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+            const chunks = process.argv[3];
+            const elapsed = process.argv[4];
+            const beaches = m.beaches || {};
+            // Every grid and its STATUS, so a zero never has to be interpreted: a grid
+            // that was never fetched and a grid that sampled nothing read differently.
+            const status = (m && typeof m.gridStatus === 'object' && m.gridStatus !== null)
+              ? m.gridStatus : null;
+            const resolved = {};
+            for (const g of (m.grids || [])) { resolved[g.id] = g.resolvedBeaches; }
+            const ids = status === null ? Object.keys(resolved) : Object.keys(status);
+            const perGrid = ids.map(function (id) {
+              const n = resolved[id] === undefined ? 0 : resolved[id];
+              const s = (status !== null && status[id]) ? status[id].status : 'unreported';
+              return id + ':' + n + '/' + s;
+            }).join(',');
+            const degraded = [];
+            if (m.gridsComplete !== true) {
+              const out = ids.filter(function (id) {
+                return status !== null && status[id] && status[id].status !== 'sampled';
+              }).map(function (id) { return id + ':' + status[id].status; });
+              degraded.push('gridsIncomplete' + (out.length === 0 ? '' : '(' + out.join(',') + ')'));
+            }
+            if ((m.sanity || {}).overridden === true) { degraded.push('sanityOverridden'); }
+            const expires = new Date(r.kvExpirationEpoch * 1000).toISOString();
+            console.log('wave cycle ' + r.cycleId +
+              ': beaches=' + beaches.total +
+              ' wave=' + beaches.resolved +
+              ' wind=' + beaches.windOnly +
+              ' grids=' + perGrid +
+              ' degraded=' + (degraded.length === 0 ? 'none' : degraded.join(',')) +
+              ' tier=' + r.tier +
+              ' validStart=' + r.validStartIso +
+              ' expires=' + expires +
+              ' pairs=' + r.pairs +
+              ' chunks=' + chunks + '/' + r.chunks +
+              ' elapsedMs=' + elapsed);
+          " "$DL/kv/kv-report.json" "$DL/quarantine/manifest.json" "$chunks" "$elapsed"
+
+      - name: Upload the KV report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: wave-kv-report
+          path: ${{ env.DL }}/kv/kv-report.json
+          if-no-files-found: ignore
+          retention-days: 14

@@ -102,7 +102,7 @@ cross-module interface.
       "color": "yellow",             // "green" | "yellow" | "red" | "double-red" | "unknown"
       "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
       "trigger": "wave-height",      // which precedence branch decided the color — see section 4
-      "rules_version": "1.5.0",
+      "rules_version": "1.5.1",
       "official": false,
       "waveHeightFt": 2.62,          // structured echo of the input wave reading (null when
                                      // absent) — ALWAYS present regardless of which branch
@@ -124,16 +124,16 @@ cross-module interface.
       "sources": [
         { "label": "NWS Alerts",
           "url": "https://api.weather.gov/alerts/active?zone=MIZ071" },
-        { "label": "ECMWF Wave Forecast",
-          "url": "https://open-meteo.com/en/docs/marine-weather-api" }
+        { "label": "NOAA GFS Wave Model",
+          "url": "https://polar.ncep.noaa.gov/waves/" }
       ],
       "updated": "2026-07-04T15:00:03.000Z"
     }
 
 Source entries are { label, url } objects: label is short human-readable display text
-(wave labels name the model that supplied the reading, e.g. "ECMWF Wave Forecast",
-"NOAA GFS Wave Forecast", "Météo-France Wave Forecast"; the mapping lives in
-WAVE_MODEL_LABELS in src/index.js); url is provenance only — the UI renders labels as
+(wave labels name the grid that supplied the reading, e.g. "NOAA GFS Wave Model",
+"NOAA Great Lakes Wave Model"; the mapping lives in waveSourceLabel in
+src/waveModels.js); url is provenance only — the UI renders labels as
 plain text and never hyperlinks the upstream url. url still points at a human-readable
 page, never the raw API request, and may be absent. The renderer also accepts legacy
 bare-string entries (rendered as their hostname, "www." stripped) for KV values written
@@ -173,78 +173,92 @@ before this shape existed.
 
     {
       "beachId": "osm-node-123456",
-      "startIso": "2026-07-12T15:00:00.000Z",   // the wave-refresh run's nowIso truncated to
-                                                // the top of its UTC hour: hoursFt[0] is the
-                                                // forecast for THIS hour
+      "startIso": "2026-07-12T15:00:00.000Z",   // the model VALID START: the top of the UTC
+                                                // hour the series describes, never the run
+                                                // clock. hoursFt[0] is THIS hour.
       "hoursFt": [2.62, 2.43, null, ...],       // exactly 24 entries, feet, raw floats (NO
                                                 // rounding — hoursFt[0] must stay identical
                                                 // to the FlagEstimate's waveHeightFt so the
                                                 // flag color and the chart's first cell
-                                                // always agree); null = no model had a
-                                                // finite value that hour (normal on the
-                                                // Great Lakes)
-      "models": ["ecmwf_wam025"],               // distinct models that WON >= 1 composite
-                                                // hour, in WAVE_MODEL_ORDER order
-      "byModel": { "ecmwf_wam025": [2.62, ...] },
+                                                // always agree); null = the resolved cell
+                                                // carried no usable value that hour
+      "models": ["noaa_gfswave"],               // the grid ids that contributed a series;
+                                                // one grid per beach, so length 1 today
+      "byModel": { "noaa_gfswave": [2.62, ...] },
                                                 // per-model 24-entry slices (raw floats,
                                                 // feet, aligned with hoursFt); only models
-                                                // with >= 1 finite hour appear — a model can
-                                                // be here without ever winning a composite
-                                                // hour. Powers the detail page's model
-                                                // comparison; the flag NEVER derives from
-                                                // byModel (composite hoursFt only). Older
-                                                // KV payloads lack it; renderers treat
+                                                // with >= 1 finite hour appear. Powers the
+                                                // detail page's model comparison; the flag
+                                                // NEVER derives from byModel. Older KV
+                                                // payloads lack it; renderers treat
                                                 // missing/malformed as {}.
-      "sources": [{ "label": "ECMWF Wave Forecast",
-                    "url": "https://open-meteo.com/en/docs/marine-weather-api" }],
-                                                // label = waveSourceLabel(models[0]) when a
-                                                // single model, else "Open-Meteo Wave Models"
-      "updated": "2026-07-12T15:00:03.000Z"
+      "sources": [{ "label": "NOAA GFS Wave Model",
+                    "url": "https://polar.ncep.noaa.gov/waves/" }],
+                                                // label/url = waveSourceLabel/waveSourceUrl
+                                                // (src/waveModels.js) for models[0]
+      "updated": "2026-07-12T15:00:00.000Z"     // the same model valid start as startIso
     }
 
-Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data TTL
-(WAVE_DATA_TTL_SECONDS = 25200) ONLY when the beach's Open-Meteo series has at least one
-finite hour — a fetch failure, an all-masked series, an all-zero series (Open-Meteo's
-masked-cell signature; the client treats it as no data), or a buoy-only gap-fill (buoys
-are nearest-point now-observations with no hourly series; one is never synthesized)
-writes no key, so absent means "no series to show" and the detail page simply omits
-the forecast strip. NOT written by the hourly recompute (which no longer fetches waves).
-Feeds the detail page's 24 h wave chart (section 9).
+Written by the offline NOAA GRIB2 wave cycle (.github/workflows/waves.yml, section 7's
+offline subsection) ONLY when the beach's series has at least one finite hour, so absent
+means "no series to show" and the detail page simply omits the forecast strip. hoursFt is
+exactly 24 entries or src/frontend/waveStrip.js drops the whole strip. hoursFt[0] and the
+WaveInput waveHeightFt are ONE conversion of ONE sample of the hour-0 band, computed once
+and written twice: the resolved grid cell is found once from that band and reused for all
+24 hours, because re-running the nearest-wet-cell search per hour would let the series jump
+between cells and make the detail page's "now" stat contradict its own first bar.
+
+The key carries an ABSOLUTE per-key expiration of validStartEpoch + 25200 rather than a
+write-time TTL. See WaveInput below for why.
 
 ### WaveInput (KV value under "waveinput:" + beachId)
 
     {
       "beachId": "osm-node-123456",
-      "waveHeightFt": 2.62,          // number (feet) or null — the current-hour wave reading
-                                     // (marine composite hour-0, or a buoy gap-fill), what the
-                                     // hourly estimate consumes as inputs.waveHeightFt
-      "model": "ecmwf_wam025",       // string or null: the model that supplied waveHeightFt
-                                     // (GLCFS_WAVE_MODEL for a buoy reading); drives the
-                                     // estimate's wave source label
+      "waveHeightFt": 2.62,          // number (feet) or null — the hour-0 wave reading, what
+                                     // the hourly estimate consumes as inputs.waveHeightFt
+      "model": "noaa_gfswave",       // string or null: the grid that supplied waveHeightFt
+                                     // (noaa_gfswave | noaa_gfswave_arctic | noaa_glwu);
+                                     // drives the estimate's wave source label
       "windSpeedMph": null,          // number (mph) or null — the wind FALLBACK, recorded ONLY
-      "windGustMph": null,           // number (mph) or null   for beaches still wave-null after
-                                     // the marine + buoy passes (the estimate's wind fallback)
-      "updated": "2026-07-12T15:00:03.000Z"
+                                     // for beaches that resolved no wave height
+      "windGustMph": null,           // ALWAYS null: NOAA gfswave publishes no GUST element, so
+                                     // the wind red rule is effectively speed >= 25 mph alone
+                                     // and rules.js renders "n/a" for the gust
+      "updated": "2026-07-12T15:00:00.000Z"  // the model valid start, never the run clock
     }
 
-Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data TTL
-(WAVE_DATA_TTL_SECONDS = 25200) and read by the hourly runFlagRecompute, which takes the
-current wave height and the wind fallback for its estimate from this payload instead of a
-live fetch. Written ONLY when the run produced something usable for the beach: a wave
-height (from the marine models, the buoy gap-fill, OR a SUPPLEMENTAL fallback wave source —
-section 5/7) OR a wind fallback reading. A beach whose marine fetch merely FAILED this run
-(the hoursFt === null batch-failure sentinel) with no buoy reading is SKIPPED so its
-last-good key rides the TTL — the same graceful-degradation contract the WaveSeries has; a
-fetched-but-fully-masked beach with no buoy and no wind is skipped too. Either skip still
-STAMPS the beach in wave_updated (migration 0012), so a permanently-masked beach rotates
-away instead of pinning the head of the queue: Open-Meteo masking on the Great Lakes is
-documented as NORMAL, not an error, so stamping only on a successful write would invert the
-starvation the cursor exists to fix. Absent/expired key →
-the hourly estimate simply has no wave input this run (degrades to the wind fallback or
-"unknown", never a wrong flag). The `model` may name a supplemental source (e.g.
-"nws_gridpoint_wave", "ndbc_buoy") when Open-Meteo + GLOS were both null and a fallback
-supplied the reading — the estimate's wave source label resolves it through WAVE_MODEL_LABELS
-either way.
+Written by the offline NOAA GRIB2 wave cycle and read by the hourly runFlagRecompute, which
+takes the current wave height and the wind fallback for its estimate from this payload
+instead of a live fetch. Written ONLY when the cycle produced something usable for the beach:
+a wave height, or a wind fallback for a beach that resolved none. A beach that resolved
+neither is SKIPPED entirely, so its last-good key rides its own lease and the flag ages out
+to unknown rather than being recoloured from nothing — the same graceful-degradation contract
+the WaveSeries has. Absent/expired key → the hourly estimate simply has no wave input this
+run (degrades to the wind fallback or "unknown", never a wrong flag).
+
+THE UNITS CONTRACT. GRIB HTSGW is METRES and waveHeightFt is FEET: metres * 3.28084
+(metersToFeet, src/geo.js). GRIB WIND is METRES PER SECOND and windSpeedMph is MPH: m/s *
+2.2369362920544 (metersPerSecondToMph, src/waveGrids.js). rules.js thresholds are 2 ft yellow
+and 4 ft red, and 15/25 mph; handing it metres makes every sea state below 1.22 m read green
+sitewide, and handing it m/s makes an actual 25 mph arrive as 11, with no error anywhere in
+either case. GRIB nodata is a NUMBER that survives JSON — 9999 on gfswave, 9.999000260554009e+20
+on GLWU, read per band from the raster header and never hardcoded — and 9999 m is 32,808 ft,
+which colors a flag red with a straight-faced reason string, so every masked cell is coerced
+to JSON null in the offline writer. rules.js tests waveHeightFt !== null with no isFinite
+guard and the cron guards with typeof === "number" only; containment belongs to the writer and
+the reader is unchanged.
+
+ABSOLUTE EXPIRATION, NOT A TTL. Each pair is written with an expiration of
+validStartEpoch + 25200, so a key expires 7 h after the hour it DESCRIBES regardless of when
+the job ran. runFlagRecompute never reads waveinput.updated, so expiration is the only
+staleness control on the color path, and a TTL measured from write time would grant a run
+firing 9 h late seven fresh hours on data already 9 h old. Republishing an older cycle
+therefore yields a short or negative lease and is refused by construction: there is no KV
+time machine, and the only rollback is to stop writing. The wrangler bulk-put field is
+snake_case "expiration"; the Worker runtime's camelCase expirationTtl is accepted as an
+unexpected property, warned about and IGNORED with exit 0, producing a key that never
+expires.
 
 ### WaterTemp (KV value under "watertemp:" + beachId)
 
@@ -258,17 +272,17 @@ either way.
         "distanceKm": 5.02
       },
       "observedIso": "2026-07-12T15:00:00.000Z", // the buoy observation's own UTC timestamp
-      "updated": "2026-07-12T15:00:03.000Z"      // when the wave cron wrote this record
+      "updated": "2026-07-12T15:00:03.000Z"      // when the cron wrote this record
     }
 
-DISPLAY-ONLY. Written by the 6-hourly wave cron (runWaveRefresh, section 7) at the wave-data
-TTL (WAVE_DATA_TTL_SECONDS = 25200) from the WTMP column of the nearest station carrying the
+DISPLAY-ONLY. Written by the 6-hourly water-temperature cron (runWaterTempRefresh, section 7)
+with expirationTtl 25200 from the WTMP column of the nearest station carrying the
 CAP_WATER_TEMP capability, selected by nearestWaterTempStation within
 NDBC_WATER_TEMP_MAX_DISTANCE_KM = 25 km (src/waveSources/ndbcBuoys.js, parseNdbcWaterTempF —
 the freshest non-"MM" reading inside the NDBC_WATER_TEMP_MAX_OBS_AGE_MS = 12 h window and the
 sanity band, else null). The 25 km temp cap is deliberately TIGHTER than the 40 km wave cap
-(NDBC_MAX_DISTANCE_KM): a wave height is consumed through coarse ≥2 ft / ≥4 ft thresholds,
-while a temperature is displayed as a precise number next to the beach name, and both
+of the retired NDBC wave lane: a wave height is consumed through coarse ≥2 ft / ≥4 ft
+thresholds, while a temperature is displayed as a precise number next to the beach name, and both
 cross-lake attribution (Erie's central basin is ~57 km wide) and summer upwelling (the
 thermal front sits 5-15 km offshore) bound how far one may travel. Read
 by handleDetail and passed to renderDetailPage, which appends a fresh reading to the
@@ -278,14 +292,9 @@ flag and does not bump RULES_VERSION. Written ONLY when the station fetch/parse 
 valid recent reading; a null (winter gap, all-"MM", stale, 404) writes nothing so the old key
 expires on its own. Absent/expired key → the subtitle simply omits the temp fragment.
 
-The put is INDEPENDENT of the two WaveInput skip guards above (section 7, runWaveRefresh
-step 4): a failed marine fetch says nothing about an NDBC buoy reading, so a beach that
-writes no "waveinput:" key this run can still write a "watertemp:" one. Historical note,
-because it explains an empty key family rather than a bug in the shape: until the write pass
-was bounded (section 7), this pass ran AFTER a ~1450-put SEQUENTIAL write loop that consumed
-the entire 900 s invocation, so it was never reached and not one "watertemp:" key ever
-existed in production. The fetch half now runs in the gather (step 3b) and the put rides the
-per-beach write pool.
+This is the only KV family the Worker still writes on the wave side, and it is independent of
+the offline wave cycle in every respect: a different upstream, a per-station observedIso time
+basis rather than one cycle-wide valid time, and no path into a flag color.
 
 ### WqFloorAdvisory (KV value under "wqfloor:" + beachId)
 
@@ -352,7 +361,7 @@ migrations/0004_recompute_updated.sql:
   in one D1 batch at the end of each hourly run). Drives the HOURLY recompute
   rotation ONLY: the hourly SELECT orders by recompute_updated ASC (NULLs sort
   first) so never-recomputed and longest-waiting beaches always go first.
-  runWaveRefresh no longer reads this column — it has its own cursor
+  runWaterTempRefresh does not read this column — it has its own cursor
   (wave_updated, migration 0012). Each cron is single-writer AND single-reader
   of its own cursor.
 
@@ -399,7 +408,7 @@ migrations/0007_last_viewed.sql:
   or /api/flag/:beachId), stamped from the REQUEST path via ctx.waitUntil
   (touchLastViewed in src/router.js — section 8), throttled to once per beach per
   hour (LAST_VIEWED_MIN_INTERVAL_MS). NULL = never viewed. Consumed by:
-  runFlagRecompute and runWaveRefresh (section 7), which both split their
+  runFlagRecompute and runWaterTempRefresh (section 7), which both split their
   recompute rotation into a hot tier — beaches viewed within HOT_VIEW_WINDOW_MS
   (7 days), always covered every run via an ORDER BY guard bound as ?1 — and a
   cold tier that rotates through the remaining MAX_BEACHES_PER_RUN budget on the
@@ -464,25 +473,22 @@ migrations/0012_wave_updated.sql:
 
     ALTER TABLE beaches ADD COLUMN wave_updated TEXT;
 
-  The 6-hourly wave cron's PRIVATE rotation cursor: ISO timestamp of the last
-  runWaveRefresh run that reached a write DECISION for this row.
-  WHY IT EXISTS (this DELETES the old shared-cursor invariant in section 7):
-  runWaveRefresh used to order its rotation by recompute_updated, which
-  runFlagRecompute rewrites to ONE shared nowIso for its entire run's beach set
-  every hour. That flattens the column to ~2 distinct values across the table, so
-  the wave cron's cold-tier sort collapsed to id ASC permanently and, once the
-  table outgrew what one wave run could finish, a fixed tail of rows starved
-  forever. A cursor a different cron flattens hourly is not a cursor.
-  WHO WRITES IT: runWaveRefresh only, and INCREMENTALLY — batches of
+  The 6-hourly water-temperature cron's PRIVATE rotation cursor: ISO timestamp of
+  the last runWaterTempRefresh run that reached a write DECISION for this row.
+  WHY IT EXISTS: runFlagRecompute rewrites recompute_updated to ONE shared nowIso
+  for its entire run's beach set every hour, flattening that column to ~2 distinct
+  values across the table. Any second cron ordering by it collapses to id ASC
+  permanently and, once the table outgrows what one run can finish, a fixed tail of
+  rows starves forever. A cursor a different cron flattens hourly is not a cursor.
+  WHO WRITES IT: runWaterTempRefresh only, and INCREMENTALLY — batches of
   WAVE_CURSOR_FLUSH_SIZE (100) flushed as the write pool reaches each beach, never
-  one batch after the loop (the hourly cron's post-loop shape is exactly what
-  failed: SIGKILLed mid-loop, the trailing batch never ran, the cursor never
-  moved). Stamped for every beach that reached a write DECISION, INCLUDING the two
-  graceful-degradation skips that write no KV (section 1, WaveInput) — stamping
-  only on a successful write would pin permanently-masked Great Lakes beaches to
-  the head of the queue forever. NOT stamped for beaches the gather deadline meant
-  the run never ATTEMPTED, so those sort first next run.
-  WHO READS IT: runWaveRefresh's own SELECT (section 7 step 1) only. It rides
+  one batch after the loop: a run killed at the wall-clock ceiling mid-loop never
+  runs a trailing batch, so the cursor never moves. Stamped for every beach that
+  reached a write DECISION, INCLUDING the skips that write no KV — stamping only on
+  a successful write would pin a beach with no station in range to the head of the
+  queue forever. NOT stamped for beaches the gather deadline meant the run never
+  ATTEMPTED, so those sort first next run.
+  WHO READS IT: runWaterTempRefresh's own SELECT (section 7 step 1) only. It rides
   along in row objects on the hourly cron's SELECT * and router.js's, but nothing
   on the request path reads it.
   NULL is required (SQLite ADD COLUMN forbids NOT NULL without a DEFAULT) and is
@@ -529,29 +535,28 @@ Binding name: FLAGS (single namespace for both key families).
   `officialTtlSeconds` governs how long the KV VALUE lives, `staleMs` governs how the
   renderer judges the reading's AGE. nws-omr-grr (30 h) and winnetka-tower-beach (72 h)
   declare `staleMs` today; only nws-omr-grr declares a `readingNote` (section 6).
-- Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the 6-hourly wave cron
-  (runWaveRefresh) with { expirationTtl: 25200 }, and only when the series has >= 1 finite
-  hour (section 1). Read ONLY by the detail route (the list page must not gain per-row
-  reads). Absent key → the detail page omits the wave-forecast strip (the "now" stat can
-  still render from FlagEstimate.waveHeightFt).
-- Key "waveinput:" + beachId → JSON.stringify(WaveInput). Written by the 6-hourly wave cron
-  (runWaveRefresh) with { expirationTtl: 25200 }, and only when the run produced a usable
-  wave height or a wind fallback for the beach (section 1). Read by the hourly
-  runFlagRecompute — the current wave height + wind fallback for the estimate come from
-  here, NOT a live fetch. Absent key → the estimate has no wave input this run.
-- Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly wave cron
-  (runWaveRefresh — fetched in step 3b, put in step 4) with { expirationTtl: 25200 }, and
-  ONLY when the beach's nearest CAP_WATER_TEMP station (within 25 km) produced a valid recent
-  water-temp reading (section 1). Read ONLY by the detail route (like "waves:", the list page must not gain
-  per-row reads) and passed to renderDetailPage as the .beach-subtitle temp fragment.
-  DISPLAY-ONLY — never feeds src/rules.js. Absent key → the subtitle omits the temp fragment.
-- "waves:", "waveinput:" and "watertemp:" are all written from the SAME bounded-concurrency
-  per-beach write pass (runWaveRefresh step 4, KV_WRITE_CONCURRENCY wide, yielding at
-  WAVE_WRITE_DEADLINE_MS). Writers, key shapes and TTLs are unchanged; what changed is that
-  the three share one deadline-bounded pool instead of two sequential loops, and that the
-  "watertemp:" put is independent of the two "waveinput:" skip guards. No cron may
-  reintroduce a sequential per-beach await env.FLAGS.put — see section 7, "Run budgets and
-  write pools".
+- Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the offline NOAA GRIB2
+  wave cycle, and only when the series has >= 1 finite hour (section 1). Read ONLY by the
+  detail route (the list page must not gain per-row reads). Absent key → the detail page
+  omits the wave-forecast strip (the "now" stat can still render from
+  FlagEstimate.waveHeightFt).
+- Key "waveinput:" + beachId → JSON.stringify(WaveInput). Written by the offline NOAA GRIB2
+  wave cycle, and only when the cycle produced a usable wave height or a wind fallback for
+  the beach (section 1). Read by the hourly runFlagRecompute — the current wave height +
+  wind fallback for the estimate come from here, NOT a live fetch. Absent key → the estimate
+  has no wave input this run.
+- "waves:" and "waveinput:" carry an ABSOLUTE per-key expiration of validStartEpoch + 25200
+  (the wrangler bulk-put field is snake_case "expiration"), not a write-time TTL. They are
+  the only keys in this namespace written from outside the Worker. See section 1 (WaveInput)
+  for why absolute, and section 7's offline subsection for the pipeline.
+- Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly
+  water-temperature cron (runWaterTempRefresh) with { expirationTtl: 25200 }, and ONLY when
+  the beach's nearest CAP_WATER_TEMP station (within 25 km) produced a valid recent
+  water-temp reading (section 1). Read ONLY by the detail route (like "waves:", the list page
+  must not gain per-row reads) and passed to renderDetailPage as the .beach-subtitle temp
+  fragment. DISPLAY-ONLY — never feeds src/rules.js. Absent key → the subtitle omits the temp
+  fragment. Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential
+  per-beach await env.FLAGS.put — see section 7, "Run budgets and write pools".
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
   (runFlagRecompute) with { expirationTtl: 7200 }, and ONLY when a src/wqFloor source
   resolved an active water-quality advisory for the beach — a clean/absent reading writes
@@ -560,13 +565,6 @@ Binding name: FLAGS (single namespace for both key families).
   advisory the estimate already folded in as a raise-only floor (rules.js step 7,
   official:false), surfaced separately for the UI. Absent key → no active advisory (never a
   "clean" green). See section 6 (src/wqFloor).
-- Key "glcfs:catalogs" → JSON.stringify({ platforms: [{ obsDatasetId, lat, lon }, ...],
-  waveParameterIds: number[] }) — the two SMALL derived structures parsed from the ~5.5 MB
-  semi-static GLOS Seagull catalogs (the wave-parameter-id Set serialized as an array).
-  Written AND read by the 6-hourly wave cron (runWaveRefresh) ONLY, with
-  { expirationTtl: 86400 } (~24 h), so the cron reuses them instead of re-downloading both
-  catalogs every run. Absent/corrupt → the wave cron fetches both catalogs fresh (never an
-  error). The request path never touches this key (two-path rule intact).
 - Key "scraperhealth:" + scraperId → JSON { consecutiveNulls, lastSuccess,
   lastFailure }. Written by the hourly cron with NO expirationTtl (the failure
   streak must survive across runs). See section 7 step 8.
@@ -579,7 +577,7 @@ official card when official is null.
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.5.0";
+    export const RULES_VERSION = "1.5.1";
 
     export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
       // Appended to the reason (see the caveat rule after step 5) when the cron
@@ -727,7 +725,7 @@ Pure module. No fetch, no Date, no env. Exports:
       ripCurrentRisk: "HIGH",           // "HIGH" | "MODERATE" | "LOW" | null
       waveHeightFt: 3.2,                // number (feet, already converted) or null. The cron
                                         // now reads this from the "waveinput:" + beachId KV
-                                        // the 6-hourly wave cron wrote (section 1/3), NOT a
+                                        // the offline wave cycle wrote (section 1/3), NOT a
                                         // live fetch; the shape into estimateFlag is unchanged.
       windSpeedMph: 18,                 // number (mph, sustained) or null — wind FALLBACK, also
       windGustMph: 27,                  // number (mph) or null   from the "waveinput:" KV
@@ -799,9 +797,10 @@ must NOT be mutated.
    - If ripCurrentRisk === "LOW" (and steps 3–4 had no data) → "green",
      reason: "NWS surf zone forecast rip current risk: LOW; no wave or wind data available"
    - Otherwise → "unknown",
-     reason: "No usable data from NWS alerts, surf zone forecast, or Open-Meteo wave and wind models"
+     reason: "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models"
    Note: alerts === [] (successful fetch, zero alerts) does NOT count as usable data on its
-   own; with everything else null the result is "unknown".
+   own; with everything else null the result is "unknown". That reason string is reproduced
+   here VERBATIM because it is pinned in test/rules.test.js.
 6. NWS yellow WATCH/ADVISORY floor (applied AFTER steps 1–5 decide a color). Scan
    inputs.alerts (if non-null) against NWS_FLOOR_PRECEDENCE in that order. If one is
    present AND the decided color is "green" or "unknown", raise it to "yellow"; it
@@ -887,10 +886,9 @@ src/clients/ecccMarine.js, src/marineZones.js and scripts/build-marine-zones.js 
 byte-identical private copies of the nearest-edge helpers were deleted from those
 modules in favour of the exports below, so they can never drift apart again. Other
 modules import from here rather than copy-pasting a haversine or a ray cast (current
-importers: clients/eccc.js, clients/ecccMarine.js, clients/glerl.js, clients/openMeteo.js,
+importers: clients/eccc.js, clients/ecccMarine.js, clients/windyWebcams.js,
 discovery.js, marineZones.js, officialSources/util.js, officialSources/metroparks.js,
-router.js, waveSources/ndbcBuoys.js, waveSources/nwsGridpointWaves.js,
-waveSources/seaCavesWaves.js, wqFloor/kenoshaBeachConditions.js,
+router.js, waveGrids.js, waveSources/ndbcBuoys.js, wqFloor/kenoshaBeachConditions.js,
 wqFloor/nyOprhpBeachStatus.js, and scripts/build-marine-zones.js — note
 officialSources/index.js is NO LONGER one of them). Safe on both the request and cron
 paths.
@@ -1223,44 +1221,24 @@ the US branch concats marine onto land (section 7 step 3b/7).
       // minEdgeDistanceKm from src/geo.js (section 5); ECCC_MARINE_MAX_EDGE_KM
       // stays applied here, at the call site.
 
-### src/waveSources/ (supplemental fallback wave-height registry, cron-side)
+### src/waveSources/ndbcBuoys.js (NDBC water temperature, cron-side)
 
-An ORDERED FALLBACK registry (src/waveSources/index.js) consulted by runWaveRefresh
-(section 7 step 2b) ONLY for beaches whose PRIMARY wave height (Open-Meteo marine batch
-+ GLOS Seagull buoy gap-fill) came back null. NEVER additive and never double-counted:
-the first matching source that returns a finite ft wins; the reading is then treated
-EXACTLY like the primary (same wave-height rule, same source badge) — only the model id
-differs. Wave-height ONLY — rip-current signal deliberately does NOT belong here (the SRF
-client stays the single primary rip path). Two-path rule: fetches are reachable only from
-runWaveRefresh; the request path never imports this module's network code.
+The water-temperature half of the NDBC client, and the only surviving module under
+src/waveSources/. Read by runWaterTempRefresh (section 7) and by nothing else. DISPLAY-ONLY:
+its output reaches the detail page's .beach-subtitle and never src/rules.js.
 
-    export const waveSources     // ordered = fallback precedence:
-                                 //   1. nws-gridpoint-waves (model "nws_gridpoint_wave") —
-                                 //      keyed on beach.nws_grid_url (precise NWS forecast cell)
-                                 //   2. nws-nsh-nearshore (model "nws_nsh_nearshore_wave") —
-                                 //      keyed on beach.marine_zone (nearshore marine text)
-                                 //   3. uw-sea-caves-watch (model "uw_sea_caves_watch") —
-                                 //      single UW-Madison Lake Superior gauge (proximity)
-                                 //   4. toronto-beach-obs (model "toronto_beach_obs") —
-                                 //      10 curated Lake Ontario beaches (self-memoized/run)
-                                 //   5. ndbc-buoys (model "ndbc_buoy") — nearest NOAA NDBC
-                                 //      buoy within 40 km (broad last resort)
-                                 // Key-shaped US sources first, regional gauges next, the
-                                 // broad buoy net last. NOTE: there was NO prior NDBC
-                                 // ingestion — this is the first. Each source object:
-                                 //   { id, model, label, url, matches(beach),
-                                 //     waveFt(beach, nowIso, env) -> finite ft | null }
-                                 // Sources that share a key across beaches (gridpoint by
-                                 // nws_grid_url, NSH by marine_zone, NDBC by buoy id) MUST
-                                 // dedup/memoize that key within a run to stay under the
-                                 // subrequest budget on a fully wave-null (winter) run.
+    export const NDBC_WATER_TEMP_MAX_DISTANCE_KM  // 25 km cap on station attribution
+    export const NDBC_WATER_TEMP_MAX_OBS_AGE_MS   // 12 h freshness window
+    export const NDBC_HEAD_BYTES                  // Range prefix (NOS gauges publish ~1 MB
+                                                  // realtime2 files; only the head is needed)
 
-    export async function resolveSupplementalWaveFt(beach, nowIso, env)
-      // Cron-side ONLY. Tries each matching source in registry order; returns the FIRST
-      // finite result WITH its provenance { waveHeightFt, model, label, url } so the caller
-      // stamps the correct model on the WaveInput (never a generic label that would
-      // mislabel the source badge), else null. A source that throws is isolated and
-      // treated as "no reading" — never throws across the boundary.
+    export function nearestWaterTempStation(lat, lon)
+      // Nearest station carrying CAP_WATER_TEMP within the 25 km cap, or null.
+
+    export function parseNdbcWaterTempF(text, nowMs)
+      // Pure. The freshest non-"MM" WTMP reading inside the age window and the sanity band,
+      // as { tempF, tempC, observedIso }, else null. A markup or column change degrades to
+      // null, never to a wrong temperature.
 
 ### src/clients/srfParser.js (pure, no fetch)
 
@@ -1275,140 +1253,90 @@ runWaveRefresh; the request path never imports this module's network code.
       // Known limitation (accept it): "LOW TO MODERATE" captures "LOW" (conservative parse
       // is fine; document with a test).
 
-### src/clients/openMeteo.js
+### src/waveGrids.js (the three NOAA GRIB2 wave grids + pure sampling geometry — offline only)
 
-    export const WAVE_MODEL_ORDER = ["ecmwf_wam025", "ncep_gfswave025", "meteofrance_wave"];
+OFFLINE ONLY. Nothing in the Worker's import closure may import this module; it exists for
+scripts/sample-waves.js and scripts/build-wave-manifest.js.
 
-    export async function fetchWaveHeightsFt(points, nowIso)
-      // points: [{ beachId, lat, lon }]; the caller (runWaveRefresh) enforces batching at
-      // OPEN_METEO_BATCH = 100 per call and paces the batches under the API rate limit.
-      // nowIso: ISO string used to select the hourly index — NO Date.now() inside.
-      // One GET to "https://marine-api.open-meteo.com/v1/marine?latitude=" +
-      //   lats.join(",") + "&longitude=" + lons.join(",") +
-      //   "&hourly=wave_height" +
-      //   "&models=" + WAVE_MODEL_ORDER.join(",") +
-      //   "&forecast_days=2&timezone=UTC"
-      //   Only wave_height is requested (wave_direction/wave_period are never consumed).
-      // Response: array of location objects when multiple coords are sent (a single object
-      //   when one coord — normalize to array). With multiple models the hourly variables
-      //   are suffixed per model, e.g. hourly.wave_height_ecmwf_wam025. forecast_days=2
-      //   makes each hourly series 48 entries — same single GET per batch, no extra
-      //   subrequests.
-      // Hour selection: idx = UTC hour of nowIso (0-23); the 24-hour forecast window
-      //   idx..idx+23 is always within the 48-entry series.
-      // Per point, per hour offset h in 0..23: iterate WAVE_MODEL_ORDER; first model whose
-      //   value at idx + h is a finite number wins (null/masked grid points are COMMON on
-      //   the Great Lakes — skip them); convert meters -> feet (m * 3.28084); store raw
-      //   floats, no rounding. No finite value from any model -> null for that hour.
-      // All-zero guard: a model whose full 48-entry series has every finite cell exactly
-      //   0.0 is Open-Meteo's masked-cell signature (not a real flat calm) — treat that
-      //   model as having no data (excluded from byModel, never wins a composite hour), so
-      //   it can't produce a false-green flag or a stored all-zero WaveSeries. A series
-      //   with zeros in the 24-hour window but any nonzero finite cell elsewhere is kept.
-      // Return: { results: { beachId -> { waveHeightFt: number | null,   // === hoursFt[0]
-      //                                   model: "ncep_gfswave025" | null, // hour-0 model
-      //                                   hoursFt: [24 x number | null],
-      //                                   models: [string],      // distinct models that WON
-      //                                                          // >= 1 composite hour, in
-      //                                                          // WAVE_MODEL_ORDER order
-      //                                   byModel: { modelId -> [24 x number | null] } } },
-      //                                                          // per-model slices; only
-      //                                                          // models with >= 1 finite
-      //                                                          // hour (may include models
-      //                                                          // that never won)
-      //           sourceUrl: the request URL }
-      //   Every input beachId MUST appear in results (null values / all-null hoursFt /
-      //   empty models / byModel {} on miss). waveHeightFt === hoursFt[0] is load-bearing:
-      //   the flag color and the wave strip's first cell must agree. The composite is
-      //   derived FROM the per-model slices, so byModel and hoursFt can never disagree.
-      // Total request failure -> null.
+    export const GRIDS                     // ordered fallthrough: noaa_glwu, noaa_gfswave,
+                                           // noaa_gfswave_arctic. Each carries its domain,
+                                           // url template, fetch mode, warp descriptor, the
+                                           // decoded raster geometry and its own nodata.
+    export const REQUIRED_GRID_IDS         // ["noaa_gfswave"] — the grids a cycle cannot do
+                                           // without. Read by the fetch, the band plan, the
+                                           // workflow shell and the build gate, so all four
+                                           // refusals move together. Emptying it would make
+                                           // every grid optional and let a cycle carrying no
+                                           // gfswave data publish.
+    export const WAVE_ELEMENT / WIND_ELEMENT      // "HTSGW" (metres) / "WIND" (metres/second)
+    export const FORECAST_HOURS                   // 24
+    export const METERS_PER_SECOND_TO_MPH         // 2.2369362920544
+    export function metersPerSecondToMph(ms)      // null-safe, mirroring metersToFeet
+    export function gridById(id)
+    export function candidateGrids(waterClass)    // water_class constrains the grid set:
+                                                  // 'great_lake' may match only noaa_glwu,
+                                                  // 'ocean' only the two gfswave grids,
+                                                  // NULL may try both in order
+    export function containsPoint(grid, lat, lon)
+    export function nearestWetSample(grid, header, data, lat, lon)
+                                                  // The nearest-wet-cell spiral, by
+                                                  // great-circle minimum rather than
+                                                  // scan order or ring index — longitude
+                                                  // cells narrow with latitude, so both
+                                                  // cheaper tie-breaks pick the wrong cell
+                                                  // and produce a plausible number with no
+                                                  // error. This is THE sampling mechanism,
+                                                  // not a fallback: real beach coordinates
+                                                  // routinely land on masked land cells.
+    export function sampleAtCell(header, data, row, col)
+    export function isUsableSample(value, nodata)  // rejects non-finite, the band's own
+                                                   // nodata, > 9000 and < 0
+    export async function gridsDigest()            // sha256 over the canonical serialization
+                                                   // of GRIDS (id, domain, cell size, url
+                                                   // template, variables, cap km). Keys the
+                                                   // coverage floors. The BEACH SET is
+                                                   // deliberately excluded: it grows daily,
+                                                   // and a digest that changes daily is not
+                                                   // a gate.
 
-    export async function fetchWinds(points)
-      // points: [{ beachId, lat, lon }]; caller batches at OPEN_METEO_BATCH = 100 per call.
-      // One GET to "https://api.open-meteo.com/v1/forecast?latitude=" + lats.join(",") +
-      //   "&longitude=" + lons.join(",") +
-      //   "&current=wind_speed_10m,wind_gusts_10m&wind_speed_unit=mph&timezone=UTC"
-      // Return: { results: { beachId -> { windSpeedMph: number | null, windGustMph: number | null } },
-      //           sourceUrl: the request URL }
-      // Total request failure -> null.
+### src/waveModels.js (model labels + provenance urls, Worker-side)
 
-### src/clients/glerl.js
+Static tables so the hourly cron can name a reading's source without importing any fetching
+module. Lives outside src/index.js because workerd rejects every non-function named export on
+the entry module (section 7, entry-module export shape).
 
-Great Lakes wave gap-filler: Open-Meteo's wave models frequently return masked/null
-cells on the Great Lakes, so beaches Open-Meteo leaves wave-null are filled from real
-buoy observations served by the GLOS Seagull REST API (unauthenticated JSON,
-10-minute cadence). This is NEAREST-BUOY point data, not grid interpolation — a beach
-only gets a reading when a wave-reporting buoy sits within MAX_PLATFORM_DISTANCE_KM (25);
-beyond that it stays null so a distant buoy is never presented as the beach's condition.
-Great Lakes buoys are seasonal (many pulled Nov-Apr): winter coverage collapsing to
-null is expected behavior, not an error.
+    export const WAVE_MODEL_IDS                   // noaa_gfswave, noaa_gfswave_arctic,
+                                                  // noaa_glwu — every id must also appear in
+                                                  // MODEL_DISPLAY in src/frontend/waveStrip.js
+                                                  // or the chart legend renders the raw id
+    export const WIND_SOURCE                      // frozen { label, url } the hourly cron
+                                                  // pushes into an estimate's sources array
+                                                  // when waveHeightFt is null
+    export function waveSourceLabel(model)        // unknown id degrades to "Wave Forecast";
+    export function waveSourceUrl(model)          // never throws, never affects color
 
-    export const SEAGULL_API_BASE = "https://seagull-api.glos.org/api/v1";
-    export const SEAGULL_PLATFORMS_URL   // SEAGULL_API_BASE + "/obs-datasets.geojson"
-    export const SEAGULL_PARAMETERS_URL  // SEAGULL_API_BASE + "/parameters"
-    export const SEAGULL_INFO_URL = "https://seagull.glos.org/";
-      // human-readable portal for source { url } entries — never the raw API request
-    export const GLCFS_WAVE_MODEL = "glos_seagull_buoy";
-      // model string reported in result entries; WAVE_MODEL_LABELS (section 7) maps it
-    export const MAX_PLATFORM_DISTANCE_KM = 25;
-    export const MAX_OBS_AGE_MS = 7200000;      // matches the product-wide 2 h stale rule
-    export const MAX_PLATFORM_FETCHES = 60;     // hard cap on per-run obs fetches
+### src/waveManifest.js (the pure fail-closed consumer gate — never imported by the Worker)
 
-    export async function fetchGlcfsWaveHeightsFt(points, nowIso, cachedCatalogs)
-      // points: [{ beachId, lat, lon }]; nowIso drives ALL freshness math (no Date.now()).
-      // cachedCatalogs (optional): the derived { platforms, waveParameterIds } the cron
-      //   cached in KV (see "glcfs:catalogs", section 3). When USABLE, both large catalog
-      //   fetches are SKIPPED; when absent/garbage, they are fetched fresh.
-      // Result shape is a SUPERSET of openMeteo.fetchWaveHeightsFt's, plus catalog
-      // bookkeeping the cron uses to cache:
-      //   { results: { beachId -> { waveHeightFt: number|null, model: GLCFS_WAVE_MODEL|null } },
-      //     sourceUrl,
-      //     catalogs: { platforms, waveParameterIds } | null,  // the structures used
-      //     catalogsFetched: boolean }                         // true iff fetched fresh
-      //   Every input beachId MUST appear in results (nulls on miss).
-      // Flow: reuse cachedCatalogs when usable, else fetch + parse the platform geojson +
-      // parameter catalog (the 2 catalog subrequests, SKIPPED on a cache hit). Map each
-      // beach to its nearest wave platform within 25 km, dedup platforms, then one
-      // /obs?obsDatasetId=N&startDate=<UTC date of nowIso - 2 h>&parameterId=<comma-
-      // separated wave ids> fetch per UNIQUE platform (capped at MAX_PLATFORM_FETCHES,
-      // small concurrency batches). The obs request appends &parameterId=<wave ids> (F9):
-      // the server returns ONLY the requested parameters (~9x smaller payload; verified
-      // live), and parseObsWaveHeightFt still filters standard_name
-      // "sea_surface_wave_significant_height" client-side, so behavior is unchanged.
-      // Freshest observation within the 2 h window wins; value is METERS -> * 3.28084.
-      // A failed platform fetch nulls only that platform's beaches. Total failure
-      // (a catalog fetch on the fresh path, unparseable nowIso) -> null.
-      // Env-free: the module knows nothing about KV — the cron owns caching.
-      // Subrequest cost: <= 2 (catalogs, skipped on a cache hit) + MAX_PLATFORM_FETCHES =
-      // 62 worst case, typically <= 60 obs fetches on a hit (budget math in the module
-      // and section 7).
+Mirrors src/layerManifest.js for the wave cycle. Three tiers on ONE conjunct walk, every
+conjunct a strict !== true so a MISSING field refuses exactly as a false one does.
 
-    export async function fetchWaveCatalogs()
-      // Fetch + parse the two large semi-static Seagull catalogs (the ~3.4 MB
-      // /parameters and ~2.1 MB /obs-datasets.geojson) into the two SMALL derived
-      // structures the obs step needs: { platforms: [{ obsDatasetId, lat, lon }],
-      // waveParameterIds: Set }. Null when EITHER catalog fetch fails. Separable so the
-      // wave cron can cache the derived result in KV and hand it back to
-      // fetchGlcfsWaveHeightsFt. Env-free.
-
-    export function serializeWaveCatalogs(catalogs)
-      // Pure. Derived catalogs -> JSON-safe object for KV (the waveParameterIds Set is
-      // written as an array, since JSON cannot represent a Set).
-
-    export function deserializeWaveCatalogs(raw)
-      // Pure. Rehydrate a serializeWaveCatalogs KV payload back into the derived
-      // structures (array -> Set). Null on any missing/malformed field so a corrupt or
-      // stale-shaped cache degrades to a fresh fetch rather than throwing.
-
-    Pure helpers, exported for tests: parseWaveParameterIds(paramsJson) -> Set of
-    wave parameter_ids (per-platform ids; empty Set on malformed input);
-    parseWavePlatforms(geojson) -> [{ obsDatasetId, lat, lon }] wave platforms only;
-    nearestWavePlatform(lat, lon, platforms) -> { obsDatasetId, distanceKm } | null;
-    obsStartDateUtc(nowIso) -> "YYYY-MM-DD" | null; parseObsWaveHeightFt(obsJson,
-    obsDatasetId, waveParameterIds, nowIso) -> feet | null (stale/ambiguous/malformed
-    degrades to null, never an old number). distanceKm is NOT defined here — it is
-    re-exported from src/geo.js (section 5) so tests and windyWebcams.js can keep
-    importing it from this module; metersToFeet is likewise imported from src/geo.js.
+    export const WAVE_SCHEMA_VERSION
+    export const EXPECTED_WAVE_ARTIFACTS          // ["waveinput.ndjson", "waves.ndjson"]
+    export const WAVE_KV_LEASE_SECONDS            // 25200
+    export function classifyWaveManifestFailure(report)
+      // { tier: "ok" | "degraded" | "expired" | "fatal", reasons: string[] }
+      //   fatal   → write no KV: schema mismatch, pointer/manifest disagreement, artifacts
+      //             unverified, artifactsPresent/artifactsExpected (BOTH isFiniteNumber-
+      //             guarded FIRST — undefined !== undefined is false and fails OPEN),
+      //             buildStatus not "complete", validTimes or sentinelScan not passed,
+      //             minimumRecordsPassed not true (the absolute record rails, independent
+      //             of the seeded floors, so a zero-record cycle can never publish)
+      //   expired → write no KV: secondsRemaining < 3600, or gridsDigestMatches !== true.
+      //             NaN from an unparseable validStartIso fails the range check, which is
+      //             correct: refusing because the age is unknowable is the same answer as
+      //             refusing because it is too old.
+      //   degraded→ write, warn: gridsComplete !== true, or sanity.overridden === true
+    export function waveKvWriteAllowed(report)    // true only for "ok" and "degraded"
 
 ### src/clients/windyWebcams.js
 
@@ -1438,7 +1366,7 @@ entirely when it is unset.
       //   enforced IN THE PARSER (not only by the nearby query param), so a shared
       //   bbox result set (fetchWebcamsInBbox may return cams nearer some OTHER beach
       //   in the bucket) stays correct. Nearest by haversine (distanceKm imported
-      //   from ./glerl.js, which re-exports it from ../geo.js). Malformed input -> null.
+      //   from ../geo.js). Malformed input -> null.
 
     export async function fetchNearestWebcam(lat, lon, apiKey)
       // GET WINDY_WEBCAMS_API_URL + "?nearby=" + lat + "," + lon + "," +
@@ -2304,13 +2232,13 @@ wrangler.toml triggers:
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
 matched job; an unrecognized cron is logged and ignored. The table:
-- "7 * * * *"          → runFlagRecompute(env)  (hourly; reads wave inputs from KV, does NOT
-                         fetch waves — see runWaveRefresh. Offset off the congested :00
-                         top-of-hour slot the repo's own GH workflows avoid; any minute
-                         before :15 preserves the wave-cron ordering since it only READS
-                         the "waveinput:" KV)
-- "15 */6 * * *"       → runWaveRefresh(env)    (6-hourly; owns ALL Open-Meteo/GLOS wave &
-                         wind fetching, writes the "waveinput:"/"waves:" KV the hourly cron reads)
+- "7 * * * *"          → runFlagRecompute(env)  (hourly; READS wave inputs from KV and never
+                         fetches waves. Offset off the congested :00 top-of-hour slot the
+                         repo's own GH workflows avoid. No ordering against the offline wave
+                         cycle is required: "waveinput:" keys carry an absolute expiration
+                         derived from the model valid time)
+- "15 */6 * * *"       → runWaterTempRefresh(env) (6-hourly; sole writer of "watertemp:",
+                         sole writer and reader of the wave_updated rotation cursor)
 - "17 3,9,15,21 * * *" → runNwsEnrichment(env)  (4x daily; picks up rows the offline
                          discovery batch inserted)
 - "29 4,10,16,22 * * *" → runEcccEnrichment(env) (4x daily, offset ~1h from the NWS trigger;
@@ -2326,11 +2254,8 @@ failure counts).
 ### runFlagRecompute (hourly)
 
 Constants: MAX_BEACHES_PER_RUN = 1200, KV_TTL_SECONDS = 7200, KV_WRITE_CONCURRENCY = 12,
-HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaveRefresh; lives in
+HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
 src/demandWindow.js, NOT src/index.js, see "Entry-module export shape" below).
-(The Open-Meteo batch/pacing constants — OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY,
-OPEN_METEO_BATCH_GAP_MS, OPEN_METEO_RETRY_MS, WAVE_DATA_TTL_SECONDS — belong to
-runWaveRefresh; the hourly cron does not fetch Open-Meteo.)
 
 MAX_BEACHES_PER_RUN must cover all HOT beaches every run: cold rows rotate through the
 remaining budget and lapse to honest no-data between turns. A beach is HOT when its
@@ -2342,8 +2267,8 @@ run today, so the split is a no-op in practice at pilot scale); nationwide scale
 still needs a longer cold-tier KV TTL and real pagination (TODO.md). It was raised from
 1000 because the flag-worthy table reached 1001 rows: at LIMIT 1000 the SELECT silently
 EXCLUDED a row every run — not truncated by a kill, never selected at all — and discovery
-grows that invisible dead zone daily. The ceiling on this number is Open-Meteo's DAILY
-weighted budget in runWaveRefresh (see its constants below), not wall clock.
+grows that invisible dead zone daily. The ceiling on this number is the run's wall clock and
+its KV write budget.
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run);
    const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
@@ -2354,13 +2279,13 @@ weighted budget in runWaveRefresh (see its constants below), not wall clock.
    selectRunBeaches(env, columns, hotCutoffIso, rotation) in src/index.js (precedent:
    buildHomeStatement in src/router.js) — the WHERE / hot-first guard / id ASC tiebreak /
    LIMIT / single bind live there once. The two callers' SQL is identical EXCEPT the
-   column list ("*" here, the explicit list in the Setup block of runWaveRefresh below) and the
+   column list ("*" here, the explicit list in runWaterTempRefresh below) and the
    ROTATION CURSOR COLUMN, selected by the rotation argument ("flag" here, "wave" there)
    from the two-entry ROTATION_COLUMNS whitelist { flag: "recompute_updated",
    wave: "wave_updated" } and concatenated into the SQL as a LITERAL, because a column
    name cannot be a bind parameter. The lookup is own-property-checked and MUST never be
    caller-derived text. The hot-first demand term is PRESERVED for both callers — dropping
-   it from the wave cron would let a beach in active demand lose its wave data to the
+   it from the water-temp cron would let a beach in active demand lose its reading to the
    rotation the moment the table outgrows one run. The helper returns the BOUND statement;
    the caller runs it. (The byte-identical-SQL property this doc previously asserted is
    deliberately narrowed to "identical except the rotation column"; see migration 0012 for
@@ -2392,15 +2317,16 @@ weighted budget in runWaveRefresh (see its constants below), not wall clock.
    beaches get that authority's alerts: null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
-5. Wave inputs: READ ONLY — the hourly cron performs NO Open-Meteo or GLOS fetch. The
-   6-hourly wave cron (runWaveRefresh) wrote a "waveinput:" + id payload (section 1:
+5. Wave inputs: READ ONLY — the hourly cron performs NO wave fetch. The offline NOAA GRIB2
+   wave cycle wrote a "waveinput:" + id payload (section 1:
    { waveHeightFt, model, windSpeedMph, windGustMph, updated }) per beach; prefetch all of
    them from KV concurrently in chunks of 50 (env.FLAGS.get(..., { type: "json" }), each
-   guarded so a failed get yields no input) into a Map. A missing key (the wave cron
-   hasn't run yet, or its data aged past the 7 h TTL) simply yields no wave input — the
-   estimate degrades to the wind fallback or "unknown", never a wrong flag.
+   guarded so a failed get yields no input) into a Map. A missing key (the cycle has not
+   landed, or its keys reached their absolute expiration) simply yields no wave input — the
+   estimate degrades to the wind fallback or "unknown", never a wrong flag. This step is the
+   entire Worker-side wave contract and does not change with the upstream.
 6. (Wind is not fetched here — the wind fallback the estimate uses is carried on the
-   waveinput payload, recorded by runWaveRefresh only for beaches still wave-null there.)
+   waveinput payload, recorded offline only for beaches that resolved no wave height.)
 6b. Water-quality floor gather: ONE findWqFloorSource(beach) pass over the run's beaches
    builds two maps — wqSourceByBeach (beach.id -> source, reused verbatim by step 7 so the
    resolver runs ONCE per beach, not twice) and wqDistinctSources (source.id -> source, the
@@ -2419,8 +2345,8 @@ weighted budget in runWaveRefresh (see its constants below), not wall clock.
    per-beach try/catch stays INSIDE the worker so one rejecting put can never abort the
    other beaches. estimateCount / failureCount are incremented with a single synchronous
    statement, so concurrent runners cannot lose a count. No deadline is passed here — this
-   cron's budget headroom is large after pooling (~290 s of 900 s); only the wave cron's
-   pools are deadline-bounded.
+   cron's budget headroom is large after pooling (~290 s of 900 s); only the water-temp
+   cron's pools are deadline-bounded.
    Assemble inputs (nulls for anything missing), including
    alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false
    (section 4 — a beach enriched for no authority gets the honesty caveat instead of a
@@ -2438,11 +2364,10 @@ weighted budget in runWaveRefresh (see its constants below), not wall clock.
    data for THIS beach — alerts: "NWS Alerts" / "NWS Marine Alerts", or "Environment Canada
    Alerts" (ECCC_ALERTS_INFO_URL) / "Environment Canada Marine Alerts" (ECCC_MARINE_INFO_URL)
    for Canadian beaches; SRF: "NWS Surf Zone Forecast";
-   waves: waveSourceLabel(waveInput.model) from WAVE_MODEL_LABELS
-   (GLCFS_WAVE_MODEL -> "GLOS Buoy Observations"; supplemental fallback models resolve their
-   own labels — section 5) with url waveSourceUrl(waveInput.model) (always a human-readable
-   page, never the raw API request); wind: "Wind Forecast" (only when waveHeightFt is null
-   and a wind fallback is present); water quality: the advisory's own source label with the
+   waves: waveSourceLabel(waveInput.model) (src/waveModels.js, section 5) with url
+   waveSourceUrl(waveInput.model) — always a human-readable page, never a raw API request,
+   and an unrecognised id degrades to "Wave Forecast" rather than throwing; wind: WIND_SOURCE
+   (only when waveHeightFt is null and a wind fallback is present); water quality: the advisory's own source label with the
    wqFloor source's infoUrl, added only when an advisory is active.
    Resolve the water-quality floor for this beach against its group's step-6b result via
    scrapeWqFloorFromResult -> waterQualityAdvisory (null when clean/absent), and pass it into
@@ -2459,7 +2384,7 @@ weighted budget in runWaveRefresh (see its constants below), not wall clock.
    caught, increments failureCount, and records NO estimate, so no flag_history row (step 9)
    can ever claim an estimate that was never published. Do NOT refactor this into a
    collect-descriptors-then-flush shape — that silently inverts the guarantee.
-   The "waves:" WaveSeries is NOT written here — the wave cron owns it (see runWaveRefresh).
+   The "waves:" WaveSeries is NOT written here — the offline wave cycle owns it.
 8. Officials: group beaches by findScraper(beach) id; call each distinct scraper's
    scrape(nowIso) ONCE per run; for every matched beach — in a KV_WRITE_CONCURRENCY-wide
    runPool over group.beaches — resolve the shared result via
@@ -2516,15 +2441,14 @@ weighted budget in runWaveRefresh (see its constants below), not wall clock.
    at most 1 extra D1 batch call per run (only when >= 1 pair exists).
 10. Stamp the rotation cursor: one env.DB.batch of
    UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
-   UNCHANGED — still a single post-loop batch. That shape is only safe here because this
-   cron now finishes in ~290 s of its 900 s ceiling; the wave cron, which was being killed
-   mid-loop, could not keep it and stamps wave_updated INCREMENTALLY instead (migration
-   0012). Note the two crons no longer share a cursor: recompute_updated is written AND read
+   A single post-loop batch is safe here because this cron finishes well inside its 900 s
+   ceiling; runWaterTempRefresh stamps wave_updated INCREMENTALLY instead (migration 0012).
+   The two crons deliberately do not share a cursor: recompute_updated is written AND read
    by this cron alone.
 
 Subrequest budget (paid plan, 10,000/invocation): 1 NWS national alerts call (step 3) +
 2 ECCC national fetches (land + marine, step 3b, only when Canadian rows exist) + ~2×15
-SRF calls + ≤1200 waveinput KV gets (step 5 — no upstream marine/GLOS/wind fetch) +
+SRF calls + ≤1200 waveinput KV gets (step 5 — no upstream wave or wind fetch) +
 a handful of wqFloor scrapes (one scrape() per matched wqFloor source, step 6b) +
 a handful of official-scraper fetches (one scrape() per matched scraper; South Haven uses 2
 fetches, metroparks and chicago-park-district 1 each) + ~2 scraper-health KV ops per
@@ -2539,264 +2463,46 @@ alert cost stays flat as the table grows. Free plan (50 subrequests, 1000 KV wri
 NOT sufficient at this cadence — README states the paid-plan assumption; alternatively cap
 MAX_BEACHES_PER_RUN low for a free-plan demo (TODO.md).
 
-### runWaveRefresh (6-hourly: "15 */6 * * *")
+### runWaterTempRefresh (6-hourly: "15 */6 * * *")
 
-Constants: OPEN_METEO_BATCH = 100, OPEN_METEO_CONCURRENCY = 1, OPEN_METEO_BATCH_GAP_MS =
-12000, OPEN_METEO_RETRY_MS = 60000, WAVE_DATA_TTL_SECONDS = 25200 (7 h),
-KV_WRITE_CONCURRENCY = 12, WAVE_GATHER_DEADLINE_MS = 480000, WAVE_SUPPLEMENTAL_BUDGET_MS =
-120000, WAVE_WRITE_DEADLINE_MS = 840000, WAVE_CURSOR_FLUSH_SIZE = 100. The three pacing
-knobs are read via batchTiming(env, deadline) with numeric env overrides of the same names
-(tests zero them to run instantly), and the three wall-clock budgets are read via
-runBudget(env) with numeric env overrides of the same names, in exactly the same shape — a
-plain NUMBER on env, deliberately NOT a callable clock (a function smuggled through the
-binding object would be a namespace hazard on a real Worker env, and a numeric budget is
-enough to make every deadline branch reachable in a test, because makeDeadline's expired()
-uses >= and so a 0 override trips even under the suite's frozen Date).
-MAX_BEACHES_PER_RUN = 1200 covers the whole table as the hourly cron does.
+Constants: WAVE_DATA_TTL_SECONDS = 25200 (7 h), KV_WRITE_CONCURRENCY = 12,
+WAVE_GATHER_DEADLINE_MS = 480000, WAVE_WRITE_DEADLINE_MS = 840000,
+WAVE_CURSOR_FLUSH_SIZE = 100, HOT_VIEW_WINDOW_MS (src/demandWindow.js).
 
-OPEN_METEO_CONCURRENCY is 1, not 2, and the arithmetic is the contract: the per-minute rate
-the pacing produces is OPEN_METEO_BATCH x concurrency x 60000 / (gap + fetch), against
-Open-Meteo's documented 600 calls/min free-tier ceiling. At concurrency 2 that was 200
-locations per ~14 s = ~857/min = 143% OF THE CEILING — a marginal sustained overshoot and
-the most plausible cause of the exactly-two-HTTP-429s-per-run signature this cron logged,
-each 429 costing a 60 s backoff out of a 900 s invocation. At 1 it is 100 locations per
-~15 s = ~400/min = 67%. Do NOT "optimize" the gap away without redoing that arithmetic;
-note also that total gap time is roughly invariant under the concurrency/gap trade
-(gaps = ceil(nBatches / concurrency) - 1), so halving the concurrency cost ~0 s of wall
-clock. OPEN_METEO_RETRY_MS stays 60000 — the post-429 wait is the one number that must not
-shrink.
+The sole writer of "watertemp:" (section 1) and the sole writer and reader of the
+wave_updated rotation cursor (migration 0012). DISPLAY-ONLY end to end: nothing it writes
+reaches src/rules.js, so it can never change a flag color and never bumps RULES_VERSION.
 
-Owns ALL upstream wave/wind fetching — the Open-Meteo marine wave batch, the GLOS Seagull
-buoy gap-fill, and the Open-Meteo wind fallback. It is a SEPARATE, less-frequent cron
-because Open-Meteo's marine models only publish every 6–12 h, so a 6-hourly cadence plus
-paced batching keeps the run under Open-Meteo's per-minute weighted rate limit. The 7 h TTL
-outlives the gap between runs (plus slack for one failed run), so a transient 429 leaves the
-strip showing slightly-older-but-still-model-current data instead of blanking it.
+1. Select beaches with selectRunBeaches(env, { rotation: "wave_updated" }) — the same
+   hot/cold demand-priority ordering as the hourly cron (hot rows by last_viewed within
+   HOT_VIEW_WINDOW_MS first, then oldest-cursor-first), rotating on its OWN cursor. The two
+   crons deliberately do not share one: the hourly cron rewrites recompute_updated to a
+   single shared nowIso for its entire run, flattening the column so any cold-tier sort over
+   it collapses to id ASC and a fixed tail of the table starves forever. The rotation
+   parameter is concatenated as a SQL literal after an own-property check against
+   ROTATION_COLUMNS, because a column name cannot be a bind parameter; that whitelist is the
+   injection guard and must not be removed.
+2. Gather: for each beach, nearestWaterTempStation(lat, lon) within
+   NDBC_WATER_TEMP_MAX_DISTANCE_KM (25 km), deduped by station id, then ONE Range-limited
+   realtime2 read per distinct station (NDBC_HEAD_BYTES) parsed by parseNdbcWaterTempF. A
+   null (winter gap, all-"MM", stale, 404) is a normal outcome, not an error. No new upstream
+   work starts after WAVE_GATHER_DEADLINE_MS.
+3. Write: one bounded-concurrency pool (runPool, KV_WRITE_CONCURRENCY, src/pool.js) writing
+   "watertemp:" + beachId with { expirationTtl: WAVE_DATA_TTL_SECONDS } for every beach whose
+   station produced a valid recent reading. The pool YIELDS at WAVE_WRITE_DEADLINE_MS rather
+   than being killed at the 900 s ceiling. No cron may reintroduce a sequential per-beach
+   await env.FLAGS.put.
+4. Stamp wave_updated INCREMENTALLY, in flushes of WAVE_CURSOR_FLUSH_SIZE, for every beach
+   that reached a write DECISION — including the "no reading" skips, or a beach with no
+   station in range would pin the head of the queue forever — but never for beaches the
+   gather deadline meant it never attempted, and never for a beach whose write THREW.
+5. The completion log reports truncation from CLOCK exhaustion and write failures as
+   separate fields, so one flaky put cannot trip the truncation alarm while a systemic write
+   outage stays unmissable.
 
-The run is bounded in WALL CLOCK end to end. startedMs is taken BEFORE the D1 SELECT so the
-budgets measure true invocation elapsed time; gathering starts no NEW upstream work after
-WAVE_GATHER_DEADLINE_MS and the write pool yields at WAVE_WRITE_DEADLINE_MS, both well
-inside the 900 s scheduled ceiling. Each gather step (1, 2, 2b, 3, 3b) carries its OWN
-try/catch and falls through: before that, one unexpected throw anywhere in the gather
-skipped the entire write pass and the run persisted NOTHING, which is the most expensive
-possible failure mode for a 6-hourly cron. Step ORDER below is the execution order: 1, 2,
-2b, 3, 3b, 4.
-
-Setup (before step 1): const startedMs = Date.now() — taken BEFORE the SELECT so every
-   budget below measures true invocation elapsed time, not just the phases after the query;
-   const nowIso = new Date().toISOString(); wavesStartIso = nowIso truncated to the top of
-   its UTC hour (setUTCMinutes(0,0,0)) — the startIso stamped on every WaveSeries;
-   const hotCutoffIso = new Date(Date.parse(nowIso) - HOT_VIEW_WINDOW_MS).toISOString()
-   (the same 7-day hot/cold split runFlagRecompute uses, computed from this run's own
-   nowIso); gatherDeadline = makeDeadline(startedMs, budget.gatherDeadlineMs) and
-   writeDeadline = makeDeadline(startedMs, budget.writeDeadlineMs) from runBudget(env).
-   SELECT id, lat, lon, nws_grid_url, nws_zone, marine_zone, last_viewed FROM
-   beaches WHERE <FLAG_WORTHY_WATER_SQL> ORDER BY (last_viewed IS NOT
-   NULL AND last_viewed >= ?1) DESC, wave_updated ASC, id ASC LIMIT 1200, bound with
-   hotCutoffIso as ?1 — emitted by the SAME shared selectRunBeaches(env, columns,
-   hotCutoffIso, rotation) helper the hourly cron uses (section 7, runFlagRecompute step 2),
-   called with rotation "wave", so the WHERE / hot-first guard / id ASC tiebreak / LIMIT /
-   bind exist in exactly one place; this caller's column list, clock source and ROTATION
-   CURSOR COLUMN differ. The COLUMN LIST is unchanged by the cursor work (wave_updated is
-   written, never read back into the row objects). The three extra columns beyond
-   id/lat/lon/last_viewed (nws_grid_url, nws_zone, marine_zone) key the step-2b supplemental
-   wave sources.
-   ROTATION CURSOR — this REPLACES the shared-cursor invariant this document previously
-   asserted here ("shares the flag cron's recompute_updated cursor ... so the two crons'
-   rotations stay coupled"). That is no longer true and was never safe: runFlagRecompute
-   rewrites recompute_updated to ONE shared nowIso for its whole run every hour, flattening
-   the column to ~2 distinct values, so the wave cron's cold-tier sort collapsed to id ASC
-   permanently and a fixed tail of the table starved forever. The two rotations are now
-   DECOUPLED — each cron is single-writer AND single-reader of its own cursor column
-   (recompute_updated for the hourly cron, wave_updated for this one, migration 0012). A
-   cursor that a different cron flattens hourly is not a cursor. The hot-first demand term
-   is PRESERVED in both SELECTs.
-1. Waves (marine), PACED: batchByBeach chunks the points (OPEN_METEO_BATCH = 100) and runs
-   the chunks in concurrency-limited waves (OPEN_METEO_CONCURRENCY at a time) with a gap
-   (OPEN_METEO_BATCH_GAP_MS) between waves and ONE backoff retry (OPEN_METEO_RETRY_MS) on a
-   throttled (null) batch. Each per-beach entry carries the client's full shape
-   { waveHeightFt, model, hoursFt, models, byModel } (section 5). A still-failed batch
-   stores the hoursFt: null batch-failure sentinel (NOT an all-null array — distinguishes
-   "fetch failed" from "fetched, all cells masked"), models: [], byModel: {}.
-   The ONE-backoff-retry contract is UNCHANGED (stated explicitly because it is a recurring
-   target for "optimization": fetchBatchWithRetry is byte-identical, and at concurrency 1
-   there is no idle wave-mate for the 60 s backoff to stall, so no deferred-retry queue is
-   needed).
-   GATHER DEADLINE: batchTiming(env, gatherDeadline) puts the deadline on the timing object,
-   and batchByBeach checks it at the top of the WAVE boundary — BEFORE the pacing sleep, so
-   a run that has already blown its budget does not also burn a 12 s gap on its way out. It
-   then collects every point of every remaining batch into `unattempted`, logs "index: batch
-   pacing deadline reached, <n> batches unattempted", and breaks. batchByBeach therefore
-   returns { weightedCalls, unattempted } instead of a bare number; both call sites are in
-   this cron (wave and wind) and their unattempted point ids are unioned into one Set.
-   Beaches in that set are NEITHER written NOR stamped in step 4. They are deliberately NOT
-   routed through onBatchFail: a FAILED batch is work the run tried and got nothing for (its
-   last-good KV is preserved and its cursor still advances), while an UNATTEMPTED beach is
-   one the run never touched — collapsing the two would advance the cursor past work that
-   never happened.
-2. Great Lakes buoy gap-fill: for beaches STILL wave-null, one fetchGlcfsWaveHeightsFt(
-   points, nowIso, cachedCatalogs) call (src/clients/glerl.js — dedups buoy fetches
-   internally, <= 62 subrequests). SKIPPED ENTIRELY once the gather deadline has expired
-   (logs "index: glcfs gap-fill skipped, gather deadline reached (<n> wave-null beaches)").
-   This gate is load-bearing and was missing at first: an expired gather deadline leaves
-   EVERY beach wave-null, which is precisely the input that hands this step the whole table,
-   so without the gate a spent run still started a fresh ~5.5 MB catalog download plus up to
-   62 buoy fetches — hundreds of seconds of NEW upstream work begun after the budget was
-   gone, whose readings the write pool then discarded anyway (those beaches are already in
-   the unattempted set). It also falsified the invariant that no new upstream work starts
-   after the gather deadline. BEFORE the call, read the cron-cached derived catalogs
-   from the "glcfs:catalogs" KV (section 3) and deserializeWaveCatalogs (null on
-   miss/corrupt) → pass as cachedCatalogs so the client skips the two ~5.5 MB catalog
-   downloads on a hit. AFTER a fresh (non-cache) fetch of NON-EMPTY catalogs
-   (glcfsData.catalogsFetched && non-empty platforms/waveParameterIds), serialize and write
-   them back to "glcfs:catalogs" with { expirationTtl: 86400 } (~24 h); a cache HIT does
-   NOT rewrite (so the TTL genuinely expires and re-fetches), and empty catalogs are never
-   cached. Non-null readings overwrite ONLY the entry's waveHeightFt and model
-   (model: GLCFS_WAVE_MODEL), PRESERVING hoursFt/models/byModel — buoys are nearest-point
-   now-observations with no hourly series, and one is never synthesized.
-2b. Supplemental fallback wave sources: for beaches STILL wave-null after steps 1–2, consult
-   the ordered src/waveSources registry (section 5) via resolveSupplementalWaveFt(beach,
-   nowIso, env) — the first matching source that returns a finite ft wins (never additive).
-   Merged into the entry exactly like the buoy gap-fill (overwrite waveHeightFt + model,
-   PRESERVING hoursFt/models/byModel — single-point fallbacks write no "waves:" strip). MUST
-   run BEFORE step 3 so wind stays the true last resort. Each source isolates its own
-   failures (a throw is treated as "no reading"). With an all-null (winter) run this is the
-   costliest step — sources that share a key across beaches dedup/memoize (section 5).
-   STAYS SEQUENTIAL BY DESIGN. src/waveSources/index.js memoizes the RESOLVED ft-or-null,
-   not the in-flight promise, so pooling this loop would issue up to N duplicate
-   api.weather.gov fetches per key IN PRODUCTION while every existing (sequential) dedup
-   test stayed green — the highest-risk silent regression available here. Pooling it
-   requires shipping a promise-keyed memo and its concurrent-dedup test FIRST.
-   Its wall time is bounded by a sub-budget instead: supDeadline = makeDeadline(Date.now(),
-   budget.supplementalBudgetMs), checked together with the run-wide gatherDeadline at the
-   top of each beach; on either, log "index: supplemental wave deadline reached after <i> of
-   <n> beaches" and break. The sub-budget is what keeps the step-3 wind pass ALIVE: in a
-   fully wave-null winter run these sequential fetches want ~660 requests / ~500 s, which
-   would consume the entire gather deadline and leave exactly those beaches with no wind
-   fallback and therefore an "unknown" flag. Every source in the registry also now carries a
-   transport timeout (15 s on the NWS gridpoint / NSH and Toronto fetches; Sea Caves and
-   NDBC route through fetchText's existing 30 s default), because a deadline is only checked
-   BETWEEN units of work — a single hung socket would otherwise run the 900 s clock out
-   regardless of any deadline.
-3. Wind: only for beaches whose waveHeightFt is still null (recomputed fresh — steps 2 and
-   2b may have gap-filled some out of the wave-null set) — fetchWinds, paced by the same
-   batchByBeach and bounded by the same gather deadline (its unattempted points join the
-   same Set). Deliberately NOT capped by a coverage limit: truncating the wind pass would
-   change which INPUTS reach estimateFlag and turn wind-derived greens/yellows into
-   "unknown", which is a product regression, not a performance fix.
-3b. NDBC water temperature — FETCH HALF (DISPLAY-ONLY). A self-contained pass over the SAME
-   beaches SELECTed this run (no extra query) that never reads or mutates
-   waveResults/windResults or the wave KV. Dedup by nearest station id
-   (nearestWaterTempStation — the CAP_WATER_TEMP pool and the 25 km temp cap, NOT the wave
-   selector; exactly like the step-2b supplemental memo): fetch each unique station's realtime2 file
-   ONCE via stationWaterTemp(stationId, nowIso, env) → parseNdbcWaterTempF and fan the parsed
-   reading to every beach under it, building waterTempByBeach (beach.id -> the complete
-   WaterTemp record of section 1). A null reading records nothing for that station's beaches,
-   so their old keys expire on their own. Per-station failures are isolated; the step never
-   throws out. NEVER feeds src/rules.js (colors no flag, does not bump RULES_VERSION). May
-   re-fetch a station file the step-2b fallback also touched — the pass is kept isolated on
-   purpose rather than sharing a cache. The temp-capable set is ~7x the wave set (72 stations
-   vs 10), so this loop can touch ~60 unique stations rather than ≤10; stationWaterTemp
-   Range-limits every fetch to NDBC_HEAD_BYTES = 32768 bytes (rows are newest-first, so ~34 h
-   of a 6-minute NOS gauge — far more than the 12 h window can accept), because the NOS
-   water-level gauges that dominate the temp set publish ~1 MB realtime2 files and pulling
-   them whole would put tens of megabytes into the last step of the gather. waveFt is
-   deliberately NOT Range-limited, keeping the COLOR path's bytes identical. The station loop
-   is gated by gatherDeadline, and this step is LAST in the gather on purpose: if the
-   deadline bites, display-only data is the correct thing to sacrifice.
-   THIS BLOCK USED TO SAY the pass ran "AFTER the step-4 wave-input writes". That sentence
-   WAS THE BUG: sitting behind a ~1450-put sequential write loop that consumed the whole
-   900 s invocation, the pass was never reached and not one "watertemp:" key ever existed in
-   production. Splitting it — the fetch here, the put folded into the step-4 write pool —
-   makes it un-starvable BY POSITION rather than merely bounded, and DELETES a second
-   ~1000-put sequential loop instead of parallelizing it.
-4. Persist per beach — a KV_WRITE_CONCURRENCY-wide runPool (src/pool.js) over the SELECTed
-   beaches, bounded by writeDeadline. This loop was sequential and was ~80% of the run that
-   got SIGKILLed at 899.989 s of 900 s; it is embarrassingly parallel, since nothing in the
-   body depends on the previous beach. Per beach, in order:
-   (a) SKIP entirely — no writes, NO stamp — if the beach is in the `unattempted` set from
-   step 1/3. The run genuinely has no opinion about it.
-   (b) writeWaveKvForBeach: write "waveinput:" + id → WaveInput (section 1:
-   { beachId, waveHeightFt, model, windSpeedMph, windGustMph, updated }) with
-   { expirationTtl: 25200 } ONLY when the run produced something usable — a wave height OR
-   a wind fallback. A beach whose marine fetch merely FAILED (hoursFt === null sentinel)
-   with no buoy reading is SKIPPED so its last-good KV rides the TTL; a fetched-but-masked
-   beach with no buoy and no wind is skipped too. Then, when the entry has an Array hoursFt
-   with >= 1 finite number, also write "waves:" + id → WaveSeries (section 1: startIso =
-   wavesStartIso, hoursFt raw, models, byModel, sources label =
-   models.length === 1 ? waveSourceLabel(models[0]) : "Open-Meteo Wave Models" with url
-   OPEN_METEO_MARINE_URL) with { expirationTtl: 25200 }. Both guards, both payload shapes
-   and both TTLs are VERBATIM what the sequential loop had — the old `continue` is a
-   `return`, which is the only behavioral difference and is exactly equivalent under a pool.
-   (c) write "watertemp:" + id → WaterTemp from the step-3b map with { expirationTtl: 25200 },
-   in its OWN try/catch, INDEPENDENT of both skip guards in (b): a failed marine fetch says
-   nothing about an NDBC buoy reading, and coupling them would re-create the zero-watertemp
-   gap for exactly the beaches whose wave data is missing. It cannot produce a wrong flag —
-   water temp is display-only.
-   (d) stamp the beach into wave_updated via the incremental stamper (migration 0012), for
-   EVERY beach that reached a write DECISION — INCLUDING both graceful-degradation skips in
-   (b). Stamping only on a successful write would INVERT the starvation the cursor exists to
-   fix, because a permanently-masked Great Lakes beach writes nothing on every run and would
-   pin itself to the head of the queue forever. A beach whose writes ALL THREW is the one
-   exception: it persisted nothing, so it is NOT stamped (leaving wave_updated NULL, which
-   sorts first next run) and is counted in failures= instead. Stamping it would advance the
-   cursor on the strength of a failure and send a beach with no data to the back of the
-   rotation.
-   Per-beach failures are isolated INSIDE the pool worker (runPool also catches as a
-   backstop, but the worker's own try/catch is what preserves the existing per-beach log
-   line and the counter bookkeeping), so one rejecting put can never abort the other ~1200
-   beaches or the run. After the pool settles, stamper.drain() flushes the remainder.
-   Beaches the write deadline never reached are neither written nor stamped, so a truncated
-   run persists a PREFIX and the tail sorts first next run.
-   Completion log (the operator trip-wire): "index: wave refresh complete, beaches=<n>
-   stamped=<n> reached=<n> unattempted=<n> failures=<n> inputs=<n> series=<n>
-   watertemp=<n> truncated=yes|no elapsedMs=<n>".
-   truncated = reached < beaches OR unattempted > 0 — i.e. the run ran out of CLOCK, either
-   because the gather deadline left beaches unattempted or because the write pool yielded
-   before reaching every beach. It is deliberately NOT derived from stamped: a single flaky
-   put would otherwise trip the truncation alarm every run.
-   failures = beaches the pool REACHED whose every write threw (see (d)). One is noise;
-   failures= near beaches= with stamped=0 is a systemic write outage — the shape an enforced
-   per-invocation KV operation ceiling would take (Cloudflare documents 1,000 operations per
-   invocation; this Worker has long exceeded that hourly with no error, so it is treated as
-   unenforced-but-watched rather than a hard bound).
-   Alert on truncated=yes, on failures= growing beyond a trickle, AND on the total ABSENCE
-   of the line — the run that motivated all of this produced three log lines and no
-   completion record at all.
-
-Subrequest budget: ≤12 paced marine batches (100/batch over ≤1200 beaches) + ≤62 GLCFS buoy
-(the 2 catalog fetches are AVOIDED on a "glcfs:catalogs" cache hit — most runs — so GLCFS
-cost is typically ≤60 deduped platform obs fetches) + supplemental fallback fetches for the
-still-wave-null remainder (step 2b — key-shared sources dedup, so cost is roughly the number
-of distinct gridpoint/marine-zone/buoy keys, not one per beach; ≤664 in a fully wave-null
-winter run) + ≤12 paced wind batches + ≤72 NDBC station fetches (one per CAP_WATER_TEMP
-station, Range-limited to 32 KB) + ≤3600 waveinput/waves/
-watertemp KV puts + ≤12 wave_updated D1 batches + 1 SELECT ≈ 4,360 worst case at the 1200-row
-LIMIT — well under the paid-plan 10,000/invocation ceiling.
-WALL CLOCK, NOT SUBREQUEST COUNT, IS THE BINDING LIMIT. The run that failed used ~1,470
-subrequests of 10,000 and 899.989 s of 900 s. Two consequences worth writing down: pooling
-the writes changes their LATENCY, not their COUNT, so this budget is unchanged by it; and
-Cloudflare caps an invocation at SIX SIMULTANEOUS OPEN CONNECTIONS with KV get/put counting
-toward that cap, so a pool width above ~6 buys no additional throughput (the platform queues
-the excess) and every wall-clock estimate here is computed at 6, never at the requested 12.
-
-Open-Meteo daily-budget accounting (U1): batchByBeach returns the run's weighted-call
-estimate on { weightedCalls, unattempted } (sum of batch.length over every attempt including
-the one backoff retry, since Open-Meteo weights a multi-location request by its location
-count), and runWaveRefresh logs wave + wind weighted calls against
-OPEN_METEO_DAILY_WEIGHTED_CEILING (10000/day free tier) PLUS the run's rolling per-MINUTE
-peak, computed as OPEN_METEO_BATCH x timing.concurrency x 60000 / (timing.gapMs + 3000) and
-logged as "peak=<n>/min". The per-minute limit is the one actually producing the 429s and it
-was invisible in the logs, which reported only the daily figure.
-Recomputed at OPEN_METEO_CONCURRENCY = 1 and the 1200 LIMIT: a summer run (~1% wave-null) is
-~1200 weighted calls = ~4,800/day (48% of the ceiling); a fully wave-null winter run is
-~1200 wave + ~1200 wind = 2400 = ~9,600/day (96%), which is an acknowledged OVER-count since
-a 1-variable/3-model/2-day request weighs fractionally per location. Visibility only — no
-behavioral throttling on the DAILY budget yet (the pacing guards the per-MINUTE limit). That
-daily ceiling, not wall clock, is what bounds any further increase of MAX_BEACHES_PER_RUN,
-and it binds outright once nationwide pagination removes the LIMIT (TODO.md). If it ever
-genuinely binds, the levers are cadence or a paid tier — NOT capping the wind pass, which
-would change which inputs reach estimateFlag.
+The wave inputs this cron once produced are now published by the offline NOAA GRIB2 wave
+cycle (below), which is why beaches.wave_updated needs no migration: it retains exactly one
+writer and one reader.
 
 ### Run budgets and write pools (src/pool.js)
 
@@ -2830,10 +2536,10 @@ INVARIANT: every fan-out KV write in the cron path goes through runPool. No cron
 reintroduce a sequential per-beach `await env.FLAGS.put(...)` — that pattern is what
 consumed a whole 900 s invocation and cost the run everything it had gathered.
 
-The four wall-clock budgets are WAVE_GATHER_DEADLINE_MS (480000), WAVE_SUPPLEMENTAL_BUDGET_MS
-(120000), WAVE_WRITE_DEADLINE_MS (840000) and, for the write pool's cursor, the
-WAVE_CURSOR_FLUSH_SIZE (100) flush granularity. All are numeric-env-overridable via
-runBudget(env), the same shape as batchTiming(env, deadline).
+The water-temp cron's wall-clock budgets are WAVE_GATHER_DEADLINE_MS (480000) and
+WAVE_WRITE_DEADLINE_MS (840000), plus the WAVE_CURSOR_FLUSH_SIZE (100) flush granularity
+for the write pool's cursor. The two deadlines are numeric-env-overridable via
+runBudget(env).
 
 TRUNCATION CONTRACT — what a yielded run still delivers. A run that trips a deadline is a
 SUCCESSFUL partial run, not a failure: every beach the write pool reached has its KV written
@@ -2841,7 +2547,7 @@ and its wave_updated stamped; every beach it did not reach is left completely un
 (no KV, no stamp) and therefore sorts to the FRONT of the next run's queue; last-good KV
 everywhere rides its 7 h TTL; and the run exits cleanly through its own completion log with
 truncated=yes. The completion log's beaches / stamped / reached / unattempted / failures /
-inputs / series / watertemp / truncated / elapsedMs fields are the operator trip-wire —
+watertemp / truncated / elapsedMs fields are the operator trip-wire —
 alert on truncated=yes, on a rising failures=, and on the ABSENCE of the line. Persistent truncation means the coverage interval has
 exceeded WAVE_DATA_TTL_SECONDS, at which point the TTL must rise to ≥ ~13 h and be
 reconciled against the detail strip's own 8 h WAVE_STALE_MS (section 9); that is a known
@@ -3334,6 +3040,125 @@ OR abs(lon - ?4) > 0.001) THEN NULL/0 ELSE <existing> END (0.001 deg ≈ 80-111 
 latitudes; in SQLite's upsert an unqualified column is the EXISTING value and ?3/?4 are the
 new lat/lon), so a beach that moved to different water re-classifies.
 
+### Wave cycle (offline batch — GitHub Actions, NOT an in-Worker cron)
+
+NOAA GRIB2 model output, downloaded and point-sampled in .github/workflows/waves.yml
+("52 */3 * * *", 8 slots a day) and bulk-written into the "waveinput:" / "waves:" KV the
+hourly cron reads. The Worker's read contract is unchanged: runFlagRecompute step 5 and the
+KV shapes in section 1 move not one line, and RULES_VERSION is not bumped.
+
+NOT COLOR-BEARING ON FAILURE. This pipeline never writes a flag color. A failed or refused
+cycle writes no KV at all and leaves the previous cycle riding an expiration derived from its
+own model valid time, so the failure mode is a flag aging out to unknown — gray and honest —
+never a stale wave height deciding a color. That is what sorts the gates: everything that
+could produce a WRONG NUMBER is non-overridable, everything that is merely LESS DATA is
+overridable and warns.
+
+THE GRID SET. Three grids in ordered fallthrough, constrained by beaches.water_class
+(great_lake may match only noaa_glwu, ocean only the two gfswave grids, NULL may try both in
+order):
+
+  1. noaa_glwu           NOMADS glwu.grlc_2p5km_sr, 2.5 km Lambert, 49 steps in ONE ~22 MB
+                         file, nodata 9.999000260554009e+20, 10 km search cap. The only
+                         source for the Great Lakes, which gfswave masks entirely. NOMADS
+                         documents a 10 second wait between scripted fetches, honoured by
+                         construction: at most two spaced whole-file requests per cycle.
+  2. noaa_gfswave        AWS noaa-gfs-bdp-pds gfswave.global.0p16, 2160x406 at 0.166666 deg,
+                         -180.083..179.917 by 52.583N..-15.083S, nodata 9999, 25 km cap.
+  3. noaa_gfswave_arctic AWS gfswave.arctic.9km, polar stereographic, above 52.58N, nodata
+                         9999, 25 km cap.
+
+global.0p16 supersedes wcoast.0p16, atlocn.0p16 and epacif.0p16 in one file: it closes the
+coverage gap between wcoast's -109.917 edge and atlocn's -100.083 edge that left Mexican
+Pacific beaches uncovered, and it uses the normal -180..180 convention, so epacif's 0-360
+longitude trap does not exist on it. A beach out of extent, or with no wet cell inside its
+cap, falls through to the next permitted grid and then to null.
+
+THE SPIRAL IS THE MECHANISM, NOT A FALLBACK. Beach coordinates frequently land on masked LAND
+cells: 4 of 5 real beach points return the nodata sentinel at the exact cell. nearestWetSample
+searches outward by great-circle minimum — not scan order, not ring index, both of which pick
+the wrong cell as longitude cells narrow with latitude and produce a plausible number with no
+error. The resolved cell is computed ONCE per beach from the hour-0 wave band and reused for
+all 24 hours; re-running the search per hour would let hoursFt jump between cells and make the
+detail page's "now" stat contradict its own first bar.
+
+DECODING REQUIRES GDAL. GRIB2 DRS template 5.40 is JPEG 2000 and there is no pure-JS decode
+path, so GRIB2 decoding inside the Worker is impossible and must never be attempted. GDAL runs
+in the workflow SHELL: no Deno script in this pipeline carries --allow-run, and only
+scripts/fetch-wave-grids.js carries --allow-net. The permission guard in
+.github/workflows/test.yml enforces the network half machine-side; the subprocess half
+rests on review (TODO.md).
+
+PIPELINE. scripts/fetch-wave-grids.js resolves the cycle at RUNTIME (validStart is the top of
+the current UTC hour; GFS cycles are walked newest-first back 24 h and the first whose
+f(k)..f(k+23) all exist wins) and downloads it. The shell captures a gdalinfo -json sidecar per
+file; scripts/sample-waves.js --mode plan names the band index carrying each hour's HTSGW and
+WIND, discovered from gdalinfo and never assumed; the shell extracts each band to a flat ENVI
+plane; scripts/sample-waves.js --mode sample samples every beach in the D1 snapshot and emits
+waveinput.ndjson and waves.ndjson; scripts/build-wave-manifest.js applies every gate and
+writes manifest.json plus SHA256SUMS or exits 1; the shell publishes and then reads the cycle
+back through the public domain; scripts/build-wave-kv.js --mode emit re-verifies it against
+the manifest, applies the consumer gate (src/waveManifest.js) and emits the bulk-put chunks.
+
+PUBLICATION copies build-layers.yml. R2 bucket swim-report (HYPHEN), path-style addressing,
+public at https://map.swim.report:
+
+    waves/<cycleId>/manifest.json      immutable
+    waves/<cycleId>/waveinput.ndjson   immutable
+    waves/<cycleId>/waves.ndjson       immutable
+    waves/<cycleId>/SHA256SUMS         immutable, covers the two .ndjson ONLY
+    waves/current.json                 no-store, WRITTEN LAST
+
+manifest.buildStatus:"complete" is the LAST key written and is assigned nowhere else, so a
+torn manifest cannot read as a finished one.
+
+PER-GRID ISOLATION. gridStatus is the data contract that keeps one grid's failure off every
+other grid's beaches. It carries ONE entry per GRIDS member — { status, elements, reasons } —
+and is threaded band-plan.json → sample-report.json → manifest.json. status is "unfetched"
+(no grids-report entry), "unplanned" (fetched but not usable for waves), "planned" (every
+hour's HTSGW band located) or "sampled" (it produced a stats entry). A grid reaches "sampled"
+only on a real stats entry, never with zeroes, because a phantom zero would score an absent
+grid as a shrink and refuse the cycle on behalf of a grid that never ran; the build gate reads
+a MISSING entry as "absent", which is not a measurement either and warns rather than passes.
+The element requirement splits in ONE direction only: any HTSGW gap unplans the grid and drops
+both its elements, while a WIND-only gap keeps its waves and drops just its WIND entries — the
+inverse would publish wind-only records from a grid whose wave plane was never proven. A grid
+in REQUIRED_GRID_IDS that does not reach "planned" still refuses the whole cycle.
+
+GATES. Non-overridable: gridIdentity and bandIdentity against the committed
+data/wave-grids.json — gridIdentity compares EVERY plane of a grid against that grid's
+hour-0 wave header, not the hour-0 header alone, so a later plane with a shifted origin and
+identical dimensions cannot sample the wrong cells unobserved, and a sample report carrying
+no plane-identity count is refused rather than passing the check vacuously — per-band
+validTimes (GRIB_VALID_TIME === validStartEpoch + i*3600, which catches an .idx
+off-by-one), the sentinel scan against each grid's OWN nodata — covering
+wave values in feet against MAX_EMITTED_FT and wind values in mph against MAX_EMITTED_MPH, each
+grid's nodata converted through the SAME constant the sampler applied — series alignment
+(exactly 24 entries, every value finite or null), distinctValues and meanPlausibility (the only
+two gates that can tell a real ocean from a filled buffer — every other gate counts things, and
+a constant plane counts perfectly), the KV pair spelling, and the minimum record rails (a
+finite non-zero beach total, at least one wave value anywhere, and every REQUIRED_GRID_IDS
+member "sampled" carrying counts of its own and resolving at least one of any beaches it was
+offered, and no grid reaching "sampled" with a validPercent of zero — a grid that sampled
+cannot have zero usable cells). Those rails are deliberately independent of the seeded
+floors: they are what stops a zero-record cycle publishing and poisoning every future
+shrink ratio, since a ratio gate skips a field whose previous value is <= 0 and the zero
+would be absorbing.
+Overridable with --allow-shrink, and warned: the coverage floors from data/wave-floors.json
+keyed by gridsDigest, the per-grid floors, a shrink ratio of 0.95 against the previous cycle
+and a decay ratio of 0.85 against the oldest of an 8-cycle rolling history (a hit rate
+bleeding 5% per cycle passes every ratio-to-previous check forever). Every one of these is
+scored PER GRID and only for a grid that sampled, so an absent grid is never read as a shrink
+to zero; the global coverage floor and the global ratio fallback apply only when every grid
+sampled. validPercent is scored through the same per-grid shrink and decay ratios as the
+counts. An unseeded digest sets autoPublishAllowed:false without failing the build, and
+auto-publish is likewise withheld, without a refusal, when no ratio comparison was scored at
+all.
+
+CADENCE AND THE OPEN RISK. GitHub Actions SKIPS cron occurrences rather than merely deferring
+them. At 8 slots a day against the 7 h absolute key expiration this tolerates two consecutive
+misses. That is the design's largest unclosed exposure; the permanent fix is in TODO.md.
+
 ### Flag-worthy gate (HIDE-UNTIL-FLAG-WORTHY) — a cross-cutting invariant
 
 Inland beaches are never DELETED; every consumer filters to flag-worthy water via ONE
@@ -3346,7 +3171,7 @@ the pure "water_class IN ('ocean','great_lake')" state with no second code chang
 fail-open NULL window is now bounded by a SINGLE batch run rather than a classify cycle,
 because classification happens in the run that discovers the beach. Applied
 at: buildHomeStatement (home list, both branches + ?q=), handleBeachesGeojson (map directory),
-runFlagRecompute, runWaveRefresh, runNwsEnrichment, runEcccEnrichment, runWebcamSync
+runFlagRecompute, runWaterTempRefresh, runNwsEnrichment, runEcccEnrichment, runWebcamSync
 (AND-ed into each SELECT); handleDetail and handleApiFlag use the JS mirror
 isFlagWorthyWater to 404 a non-flag-worthy row. The enrichers gate ONLY drops confirmed
 inland — a NULL-pending row still enriches, so classification never stacks in front of the
@@ -3443,7 +3268,7 @@ Routing table (method GET only; anything else → 405):
   can never delay or fail a render. With the response cache enabled, cache HITs do
   not run the Worker, so stamps only land on misses/revalidations — acceptable: it
   is a coarse demand signal, not analytics. Consumers (section 7, section 3
-  migration 0007): runFlagRecompute/runWaveRefresh's hot/cold recompute-rotation
+  migration 0007): runFlagRecompute/runWaterTempRefresh's hot/cold rotation
   split, and runNwsEnrichment/runEcccEnrichment/runWebcamSync's last_viewed DESC
   NULLS LAST candidate-queue tiebreak. The home list (GET /) never stamps
   last_viewed — only the two single-beach routes do.
@@ -3646,9 +3471,8 @@ exporting a CSS string); render.js is the sole module the router imports.
   single child is what keeps it centered). The disclaimer is the first line (its own
   <small>); the sentence itself is the invariant. The second line carries the site-wide
   data-source attributions as a single sentence with each service linked: "Thanks to OpenStreetMap (openstreetmap.org)
-  for beach locations, NOAA/NWS (weather.gov) + ECCC (weather.gc.ca) + Open-Meteo
-  (open-meteo.com/en/docs/marine-weather-api) for marine and weather data, and Windy.com
-  (windy.com/webcams) for webcams." This once-per-page Windy credit (Windy.com linking to
+  for beach locations, NOAA/NWS (weather.gov) + ECCC (weather.gc.ca) for marine and weather
+  data, and Windy.com (windy.com/webcams) for webcams." This once-per-page Windy credit (Windy.com linking to
   the webcams hub) satisfies the free tier's attribution expectation on every page.
 
 ### Flag rendering rules
@@ -3827,12 +3651,17 @@ exporting a CSS string); render.js is the sole module the router imports.
     byModel problems can never block the main strip. Legacy payloads without byModel
     render exactly as before.
   - Per-model "now" caption (below the now stat): when >= 2 models have a finite value
-    at the trimmed hour 0, a quiet wa-caption-s line "ECMWF 2.6 ft · NOAA GFS 2.4 ft ·
-    Météo-France 2.9 ft" (toFixed(1), " · " separator, display-name order). 0-1 models
+    at the trimmed hour 0, a quiet wa-caption-s line "NOAA Great Lakes 2.6 ft ·
+    NOAA GFS 2.4 ft" (toFixed(1), " · " separator, display-name order). 0-1 models
     -> omitted (one model would just repeat the stat). Model display names live in
-    waveStrip.js's MODEL_DISPLAY (ecmwf_wam025 -> "ECMWF", ncep_gfswave025 ->
-    "NOAA GFS", meteofrance_wave -> "Météo-France"; unknown ids fall back to the raw id
-    after the known ones) — deliberately NOT imported from src/clients/.
+    waveStrip.js's MODEL_DISPLAY (noaa_glwu -> "NOAA Great Lakes", noaa_gfswave ->
+    "NOAA GFS", noaa_gfswave_arctic -> "NOAA GFS Arctic"; unknown ids fall back to the
+    raw id after the known ones) — deliberately NOT imported from src/waveModels.js, so
+    a backend id rename cannot silently reorder the UI. Every id waveSourceLabel can
+    name must appear here; test/waveModels.test.js asserts that across the two files.
+    With one grid per beach the multi-model machinery is dormant (models.length === 1,
+    so the disclosure never renders) but reachable — SWELL/WVHGT out of the same GRIB
+    messages are the obvious second series.
   - Model comparison chart (after the strip + ticks, before the stale warning): when the
     trimmed byModel has >= 2 models, a collapsed-by-default <wa-details
     summary="Compare wave models"> containing <wa-line-chart class="wave-model-chart"
@@ -3865,7 +3694,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     forecast model", an accessibility label) does not leak as a visible chart title above
     the plot. UNLIKE the band strip this chart keeps the default legend and tooltips
     (comparison view). label/description attributes + a visible fallback <p> carry
-    waveModelSummary's prose ("Wave height by model, next N hours — ECMWF now 2.6 ft, ...",
+    waveModelSummary's prose ("Wave height by model, next N hours — NOAA GFS now 2.4 ft, ...",
     with "(no current reading)" for models null at hour 0). The flag and the band strip
     NEVER derive from byModel — composite hoursFt only.
   - Hour ticks: an aria-hidden HTML row below the strip — "Now" left, "+6 h"/"+12 h"/
@@ -3880,7 +3709,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     with JS off / kit unreachable; only the tooltips need the component kit.
   - Stale warning (WAVE_STALE_MS = 28800000 ms / 8 h, keyed on waves.updated) inside the
     section — a LONGER threshold than the flag cards' DEFAULT 2 h STALE_MS because the wave strip
-    refreshes on the 6-hourly wave cron (its KV lives 7 h and the marine models publish
+    refreshes on the offline NOAA wave cycle (its KV lives 7 h and the models publish
     only every 6-12 h), so a few-hours-old strip is model-current, not stale. The ESTIMATE
     badge plus footer disclaimer keep the not-official framing on the page.
   - The whole section is omitted when there is neither a finite now-height nor a
@@ -3915,10 +3744,14 @@ exporting a CSS string); render.js is the sole module the router imports.
   writing the column). All dynamic values escape through escapeHtml, including attribute
   positions.
 
-## 10. Test plan (Vitest, node environment — default; vitest.config.js only if needed)
+## 10. Test plan (Vitest, node environment — default)
 
 Run with: npm test (vitest run). Tests import pure functions only — no Workers runtime,
-no network, no mocks of fetch needed.
+no network, no mocks of fetch needed. vitest.config.js carries a coverage block and
+nothing else — the v8 provider, an explicit include over src/ and scripts/ (vitest
+reports only test-touched files by default, so an entirely untested module would be
+invisible without it), and no thresholds; npm run test:coverage prints it, and npm test
+is unchanged.
 
 Shared fixtures/builders live in test/helpers/ (imported across the suite instead of
 re-declaring per file): makeBeach(overrides) (test/helpers/beach.js) — a BeachRow builder
@@ -4039,11 +3872,26 @@ legacy defaults).
   bldhd, wisconsin-dnr — were removed; see the registry-scope note in section 6.)
 - test/scraperHealth.test.js — updateScraperHealth (increment/reset, 23-vs-24 boundary,
   exact alert strings, "never" fallback).
-- test/glerl.test.js — GLOS buoy gap-fill client against a stubbed global fetch.
-- test/openMeteo.test.js — fetchWaveHeightsFt against a stubbed fetch: forecast_days=2 in the
-  URL, 24-entry window at the UTC hour of nowIso, per-hour model fallback (+ models[] order),
-  meters→feet, hoursFt[0] === waveHeightFt, all-null series, single-location normalization,
-  null on HTTP/network failure.
+- test/waveGrids.test.js — grid selection under water_class, containsPoint, the
+  nearest-wet-cell spiral (great-circle tie-break, cap enforcement, all-dry return), sample
+  containment against each grid's own nodata, and gridsDigest stability.
+- test/waveSample.test.js — the band plan (element/valid-time matching, refusal on an
+  unplannable band), waveRecordsForBeach (both write-skip guards, hoursFt[0] ===
+  waveHeightFt, exactly 24 entries), and the snapshot reader.
+- test/buildWaveKv.test.js — the pair emitter: the units pins (1 m -> 3.28084 ft, 1 m/s ->
+  2.2369362920544 mph), snake_case "expiration" on every pair, value is a JSON STRING, the
+  absolute expiration = validStartEpoch + 25200, chunking, and the pointer parser's
+  refusals.
+- test/buildWaveManifest.test.js — every gate as a pure function: grid and band identity,
+  valid times, the sentinel scan against each grid's own nodata, alignment, distinct values,
+  mean plausibility, the coverage floors keyed by gridsDigest, the shrink and decay ratios,
+  and which refusals --allow-shrink may override.
+- test/waveManifest.test.js — the three-tier consumer gate, including that a MISSING field
+  refuses exactly as a false one does and that artifactsPresent/artifactsExpected are
+  isFiniteNumber-guarded before comparison.
+- test/waveModels.test.js — label/url resolution, the unknown-id degradation, and the
+  cross-file assertion that every WAVE_MODEL_IDS entry appears in MODEL_DISPLAY in
+  src/frontend/waveStrip.js.
 - test/waveStrip.test.js — pure strip helpers: trimWaveSeries (defensive/trimming incl. byModel
   validation/trimming), computeWaveRuns (run-length + sum invariant + exact band label/var()
   strings), waveStripSummary strings, model helpers, buildWaveModelChartConfig shape, and
@@ -4057,9 +3905,8 @@ legacy defaults).
   the stat line, no section heading), the hazard lane (positioned band + tooltip, rip band,
   no lane for legacy estimates or without a series), the buoy case (stat without strip),
   legacy/absent payload omission, and the stale warning.
-- test/flagRecompute.test.js — asserts runWaveRefresh writes "waveinput:" and "waves:" KV
-  (24-entry hoursFt, top-of-hour startIso, TTL 25200) and their absence for all-null/masked/
-  failed fetches (last-good rides the TTL); runFlagRecompute READS "waveinput:" for wave
+- test/flagRecompute.test.js — asserts runWaterTempRefresh writes "watertemp:" and stamps
+  wave_updated; runFlagRecompute READS "waveinput:" for wave
   height + wind fallback (degrading to unknown when absent) rather than fetching; the
   alertDetails/ripCurrentRisk echoes landing in "flag:"; and the Canadian path (eccc_zone
   beach inside a stubbed GeoMet polygon → ECCC red + "Environment Canada Alerts" source, no

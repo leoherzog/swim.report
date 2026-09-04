@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "_readme": [
+    "data/wave-grids.json - the committed IDENTITY expectation for the three NOAA GRIB2 wave",
+    "grids, read by scripts/build-wave-manifest.js as the gridIdentity and bandIdentity gates",
+    "before any cycle is published.",
+    "",
+    "WHY IT IS DUPLICATED. Every number here also appears in GRIDS in src/waveGrids.js. That is",
+    "deliberate, and it is the same split scripts/clip-layers.js and scripts/build-manifest.js",
+    "already use: src/waveGrids.js is the PRODUCER (it drives the fetch and the sampler) and this",
+    "file is the GATE's expectation. A gate that imported its expectations from the thing it gates",
+    "would be checking the producer against itself, which proves nothing. Both copies move",
+    "together, in one reviewed commit.",
+    "",
+    "WHAT IT CATCHES. A grid whose decoded raster no longer matches its committed size,",
+    "geotransform, cell size or nodata is a grid whose cell indices mean something different than",
+    "the sampler assumes. Upstream changing a domain, GDAL changing a warp default, or a shell",
+    "argument being edited all produce a raster that decodes cleanly, samples without error, and",
+    "returns wave heights from the wrong place on earth. There is no other signal for that.",
+    "",
+    "sampled{} describes the raster handed to scripts/sample-waves.js, AFTER the workflow's",
+    "gdal_translate (noaa_gfswave, already lat/lon) or gdalwarp (noaa_glwu and noaa_gfswave_arctic,",
+    "both projected). nodata is the value GDAL reports in the band header for that grid; it is",
+    "compared, never assumed, because gfswave uses 9999 and GLWU uses 9.999000260554009e+20 and a",
+    "hardcoded 9999 would pass every Great Lakes sentinel into a flag color.",
+    "",
+    "bands[] is the GRIB_ELEMENT set every sampled band must be drawn from, asserted per band",
+    "index against gdalinfo -json. HTSGW is metres and WIND is metres per second; there is no GUST",
+    "element in gfswave, which is why windGustMph is permanently null on this pipeline.",
+    "",
+    "tolerance{} is the absolute epsilon the gate compares geotransform floats within. It is not a",
+    "licence to drift: it exists because a warp origin is a float and an exact equality test on",
+    "floats is a gate that fails for the wrong reason. nodata is compared RELATIVELY instead, via",
+    "NODATA_MATCH_RELATIVE in src/waveGrids.js: gdalinfo -json prints a large nodata with about",
+    "eight significant digits, so GLWU's sentinel reads back slightly rounded and an equality test",
+    "would refuse every cycle over a formatting difference."
+  ],
+  "tolerance": {
+    "origin": 1e-9,
+    "pixel": 1e-12
+  },
+  "bands": ["HTSGW", "WIND"],
+  "grids": {
+    "noaa_glwu": {
+      "sampled": {
+        "width": 950,
+        "height": 455,
+        "originLon": -93.0,
+        "originLat": 49.4,
+        "pixelLon": 0.02,
+        "pixelLat": -0.02,
+        "nodata": 9.999000260554009e+20
+      }
+    },
+    "noaa_gfswave": {
+      "sampled": {
+        "width": 2160,
+        "height": 406,
+        "originLon": -180.083333343214463,
+        "originLat": 52.583333333333336,
+        "pixelLon": 0.166666686428902,
+        "pixelLat": -0.166666666666667,
+        "nodata": 9999
+      }
+    },
+    "noaa_gfswave_arctic": {
+      "sampled": {
+        "width": 650,
+        "height": 290,
+        "originLon": -180.0,
+        "originLat": 73.2,
+        "pixelLon": 0.08,
+        "pixelLat": -0.08,
+        "nodata": 9999
+      }
+    }
+  }
+}
