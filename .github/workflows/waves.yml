@@ -266,7 +266,12 @@ jobs:
             fi
             got=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < "$WORK/page.json")
             echo "page at offset $offset: $got row(s)"
-            cat "$WORK/page.json" >> "$WORK/pages.json"
+            # Compact to ONE line before appending. The assembler below splits on
+            # newlines and parses each part, but wrangler --json pretty-prints across
+            # ~34 lines, so appending it raw feeds JSON.parse a bare "[". JSON.stringify
+            # escapes any newline inside a string, so one document per line holds.
+            node -e "const fs=require('fs');process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(process.argv[1],'utf8')))+'\n')" \
+              "$WORK/page.json" >> "$WORK/pages.json"
             if [ "$got" -lt "$SNAPSHOT_PAGE" ]; then break; fi
             offset=$((offset + SNAPSHOT_PAGE))
           done
