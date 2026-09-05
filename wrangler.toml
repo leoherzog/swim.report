@@ -30,15 +30,27 @@ enabled = true
 #                    write time, so no schedule ordering between this cron and that
 #                    workflow is required or implied: a late or missing pipeline run
 #                    ages a beach out to unknown instead of serving stale data.
+# 3-53/10 * * * * — level-triggered alerts refresh, every 10 minutes. Four national
+#                    fetches, no per-beach upstream call, and a "flag:" rewrite only
+#                    for beaches whose alert event set moved against the set their
+#                    standing estimate used. Offset off :07 so it never fires inside
+#                    the hourly recompute's measured wall-clock window, and off every
+#                    other minute already in this list.
 # 15 */6 * * *     — 6-hourly water-temperature refresh. Sole writer of watertemp:,
 #                    and sole writer and reader of the wave_updated rotation cursor.
 #
-# EVERY interval here must stay >= 1 hour. Cloudflare gives a scheduled invocation
-# 15 minutes of CPU only at hourly-or-longer intervals; below that the allowance
-# drops to 30 seconds, which no beach-walking cron in this Worker fits inside.
-# Changing a cron string is also a FOUR-file edit (this file, package.json's
-# seed:* URLs, CRON_JOBS in src/index.js, and the cron strings hard-coded in the
-# tests) — miss one and the job silently never runs.
+# NO CRON THAT FANS OUT AN UPSTREAM CALL PER BEACH MAY GO SUB-HOURLY. What a
+# sub-hour interval actually costs is CPU: Cloudflare gives such an invocation
+# 30 seconds instead of 15 minutes, while wall clock stays 15 minutes either way.
+# The full 1102-beach hourly run measures 273-1213 ms of CPU, so CPU is not what
+# keeps it hourly — its WALL clock is, and wall clock is what a beach-walking
+# fan-out consumes. The alerts refresh above makes four national fetches and
+# writes only the beaches whose alert set moved, so it fits.
+# Changing a cron string is a FIVE-file edit (this file, package.json's seed:*
+# URLs, CRON_JOBS in src/index.js, the cron strings hard-coded in the tests, and
+# whichever docs quote the schedule). test/cronTriggers.test.js catches a
+# wrangler.toml / CRON_JOBS mismatch, which nothing did before; the rest still
+# fail silently.
 # 17 3,9,15,21 * * * — NWS point enrichment, 4x daily
 # 29 4,10,16,22 * * * — ECCC zone enrichment, 4x daily (Canadian beaches the
 #                    NWS enrichment permanently parked)
@@ -60,7 +72,7 @@ enabled = true
 # anywhere in this file. Adding one would put an offline artifact store within
 # reach of the request path and break the two-path rule at the config layer.
 [triggers]
-crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+crons = ["7 * * * *", "3-53/10 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
 [[d1_databases]]
 binding = "DB"

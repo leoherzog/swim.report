@@ -223,14 +223,50 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   migration 0012-class indexes real pagination will need; (3) real pagination itself. Workers
   Cache means cache hits do not run the Worker, so `last_viewed` undercounts popular beaches
   slightly, which is fine for a coarse priority signal.
-- **Alerts-only fast cron (not yet built).** A `*/10`-ish alerts-only cron — NWS
-  alerts are the one event-driven input; a High Surf Warning issued at :05
-  currently waits up to 55 min for the hourly recompute. Since alerts are a
-  single national fetch matched to beaches locally, such a cron would cost just
-  ONE `api.weather.gov/alerts/active` fetch per run (plus one ECCC national fetch
-  if Canadian beaches are included), regardless of zone count. A separate
-  queue-based stale-refresh (request path enqueues, consumer fetches) only if
-  flagless gaps show up in practice.
+- **Alerts-only fast cron — shipped as `runAlertRefresh` (`"3-53/10 * * * *"`).** It closes
+  the warning-to-flag gap from up to an hour to about ten minutes on four national fetches
+  whose cost is flat in the beach table. Residue: a queue-based stale-refresh (request path
+  enqueues, consumer fetches), only if flagless gaps show up in practice.
+- **Canadian clear-down is still hourly.** `runAlertRefresh` is raise-only for Canada, because
+  neither GeoMet collection has an `/alerts/active/count` equivalent and the cron publishes a
+  lowering only from a feed whose completeness it verified. It becomes 10-minute the moment
+  GeoMet exposes a count or the two collections gain an independent completeness signal.
+- **336 flag-worthy rows carry a marine zone id in `nws_zone`** (`LHZ441`, `LMZ221`, `LSZ250`
+  and so on), with `marine_zone` equal to it, because `api.weather.gov/points` returns a
+  marine forecast zone for a centroid over water. Those beaches have no land forecast zone and
+  can never match High Surf Advisory, Beach Hazards Statement or Coastal Flood Advisory — the
+  products the refresh cron exists to deliver quickly — yet they read `alertsCheckable` true,
+  so no caveat renders. Pre-existing; the fix belongs in NWS enrichment, which should reject a
+  marine-prefixed `forecastZone` and re-queue the row.
+- **`rules.js` step 3's else branch still has no finite check**, so any future caller passing a
+  non-finite `waveHeightFt` gets green with a nonsense reason. `buildEstimateInputs`
+  (`src/flagInputs.js`) closes the reachable route from a malformed KV value; fixing `rules.js`
+  itself is a color-decision change and needs its own `RULES_VERSION` bump.
+- **An ECCC bounding-box prefilter through `idx_beaches_lon_lat`** before exact
+  point-in-polygon. Free at today's 354 Canadian rows (112 ms measured); about 6.4 s of CPU at
+  20k against the 30 s sub-hour CPU allowance the refresh cron runs under.
+- **`flag_history` records only hourly-vintage pairs.** `runAlertRefresh` scrapes no officials,
+  so it logs nothing, and a color served between hourly runs may differ from the logged one.
+  Calibration should say so.
+- **Map directory scale ceiling.** The binding constraint on `mapdirectory:v1` is the 128 MB
+  isolate, not KV's 25 MiB value cap (190 B/entry measured, so the cap is ~139k entries away)
+  and not the read-time CPU. Measured against the real `mapDirectoryFeatures` with the
+  directory string, the parsed directory, the feature array and the response body all live at
+  once, which is what `handleBeachesGeojson` holds: 10k → 1.8 MiB artifact, 17 MiB heap, 72 ms
+  (parse 27 + resolve 20 + stringify 25); 40k → 7.3 MiB, 56 MiB, 255 ms; 100k → 18.1 MiB,
+  151 MiB, 590 ms. A single 100k request exceeds the isolate on its own, so the endpoint OOMs
+  somewhere near 85k features with no concurrency at all, and near 42k with two concurrent
+  cache misses. The practical ceiling is roughly 40k features, and the single-fetch map model
+  wants bbox or tile sharding well before that. The artifact does not scale to 100k, and
+  nothing here should pretend it does.
+- **The refresh cron's KV read volume is the Worker's one recurring O(N) cost.** Its scan
+  reads both key families for every flag-worthy beach on every run, and KV bills a bulk read
+  per key, so 144 runs a day is 288N key-reads a day: about 320k at today's 1,102 rows, 2.9M
+  at 10k (~87M/month, past the Paid plan's 10M included reads) and 29M at 100k. It buys the
+  standing alert set for a median of a few dozen beaches whose alerts actually moved. There is
+  no cheaper level-triggered selection while the standing set lives inside the `"flag:"` value;
+  the ways out are a shorter cadence for the artifact rebuild than for selection, or the same
+  bbox/tile sharding the ceiling above wants.
 - **NDBC `latest_obs.txt` would replace the hardcoded water-temp table.** One ~106 KB file
   carries 886 stations, against today's 72 committed rows and 72 per-station Range fetches.
   Display-only and a separate change, because it feeds a different key family on a
@@ -272,6 +308,12 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     stamp the run selected, so the wait is readable from the observability API. Past those
     sizes the knob is a larger `MAX_BEACHES_PER_RUN`, bounded by the 900 s wall clock on a
     cron that passes no deadline to either write pool, or real pagination.
+    The alerts refresh cron inherits that reach rather than extending it: a seal and a
+    standing `flag:` value exist only for the rows a run covered, so
+    `MAX_BEACHES_PER_RUN × (FLAG_TTL_SECONDS / 3600)` beaches — about 8,400 — can hold a live
+    seal at any time. At 1102 rows that is the whole table; at 10k it is most of it; past that
+    real pagination is the prerequisite, and `skipNoSeal=` in the refresh cron's completion log
+    is the number that reports it.
   - **The D1 `--json` snapshot is size-capped and single-shot**, and the
     delete-bearing snapshot just widened from 7 to 11 columns (discovery and
     classification now share one). A truncated snapshot aborts the only delete path
@@ -474,7 +516,9 @@ remains partnership-gated.
   `runWaterTempRefresh` runs one Range-limited read per distinct station plus its `watertemp:`
   writes (PLAN.md section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
   quota are not sufficient at this cadence and beach count. For a free-plan demo, drop
-  `MAX_BEACHES_PER_RUN` well down and reduce cron frequency before deploying.
+  `MAX_BEACHES_PER_RUN` well down and reduce cron frequency before deploying. Two further Free
+  blockers arrived with the alerts refresh cron: a sub-hour Cron Trigger gets 10 ms of CPU on
+  Free, and Free caps Cron Triggers at 5 per account, which this Worker now exceeds.
 
 ## Frontend
 

@@ -1,8 +1,9 @@
 import { handleRequest } from "./router.js";
 import { renderErrorPage } from "./frontend/render.js";
-import { estimateFlag } from "./rules.js";
+import { estimateFlag, SEVERITY_RANK } from "./rules.js";
 import {
   fetchAllActiveAlerts,
+  fetchActiveAlertCount,
   nwsAlertsForZone,
   alertsUrlForZone,
   wfoFromGridUrl,
@@ -33,7 +34,10 @@ import { FLAG_TTL_SECONDS } from "./flagTtl.js";
 import {
   buildAlertInputs,
   buildEstimateInputs,
-  sealFromSignals
+  sealFromSignals,
+  signalsFromStanding,
+  standingAlertEvents,
+  eventKey
 } from "./flagInputs.js";
 import {
   MAP_DIRECTORY_KEY,
@@ -117,6 +121,51 @@ const WAVE_CURSOR_FLUSH_SIZE = 100;
 // against a hung KV read rather than a routine truncation point, and it leaves
 // the hourly run's 900 s budget intact.
 const MAP_SCAN_DEADLINE_MS = 120000;
+// Alerts refresh cron ("3-53/10 * * * *"). It fetches four national endpoints
+// bounded at 45 s each, scans the flag-worthy set, and writes only the beaches
+// whose alert set moved, so the worst case sits well inside the 600 s cadence.
+//
+// FAST_WRITE_DEADLINE_MS: the write pool yields here rather than being killed at
+// the 900 s ceiling. A capped or truncated run is self-continuing — the beaches
+// it never reached keep their old standing alert set, so the next run re-selects
+// them. Measured from the pool's own start, not from the top of the invocation:
+// the four sequential fetches can spend 180 s and the scan another 120 s ahead of
+// it, which anchored at the invocation would leave the pool no budget at all and
+// a run that writes nothing while every skip counter reads zero. 180 + 120 + 240
+// still sits inside the 600 s cadence.
+// FAST_MIN_REMAINING_TTL_SECONDS: a beach within five minutes of its lease
+// expiring belongs to the hourly. KV's minimum expirationTtl is 60 s, and
+// republishing a nearly-dead key buys nothing.
+// FAST_LOWER_MAX_SEAL_AGE_MS: this cron will not publish a LOWERING decided by
+// inputs the product itself would render with a stale-data warning. 7200000 is
+// render.js STALE_MS. Raises are never gated on age, because age can only
+// understate a hazard.
+// FAST_MAX_BEACHES_PER_RUN caps WRITES, not reads, and is checked inside the pool
+// worker rather than by slicing the candidate list. The binding ceiling is
+// subrequests, not wall clock: 2000 puts plus the scan's bulk gets, four fetches
+// and one artifact put lands near 2,030 against the 10,000-per-invocation cap.
+// FAST_MAX_BEACHES_PER_RUN also caps the candidate list, so a nationwide event
+// that moves every zone's alert set cannot materialize one retained candidate per
+// table row against the 128 MB isolate; beyond the cap the run is self-continuing
+// for the same reason a capped write run is.
+// ALERT_COUNT_SLACK covers only the skew between two fetches taken about a second
+// apart — the national issue rate is a few alerts per ten minutes — so a shortfall
+// larger than this is truncation or schema drift, not timing.
+// ALERT_PARSE_DROP_MAX is the second half of that cross-check and answers a
+// different question: the count endpoint proves the whole population arrived,
+// this proves the parse UNDERSTOOD it. featureCount is the raw pre-filter count,
+// so a schema drift that renames properties.event or restructures the zone fields
+// yields alerts: [] with featureCount still equal to the count endpoint's total —
+// a nationwide clear-down licensed by a feed nobody could read. A healthy feed
+// drops almost nothing at that filter, since an active alert carries an event
+// name and at least one UGC or affectedZones id, so a larger drop is drift rather
+// than routine loss.
+const FAST_WRITE_DEADLINE_MS = 240000;
+const FAST_MIN_REMAINING_TTL_SECONDS = 300;
+const FAST_LOWER_MAX_SEAL_AGE_MS = 7200000;
+const FAST_MAX_BEACHES_PER_RUN = 2000;
+const ALERT_COUNT_SLACK = 5;
+const ALERT_PARSE_DROP_MAX = 5;
 // Rotation cursor per cron. A column name cannot be a bind parameter, so the
 // value is concatenated into the SQL as a literal: it must stay a lookup in this
 // two-entry whitelist and must never be caller-derived text.
@@ -194,6 +243,15 @@ function runBudget(env) {
   return {
     gatherDeadlineMs: gather,
     writeDeadlineMs: write
+  };
+}
+
+// Wall-clock budget for the alerts refresh cron's write pool, same plain-number
+// env override idiom as runBudget(env) and for the same reason.
+function fastRunBudget(env) {
+  return {
+    writeDeadlineMs: env && typeof env.FAST_WRITE_DEADLINE_MS === "number"
+      ? env.FAST_WRITE_DEADLINE_MS : FAST_WRITE_DEADLINE_MS
   };
 }
 
@@ -925,6 +983,368 @@ async function runFlagRecompute(env) {
   }
 }
 
+// Level-triggered alerts refresh ("3-53/10 * * * *"). NWS alerts are the only
+// event-driven input in the system, so this cron closes the gap between a warning
+// being issued and the flag moving from up to an hour to about ten minutes.
+//
+// Its upstream cost does not scale with the beach table: four national fetches,
+// matched to beaches locally. Its per-beach cost is paid only for beaches whose
+// alert situation actually changed, which it detects by comparing each beach's
+// CURRENT alert event set against the set its STANDING estimate was decided
+// against — echoed into the "flag:" value as alertDetails by rules.js. That is
+// why there is no persisted baseline, no zone digest, no gained/changed/cleared
+// classification and no first-run semantics: the standing set is already in hand,
+// because the map-directory scan bulk-reads every flag-worthy beach's "flag:" key
+// anyway.
+//
+// Level-triggering is also what removes the hourly/fast interlock. The hourly can
+// clobber a fast raise with its own older snapshot, and no KV lock can close that
+// race (no CAS, a lock reads stale for up to 60 s, and a run killed at the 900 s
+// ceiling never deletes it). Under level-triggering the clobbered value's
+// alertDetails reverts to the old set, which differs from current, so the next run
+// re-selects the beach and re-raises it. Repair is automatic and bounded at one
+// cadence.
+//
+// What that costs, since it is the Worker's one recurring O(N) term: the scan
+// reads both key families for every flag-worthy beach on every run, and KV bills
+// a bulk read per key, so 144 runs a day is 288N key-reads a day — about 320k at
+// today's 1,102 rows, 2.9M at 10k and 29M at 100k, spent to find the handful of
+// beaches whose alert set actually moved. There is no cheaper selection: the
+// standing alert set lives in the "flag:" value. TODO.md carries the figure as
+// the thing that decides when the endpoint needs tiles rather than one artifact.
+//
+// It writes exactly two things: "flag:" for the beaches it recomputed, and the map
+// directory. Never "wqfloor:" (the hourly stays its single writer, so expiry
+// remains the only way a cleared advisory is withdrawn), never "official:", never
+// a flag_history row (it scrapes no officials, so it has no pair to log), and
+// above all never recompute_updated, which is runFlagRecompute's rotation cursor
+// and single-writer by contract.
+async function runAlertRefresh(env) {
+  const startedMs = Date.now();
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.parse(nowIso);
+  const budget = fastRunBudget(env);
+  const candidates = [];
+  let written = 0;
+  let raised = 0;
+  let lowered = 0;
+  let skipNoStanding = 0;
+  let skipNoSeal = 0;
+  let skipAuthority = 0;
+  let skipLease = 0;
+  let skipStaleLower = 0;
+  let skipFeedLower = 0;
+  let skipCanadaLower = 0;
+  let skipSuperseded = 0;
+  let capped = false;
+
+  try {
+    // Step 1: one full-table statement, the same one the artifact builder needs
+    // anyway. No zone IN list, no bind chunking and no marine_zone index: zone
+    // matching is a Map lookup per beach in memory.
+    const rowsResult = await env.DB.prepare(MAP_DIRECTORY_SQL).all();
+    const rows = rowsResult.results || [];
+
+    // Step 2: four national fetches, each in its own try/catch and each already
+    // bounded by its client's timeoutMs. Nothing else is fetched — no SRF, no
+    // wqFloor scrape, no official scrape, no "waveinput:" read — so a 10-minute
+    // cadence costs county health departments and Ontario Parks nothing, and
+    // there is no second source of truth for any non-alert input.
+    let nationalAlerts = null;
+    try {
+      nationalAlerts = await fetchAllActiveAlerts();
+    } catch (err) {
+      console.log("index: alert refresh nws alerts fetch threw: " + err.message);
+      nationalAlerts = null;
+    }
+    let alertCount = null;
+    try {
+      alertCount = await fetchActiveAlertCount();
+    } catch (err) {
+      console.log("index: alert refresh nws alert count fetch threw: " + err.message);
+      alertCount = null;
+    }
+    let ecccAlerts = null;
+    try {
+      ecccAlerts = await fetchActiveEcccAlerts(nowIso);
+    } catch (err) {
+      console.log("index: alert refresh eccc alerts fetch threw: " + err.message);
+      ecccAlerts = null;
+    }
+    let ecccMarineAlerts = null;
+    try {
+      ecccMarineAlerts = await fetchActiveEcccMarineAlerts(nowIso);
+    } catch (err) {
+      console.log("index: alert refresh eccc marine alerts fetch threw: " + err.message);
+      ecccMarineAlerts = null;
+    }
+
+    // Step 3: the feed integrity gate, entirely intra-run. fetchAllActiveAlerts
+    // cannot distinguish a genuinely quiet nation from a 200 whose schema drifted
+    // — both yield alerts: [] — so the count endpoint is the independent view
+    // that separates them. A parse materially short of the API's own total is
+    // truncation or drift whatever its magnitude, which is the gap every
+    // fraction-based rail leaves open.
+    //
+    // A missing feed is never evidence of clearing: usFeedUsable false excludes
+    // every US beach outright, and usLowerAllowed false keeps raises at
+    // 10-minute latency while lowerings wait for the hourly, which is the status
+    // quo. The ECCC rule is stricter than the hourly's deliberate
+    // proceed-on-partial-success, because at 6x cadence a marine-collection
+    // outage would repeatedly recompute Canadian beaches with the marine events
+    // missing and drop a live "gale warning" red to a wave-height green.
+    //
+    // The count check alone proves only that the whole population arrived. The
+    // parse-drop check is what proves the parse understood it: featureCount is
+    // raw, so a drift that renames properties.event or restructures the zone
+    // fields would otherwise pass the count check with alerts: [] and license a
+    // nationwide clear-down.
+    const usFeedUsable = nationalAlerts !== null;
+    const usLowerAllowed =
+      usFeedUsable &&
+      nationalAlerts.truncated === false &&
+      alertCount !== null &&
+      nationalAlerts.featureCount + ALERT_COUNT_SLACK >= alertCount.total &&
+      nationalAlerts.featureCount - nationalAlerts.alerts.length <= ALERT_PARSE_DROP_MAX;
+    const ecccUsable = ecccAlerts !== null && ecccMarineAlerts !== null;
+
+    const alertsMap = new Map();
+    if (usFeedUsable) {
+      // A plain loop into a Set, never a concat reduce: this walks the whole
+      // flag-worthy table rather than one capped run, and the quadratic form
+      // costs seconds of a sub-hourly cron's 30 s CPU allowance past 20k rows.
+      const zoneSet = new Set();
+      for (const row of rows) {
+        if (row.nws_zone !== null && row.nws_zone !== undefined) {
+          zoneSet.add(row.nws_zone);
+        }
+        if (row.marine_zone !== null && row.marine_zone !== undefined) {
+          zoneSet.add(row.marine_zone);
+        }
+      }
+      for (const zone of zoneSet) {
+        const matched = nwsAlertsForZone(nationalAlerts.alerts, zone);
+        alertsMap.set(zone, {
+          events: matched.events,
+          details: matched.details,
+          sourceUrl: alertsUrlForZone(zone)
+        });
+      }
+    }
+    const alertCtx = {
+      alertsMap: alertsMap,
+      ecccAlerts: ecccAlerts,
+      ecccMarineAlerts: ecccMarineAlerts
+    };
+
+    // Step 4: one scan of the flag-worthy set, selecting as it goes. onRow runs
+    // synchronously while the standing estimate is still in hand, so selection
+    // costs no second read. Every rejection is a SKIP that leaves the standing
+    // value untouched — there is no path here in which estimateFlag is called
+    // with a null substituted for a sealed input.
+    function onRow(row, entry, standing) {
+      if (!standing) {
+        // No standing value: nothing to compare against and no lease to inherit,
+        // so the hourly publishes this beach's first estimate.
+        skipNoStanding = skipNoStanding + 1;
+        return;
+      }
+      const signals = signalsFromStanding(standing);
+      if (signals === null) {
+        // Written before the seal shipped, or carrying another seal version.
+        skipNoSeal = skipNoSeal + 1;
+        return;
+      }
+      const isUs = (row.nws_zone || row.marine_zone) ? true : false;
+      const isCa = !isUs && row.eccc_zone ? true : false;
+      if ((!isUs && !isCa) || (isUs && !usFeedUsable) || (isCa && !ecccUsable)) {
+        skipAuthority = skipAuthority + 1;
+        return;
+      }
+      const updatedMs = Date.parse(standing.updated);
+      if (Number.isNaN(updatedMs)) {
+        skipNoSeal = skipNoSeal + 1;
+        return;
+      }
+      // Supersession check, against D1's strongly consistent stamp rather than
+      // KV's eventually consistent one. The hourly writes "flag:" with
+      // updated = its run instant and stamps recompute_updated with that same
+      // instant, so a standing value older than the stamp is either a stale KV
+      // replica of a beach the hourly has already rewritten or a put that failed.
+      // Recomputing either one would republish an hour-old bundle over the
+      // hourly's newer decision, and none of the lowering rails would see it:
+      // they compare against this same superseded value. Skipping is the status
+      // quo the hourly already owns.
+      const stampMs = row.recompute_updated ? Date.parse(row.recompute_updated) : NaN;
+      if (!Number.isNaN(stampMs) && stampMs > updatedMs) {
+        skipSuperseded = skipSuperseded + 1;
+        return;
+      }
+      const ageSec = (nowMs - updatedMs) / 1000;
+      if (ageSec < 0 || FLAG_TTL_SECONDS - ageSec < FAST_MIN_REMAINING_TTL_SECONDS) {
+        skipLease = skipLease + 1;
+        return;
+      }
+      const alertPart = buildAlertInputs(row, alertCtx);
+      // Set inequality selects; estimateFlag decides. Comparing severities here
+      // would reimplement ALERT_PRECEDENCE outside rules.js, and a "has any
+      // alert" test would miss a zone swapping Small Craft Advisory for Gale
+      // Warning, or losing one of two alerts.
+      //
+      // signals.alertsResolved false is the repair for a failed hourly alert
+      // fetch: that run passed alerts null, losing both the short-circuit and the
+      // floors, and its echoed alertDetails is [] — indistinguishable from
+      // "checked, none active" without the sealed boolean.
+      const selected =
+        alertPart.alertsResolved === false ||
+        signals.alertsResolved === false ||
+        eventKey(alertPart.alerts) !== eventKey(standingAlertEvents(standing));
+      if (!selected) {
+        return;
+      }
+      if (candidates.length >= FAST_MAX_BEACHES_PER_RUN) {
+        // The write cap is checked inside the pool, far too late to bound this
+        // list: a nationwide event moves most zones' alert sets at once, and one
+        // retained candidate per row would carry the whole table's parsed KV
+        // payloads into the 128 MB isolate. Beaches past the cap keep their old
+        // standing alert set, so the next run re-selects them.
+        capped = true;
+        return;
+      }
+      // Only the standing color survives into the candidate; the parsed standing
+      // payload goes out of scope with its chunk, which is the streaming
+      // discipline scanMapDirectory documents.
+      candidates.push({
+        row: row,
+        standingColor: standing.color,
+        signals: signals,
+        alertPart: alertPart,
+        updatedMs: updatedMs,
+        isCa: isCa
+      });
+    }
+
+    const scan = await scanMapDirectory(
+      env,
+      rows,
+      makeDeadline(Date.now(), mapScanBudgetMs(env)),
+      null,
+      onRow
+    );
+
+    let mapdirState = "truncated";
+    if (scan !== null) {
+      // Step 5: recompute and write. Unconditional for a selected beach that
+      // clears its rails, not gated on a strict color change: selection already
+      // means the alert set moved, so the reason string, alertDetails and sources
+      // are stale by definition, and a color-only gate would leave the detail
+      // page citing an expired alert for up to an hour.
+      await runPool(candidates, KV_WRITE_CONCURRENCY, async function (candidate) {
+        if (written >= FAST_MAX_BEACHES_PER_RUN) {
+          capped = true;
+          return;
+        }
+        const row = candidate.row;
+        const next = estimateFlag(
+          buildEstimateInputs(row, candidate.alertPart, candidate.signals)
+        );
+        const standingRank = SEVERITY_RANK[candidate.standingColor] !== undefined
+          ? SEVERITY_RANK[candidate.standingColor] : 0;
+        const nextRank = SEVERITY_RANK[next.color] !== undefined
+          ? SEVERITY_RANK[next.color] : 0;
+        // Three rails, on the lowering direction only. A lowering is published
+        // only from evidence this run could verify: Canada is raise-only for want
+        // of a count endpoint on either GeoMet collection, the US needs the count
+        // cross-check, and neither authority may lower on inputs old enough that
+        // the product itself would mark them stale.
+        if (nextRank < standingRank) {
+          if (candidate.isCa) {
+            skipCanadaLower = skipCanadaLower + 1;
+            return;
+          }
+          if (!usLowerAllowed) {
+            skipFeedLower = skipFeedLower + 1;
+            return;
+          }
+          if (Date.now() - candidate.updatedMs >= FAST_LOWER_MAX_SEAL_AGE_MS) {
+            skipStaleLower = skipStaleLower + 1;
+            return;
+          }
+        }
+        // The remaining lease, never a fresh one: the republished key expires no
+        // later than the hourly's own write would have, so this cron cannot keep
+        // any flag alive past the rotation that is supposed to judge it. Combined
+        // with next.updated carrying the standing instant rather than the run's
+        // clock, it is lifetime-neutral and staleness-neutral — it can move a
+        // color and nothing else.
+        const ageSec = Math.floor((Date.now() - candidate.updatedMs) / 1000);
+        const ttl = FLAG_TTL_SECONDS - ageSec;
+        if (ttl < FAST_MIN_REMAINING_TTL_SECONDS) {
+          skipLease = skipLease + 1;
+          return;
+        }
+        const stored = Object.assign({}, next, {
+          estimateInputs: sealFromSignals(candidate.signals, candidate.alertPart)
+        });
+        await env.FLAGS.put("flag:" + row.id, JSON.stringify(stored), { expirationTtl: ttl });
+        written = written + 1;
+        if (nextRank > standingRank) {
+          raised = raised + 1;
+        } else if (nextRank < standingRank) {
+          lowered = lowered + 1;
+        }
+        // Patch the scan's own entry rather than re-reading the key KV has no
+        // read-your-own-writes guarantee for.
+        const entry = scan.byId.get(row.id);
+        if (entry) {
+          entry.estColor = next.color;
+          entry.estUpdated = next.updated;
+        }
+      }, makeDeadline(Date.now(), budget.writeDeadlineMs));
+
+      // Step 6: publish the directory as a full rebuild from this scan, with the
+      // entries this run wrote patched in place. Not a read-modify-write of the
+      // published key: both writers derive the whole value from KV truth, so a
+      // lost update discards one truth-derived build for another, bounded at one
+      // build period, with no torn state and nothing to reconcile.
+      mapdirState = await putMapDirectory(env, scan.entries, nowIso)
+        ? String(scan.entries.length)
+        : "failed";
+    }
+
+    // skipStaleLower= and feed=unverified are the operator trip-wires: the first
+    // means the hourly rotation has fallen behind, the second that the count
+    // cross-check is failing and US clear-down has silently reverted to hourly
+    // latency.
+    const feedState = usFeedUsable ? (usLowerAllowed ? "complete" : "unverified") : "down";
+    console.log(
+      "index: alert refresh complete, rows=" + String(rows.length) +
+      " candidates=" + String(candidates.length) +
+      " written=" + String(written) +
+      " raised=" + String(raised) +
+      " lowered=" + String(lowered) +
+      " skipNoStanding=" + String(skipNoStanding) +
+      " skipNoSeal=" + String(skipNoSeal) +
+      " skipAuthority=" + String(skipAuthority) +
+      " skipLease=" + String(skipLease) +
+      " skipStaleLower=" + String(skipStaleLower) +
+      " skipFeedLower=" + String(skipFeedLower) +
+      " skipCanadaLower=" + String(skipCanadaLower) +
+      " skipSuperseded=" + String(skipSuperseded) +
+      " capped=" + (capped ? "1" : "0") +
+      " feed=" + feedState +
+      " features=" + String(nationalAlerts === null ? "none" : nationalAlerts.featureCount) +
+      " parsed=" + String(nationalAlerts === null ? "none" : nationalAlerts.alerts.length) +
+      " count=" + String(alertCount === null ? "none" : alertCount.total) +
+      " eccc=" + (ecccUsable ? "ok" : "down") +
+      " mapdir=" + mapdirState +
+      " elapsedMs=" + String(Date.now() - startedMs)
+    );
+  } catch (err) {
+    console.log("index: alert refresh failed: " + err.message);
+  }
+}
+
 // 6-hourly water-temperature refresh. Display-only: the reading it publishes
 // colors no flag, never reaches src/rules.js and bumps no RULES_VERSION. It is
 // the only writer of "watertemp:" + id, which the detail page renders as its
@@ -1431,6 +1851,7 @@ async function runWebcamSync(env) {
 // logged.
 const CRON_JOBS = {
   "7 * * * *": { run: runFlagRecompute, label: "flag recompute" },
+  "3-53/10 * * * *": { run: runAlertRefresh, label: "alert refresh" },
   "15 */6 * * *": { run: runWaterTempRefresh, label: "water temp refresh" },
   "17 3,9,15,21 * * *": { run: runNwsEnrichment, label: "nws enrichment" },
   "29 4,10,16,22 * * *": { run: runEcccEnrichment, label: "eccc enrichment" },

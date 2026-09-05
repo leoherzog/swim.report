@@ -5,9 +5,11 @@
 // onset/effective, ends/expires, geocode.UGC codes, affectedZones URLs).
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  NWS_ACTIVE_ALERTS_COUNT_URL,
   NWS_ACTIVE_ALERTS_URL,
   NWS_USER_AGENT,
   alertsUrlForZone,
+  fetchActiveAlertCount,
   fetchAllActiveAlerts,
   fetchLatestSrfText,
   fetchPointMetadata,
@@ -149,6 +151,96 @@ describe("fetchAllActiveAlerts", function () {
   });
 });
 
+describe("fetchAllActiveAlerts feed-integrity fields", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("reports the RAW feature count, before the event and zone filter", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [
+          alertFeature({ props: { event: null } }),
+          alertFeature({ props: { event: "Gale Warning", geocode: null, affectedZones: [] } }),
+          alertFeature({ props: { event: "Small Craft Advisory" } })
+        ]
+      });
+    });
+    const result = await fetchAllActiveAlerts();
+    // Only the raw count is comparable to the count endpoint's total: the parse
+    // legitimately drops two of these three features.
+    expect(result.alerts.length).toBe(1);
+    expect(result.featureCount).toBe(3);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("flags a paginated response as truncated", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [alertFeature({})],
+        pagination: { next: "https://api.weather.gov/alerts/active?cursor=2" }
+      });
+    });
+    const result = await fetchAllActiveAlerts();
+    expect(result.truncated).toBe(true);
+  });
+});
+
+describe("fetchActiveAlertCount", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads total from the count endpoint with the NWS User-Agent", async function () {
+    let requestedUrl = null;
+    let requestedInit = null;
+    vi.stubGlobal("fetch", function (url, init) {
+      requestedUrl = url;
+      requestedInit = init;
+      return okJson({ total: 183, zones: 4000 });
+    });
+    expect(await fetchActiveAlertCount()).toEqual({ total: 183 });
+    expect(requestedUrl).toBe(NWS_ACTIVE_ALERTS_COUNT_URL);
+    expect(requestedInit.headers["User-Agent"]).toBe(NWS_USER_AGENT);
+  });
+
+  it("accepts a genuine zero", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ total: 0 });
+    });
+    expect(await fetchActiveAlertCount()).toEqual({ total: 0 });
+  });
+
+  it("returns null for a missing, non-numeric or negative total", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ zones: 4000 });
+    });
+    expect(await fetchActiveAlertCount()).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return okJson({ total: "183" });
+    });
+    expect(await fetchActiveAlertCount()).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return okJson({ total: -1 });
+    });
+    expect(await fetchActiveAlertCount()).toBeNull();
+  });
+
+  it("returns null on HTTP failure and on a rejected fetch, never throws", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 503 });
+    });
+    expect(await fetchActiveAlertCount()).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network down"));
+    });
+    expect(await fetchActiveAlertCount()).toBeNull();
+  });
+});
+
 describe("fetchLatestSrfText", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
@@ -270,7 +362,9 @@ describe("fetchAllActiveAlerts with missing or malformed features", function () 
     // The hourly cron treats null as a fetch failure; an alert-free body must
     // instead resolve to an empty alerts list with the source URL intact.
     const result = await fetchAllActiveAlerts();
-    expect(result).toEqual({ alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL });
+    expect(result).toEqual({
+      alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount: 0, truncated: false
+    });
   });
 
   it("treats a non-array features value as an empty success, never throws", async function () {
@@ -278,7 +372,9 @@ describe("fetchAllActiveAlerts with missing or malformed features", function () 
       return okJson({ features: "nope" });
     });
     const result = await fetchAllActiveAlerts();
-    expect(result).toEqual({ alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL });
+    expect(result).toEqual({
+      alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount: 0, truncated: false
+    });
   });
 });
 

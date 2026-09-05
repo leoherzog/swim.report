@@ -336,7 +336,28 @@ classification (offline)](#discovery-and-classification-offline)).
   scraper's optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs` and
   `readingNote` ride along as display-side hints, not TTLs. `waveinput:` keys expire on an
   absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
-  required, and a missing key just means the estimate falls back to wind or `unknown`.
+  required, and a missing key just means the estimate falls back to wind or `unknown`. As its
+  last step it rebuilds the map directory `GET /api/beaches.geojson` serves, from KV truth
+  plus the estimates and officials it wrote in the same run — KV offers no read-your-own-writes
+  guarantee, so a rebuild that read those keys back would publish the previous hour's colors.
+  A rebuild that fails or runs out of time writes nothing and leaves the last directory in
+  place, because a partial one would drop beaches from the map entirely. Each `flag:` value it
+  writes also carries an `estimateInputs` seal — the non-alert inputs that estimate was decided
+  from — which is what lets the alerts refresh below recompute a beach without refetching or
+  losing any of them.
+- `3-53/10 * * * *` (every 10 min) — `runAlertRefresh`. NWS alerts are the one event-driven
+  input, so this cron closes the gap between a warning being issued and the flag moving from
+  up to an hour to about ten minutes. It makes four national fetches whose cost does not grow
+  with the beach table, compares each beach's current alert set against the set its standing
+  estimate used, and recomputes only the beaches whose alert situation actually changed —
+  reusing the sealed non-alert inputs so a recompute can never lower a flag by losing a wave
+  reading, a rip-current risk or a water-quality advisory. It publishes a lowering only from a
+  feed whose completeness it verified against `api.weather.gov/alerts/active/count` and whose
+  features it could actually parse, so a quiet nation and a feed whose shape changed under it
+  are never confused; Canadian beaches, which have no equivalent count endpoint, are
+  raise-only. It never restamps
+  a reading's timestamp, never extends a key's life, and writes nothing but `flag:` and the map
+  directory.
 - `15 */6 * * *` (6-hourly) — `runWaterTempRefresh`: the sole writer of `watertemp:` + beachId,
   the WTMP water temperature from the nearest station able to serve that reading (see "Water
   temperature stations"), deduped by station id so each file is fetched once and fanned to
@@ -385,10 +406,11 @@ developing via the scheduled-handler endpoint:
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=31+9+*+*+*"           # webcam hydration
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=15+*/6+*+*+*"         # 6-hourly water-temperature refresh
     curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=7+*+*+*+*"            # hourly flag recompute
+    curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=3-53/10+*+*+*+*"      # alerts refresh
     # (marine_zone is derived offline by the discovery batch — not a cron; see npm run seed:marine)
 
-`npm run seed:enrich` / `seed:eccc` / `seed:webcams` / `seed:watertemp` / `seed:flags` wrap
-those crons. `npm run seed:marine` is not a cron wrapper — it runs the offline `marine_zone`
+`npm run seed:enrich` / `seed:eccc` / `seed:webcams` / `seed:watertemp` / `seed:flags` /
+`seed:alerts` wrap those crons. `npm run seed:marine` is not a cron wrapper — it runs the offline `marine_zone`
 derivation against local D1, so run it after `seed:enrich` has stamped `nws_zone`.
 
 The local database starts empty. Run `npm run seed:layers` once to download and verify the

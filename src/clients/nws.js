@@ -20,6 +20,13 @@ const NWS_TIMEOUT_MS = 45000;
 // matching happens locally in nwsAlertsForZone.
 export const NWS_ACTIVE_ALERTS_URL = "https://api.weather.gov/alerts/active";
 
+// The count view of the same active-alert population, produced by a different
+// code path upstream. The alerts refresh cron cross-checks one against the other:
+// fetchAllActiveAlerts cannot tell a genuinely quiet nation from a 200 whose
+// schema drifted, because both parse to zero alerts, and a parse materially short
+// of the API's own total is truncation or drift whatever its magnitude.
+export const NWS_ACTIVE_ALERTS_COUNT_URL = "https://api.weather.gov/alerts/active/count";
+
 // Per-zone provenance URL for FlagEstimate source entries. The cron fetches
 // NWS_ACTIVE_ALERTS_URL; the zone-scoped view is the more useful pointer for a
 // given beach's payload.
@@ -74,7 +81,8 @@ function alertZoneIds(props) {
 // Every active alert nationwide in ONE fetch (the hourly cron calls this once
 // per run regardless of zone count; per-zone filtering happens locally via
 // nwsAlertsForZone). Success ->
-//   { alerts: [{ event, onset, ends, zones: [zone ids] }], sourceUrl }
+//   { alerts: [{ event, onset, ends, zones: [zone ids] }], sourceUrl,
+//     featureCount, truncated }
 // where onset/ends fall back onset -> effective / ends -> expires (null when
 // the feed omits both) and zones comes from alertZoneIds. Features without an
 // event name or with zero resolvable zone ids are skipped (a zoneless alert
@@ -104,7 +112,35 @@ export async function fetchAllActiveAlerts() {
       zones: zones
     });
   }
-  return { alerts: alerts, sourceUrl: NWS_ACTIVE_ALERTS_URL };
+  return {
+    alerts: alerts,
+    sourceUrl: NWS_ACTIVE_ALERTS_URL,
+    // The RAW feature count, before the event/zone filter above, because that is
+    // the only figure comparable to the count endpoint's total: this parse
+    // legitimately drops features with no event name and features with no
+    // resolvable zone.
+    featureCount: features.length,
+    // A paginated response is a partial view of the population, so the refusal
+    // it drives is the same one a short parse drives.
+    truncated: json.pagination ? true : false
+  };
+}
+
+// Total active alerts nationwide in one small fetch. Success -> { total },
+// failure -> null. A response whose total is not a finite non-negative number is
+// a failure: an unusable cross-check must read as "unverified", never as a
+// license to clear flags.
+export async function fetchActiveAlertCount() {
+  const json = await fetchNwsJson(NWS_ACTIVE_ALERTS_COUNT_URL, "active alert count");
+  if (json === null) {
+    return null;
+  }
+  const total = json.total;
+  if (typeof total !== "number" || !isFinite(total) || total < 0) {
+    console.log("nws: active alert count missing total");
+    return null;
+  }
+  return { total: total };
 }
 
 // Pure, exported for tests — the NWS counterpart of ecccAlertsForPoint.

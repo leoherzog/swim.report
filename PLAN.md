@@ -121,8 +121,30 @@ cross-module interface.
         { "label": "NOAA GFS Wave Model",
           "url": "https://polar.ncep.noaa.gov/waves/" }
       ],
-      "updated": "2026-07-04T15:00:03.000Z"
+      "updated": "2026-07-04T15:00:03.000Z",
+      "estimateInputs": {       // cron-written SEAL of the non-alert inputs this estimate was
+        "v": 1,                 // decided from. rules.js neither reads nor produces it:
+        "alertsResolved": true, // runFlagRecompute spreads it onto the value AFTER estimateFlag
+        "windSpeedMph": 12,     // returns, and runAlertRefresh reads it back to recompute with
+        "windGustMph": null,    // fresh alerts and every other input unchanged. alertsResolved
+        "waterQualityAdvisory": null,   // is false when neither authority resolved alerts this
+        "signalSources": [      // run, which is what distinguishes a failed national fetch from
+          { "label": "NOAA Great Lakes Wave Model",   // "checked, none active" — the echoed
+            "url": "https://polar.ncep.noaa.gov/waves/" }   // alertDetails is [] for both.
+        ]                       // Older KV payloads lack the seal entirely, and the refresh
+      }                         // cron skips those beaches rather than reading them partially.
     }
+
+waveHeightFt, ripCurrentRisk, sources and updated are echoed above, so the seal does not
+repeat them. Completeness rule: the seal, plus those echoed fields, plus alertsCheckable
+recomputed from the D1 row, must cover every estimateFlag input except alerts and
+alertDetails — otherwise a refresh would pass null for a missing one and silently LOWER the
+flag. src/flagInputs.js is where both halves are built, from one shared signals object, and
+test/flagInputs.test.js enforces the rule as a round-trip property (including a JSON hop,
+because JSON.stringify emits null for NaN and Infinity alike) rather than by discipline.
+alertsCheckable is deliberately NOT sealed: recomputing it from three D1 columns both crons
+hold is cheaper and strictly more correct, since a beach enriched between runs would
+otherwise carry a stale caveat beside a live alert.
 
 Source entries are { label, url } objects: label is short display text (wave labels name
 the grid that supplied the reading, mapped by waveSourceLabel in src/waveModels.js); url is
@@ -135,17 +157,6 @@ accepts legacy bare-string entries, rendered as their hostname with "www." strip
     {
       "beachId": "osm-node-123456",
       "color": "red",                // "green" | "yellow" | "red" | "double-red"
-waveHeightFt, ripCurrentRisk, sources and updated are echoed above, so the seal does not
-repeat them. Completeness rule: the seal, plus those echoed fields, plus alertsCheckable
-recomputed from the D1 row, must cover every estimateFlag input except alerts and
-alertDetails — otherwise a refresh would pass null for a missing one and silently LOWER the
-flag. src/flagInputs.js is where both halves are built, from one shared signals object, and
-test/flagInputs.test.js enforces the rule as a round-trip property (including a JSON hop,
-because JSON.stringify emits null for NaN and Infinity alike) rather than by discipline.
-alertsCheckable is deliberately NOT sealed: recomputing it from three D1 columns both crons
-hold is cheaper and strictly more correct, since a beach enriched between runs would
-otherwise carry a stale caveat beside a live alert.
-
                                      // (scraper-dependent subset)
       "reason": "Official flag reported by City of South Haven Beach Flag Program",
       "official": true,
@@ -310,17 +321,6 @@ estimate (rules.js step 7, official:false), never an official override, and it n
 render.js markerFlagColor / titleColor. The request path reads it to render a distinct
 water-quality callout.
 
-## 2. D1 schema — migrations/
-
-migrations/0001_init.sql, exact SQL:
-
-    CREATE TABLE beaches (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      lat REAL NOT NULL,
-      lon REAL NOT NULL,
-      nws_zone TEXT,
-      nws_grid_url TEXT,
 ### MapDirectory (KV value under "mapdirectory:v1")
 
     {
@@ -372,6 +372,17 @@ Read-time resolution, in src/mapDirectory.js:
   FLAG_TTL_SECONDS, this artifact must start carrying the official's own expiry instant,
   because it currently infers the pair's expiry from the estimate's timestamp alone.
 
+## 2. D1 schema — migrations/
+
+migrations/0001_init.sql, exact SQL:
+
+    CREATE TABLE beaches (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      lat REAL NOT NULL,
+      lon REAL NOT NULL,
+      nws_zone TEXT,
+      nws_grid_url TEXT,
       osm_id TEXT NOT NULL
     );
 
@@ -556,7 +567,16 @@ Binding name: FLAGS (single namespace for both key families).
   of displayFlagColor (section 9) and an estimate that outlives the posted flag it is
   weighed against downgrades a posted red to an estimated green; "wqfloor:" keeps the
   shorter KV_TTL_SECONDS, since expiry is the only way a cleared advisory is withdrawn and
-  the callout decides no color.
+  the callout decides no color. FLAG_TTL_SECONDS lives in src/flagTtl.js, not src/index.js,
+  because the entry module rejects non-function named exports (section 7) and both the cron
+  path and src/mapDirectory.js read it. The value also carries the estimateInputs seal
+  (section 1). There is a SECOND writer: runAlertRefresh (section 7) republishes it with
+  { expirationTtl: FLAG_TTL_SECONDS minus the standing value's age in seconds }, so the key
+  expires no LATER than the hourly's own write would have and this cron cannot keep a flag
+  alive past the rotation that is supposed to judge it. It never restamps updated: the
+  republished estimate carries the standing instant, the moment the non-alert inputs were
+  gathered, so the detail page's staleness warning keeps telling the truth about the wave and
+  rip data behind the color.
 - Key "official:" + beachId → JSON.stringify(OfficialFlag). Written by the hourly cron with
   { expirationTtl: 25200 } by default (FLAG_TTL_SECONDS); a scraper object may set an optional
   `officialTtlSeconds` to extend it when it fetches on a reduced cadence, so its last color
@@ -567,6 +587,11 @@ Binding name: FLAGS (single namespace for both key families).
   orthogonal: `officialTtlSeconds` governs how long the KV value lives, `staleMs` how the
   renderer judges the reading's age. nws-omr-grr (30 h) and winnetka-tower-beach (72 h)
   declare `staleMs`; only nws-omr-grr declares a `readingNote` (section 6).
+  Standing precondition the map directory depends on: because no scraper declares
+  `officialTtlSeconds`, an official's KV lease is never shorter than its paired estimate's,
+  which is what lets the directory infer the pair's expiry from the estimate's timestamp
+  alone. If one ever declares a LONGER one, the directory must start carrying the official's
+  own expiry instant (section 1, MapDirectory).
 - Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the offline NOAA GRIB2
   wave cycle, only when the series has >= 1 finite hour. Read only by the detail route; the
   list page must not gain per-row reads. Absent key → the detail page omits the
@@ -587,11 +612,6 @@ Binding name: FLAGS (single namespace for both key families).
   Display-only — never feeds src/rules.js. Absent key → the subtitle omits the fragment.
   Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential per-beach
   await env.FLAGS.put (section 7, "Run budgets and write pools").
-  Standing precondition the map directory depends on: because no scraper declares
-  `officialTtlSeconds`, an official's KV lease is never shorter than its paired estimate's,
-  which is what lets the directory infer the pair's expiry from the estimate's timestamp
-  alone. If one ever declares a LONGER one, the directory must start carrying the official's
-  own expiry instant (section 1, MapDirectory).
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
   with { expirationTtl: 7200 }, only when a src/wqFloor source resolved an active advisory;
   a clean or absent reading writes nothing and the key expires naturally, like "official:".
@@ -599,9 +619,23 @@ Binding name: FLAGS (single namespace for both key families).
   override: it is the same advisory the estimate already folded in as a raise-only floor
   (rules.js step 7, official:false), surfaced separately for the UI. Absent key → no active
   advisory, never a "clean" green.
+- Key "mapdirectory:v1" → JSON.stringify(MapDirectory) (section 1). Written whole or not at
+  all by the beach-touching crons with { expirationTtl: 10800 } — three times the hourly
+  build period, so two consecutive dead builds are tolerated. A build whose scan trips its
+  deadline writes nothing and leaves the previous value to ride its own TTL, because a
+  partial directory would drop beaches from the map entirely rather than merely leave them
+  stale. A build that produced ZERO entries is refused on the same rule: it is the maximal
+  partial, and the read path would take it as an authoritative empty map for the full TTL
+  rather than degrading. Read by handleBeachesGeojson in a single get; absent, unparseable or
+  version-mismatched means the all-unknown degraded branch (section 8), never a color.
 - Key "scraperhealth:" + scraperId → JSON { consecutiveNulls, lastSuccess,
   lastFailure }. Written by the hourly cron with no expirationTtl (the failure
   streak must survive across runs). See section 7 step 8.
+
+Single writers that do not change: the hourly cron remains the sole writer of "wqfloor:",
+"official:", "scraperhealth:" and the recompute_updated rotation cursor. runAlertRefresh
+writes only "flag:" and "mapdirectory:v1", and must never gain one of those four — expiry
+stays the only way a cleared advisory is withdrawn, and the cursor stays single-writer.
 
 Never written from the fetch handler. Absent/expired key means "no data": the API returns
 null for that slot; the frontend renders gray "unknown" for a missing estimate and omits the
@@ -619,15 +653,6 @@ Pure module. No fetch, no Date, no env. Exports:
       // eccc_zone resolved yet).
 
     export const ALERT_PRECEDENCE = [
-- Key "mapdirectory:v1" → JSON.stringify(MapDirectory) (section 1). Written whole or not at
-  all by the beach-touching crons with { expirationTtl: 10800 } — three times the hourly
-  build period, so two consecutive dead builds are tolerated. A build whose scan trips its
-  deadline writes nothing and leaves the previous value to ride its own TTL, because a
-  partial directory would drop beaches from the map entirely rather than merely leave them
-  stale. A build that produced ZERO entries is refused on the same rule: it is the maximal
-  partial, and the read path would take it as an authoritative empty map for the full TTL
-  rather than degrading. Read by handleBeachesGeojson in a single get; absent, unparseable or
-  version-mismatched means the all-unknown degraded branch (section 8), never a color.
       // double-red (must precede every red — first match wins regardless of color)
       "Tornado Warning",             // -> double-red
       "High Surf Warning",           // -> double-red
@@ -2094,7 +2119,7 @@ carries no r2_buckets binding.
 wrangler.toml triggers:
 
     [triggers]
-    crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+    crons = ["7 * * * *", "3-53/10 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
@@ -2104,6 +2129,11 @@ matched job; an unrecognized cron is logged and ignored. The table:
                          repo's own workflows avoid. No ordering against the offline wave
                          cycle is required, because "waveinput:" keys carry an absolute
                          expiration derived from the model valid time.
+- "3-53/10 * * * *"    → runAlertRefresh(env). Level-triggered alerts refresh, every 10
+                         minutes. Four national fetches, no per-beach upstream call; writes
+                         only "flag:" and the map directory. Offset off the hourly's measured
+                         22-147 s window starting at :07, and off every other minute in this
+                         table — a plain "*/10" would fire at :10, inside a slow hourly run.
 - "15 */6 * * *"       → runWaterTempRefresh(env). Sole writer of "watertemp:", and sole
                          writer and reader of the wave_updated rotation cursor.
 - "17 3,9,15,21 * * *" → runNwsEnrichment(env). Picks up rows the offline batch inserted.
@@ -2122,6 +2152,11 @@ Constants: MAX_BEACHES_PER_RUN = 1200, FLAG_TTL_SECONDS = 25200, KV_TTL_SECONDS 
 KV_WRITE_CONCURRENCY = 12, MAP_SCAN_DEADLINE_MS = 120000,
 HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
 src/demandWindow.js rather than src/index.js — see "Entry-module export shape" below).
+FLAG_TTL_SECONDS lives in src/flagTtl.js for the same entry-module reason and is imported
+back; src/mapDirectory.js reads the matching FLAG_TTL_MS on the request path.
+The step-7 wave and wind reads use Number.isFinite, not typeof x === "number", so a
+malformed "waveinput:" value cannot reach rules.js step 3's unguarded else branch and decide
+green. That is caller-side input validation, not a rule change, and bumps no RULES_VERSION.
 
 MAX_BEACHES_PER_RUN bounds one run's wall clock and KV write budget; it does not have to
 cover the table. A beach is hot when its last_viewed falls within HOT_VIEW_WINDOW_MS of the
@@ -2152,11 +2187,6 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    active demand lose its reading to the rotation the moment the table outgrows one run.
    Migration 0012 explains why one shared cursor is not viable. NULLs sort first within
    each tier, and the leading guard evaluates to 0 for NULL or older last_viewed, so
-FLAG_TTL_SECONDS lives in src/flagTtl.js for the same entry-module reason and is imported
-back; src/mapDirectory.js reads the matching FLAG_TTL_MS on the request path.
-The step-7 wave and wind reads use Number.isFinite, not typeof x === "number", so a
-malformed "waveinput:" value cannot reach rules.js step 3's unguarded else branch and decide
-green. That is caller-side input validation, not a rule change, and bumps no RULES_VERSION.
    never-viewed and stale-viewed rows sort into the cold tier after every hot row. The
    per-run summary log adds hot=<count> and oldest=<oldest cursor stamp selected, or
    none>.
@@ -2220,9 +2250,17 @@ green. That is caller-side input validation, not a rule change, and bumps no RUL
    Resolve the water-quality floor for this beach against its group's step-6b result via
    scrapeWqFloorFromResult -> waterQualityAdvisory (null when clean or absent) and pass it
    into estimateFlag. waveHeightFt, windSpeedMph and windGustMph come from the beach's
-   "waveinput:" KV payload (step 5); updated = nowIso; call estimateFlag; then
-   env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate),
-   { expirationTtl: 25200 } (FLAG_TTL_SECONDS)).
+   "waveinput:" KV payload (step 5); updated = nowIso.
+   The alert half comes from buildAlertInputs(beach, alertCtx) and the whole bundle from
+   buildEstimateInputs(beach, alertPart, signals) (src/flagInputs.js), the same two functions
+   runAlertRefresh calls, so the two crons cannot drift in how they match a zone, attribute a
+   source or normalize a reading. Call estimateFlag on that bundle, then spread
+   sealFromSignals(signals, alertPart) onto the RESULT as estimateInputs (section 1) — after
+   estimateFlag returns, so rules.js sees nothing new — and
+   env.FLAGS.put("flag:" + beach.id, JSON.stringify(stored),
+   { expirationTtl: 25200 } (FLAG_TTL_SECONDS)). The seal and the estimate ride one put with
+   one expiry instant; sealing from the SAME signals object the estimate consumed is what
+   makes the seal's completeness structural rather than maintained.
    Only when the advisory is non-null, also write
    env.FLAGS.put("wqfloor:" + beach.id, JSON.stringify(waterQualityAdvisory),
    { expirationTtl: 7200 }) for the request path's water-quality callout — a clean reading
@@ -2291,6 +2329,27 @@ green. That is caller-side input validation, not a rule change, and bumps no RUL
    ceiling; runWaterTempRefresh stamps wave_updated incrementally instead (migration 0012).
    The two crons deliberately do not share a cursor: recompute_updated is written and read
    by this cron alone.
+11. Rebuild the map directory (section 1, MapDirectory), after the step-10 batch and before
+   the completion log, inside its own try/catch that logs and swallows — a builder failure
+   must never change this run's estimate, official or history accounting. One statement,
+   MAP_DIRECTORY_SQL, selects every flag-worthy row with its id/name/park_name/lat/lon plus
+   the three zone columns, ORDER BY id and no bind parameters. scanMapDirectory then walks
+   the rows in chunks of 100, bulk-reading "flag:" and "official:" for the ids it does not
+   already hold, and putMapDirectory publishes the whole value at
+   MAP_DIRECTORY_TTL_SECONDS.
+   The preload is load-bearing: KV offers no read-your-own-writes guarantee, so this run
+   passes BOTH estimatesByBeach and officialsByBeach and the scan never requests those keys
+   at all. With estimates only, a flag posted this run renders the previous hour's official
+   color on the map for an hour. A beach whose put FAILED is deliberately absent from the
+   preload, so it falls through to the KV read and keeps its old standing value rather than
+   dropping to unknown. Both maps carry `updated` alongside the color for this reason.
+   The scan streams: each chunk keeps only the four scalars an entry needs and lets the
+   parsed KV values go out of scope, so peak memory is one chunk plus the entry array rather
+   than the whole table's parsed payloads. It is bounded by MAP_SCAN_DEADLINE_MS, a rail
+   against a hung KV read rather than a routine truncation point; a scan that trips it
+   returns null, the run writes no artifact, and the completion log reads mapdir=truncated.
+   A build that produced zero entries is refused the same way and logs mapdir=failed. The log
+   line's mapdir field is otherwise the published entry count.
 
 Subrequest budget (paid plan, 10,000 per invocation): 1 NWS national alerts call + 2 ECCC
 national fetches (only when Canadian rows exist) + ~2×15 SRF calls + ≤1200 waveinput KV
@@ -2333,27 +2392,6 @@ reaches src/rules.js, so it can never change a flag color and never bumps RULES_
    null (winter gap, all-"MM", stale, 404) is a normal outcome, not an error. No new
    upstream work starts after WAVE_GATHER_DEADLINE_MS.
 3. Write: one bounded-concurrency pool (runPool, KV_WRITE_CONCURRENCY, src/pool.js) writing
-11. Rebuild the map directory (section 1, MapDirectory), after the step-10 batch and before
-   the completion log, inside its own try/catch that logs and swallows — a builder failure
-   must never change this run's estimate, official or history accounting. One statement,
-   MAP_DIRECTORY_SQL, selects every flag-worthy row with its id/name/park_name/lat/lon plus
-   the three zone columns, ORDER BY id and no bind parameters. scanMapDirectory then walks
-   the rows in chunks of 100, bulk-reading "flag:" and "official:" for the ids it does not
-   already hold, and putMapDirectory publishes the whole value at
-   MAP_DIRECTORY_TTL_SECONDS.
-   The preload is load-bearing: KV offers no read-your-own-writes guarantee, so this run
-   passes BOTH estimatesByBeach and officialsByBeach and the scan never requests those keys
-   at all. With estimates only, a flag posted this run renders the previous hour's official
-   color on the map for an hour. A beach whose put FAILED is deliberately absent from the
-   preload, so it falls through to the KV read and keeps its old standing value rather than
-   dropping to unknown. Both maps carry `updated` alongside the color for this reason.
-   The scan streams: each chunk keeps only the four scalars an entry needs and lets the
-   parsed KV values go out of scope, so peak memory is one chunk plus the entry array rather
-   than the whole table's parsed payloads. It is bounded by MAP_SCAN_DEADLINE_MS, a rail
-   against a hung KV read rather than a routine truncation point; a scan that trips it
-   returns null, the run writes no artifact, and the completion log reads mapdir=truncated.
-   A build that produced zero entries is refused the same way and logs mapdir=failed. The log
-   line's mapdir field is otherwise the published entry count.
    "watertemp:" + beachId with { expirationTtl: WAVE_DATA_TTL_SECONDS } for every beach
    whose station produced a valid recent reading. The pool yields at
    WAVE_WRITE_DEADLINE_MS rather than being killed at the 900 s ceiling. No cron may
@@ -2365,6 +2403,143 @@ reaches src/rules.js, so it can never change a flag color and never bumps RULES_
 5. The completion log reports truncation from clock exhaustion and write failures as
    separate fields, so one flaky put cannot trip the truncation alarm while a systemic
    write outage stays unmissable.
+
+### runAlertRefresh (every 10 min: "3-53/10 * * * *")
+
+Constants: FAST_WRITE_DEADLINE_MS = 240000, FAST_MIN_REMAINING_TTL_SECONDS = 300,
+FAST_LOWER_MAX_SEAL_AGE_MS = 7200000, FAST_MAX_BEACHES_PER_RUN = 2000, ALERT_COUNT_SLACK = 5,
+ALERT_PARSE_DROP_MAX = 5, plus MAP_SCAN_DEADLINE_MS and KV_WRITE_CONCURRENCY shared with the
+hourly. FAST_WRITE_DEADLINE_MS is measured from the write pool's own start, not from the top
+of the invocation: the four sequential fetches can spend 180 s and the scan another 120 s
+ahead of it, and anchoring at the invocation would leave the pool no budget at all — a run
+that writes nothing while every skip counter reads zero. 180 + 120 + 240 still sits inside
+the 600 s cadence.
+
+NWS alerts are the only event-driven input in the system, so this cron closes the gap
+between a warning being issued and the flag moving from up to an hour to about ten minutes.
+Its upstream cost is flat in the beach table; its per-beach cost is paid only for beaches
+whose alert situation actually changed.
+
+1. One D1 statement, MAP_DIRECTORY_SQL — the same one the artifact builder needs anyway,
+   carrying id, name, park_name, lat, lon, the three zone columns and recompute_updated. No
+   zone IN list, no bind chunking and no marine_zone index: zone matching is a Map lookup per
+   beach in memory, over a Set built by a plain loop — the concat reduce the hourly uses is
+   quadratic, and this cron walks the whole table against a sub-hourly 30 s CPU allowance.
+   The scan reads both key families for every flag-worthy row on every run, so at 144 runs a
+   day this is 288N KV key-reads a day (about 320k at 1,102 rows, 2.9M at 10k, 29M at 100k).
+   That is the price of level triggering, and there is no cheaper selection: the standing
+   alert set lives inside the "flag:" value. TODO.md carries it as a scale trigger.
+2. Four national fetches, each in its own try/catch and each bounded by its client's
+   timeoutMs (NWS_TIMEOUT_MS 45000, ECCC_TIMEOUT_MS 45000): fetchAllActiveAlerts(),
+   fetchActiveAlertCount(), fetchActiveEcccAlerts(nowIso), fetchActiveEcccMarineAlerts(nowIso).
+   Nothing else is fetched — no SRF, no wqFloor scrape, no official scrape, no "waveinput:"
+   read — so a 10-minute cadence costs third-party sites nothing and there is no second
+   source of truth for any non-alert input.
+3. Feed integrity gate, entirely intra-run, with no persisted feed state and no absolute
+   feature floor:
+
+       usFeedUsable  = nationalAlerts !== null
+       usLowerAllowed = usFeedUsable && nationalAlerts.truncated === false &&
+                        alertCount !== null &&
+                        nationalAlerts.featureCount + ALERT_COUNT_SLACK >= alertCount.total &&
+                        nationalAlerts.featureCount - nationalAlerts.alerts.length
+                          <= ALERT_PARSE_DROP_MAX
+       ecccUsable    = ecccAlerts !== null && ecccMarineAlerts !== null
+
+   fetchAllActiveAlerts cannot distinguish a genuinely quiet nation from a 200 whose schema
+   drifted — both yield alerts: [] — so the count endpoint is an independent view of the same
+   population produced by a different upstream code path, and a parse materially short of the
+   API's own total is truncation or drift whatever its magnitude. That is the gap every
+   fraction-based rail leaves open. ALERT_COUNT_SLACK covers only the skew between two fetches
+   taken about a second apart.
+   The two clauses answer different questions, and both are needed. The count proves the whole
+   population ARRIVED; the parse-drop clause proves the parse UNDERSTOOD it. featureCount is
+   the raw pre-filter count — it has to be, to stay comparable to the count endpoint — so a
+   drift that renames properties.event or restructures geocode.UGC / affectedZones yields
+   alerts: [] with featureCount still equal to total, and the count clause alone would license
+   a nationwide clear-down. A healthy feed drops almost nothing at that filter, since an active
+   alert carries an event name and at least one zone id, so a drop above ALERT_PARSE_DROP_MAX
+   is drift rather than routine loss. Consequences: nationalAlerts null excludes every US beach (a
+   missing feed is not evidence of clearing); an unusable count, a short parse or a pagination
+   cursor leaves US raises at 10-minute latency and sends US lowerings back to the hourly,
+   logged feed=unverified; either ECCC collection null excludes every Canadian beach, stricter
+   than the hourly's deliberate proceed-on-partial-success because at 6x cadence a
+   marine-collection outage would repeatedly drop a live "gale warning" red to a wave-height
+   green.
+4. One scanMapDirectory pass over the rows, with a synchronous onRow selecting while the
+   standing estimate is still in hand, so selection costs no second read. Five guards, in
+   order, each a SKIP that leaves the standing value untouched — there is no code path in
+   which estimateFlag is called with a null substituted for a sealed input:
+   (1) no standing value, so the hourly publishes this beach's first estimate;
+   (2) signalsFromStanding returns null — no seal, another seal version, or a malformed
+   signalSources; (3) authority eligibility, against usFeedUsable / ecccUsable;
+   (4) supersession — the row's recompute_updated is NEWER than the standing value's updated.
+   The hourly writes "flag:" with updated = its run instant and stamps recompute_updated with
+   that same instant, and D1 is strongly consistent where KV is not, so a standing value older
+   than the stamp is either a stale KV replica of a beach the hourly has already rewritten or a
+   put that failed. Recomputing either would republish an hour-old bundle over the hourly's
+   newer decision, and no lowering rail would see it: they compare against that same superseded
+   value. Counted skipSuperseded. It does not cover the window between one hourly put and that
+   run's end-of-run stamp, where neither store has caught up yet; what remains there is the
+   same one-cadence clobber the level trigger already owns.
+   (5) lease — an unparseable or future updated, or under FAST_MIN_REMAINING_TTL_SECONDS of
+   lease left, which belongs to the hourly since KV's minimum expirationTtl is 60 s.
+   A surviving beach is selected when the alert half failed to resolve this run, when the
+   seal records that it failed for the hourly (alertsResolved false — the repair for a failed
+   national fetch, whose echoed alertDetails is [] and otherwise indistinguishable from
+   "checked, none active"), or when eventKey(current) !== eventKey(standing). Sets, not order,
+   not timestamps and never severity: comparing severities would reimplement ALERT_PRECEDENCE
+   outside rules.js, and set inequality is what catches a zone swapping Small Craft Advisory
+   for Gale Warning or losing one of two alerts.
+   Only the standing COLOR survives into the candidate list, never the parsed standing payload,
+   and the list itself is capped at FAST_MAX_BEACHES_PER_RUN. Both keep the scan's streaming
+   discipline honest: a nationwide event moves most zones' alert sets at once, and one retained
+   payload per row would carry the whole table into the 128 MB isolate long before the write
+   cap — which is checked inside the pool worker — could bound anything.
+   There is deliberately no persisted alert baseline, no run lock and no per-zone truncation
+   contract. The standing set is free, because the scan reads every "flag:" key anyway. Level
+   triggering also repairs the hourly/fast race automatically: a fast raise clobbered by a
+   slow hourly's older snapshot reverts alertDetails to the pre-alert set, which differs from
+   current, so the next run re-selects and re-raises it. No KV lock could close that race —
+   no CAS, a lock reads stale for up to 60 s, and a run killed at the 900 s ceiling never
+   deletes it.
+5. Recompute and write, through a KV_WRITE_CONCURRENCY-wide runPool bounded by
+   FAST_WRITE_DEADLINE_MS. Per candidate: estimateFlag(buildEstimateInputs(row, alertPart,
+   signals)), then three rails on the LOWERING direction only, since age can only understate a
+   hazard — Canada is raise-only (neither GeoMet collection has a count endpoint, so a
+   Canadian lowering cannot come from a feed whose completeness was verified), usLowerAllowed
+   must hold for US beaches, and no lowering may be decided by inputs older than
+   FAST_LOWER_MAX_SEAL_AGE_MS, which is exactly render.js STALE_MS. Then the put, with
+   expirationTtl = FLAG_TTL_SECONDS minus the standing value's age and the seal spread back
+   on. FAST_MAX_BEACHES_PER_RUN caps WRITES, not reads, and is checked inside the pool worker
+   rather than by slicing the candidate list; the binding ceiling is the 10,000-subrequest cap,
+   not wall clock. A capped or truncated run is self-continuing: uncapped beaches keep their
+   old standing alert set, so the next run re-selects them.
+   The write is unconditional for a selected beach that clears its rails, not gated on a
+   strict color change: selection already means the alert set moved, so the reason string,
+   alertDetails and sources are stale by definition, and the remaining-lease TTL makes the
+   write harmless because it can only shorten a lease.
+6. Publish the map directory from the same scan, with the entries this run wrote patched in
+   place — a full rebuild, not a read-modify-write of the published key. A scan that trips
+   MAP_SCAN_DEADLINE_MS means no recompute and no artifact write at all, logged
+   mapdir=truncated. An empty entry list is refused rather than published, logged
+   mapdir=failed: it is the maximal partial, and the request path would serve it as an
+   authoritative zero-feature map for the artifact's whole TTL.
+7. What it never writes: "wqfloor:" (the hourly stays its single writer, so expiry remains
+   the only way a cleared advisory is withdrawn), "official:", a flag_history row (it scrapes
+   no officials, so it has no estimate/official pair to log), and above all
+   recompute_updated, which is runFlagRecompute's rotation cursor and single-writer by
+   contract. This cron needs no cursor because it is level-triggered over the whole table.
+
+Completion log fields, in order: rows, candidates, written, raised, lowered, skipNoStanding,
+skipNoSeal, skipAuthority, skipLease, skipStaleLower, skipFeedLower, skipCanadaLower,
+skipSuperseded, capped, feed ("complete" | "unverified" | "down"), features, parsed, count,
+eccc ("ok" | "down"), mapdir (entry count, or "truncated" | "failed"), elapsedMs. features is
+the raw feature count and parsed the number the client could read, so the two together say
+which half of the gate refused a clear-down. skipStaleLower= and feed=unverified are
+the two operator trip-wires: the first means the hourly rotation has fallen behind, the second
+that the count cross-check is failing and US clear-down has silently reverted to hourly
+latency.
 
 ### Run budgets and write pools (src/pool.js)
 
@@ -2402,6 +2577,21 @@ The water-temp cron's wall-clock budgets are WAVE_GATHER_DEADLINE_MS (480000) an
 WAVE_WRITE_DEADLINE_MS (840000), plus the WAVE_CURSOR_FLUSH_SIZE (100) flush granularity
 for the write pool's cursor. The two deadlines are numeric-env-overridable via
 runBudget(env).
+
+The alerts refresh cron's write pool takes FAST_WRITE_DEADLINE_MS (240000), numeric-env-
+overridable via fastRunBudget(env) in the same idiom, alongside FAST_MAX_BEACHES_PER_RUN
+(2000), which caps writes rather than reads and is checked inside the pool worker. Its worst
+case — four fetches bounded at 45 s each, plus the scan deadline, plus the write deadline,
+plus one in-flight put — sits comfortably inside the 600 s cadence, so two runs cannot overlap
+in practice; nothing in the design depends on that, because there is no persisted state for
+two runs to race over and the artifact write is a whole-value put of a truth-derived build.
+
+The map-directory scan has its own budget, MAP_SCAN_DEADLINE_MS (120000), numeric-env-
+overridable via mapScanBudgetMs(env) in the same idiom. Its truncation contract is the
+opposite of the water-temp cron's: that cron persists a prefix because it has a cursor to
+advance, while the directory has none, and a partial directory would drop beaches from the
+map entirely rather than merely leave them stale. So the scan is whole or nothing — a
+tripped deadline writes no artifact and the previous one rides its own TTL.
 
 Truncation contract. A run that trips a deadline is a successful partial run, not a failure:
 every beach the write pool reached has its KV written and its wave_updated stamped; every
@@ -3056,6 +3246,14 @@ Routing table (method GET only; anything else → 405):
     explicit because Cloudflare's default on Worker error is to serve stale indefinitely,
     which would freeze the HTML's embedded nowIso-based staleness warnings without bound;
     600 s caps the total stale window at ~11 min.
+  - /api/beaches.geojson has its OWN policy, not CACHEABLE:
+    "public, max-age=60, stale-while-revalidate=60, stale-if-error=600" on a served
+    directory, and "public, max-age=60, stale-if-error=600" (no SWR at all) on the degraded
+    branch. The 600 s SWR existed to hide a multi-second cache-miss origin; the origin is now
+    one KV read plus a few ms of CPU, so 600 s would only add up to ten minutes to the very
+    flip latency the read-time color gate was chosen to preserve. 60 s still gives
+    single-request-per-colo-per-minute herd protection, and dropping SWR on the degraded
+    branch means the map recovers within a minute of the builder returning.
   - "public, max-age=60", no SWR, on the /api/flag 404 — a just-discovered beach must stop
     404ing within a minute rather than linger for the SWR window.
   - "no-store" on the home page, /health, and all other 404s and error pages. The home page
@@ -3095,7 +3293,7 @@ Routing table (method GET only; anything else → 405):
     enabled = true
 
     [triggers]
-    crons = ["7 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
+    crons = ["7 * * * *", "3-53/10 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
 
     [[d1_databases]]
     binding = "DB"
@@ -3607,6 +3805,36 @@ ripCurrentRisk output echoes.
 - test/metroparks.test.js, test/chicagoParkDistrict.test.js — each exercises its scraper's
   pure parse functions against inline fixtures, including ambiguous and unknown-status rows
   being omitted, plus matches() with matching and non-matching BeachRow fixtures.
+- test/mapDirectory.test.js — mapDirectoryEntry (non-finite coords dropped, the
+  park_name/name/"" label fallback, null records nulling both fields), buildMapDirectory's
+  stamped v/builtAt/count, and mapDirectoryFeatures: PARITY against markerFlagColor called
+  directly on the same records across the whole displayFlagColor gate, the estimate's
+  FLAG_TTL_MS expiry resolving to unknown rather than its stored green, the official dropped
+  with a provably expired estimate, no independent official expiry check, and [] for a null,
+  malformed or version-mismatched directory.
+- test/cronTriggers.test.js — parses the crons array out of wrangler.toml and the CRON_JOBS
+  keys out of src/index.js and asserts the two are the same set. Nothing else catches a
+  mismatch: an unlisted cron logs "unknown cron" and does nothing, and the reverse never
+  fires at all.
+- test/flagInputs.test.js — the seal's safety proof. A matrix over rip risk, wave height,
+  wind, water-quality advisory, source sets, alert shapes and beach authorities, asserting
+  signalsFromStanding(JSON round trip of the stored value) equals the signals the estimate was
+  built from and re-estimates to an identical FlagEstimate. The JSON hop is not optional:
+  JSON.stringify emits null for NaN and Infinity alike. Plus a coverage assertion against a
+  literal field list, so adding an input to rules.js without adding it to the seal fails here;
+  signalsFromStanding's four rejections; buildEstimateInputs' normalizations and
+  alertsCheckable; and buildAlertInputs parity with the pre-refactor hourly branches.
+- test/alertRefresh.test.js — runAlertRefresh through the scheduled handler: the level
+  trigger (gain, clear, swap, partial loss, equal sets, alertsResolved false), every guard
+  asserting the standing value is untouched — including a standing value D1's
+  recompute_updated shows the hourly has already superseded — the degraded-feed matrix
+  (national fetch null, count null, short parse, a full feed that parsed to nothing,
+  agreeing counts, pagination, ECCC marine null), the LOWERING
+  regression set — a cleared warning must still land red from a sealed water-quality
+  advisory, rip risk, wave height or wind fallback, never green — the Canada raise-only and
+  stale-seal rails, and the write mechanics (remaining-lease TTL, updated never restamped,
+  seal present, nothing but "flag:" and the directory written, both deadlines, and an empty
+  flag-worthy read publishing no directory at all).
 - test/scraperHealth.test.js — updateScraperHealth (increment/reset, 23-vs-24 boundary,
   exact alert strings, "never" fallback).
 - test/waveGrids.test.js — grid selection under water_class, containsPoint, the
