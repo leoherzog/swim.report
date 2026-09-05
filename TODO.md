@@ -148,8 +148,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   rescues beach polygons that exist. P.J. Hoffmaster State Park has a park
   polygon but no `natural=beach` element inside it, so it still doesn't appear.
   Fixing OSM is the fix.
-- **Canadian beaches: alerts and marine warnings supported, no rip or surf signal.** Ontario
-  shoreline beaches get Environment Canada land alert coverage (ECCC zone enrichment plus the
+- **Canadian beaches: alerts and marine warnings supported, no rip or surf signal.** Canadian
+  beaches on every coast get Environment Canada land alert coverage (ECCC zone enrichment plus the
   hourly national GeoMet `weather-alerts` fetch matched by alert-region polygon,
   `src/clients/eccc.js`, rules step 1b) and marine warnings (`marineweather-realtime`,
   `src/clients/ecccMarine.js`, matched by marine-zone polygon and concatenated into the same

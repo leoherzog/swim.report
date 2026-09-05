@@ -1,6 +1,7 @@
 // src/clients/ecccMarine.js — the ECCC MSC GeoMet marine-warnings client, the
 // marine counterpart to the land weather-alerts path in src/clients/eccc.js, for
-// the Great Lakes beaches on the Canadian shoreline that api.weather.gov 404s.
+// every Canadian beach api.weather.gov 404s: Great Lakes, St. Lawrence, Atlantic,
+// Pacific, Arctic and Hudson Bay shorelines alike.
 //
 // Fetch and defensive parse only; it decides no flag color. src/index.js matches
 // its output per beach with ecccMarineAlertsForPoint and concats it onto the
@@ -11,16 +12,17 @@
 //   ?f=json  (send ECCC_USER_AGENT from ./eccc.js). Returns a GeoJSON
 //   FeatureCollection. Each Feature is one per-zone Polygon:
 //     - geometry: Polygon / MultiPolygon (the marine zone, over WATER)
-//     - properties.area.region.en  e.g. "Great Lakes" / "St. Lawrence"
-//     - properties.area.value.en   e.g. "Lake Erie"
+//     - properties.area.region.en  e.g. "Great Lakes" / "Atlantic - Nova Scotia"
+//     - properties.area.value.en   e.g. "Lake Erie" / "Halifax Harbour"
 //     - properties.lastUpdated     ISO timestamp (feature level; used as onset)
 //     - properties.warnings.locations[] { name.en, events[] }
 //         events[] = { name.en, type.en, category.en (=="marine"),
 //                      status.en ("IN EFFECT" / "CONTINUED" / "ENDED") }
 //   Marine events carry no per-event datetime, only a status, so status is the
 //   authoritative active/ended signal: keep IN EFFECT and CONTINUED, drop ENDED.
-//   Scoped to Great Lakes marine warnings (area.region.en == "Great Lakes",
-//   event category.en == "marine").
+//   Every region in the collection is a candidate; the only event-level scope is
+//   category.en == "marine". Geography is decided per beach by the point match,
+//   never by a region-name filter, so region rides along as provenance only.
 //
 // The color and floor mapping src/rules.js applies to these event names, recorded
 // here only as provenance. This module never decides or exports a color:
@@ -59,12 +61,12 @@ const ECCC_MARINE_COLLECTION = "marineweather-realtime";
 // visitors (reuses ECCC's public marine index).
 export const ECCC_MARINE_INFO_URL = "https://weather.gc.ca/marine/index_e.html";
 
-// Only Great Lakes marine zones are in scope for this product.
-export const ECCC_MARINE_GREAT_LAKES_REGION = "Great Lakes";
-
 // Nearest-edge leniency cap for ecccMarineAlertsForPoint's fallback. Marine
 // polygons cover water while beach points sit on land, so point-in-polygon alone
-// under-matches: a beach's adjacent marine zone can be up to ~15 km offshore
+// under-matches. The cap bounds beach-to-nearest-edge distance, not zone size,
+// so an ocean zone reaching hundreds of km offshore is no different from a lake
+// zone: what matters is how far inshore of the polygon's landward edge the beach
+// point sits, and ~15 km covers a coarsely drawn shoreline edge either way
 // (matches src/marineZones.js MARINE_ZONE_MAX_DISTANCE_KM).
 export const ECCC_MARINE_MAX_EDGE_KM = 15;
 
@@ -93,8 +95,8 @@ function localizedEn(obj) {
   return nonEmptyString(obj.en);
 }
 
-// Pure. Given a raw GeoMet FeatureCollection and nowIso, returns the active Great
-// Lakes marine warnings as a flat alerts array in the same shape as
+// Pure. Given a raw GeoMet FeatureCollection and nowIso, returns every active
+// marine warning nationwide as a flat alerts array in the same shape as
 // fetchActiveEcccAlerts's entries:
 //   [{ event, onset, ends, geometry, region, value }]
 // event is the lowercased event name, onset is properties.lastUpdated falling
@@ -102,9 +104,9 @@ function localizedEn(obj) {
 // (active/ended is by status), geometry is the zone Polygon, and region/value
 // ride along for provenance. One entry per active event per zone.
 //
-// Only Great Lakes features with an areal geometry are considered, and only
-// marine-category events with an active status are kept. A feature or event that
-// cannot be understood is skipped, never guessed. Returns null only when the
+// Only features with an area object and an areal geometry are considered, and
+// only marine-category events with an active status are kept. A feature or event
+// that cannot be understood is skipped, never guessed. Returns null only when the
 // top-level payload is unusable; an all-clear collection returns [].
 export function parseEcccMarineAlerts(json, nowIso) {
   if (json === null || typeof json !== "object") {
@@ -136,9 +138,6 @@ export function parseEcccMarineAlerts(json, nowIso) {
       continue;
     }
     const region = localizedEn(area.region);
-    if (region !== ECCC_MARINE_GREAT_LAKES_REGION) {
-      continue;
-    }
     const geometry = feature.geometry;
     if (geometry === null || typeof geometry !== "object") {
       continue;
@@ -185,7 +184,7 @@ export function parseEcccMarineAlerts(json, nowIso) {
   return alerts;
 }
 
-// Every active Great Lakes marine warning nationwide in one fetch; the caller
+// Every active marine warning nationwide in one fetch; the caller
 // matches beaches locally with ecccMarineAlertsForPoint. nowIso is threaded to
 // the pure parser as an onset fallback. Success ->
 //   { alerts: [{ event, onset, ends, geometry, region, value }], sourceUrl }

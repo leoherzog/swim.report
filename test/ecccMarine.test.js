@@ -1,6 +1,7 @@
 // [experimental] ECCC marine-warnings client tests. Fixtures mirror real
 // api.weather.gc.ca/collections/marineweather-realtime responses (pygeoapi
-// GeoJSON: per-zone Polygon features; properties.area.region.en "Great Lakes";
+// GeoJSON: per-zone Polygon features; properties.area.region.en "Great Lakes",
+// "Atlantic - Nova Scotia", "Pacific - British Columbia", ...;
 // properties.warnings.locations[].events[] { name.en, type.en, category.en
 // "marine", status.en "IN EFFECT"/"CONTINUED"/"ENDED" }; properties.lastUpdated
 // ISO). No network — the pure parser + point matcher are exercised against
@@ -10,8 +11,7 @@ import {
   parseEcccMarineAlerts,
   ecccMarineAlertsForPoint,
   fetchActiveEcccMarineAlerts,
-  ECCC_MARINE_MAX_EDGE_KM,
-  ECCC_MARINE_GREAT_LAKES_REGION
+  ECCC_MARINE_MAX_EDGE_KM
 } from "../src/clients/ecccMarine.js";
 
 const NOW_ISO = "2026-07-22T12:00:00.000Z";
@@ -110,9 +110,62 @@ describe("parseEcccMarineAlerts", function () {
     // onset falls back to properties.lastUpdated; ends is null (no per-event expiry)
     expect(alerts[0].onset).toBe("2026-07-22T10:00:00Z");
     expect(alerts[0].ends).toBe(null);
-    expect(alerts[0].region).toBe(ECCC_MARINE_GREAT_LAKES_REGION);
+    expect(alerts[0].region).toBe("Great Lakes");
     expect(alerts[0].value).toBe("Lake Erie");
     expect(alerts[0].geometry.type).toBe("Polygon");
+  });
+
+  it("keeps every region: Atlantic, Pacific and Arctic zones parse alongside the lakes", function () {
+    const json = collection([
+      marineFeature({
+        region: "Atlantic - Nova Scotia",
+        value: "Halifax Harbour",
+        lat: 44.6,
+        lon: -63.5,
+        events: [marineEvent("Gale warning", "IN EFFECT")]
+      }),
+      marineFeature({
+        region: "Pacific - British Columbia",
+        value: "Strait of Georgia - north of Nanaimo",
+        lat: 49.4,
+        lon: -124.2,
+        events: [marineEvent("Strong wind warning", "IN EFFECT")]
+      }),
+      marineFeature({
+        region: "Arctic - Nunavut",
+        value: "Frobisher Bay",
+        lat: 63.2,
+        lon: -67.5,
+        events: [marineEvent("Storm warning", "CONTINUED")]
+      }),
+      marineFeature({
+        value: "Lake Erie",
+        events: [marineEvent("Gale warning", "IN EFFECT")]
+      })
+    ]);
+    const alerts = parseEcccMarineAlerts(json, NOW_ISO);
+    expect(alerts.map(function (a) { return a.region; })).toEqual([
+      "Atlantic - Nova Scotia",
+      "Pacific - British Columbia",
+      "Arctic - Nunavut",
+      "Great Lakes"
+    ]);
+    expect(alerts.map(function (a) { return a.event; })).toEqual([
+      "gale warning",
+      "strong wind warning",
+      "storm warning",
+      "gale warning"
+    ]);
+    expect(alerts[0].value).toBe("Halifax Harbour");
+  });
+
+  it("carries a missing region name as null rather than dropping the feature", function () {
+    const feat = marineFeature({ events: [marineEvent("Gale warning", "IN EFFECT")] });
+    delete feat.properties.area.region;
+    const alerts = parseEcccMarineAlerts(collection([feat]), NOW_ISO);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].region).toBe(null);
+    expect(alerts[0].event).toBe("gale warning");
   });
 
   it("drops ENDED events but keeps IN EFFECT / CONTINUED", function () {
@@ -146,12 +199,17 @@ describe("parseEcccMarineAlerts", function () {
     expect(parseEcccMarineAlerts(noStatus, NOW_ISO)).toEqual([]);
   });
 
-  it("ignores non-Great-Lakes regions and non-marine categories", function () {
+  it("ignores non-marine categories whatever the region", function () {
     const json = collection([
       marineFeature({
         region: "St. Lawrence",
         value: "Lake Saint-Jean",
-        events: [marineEvent("Gale warning", "IN EFFECT")]
+        events: [{
+          name: { en: "Gale warning" },
+          type: { en: "warning" },
+          category: { en: "public" },
+          status: { en: "IN EFFECT" }
+        }]
       }),
       marineFeature({
         value: "Lake Huron",
@@ -164,6 +222,20 @@ describe("parseEcccMarineAlerts", function () {
       })
     ]);
     expect(parseEcccMarineAlerts(json, NOW_ISO)).toEqual([]);
+  });
+
+  it("still drops a feature with no area object or no areal geometry", function () {
+    const noGeometry = marineFeature({
+      region: "Atlantic - Newfoundland",
+      events: [marineEvent("Gale warning", "IN EFFECT")]
+    });
+    noGeometry.geometry = null;
+    const noArea = marineFeature({
+      region: "Pacific - British Columbia",
+      events: [marineEvent("Gale warning", "IN EFFECT")]
+    });
+    noArea.properties.area = null;
+    expect(parseEcccMarineAlerts(collection([noGeometry, noArea]), NOW_ISO)).toEqual([]);
   });
 
   it("uses nowIso as an onset fallback when lastUpdated is absent", function () {
@@ -234,6 +306,41 @@ describe("ecccMarineAlertsForPoint", function () {
     const out = ecccMarineAlertsForPoint(alerts, 42.2, -79.0);
     expect(out.events).toEqual([]);
     expect(out.details).toEqual([]);
+  });
+
+  it("matches an Atlantic beach inside a Nova Scotia zone and a Pacific beach inside a BC zone", function () {
+    const alerts = parseEcccMarineAlerts(collection([
+      marineFeature({
+        region: "Atlantic - Nova Scotia",
+        value: "Halifax Harbour",
+        lat: 44.6,
+        lon: -63.5,
+        events: [marineEvent("Gale warning", "IN EFFECT")]
+      }),
+      marineFeature({
+        region: "Pacific - British Columbia",
+        value: "Strait of Georgia - south of Nanaimo",
+        lat: 49.0,
+        lon: -123.6,
+        events: [marineEvent("Storm warning", "IN EFFECT")]
+      }),
+      marineFeature({
+        value: "Lake Erie",
+        lat: 42.2,
+        lon: -81.2,
+        events: [marineEvent("Strong wind warning", "IN EFFECT")]
+      })
+    ]), NOW_ISO);
+    // Lawrencetown Beach, NS: inside the Halifax Harbour square.
+    const atlantic = ecccMarineAlertsForPoint(alerts, 44.64, -63.35);
+    expect(atlantic.events).toEqual(["gale warning"]);
+    // A shoreline point ~5.5 km north of the BC square's top edge (49.2), so it
+    // matches through the nearest-edge fallback rather than containment.
+    const pacific = ecccMarineAlertsForPoint(alerts, 49.25, -123.6);
+    expect(pacific.events).toEqual(["storm warning"]);
+    // Neither ocean zone leaks onto the Lake Erie beach, nor the reverse.
+    const lake = ecccMarineAlertsForPoint(alerts, 42.2, -81.2);
+    expect(lake.events).toEqual(["strong wind warning"]);
   });
 
   it("dedupes repeated event names and returns empty on malformed/non-finite input", function () {

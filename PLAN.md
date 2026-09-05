@@ -1191,15 +1191,16 @@ fetch and matches beaches locally via pointInGeometry.
 
 ### src/clients/ecccMarine.js (ECCC GeoMet marine-warnings client, cron-side)
 
-The marine-weather counterpart to src/clients/eccc.js. Fetch, pure defensive parse and
-point matching only — it never decides a flag color and exports no color map. Disjoint from
+The marine-weather counterpart to src/clients/eccc.js, national in scope: every region in
+the collection (Great Lakes, St. Lawrence, Atlantic, Pacific, Arctic, Hudson Bay) is a
+candidate and geography is decided per beach by the point match. Fetch, pure defensive parse
+and point matching only — it never decides a flag color and exports no color map. Disjoint from
 fetchActiveEcccAlerts, since the land weather-alerts collection carries no marine warnings,
 so it adds new signal rather than duplicates. Its matches concat onto the land ECCC matches
 in the same alerts[] input, exactly as the US branch concats marine onto land (section 7).
 
     export const ECCC_MARINE_COLLECTION = "marineweather-realtime";
     export const ECCC_MARINE_INFO_URL = "https://weather.gc.ca/marine/index_e.html";
-    export const ECCC_MARINE_GREAT_LAKES_REGION = "Great Lakes";
     export const ECCC_MARINE_MAX_EDGE_KM = 15;
 
     // No color mapping lives here. The live mapping is src/rules.js's
@@ -1208,8 +1209,8 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
 
     export function parseEcccMarineAlerts(json, nowIso)
       // Pure, exported for tests. Raw GeoMet FeatureCollection -> { alerts: [...] } | null.
-      // One Feature per marine zone. Scoped to area.region.en === "Great Lakes" and event
-      // category.en === "marine". Marine events carry no per-event datetime, only a
+      // One Feature per marine zone. Every area.region.en is a candidate; the only
+      // event-level scope is category.en === "marine". Marine events carry no per-event datetime, only a
       // status — keep IN EFFECT / CONTINUED, drop ENDED. name.en arrives Title-cased and
       // is lowercased to match rules.js's keys; an unmapped string yields no event,
       // never a wrong color.
