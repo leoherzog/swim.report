@@ -40,7 +40,12 @@
 // the repo never resolves an unpinned transitive tree from the network.
 
 import { mergeBeachRows } from "../src/discovery.js";
-import { classifyLayerFeature, discoverFromLayers } from "../src/layerDiscovery.js";
+import {
+  buildPondEvidenceFilter,
+  classifyLayerFeature,
+  discoverFromLayers,
+  pondEvidenceCandidate
+} from "../src/layerDiscovery.js";
 import {
   addSignalsFeature,
   beachAbsentFromLayers,
@@ -316,57 +321,109 @@ async function readLogicalLayer(dir, fileNames) {
   return out;
 }
 
-// Load the layer set discoverFromLayers consumes.
+// One pass over a streamed probe layer, feeding two consumers per feature: the
+// signals index builder (every feature, geometry chopped into typed-array
+// segments and dropped) and the discovery retention list (only what the pond
+// pool could use, see pondEvidenceCandidate). features may be any iterable or
+// async iterable of LayerFeatures. builder may be null when this run builds no
+// signals index. Returns { streamed, retained }.
+export async function splitProbeLayer(features, layerName, builder, filter) {
+  let streamed = 0;
+  const retained = [];
+  for await (const feature of features) {
+    streamed = streamed + 1;
+    if (builder !== null) {
+      addSignalsFeature(builder, layerName, feature);
+    }
+    if (pondEvidenceCandidate(filter, feature)) {
+      retained.push(feature);
+    }
+  }
+  return { streamed: streamed, retained: retained };
+}
+
+// Stream one logical layer's files through splitProbeLayer. Deno-only.
+async function streamLogicalLayer(dir, layerName, builder, filter) {
+  let streamed = 0;
+  let retained = [];
+  const fileNames = LAYER_FILES[layerName];
+  for (let i = 0; i < fileNames.length; i = i + 1) {
+    const name = fileNames[i];
+    const split = await splitProbeLayer(readFgbStream(joinLayerPath(dir, name), layerName),
+      layerName, builder, filter);
+    streamed = streamed + split.streamed;
+    retained = retained.concat(split.retained);
+  }
+  return { streamed: streamed, retained: retained };
+}
+
+// Load the layer set discoverFromLayers consumes and, when wantSignals is true,
+// build the classification index in the same pass.
 //
-// beaches and parks must be materialised: membership, association and the pond
-// filter all need whole geometry, not envelopes. coastline and water are
-// materialised too, which is safe only because the build proximity-clips them to
-// the beach set, making them O(beaches) rather than O(continent). lakes-polygon is
-// never materialised anywhere: it streams straight into the signals index below,
-// because six simplified Great Lake polygons are megabytes of coordinates and a
-// GeoJSON coordinate pair costs roughly 10-20x its packed FlatGeobuf footprint in
-// a JS heap.
-async function loadLayerSet(dir) {
+// beaches and parks are materialised: membership, association and the pond
+// filter all need whole geometry, not envelopes. coastline, water and lakes are
+// streamed exactly once each and never held as arrays; every feature goes into
+// the segment-grid index, and a coastline or water feature is retained for
+// discovery only when it is a way whose radius-padded envelope overlaps a beach
+// envelope, which is everything the pond pool can use. Peak memory for the
+// retained subset is O(beaches), not O(coast), so a continental coastline costs
+// this process only its typed-array segments.
+//
+// The index is built here rather than in a second read so both halves of the run
+// see one identical view of the beach set: the beaches array below is the one
+// discovery scans and the one the index is keyed on, so "absent from the layer
+// set" can never mean "absent from the copy classification happened to read".
+//
+// Returns { layerSet, signalsIndex, counts } where layerSet is exactly the shape
+// discoverFromLayers takes, signalsIndex is null unless wantSignals, and counts
+// carries the streamed totals beside the retained sizes for the run log.
+async function loadLayerSet(dir, wantSignals) {
   const beaches = await readLogicalLayer(dir, LAYER_FILES.beaches);
   const parksPoly = await readLogicalLayer(dir, LAYER_FILES.parksPoly);
   const parksName = await readLogicalLayer(dir, LAYER_FILES.parksName);
-  const coastline = await readLogicalLayer(dir, LAYER_FILES.coastline);
-  const water = await readLogicalLayer(dir, LAYER_FILES.water);
   const other = await readLogicalLayer(dir, LAYER_FILES.otherRelations);
   const split = splitOtherRelations(other);
-  return {
-    beaches: beaches.concat(split.beaches),
-    parksPoly: parksPoly,
-    parksName: parksName.concat(split.parks),
-    coastline: coastline,
-    water: water,
-    otherRelations: other.length
-  };
-}
+  const allBeaches = beaches.concat(split.beaches);
 
-// Build the classification index over the same arrays discovery already holds,
-// plus a streamed lakes layer. Feeding the in-memory arrays through the three-call
-// builder rather than re-reading the files guarantees both halves of the run see
-// one identical view of the beach set, so "absent from the layer set" can never
-// mean "absent from the copy classification happened to read".
-async function buildRunSignalsIndex(dir, layerSet) {
-  const builder = beginSignalsIndex();
-  for (let i = 0; i < layerSet.beaches.length; i = i + 1) {
-    addSignalsFeature(builder, "beaches", layerSet.beaches[i]);
-  }
-  for (let i = 0; i < layerSet.coastline.length; i = i + 1) {
-    addSignalsFeature(builder, "coastline", layerSet.coastline[i]);
-  }
-  for (let i = 0; i < layerSet.water.length; i = i + 1) {
-    addSignalsFeature(builder, "water", layerSet.water[i]);
-  }
-  for (let i = 0; i < LAYER_FILES.lakes.length; i = i + 1) {
-    const name = LAYER_FILES.lakes[i];
-    for await (const feature of readFgbStream(joinLayerPath(dir, name), name)) {
-      addSignalsFeature(builder, "lakes", feature);
+  const builder = wantSignals ? beginSignalsIndex() : null;
+  if (builder !== null) {
+    for (let i = 0; i < allBeaches.length; i = i + 1) {
+      addSignalsFeature(builder, "beaches", allBeaches[i]);
     }
   }
-  return finishSignalsIndex(builder);
+  const filter = buildPondEvidenceFilter(allBeaches);
+  const coastline = await streamLogicalLayer(dir, "coastline", builder, filter);
+  const water = await streamLogicalLayer(dir, "water", builder, filter);
+  let lakesStreamed = 0;
+  if (builder !== null) {
+    // lakes feed the index only; discovery never reads them, so nothing is
+    // retained and the filter is not consulted.
+    for (let i = 0; i < LAYER_FILES.lakes.length; i = i + 1) {
+      const name = LAYER_FILES.lakes[i];
+      for await (const feature of readFgbStream(joinLayerPath(dir, name), "lakes")) {
+        lakesStreamed = lakesStreamed + 1;
+        addSignalsFeature(builder, "lakes", feature);
+      }
+    }
+  }
+  return {
+    layerSet: {
+      beaches: allBeaches,
+      parksPoly: parksPoly,
+      parksName: parksName.concat(split.parks),
+      coastline: coastline.retained,
+      water: water.retained
+    },
+    signalsIndex: builder === null ? null : finishSignalsIndex(builder),
+    counts: {
+      otherRelations: other.length,
+      coastlineStreamed: coastline.streamed,
+      coastlineRetained: coastline.retained.length,
+      waterStreamed: water.streamed,
+      waterRetained: water.retained.length,
+      lakesStreamed: lakesStreamed
+    }
+  };
 }
 
 // --- The manifest gate ------------------------------------------------------
@@ -1238,15 +1295,28 @@ export async function main() {
   out.push("");
 
   // --- Load the layer set ---------------------------------------------------
+  // The signals index is built in the same streaming pass, so whether this run
+  // classifies has to be known here; the gate above already decided it.
   let layerSet = null;
+  let signalsIndex = null;
   if (args.discovery || args.classify) {
     const loadStartMs = Date.now();
-    layerSet = await loadLayerSet(args.layers);
+    const loaded = await loadLayerSet(args.layers, args.classify && classifyAllowed);
+    layerSet = loaded.layerSet;
+    signalsIndex = loaded.signalsIndex;
+    const lc = loaded.counts;
     log("layers loaded in " + String(Date.now() - loadStartMs) + "ms: beaches=" +
       String(layerSet.beaches.length) + " parksPoly=" + String(layerSet.parksPoly.length) +
-      " parksName=" + String(layerSet.parksName.length) + " coastline=" +
-      String(layerSet.coastline.length) + " water=" + String(layerSet.water.length) +
-      " otherRelations=" + String(layerSet.otherRelations));
+      " parksName=" + String(layerSet.parksName.length) +
+      " coastline_streamed=" + String(lc.coastlineStreamed) +
+      " coastline_retained=" + String(lc.coastlineRetained) +
+      " water_streamed=" + String(lc.waterStreamed) +
+      " water_retained=" + String(lc.waterRetained) +
+      " lakes_streamed=" + String(lc.lakesStreamed) +
+      " otherRelations=" + String(lc.otherRelations));
+    if (signalsIndex !== null) {
+      log("signals index built during load: " + JSON.stringify(signalsIndexStats(signalsIndex)));
+    }
   }
 
   // Inputs to the classification queue. With discovery off nothing is discovered
@@ -1383,11 +1453,6 @@ export async function main() {
   // discovery just read, in the same run, so a beach discovered above is
   // classified below and never reaches the site unclassified.
   if (args.classify && classifyAllowed) {
-    const indexStartMs = Date.now();
-    const signalsIndex = await buildRunSignalsIndex(args.layers, layerSet);
-    const stats = signalsIndexStats(signalsIndex);
-    log("signals index built in " + String(Date.now() - indexStartMs) + "ms: " +
-      JSON.stringify(stats));
     const queue = buildClassifyQueue(snapshotRows, mergedRows, deletedIds);
     log("classification queue=" + String(queue.length) + " absent_bump_armed=" + String(armAbsentBump));
     const classifyStartMs = Date.now();

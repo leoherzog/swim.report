@@ -903,6 +903,92 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
     expect(second.color).toBe("red");
     expect(second.trigger).toBe("rip-current");
   });
+
+  it("pools the per-WFO fetches with one WFO throwing and one null, isolating each to its own beaches", async function () {
+    const urls = [];
+    let inFlight = 0;
+    let peakInFlight = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      urls.push(target);
+      if (target.indexOf("/products/types/SRF/") === -1) {
+        return Promise.reject(new Error("network disabled in test"));
+      }
+      inFlight = inFlight + 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          inFlight = inFlight - 1;
+          if (target.indexOf("/locations/LOT/") !== -1) {
+            resolve({ ok: false, status: 404 });
+            return;
+          }
+          resolve({
+            ok: true,
+            status: 200,
+            json: function () {
+              // GRR's product text throws when the parser coerces it, the only
+              // route to a genuine throw past fetchLatestSrfText's null contract.
+              const text = target.indexOf("/locations/GRR/") !== -1
+                ? { toString: function () { throw new Error("bad product text"); } }
+                : "SRFMKX\n\n.TODAY...\nRIP CURRENT RISK IS HIGH.\n";
+              return Promise.resolve({ productText: text });
+            }
+          });
+        }, 5);
+      });
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-1",
+        nws_zone: "MIZ071",
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33"
+      }),
+      makeBeachRow({
+        id: "osm-node-2",
+        name: "Test Beach Beta",
+        nws_zone: "ILZ014",
+        nws_grid_url: "https://api.weather.gov/gridpoints/LOT/76,73"
+      }),
+      makeBeachRow({
+        id: "osm-node-3",
+        name: "Test Beach Gamma",
+        nws_zone: "WIZ066",
+        nws_grid_url: "https://api.weather.gov/gridpoints/MKX/80,60"
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const srfRequests = urls.filter(function (u) {
+      return u.indexOf("/products/types/SRF/") !== -1;
+    });
+    expect(srfRequests.sort()).toEqual([
+      "https://api.weather.gov/products/types/SRF/locations/GRR/latest",
+      "https://api.weather.gov/products/types/SRF/locations/LOT/latest",
+      "https://api.weather.gov/products/types/SRF/locations/MKX/latest"
+    ]);
+    expect(peakInFlight).toBe(3);
+
+    const first = JSON.parse(made.kvPuts.get("flag:osm-node-1").value);
+    const second = JSON.parse(made.kvPuts.get("flag:osm-node-2").value);
+    const third = JSON.parse(made.kvPuts.get("flag:osm-node-3").value);
+    // The throwing and null WFOs carry no rip input and no SRF source.
+    for (const estimate of [first, second]) {
+      expect(estimate.ripCurrentRisk).toBeNull();
+      expect(estimate.trigger).not.toBe("rip-current");
+      expect(estimate.sources.some(function (s) {
+        return s.label === "NWS Surf Zone Forecast";
+      })).toBe(false);
+    }
+    expect(third.color).toBe("red");
+    expect(third.trigger).toBe("rip-current");
+    expect(third.ripCurrentRisk).toBe("HIGH");
+    expect(third.sources).toContainEqual({
+      label: "NWS Surf Zone Forecast",
+      url: "https://api.weather.gov/products/types/SRF/locations/MKX/latest"
+    });
+  });
 });
 
 // Step 8's official: KV TTL: default FLAG_TTL_SECONDS (25200), so the record

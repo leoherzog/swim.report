@@ -124,7 +124,13 @@ tests.
   for the six Great Lake polygons: their bounding boxes contain essentially every Great Lakes
   beach. Mode B keeps typed arrays rather than a multi-gigabyte GeoJSON heap.
 - **`src/layerDiscovery.js`** — `discoverFromLayers`, plus hole-aware park containment and
-  the pond water pooling.
+  the pond water pooling. Only beaches, parks and other-relations are materialised; coastline,
+  water and lakes stream through `readFgbStream` once each into the segment index, and a
+  coastline or water way is retained for discovery only when its radius-padded envelope
+  overlaps a beach envelope (`buildPondEvidenceFilter` / `pondEvidenceCandidate`, the same
+  test `poolPondWaters` applies), so the retained subset is O(beaches) and a continental
+  coastline costs the process its typed-array segments alone. The run log reports both the
+  streamed and the retained counts per layer.
 - **`src/layerSignals.js`** — the water-class **signal provider**.
 - **`src/layerManifest.js`** — manifest verification and the delete gate.
 - **`scripts/lib/fgbReader.js`** — the FlatGeobuf reader, and the **only module in this repo

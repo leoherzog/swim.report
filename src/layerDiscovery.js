@@ -343,6 +343,51 @@ function withinPondEvidenceRadius(seed, water, waterVertices, radiusKm) {
   return false;
 }
 
+// A water envelope padded by the pond-evidence radius, latitude-aware on the
+// longitude axis. Shared by poolPondWaters and the streaming retention filter
+// below so the two candidacy tests are one computation.
+function pondEvidencePaddedBounds(bounds, padDeg) {
+  const midLat = (bounds.minLat + bounds.maxLat) / 2;
+  const lonPad = lonPadFor(midLat, padDeg);
+  return {
+    minLat: bounds.minLat - padDeg,
+    maxLat: bounds.maxLat + padDeg,
+    minLon: bounds.minLon - lonPad,
+    maxLon: bounds.maxLon + lonPad
+  };
+}
+
+// The retention filter a streaming loader applies to coastline and water
+// features before discoverFromLayers sees them. buildPondEvidenceFilter indexes
+// every beach envelope once; pondEvidenceCandidate then answers, per streamed
+// feature, whether the pond pool could possibly use it: a way with usable bounds
+// whose radius-padded envelope overlaps some beach envelope. The pad is the one
+// poolPondWaters queries its seed grid with and the seeds are a subset of the
+// beaches, so the retained set is a superset of everything the pool admits and
+// discovery output is unchanged. Everything else, relations and far-off ways,
+// is dropped: neither reaches the pool. Peak retained memory is O(beaches).
+export function buildPondEvidenceFilter(beaches, radiusM) {
+  const radiusKm = (typeof radiusM === "number" ? radiusM : POND_EVIDENCE_RADIUS_M) / 1000;
+  return {
+    grid: buildLayerGrid(asArray(beaches)),
+    padDeg: radiusKm / KM_PER_DEG
+  };
+}
+
+export function pondEvidenceCandidate(filter, feature) {
+  if (filter === null || typeof filter !== "object" || filter.grid === undefined) {
+    return false;
+  }
+  if (feature === null || typeof feature !== "object" || feature.osmType !== "way") {
+    return false;
+  }
+  if (!hasUsableBounds(feature.bounds)) {
+    return false;
+  }
+  const padded = pondEvidencePaddedBounds(feature.bounds, filter.padDeg);
+  return queryGridByBounds(filter.grid, padded).length > 0;
+}
+
 // Builds the run-scoped pond-evidence pool: every way-tagged water or coastline
 // feature within POND_EVIDENCE_RADIUS_M of the geometry of some seed beach.
 //
@@ -375,15 +420,7 @@ export function poolPondWaters(seeds, waterFeatures, radiusM) {
     // this water feature's envelope. A seed within radiusKm of the water
     // geometry necessarily satisfies this, so the exact test below never misses
     // one; without a bound the pass is O(waters x seeds) over the whole run.
-    const midLat = (water.bounds.minLat + water.bounds.maxLat) / 2;
-    const lonPad = lonPadFor(midLat, padDeg);
-    const paddedWaterBounds = {
-      minLat: water.bounds.minLat - padDeg,
-      maxLat: water.bounds.maxLat + padDeg,
-      minLon: water.bounds.minLon - lonPad,
-      maxLon: water.bounds.maxLon + lonPad
-    };
-    const candidates = queryGridByBounds(seedGrid, paddedWaterBounds);
+    const candidates = queryGridByBounds(seedGrid, pondEvidencePaddedBounds(water.bounds, padDeg));
     if (candidates.length === 0) {
       continue;
     }

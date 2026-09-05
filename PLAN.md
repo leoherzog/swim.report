@@ -540,6 +540,17 @@ migrations/0012_wave_updated.sql:
   enumerate columns explicitly, so newly discovered rows arrive NULL and are picked up
   first. No index, matching recompute_updated.
 
+migrations/0013_requeue_marine_nws_zone.sql:
+
+    UPDATE beaches SET nws_zone = NULL, nws_grid_url = NULL, enrichment_attempts = 0
+    WHERE nws_zone IS NOT NULL AND substr(nws_zone, 1, 3) IN (<MARINE_ZONE_PREFIXES>);
+
+  Sends every row whose nws_zone held a marine forecast zone id back through
+  runNwsEnrichment, which now rejects a marine forecastZone and re-probes nudged
+  coordinates for the land zone (section 7). marine_zone is untouched: it is derived
+  offline from coordinates and stays correct. Until re-enriched these rows read
+  alertsCheckable false and carry the alerts-unavailable caveat.
+
 - idx_beaches_lon_lat is retained for discovery/reconciliation spatial scans; the
   GeoJSON map endpoint does a full flag-worthy-gated scan with no lon/lat predicate.
 - sync_meta rows used by the offline discovery batch: "last_discovery_sync"
@@ -1126,7 +1137,22 @@ shapes it walks are the clients' wire shapes, not general geography.
       // Success -> { nwsZone: "MIZ071", nwsGridUrl: "https://api.weather.gov/gridpoints/GRR/33,33" }
       //   nwsZone = last path segment of json.properties.forecastZone
       //   nwsGridUrl = json.properties.forecastGridData
+      //   nwsZone may be a MARINE zone ("LMZ221", "ANZ050") when the point is over
+      //   water; the caller decides via isMarineZoneId and never stores one as nws_zone.
       // Failure -> null
+
+    export const MARINE_ZONE_PREFIXES
+      // ["AMZ","ANZ","GMZ","PZZ","PKZ","PHZ","PMZ","PSZ","LCZ","LEZ","LHZ","LMZ","LOZ","LSZ","SLZ"];
+      // none collides with a US state code, so the first three characters decide exactly.
+
+    export function isMarineZoneId(zoneId)
+      // Pure. True for a marine forecast zone id, false for a land zone or malformed input.
+
+    export const LAND_PROBE_RADII_M = [300, 1000];
+    export function landProbePoints(lat, lon)
+      // Pure. The 16 nudged coordinates runNwsEnrichment re-probes when a centroid
+      // resolves to a marine zone: 8 compass directions at each radius, nearest ring
+      // first, N clockwise within a ring, so probe order is deterministic.
 
 ### src/clients/eccc.js
 
@@ -2222,7 +2248,12 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    when the run has no Canadian rows; a failed fetch means those beaches get that
    authority's alerts as null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
-   WFO; parseRipCurrentRisk on each; Map wfo -> { risk, sourceUrl } | null.
+   WFO through runPool at KV_WRITE_CONCURRENCY under SRF_GATHER_DEADLINE_MS = 120000
+   (anchored at the step's own start); parseRipCurrentRisk on each; Map wfo -> { risk,
+   sourceUrl } | null. Every WFO is pre-seeded null, so a throw, a null fetch or a WFO the
+   deadline leaves unreached all read as "no rip input" for that WFO's beaches alone. A
+   sequential loop bounded only by the 45 s transport timeout would let a few hung WFOs
+   spend the 900 s ceiling before any beach is written.
 5. Wave inputs: read only — the hourly cron performs no wave fetch. Prefetch every
    "waveinput:" + id payload (section 1) from KV concurrently in chunks of 50
    (env.FLAGS.get(..., { type: "json" }), each guarded so a failed get yields no input)
@@ -2371,7 +2402,8 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    line's mapdir field is otherwise the published entry count.
 
 Subrequest budget (paid plan, 10,000 per invocation): 1 NWS national alerts call + 2 ECCC
-national fetches (only when Canadian rows exist) + ~2×15 SRF calls + ≤1200 waveinput KV
+national fetches (only when Canadian rows exist) + one SRF call per distinct WFO (~15 at Great
+Lakes scope, 60+ continental, pooled) + ≤1200 waveinput KV
 gets + one scrape() per matched wqFloor source + one scrape() per matched official scraper
 + ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch + ≤1200 flag KV
 puts + ~200 official KV puts + ≤1200 wqfloor KV puts under a table-wide active advisory +
@@ -2888,18 +2920,25 @@ costs an enrichment day.
 ### runNwsEnrichment (4x daily: "17 3,9,15,21 * * *")
 
 Constants: NWS_ENRICHMENT_LIMIT = 75 (per run — up to 300 points/day),
-NWS_ENRICHMENT_MAX_ATTEMPTS = 5.
+NWS_ENRICHMENT_MAX_ATTEMPTS = 5, NWS_NUDGE_BEACH_LIMIT = 20.
 
 A beach with nws_zone NULL silently skips rules steps 1-2 (alerts, SRF rip risk) in
 runFlagRecompute, so draining this queue quickly is a safety property, not just throughput.
 api.weather.gov publishes no numeric rate limit — it answers 429 with Retry-After when
-unhappy — and 75 sequential polite requests per run, four times a day, is well within
-reasonable use.
+unhappy — and at most 75 + 20 × 16 = 395 sequential polite requests per run, four times a
+day, is well within reasonable use (~515 s at 300 ms spacing plus 1 s latency, inside the
+900 s ceiling; 75 nudged beaches would not fit).
 
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < 5
 ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 75; for each,
-fetchPointMetadata(lat, lon) sequentially; on success UPDATE beaches SET nws_zone = ?,
-nws_grid_url = ? WHERE id = ?; on failure (fetchPointMetadata returns null or throws)
+fetchPointMetadata(lat, lon) sequentially. A response whose nwsZone is a marine zone
+(isMarineZoneId: a centroid over water) is never stored: the loop re-probes landProbePoints
+(16 nudged coordinates, ENRICHMENT_REQUEST_SPACING_MS before each) and stores the first land
+response's nwsZone AND nwsGridUrl; no land hit is a failure below; and once
+NWS_NUDGE_BEACH_LIMIT beaches have entered the nudge path in one run, further marine beaches
+are left untouched (no write, no bump, counted as marineDeferred) and re-select next run. On
+success UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?; on failure
+(fetchPointMetadata returns null or throws, or every probe is marine or null)
 UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?, issued via
 bumpAttempts(env, beachId, NWS_ATTEMPTS_BUMP_SQL, "nws"), the one helper both authorities
 share (the ECCC side passes ECCC_ATTEMPTS_BUMP_SQL / "eccc"). Both UPDATE strings stay
@@ -2911,7 +2950,9 @@ within a tied bucket no id-prefix class of beaches is ever drained after another
 attempts cap stops permanent failures — non-US points swept in by the discovery REGIONS
 that api.weather.gov 404s forever — from occupying the batch and starving US beaches; after
 5 attempts a row is parked and no longer requeued. The per-run summary log reports
-attempted / enriched / failures / parked (nws_zone IS NULL AND enrichment_attempts >= 5).
+attempted / enriched / failures / marineRecovered / marineUnrecovered / marineDeferred /
+parked (nws_zone IS NULL AND enrichment_attempts >= 5). Migration 0013 sent every row whose
+nws_zone carried a marine id back through this path.
 
 ### runEcccEnrichment (4x daily: "29 4,10,16,22 * * *")
 

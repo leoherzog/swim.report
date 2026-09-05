@@ -13,7 +13,7 @@
 // found nothing", never "I do not know" — which is exactly what reassembling the
 // advisory from the shorter-lived "wqfloor:" key could not say.
 //
-// alertsCheckable is deliberately NOT sealed: it is a pure expression over three
+// alertsCheckable is deliberately NOT sealed: it is a pure expression over two
 // D1 columns both crons hold, so recomputing it is cheaper and strictly more
 // correct, since a beach enriched between runs would otherwise carry a stale
 // caveat beside a live alert.
@@ -124,7 +124,10 @@ export function buildEstimateInputs(beach, alertPart, signals) {
     beachId: beach.id,
     alerts: alertHalf.alerts,
     alertDetails: alertHalf.alertDetails,
-    alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false,
+    // A land zone or an ECCC region. marine_zone alone is not enough: it matches
+    // marine warnings but none of the land products the caveat is about, so a
+    // beach whose only zone is marine still reads "alerts not yet available".
+    alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false,
     ripCurrentRisk: riskOrNull(signals.ripCurrentRisk),
     waveHeightFt: finiteOrNull(signals.waveHeightFt),
     windSpeedMph: finiteOrNull(signals.windSpeedMph),

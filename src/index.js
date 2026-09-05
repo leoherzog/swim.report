@@ -8,7 +8,9 @@ import {
   alertsUrlForZone,
   wfoFromGridUrl,
   fetchLatestSrfText,
-  fetchPointMetadata
+  fetchPointMetadata,
+  isMarineZoneId,
+  landProbePoints
 } from "./clients/nws.js";
 import {
   fetchActiveEcccAlerts,
@@ -111,6 +113,15 @@ const KV_WRITE_CONCURRENCY = 12;
 // first next run.
 const WAVE_GATHER_DEADLINE_MS = 480000;
 const WAVE_WRITE_DEADLINE_MS = 840000;
+// Wall-clock budget for the hourly cron's SRF gather, measured from the start of
+// that step, not from the top of the invocation. The pool runs one fetch per
+// distinct WFO at ~6 in flight, each bounded by the client's 45 s timeout, so a
+// healthy nation of 60+ WFOs finishes in seconds and this only trips when
+// several sockets hang at once. A WFO the pool never reaches gets a null entry,
+// which is the same outcome as its own fetch failing: no rip input, never a
+// wrong color. Sits after the three 45 s national alert fetches and leaves the
+// per-beach pool most of the 900 s ceiling.
+const SRF_GATHER_DEADLINE_MS = 120000;
 // Ids per wave_updated D1 batch. The flush must be incremental: a single batch
 // after the loop never runs when the invocation is killed mid-loop, so the cursor
 // never moves and the same prefix of beaches is reprocessed every run forever.
@@ -184,6 +195,13 @@ const NWS_ENRICHMENT_LIMIT = 75;
 // Otherwise non-US points that api.weather.gov 404s forever would occupy the
 // whole nightly batch and starve US beaches (TODO.md).
 const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
+// Beaches per run that may enter the marine-zone nudge path (up to 16 extra
+// /points probes each, see landProbePoints). 75 plain lookups plus 20 nudged
+// beaches is at most 395 spaced requests: at 300 ms spacing and 1 s latency that
+// is ~515 s, inside the 900 s ceiling with room for a few 45 s timeouts, where
+// 75 nudged beaches (1,275 requests) would not fit. A marine beach past the cap
+// is left untouched, with no attempt burned, so it re-selects next run.
+const NWS_NUDGE_BEACH_LIMIT = 20;
 // ECCC zone enrichment, own cron, 4x daily: only rows NWS permanently parked
 // (nws_zone NULL at the attempts cap) are candidates. Its own attempts cap parks
 // points no ECCC region ever matches, such as mid-lake centroids, the same way
@@ -557,13 +575,20 @@ async function runFlagRecompute(env) {
           .filter(function (w) { return w !== null; })
       )
     );
+    // Pooled rather than sequential: one WFO at a time bounded only by the 45 s
+    // transport timeout lets a handful of slow WFOs spend the 900 s ceiling
+    // before any beach is written. Every WFO gets an entry, null on any failure,
+    // on a throw, or when the gather deadline leaves it unreached, so one bad WFO
+    // affects nothing but its own beaches.
     const srfMap = new Map();
     for (const wfo of wfos) {
+      srfMap.set(wfo, null);
+    }
+    const srfDeadline = makeDeadline(Date.now(), SRF_GATHER_DEADLINE_MS);
+    const srfReached = await runPool(wfos, KV_WRITE_CONCURRENCY, async function (wfo) {
       try {
         const srf = await fetchLatestSrfText(wfo);
-        if (srf === null) {
-          srfMap.set(wfo, null);
-        } else {
+        if (srf !== null) {
           const risk = parseRipCurrentRisk(srf.text);
           srfMap.set(wfo, { risk: risk, sourceUrl: srf.sourceUrl, productId: srf.productId });
         }
@@ -571,6 +596,12 @@ async function runFlagRecompute(env) {
         console.log("index: srf fetch threw for wfo " + wfo + ": " + err.message);
         srfMap.set(wfo, null);
       }
+    }, srfDeadline);
+    if (srfReached < wfos.length) {
+      console.log(
+        "index: srf gather deadline reached=" + String(srfReached) +
+        " of " + String(wfos.length) + " wfos"
+      );
     }
 
     // Step 5: wave inputs — read only, never fetched here. The offline NOAA GRIB
@@ -1553,6 +1584,12 @@ const ECCC_ATTEMPTS_BUMP_SQL = "UPDATE beaches SET eccc_attempts = eccc_attempts
 async function runNwsEnrichment(env) {
   let enriched = 0;
   let enrichmentFailures = 0;
+  let marineRecovered = 0;
+  let marineUnrecovered = 0;
+  let marineDeferred = 0;
+  let nudged = 0;
+  const spacingMs = env && typeof env.ENRICHMENT_REQUEST_SPACING_MS === "number"
+    ? env.ENRICHMENT_REQUEST_SPACING_MS : ENRICHMENT_REQUEST_SPACING_MS;
 
   try {
     const needsEnrichment = await env.DB.prepare(
@@ -1565,11 +1602,45 @@ async function runNwsEnrichment(env) {
     let firstRequest = true;
     for (const beach of toEnrich) {
       if (!firstRequest) {
-        await sleep(ENRICHMENT_REQUEST_SPACING_MS);
+        await sleep(spacingMs);
       }
       firstRequest = false;
       try {
-        const meta = await fetchPointMetadata(beach.lat, beach.lon);
+        let meta = await fetchPointMetadata(beach.lat, beach.lon);
+        if (meta !== null && isMarineZoneId(meta.nwsZone)) {
+          // A centroid over water resolves to the marine zone, which no land
+          // product is issued for. Re-probe nudged coordinates for the land zone
+          // and take the first land hit, grid URL included; the marine id is
+          // never stored, so an unrecoverable point parks like any other failure.
+          if (nudged >= NWS_NUDGE_BEACH_LIMIT) {
+            marineDeferred = marineDeferred + 1;
+            continue;
+          }
+          nudged = nudged + 1;
+          const probes = landProbePoints(beach.lat, beach.lon);
+          let landMeta = null;
+          let probesUsed = 0;
+          for (const probe of probes) {
+            await sleep(spacingMs);
+            probesUsed = probesUsed + 1;
+            const probeMeta = await fetchPointMetadata(probe.lat, probe.lon);
+            if (probeMeta !== null && !isMarineZoneId(probeMeta.nwsZone)) {
+              landMeta = probeMeta;
+              break;
+            }
+          }
+          console.log(
+            "index: nws enrichment marine zone " + meta.nwsZone + " for " + beach.id +
+            (landMeta ? " recovered " + landMeta.nwsZone : " unrecovered") +
+            " after " + String(probesUsed) + " probes"
+          );
+          if (landMeta) {
+            marineRecovered = marineRecovered + 1;
+          } else {
+            marineUnrecovered = marineUnrecovered + 1;
+          }
+          meta = landMeta;
+        }
         if (meta !== null) {
           await env.DB.prepare(
             "UPDATE beaches SET nws_zone = ?1, nws_grid_url = ?2 WHERE id = ?3"
@@ -1599,6 +1670,9 @@ async function runNwsEnrichment(env) {
       "index: nws enrichment complete, attempted=" + String(toEnrich.length) +
       " enriched=" + String(enriched) +
       " failures=" + String(enrichmentFailures) +
+      " marineRecovered=" + String(marineRecovered) +
+      " marineUnrecovered=" + String(marineUnrecovered) +
+      " marineDeferred=" + String(marineDeferred) +
       " parked=" + String(parkedCount)
     );
   } catch (err) {

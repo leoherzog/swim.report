@@ -199,6 +199,56 @@ export async function fetchLatestSrfText(wfo) {
 // ~1,360 live api.weather.gov requests/day. The hourly recompute still READS
 // marine_zone from D1 to match marine alerts; nothing in the Worker writes it.
 
+// Marine forecast zone id prefixes. api.weather.gov/points answers a beach
+// centroid over water with the MARINE forecast zone ("LMZ221", "ANZ050"), which
+// no land product (High Surf Advisory, Beach Hazards Statement, Rip Current
+// Statement, Coastal Flood Advisory) is ever issued for, so it must never be
+// stored as nws_zone. No prefix collides with a US state code, so the first
+// three characters decide exactly.
+export const MARINE_ZONE_PREFIXES = [
+  "AMZ", "ANZ", "GMZ", "PZZ", "PKZ", "PHZ", "PMZ", "PSZ",
+  "LCZ", "LEZ", "LHZ", "LMZ", "LOZ", "LSZ", "SLZ"
+];
+
+// Pure. True when zoneId is a marine forecast zone id; false for any land zone
+// and for malformed input.
+export function isMarineZoneId(zoneId) {
+  if (typeof zoneId !== "string" || zoneId.length < 3) {
+    return false;
+  }
+  return MARINE_ZONE_PREFIXES.indexOf(zoneId.slice(0, 3).toUpperCase()) !== -1;
+}
+
+// Pure. The nudged coordinates runNwsEnrichment re-probes when a centroid
+// resolves to a marine zone: the 8 compass directions at each of
+// LAND_PROBE_RADII_M, nearest ring first, N clockwise within a ring, so the
+// probe order is deterministic. Equirectangular offsets; the error at 1 km is
+// metres and the land/water boundary is coarser than that.
+export const LAND_PROBE_RADII_M = [300, 1000];
+const COMPASS_UNIT = [
+  [1, 0], [1, 1], [0, 1], [-1, 1], [0, -1], [-1, -1], [-1, 0], [1, -1]
+].map(function (v) {
+  const norm = Math.sqrt(v[0] * v[0] + v[1] * v[1]);
+  return [v[0] / norm, v[1] / norm];
+});
+const METERS_PER_DEGREE_LAT = 111320;
+
+export function landProbePoints(lat, lon) {
+  const cosLat = Math.max(Math.cos(lat * Math.PI / 180), 0.01);
+  const points = [];
+  for (const radius of LAND_PROBE_RADII_M) {
+    for (const unit of COMPASS_UNIT) {
+      points.push({
+        lat: lat + (unit[0] * radius) / METERS_PER_DEGREE_LAT,
+        lon: lon + (unit[1] * radius) / (METERS_PER_DEGREE_LAT * cosLat)
+      });
+    }
+  }
+  return points;
+}
+
+// Success -> { nwsZone, nwsGridUrl }, which may carry a MARINE zone id: the
+// caller decides what to do with it via isMarineZoneId. Failure -> null.
 export async function fetchPointMetadata(lat, lon) {
   const url = "https://api.weather.gov/points/" + lat.toFixed(4) + "," + lon.toFixed(4);
   const json = await fetchNwsJson(url, "points for " + lat + "," + lon);

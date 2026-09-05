@@ -231,13 +231,14 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   neither GeoMet collection has an `/alerts/active/count` equivalent and the cron publishes a
   lowering only from a feed whose completeness it verified. It becomes 10-minute the moment
   GeoMet exposes a count or the two collections gain an independent completeness signal.
-- **336 flag-worthy rows carry a marine zone id in `nws_zone`** (`LHZ441`, `LMZ221`, `LSZ250`
-  and so on), with `marine_zone` equal to it, because `api.weather.gov/points` returns a
-  marine forecast zone for a centroid over water. Those beaches have no land forecast zone and
-  can never match High Surf Advisory, Beach Hazards Statement or Coastal Flood Advisory — the
-  products the refresh cron exists to deliver quickly — yet they read `alertsCheckable` true,
-  so no caveat renders. Pre-existing; the fix belongs in NWS enrichment, which should reject a
-  marine-prefixed `forecastZone` and re-queue the row.
+- **Marine-zone `nws_zone` rows are requeued, not yet re-drained.** Migration 0013 NULLed
+  `nws_zone` on every row whose id carried a marine prefix (336 at the time) and
+  `runNwsEnrichment` now rejects a marine `forecastZone` and re-probes 16 nudged points for the
+  land zone, 20 such beaches per run. At four runs a day that queue takes 4-5 days, during
+  which those rows read `alertsCheckable` false (marine_zone alone no longer counts) and carry
+  the alerts-unavailable caveat, and skip SRF until `nws_grid_url` is restored. Watch
+  `marineUnrecovered=` in the completion log: a beach whose 1 km ring finds no land zone parks
+  at the attempts cap, and a large count means the rings need a third radius.
 - **`rules.js` step 3's else branch still has no finite check**, so any future caller passing a
   non-finite `waveHeightFt` gets green with a nonsense reason. `buildEstimateInputs`
   (`src/flagInputs.js`) closes the reachable route from a malformed KV value; fixing `rules.js`

@@ -299,10 +299,13 @@ describe("buildEstimateInputs normalization", function () {
     expect(inputs.ripCurrentRisk).toBeNull();
   });
 
-  it("computes alertsCheckable false only when all three zone columns are absent", function () {
+  it("computes alertsCheckable from the land zone or the ECCC region, never from marine_zone alone", function () {
     expect(buildEstimateInputs(beachRow({}), noAlerts, signalsWith({})).alertsCheckable).toBe(false);
     expect(buildEstimateInputs(beachRow({ nws_zone: "MIZ071" }), noAlerts, signalsWith({})).alertsCheckable).toBe(true);
-    expect(buildEstimateInputs(beachRow({ marine_zone: "LHZ441" }), noAlerts, signalsWith({})).alertsCheckable).toBe(true);
+    // A marine zone matches marine warnings but none of the land products the
+    // caveat is about, so a beach whose only zone is marine still reads unavailable.
+    expect(buildEstimateInputs(beachRow({ marine_zone: "LHZ441" }), noAlerts, signalsWith({})).alertsCheckable).toBe(false);
+    expect(buildEstimateInputs(beachRow({ nws_zone: "MIZ071", marine_zone: "LHZ441" }), noAlerts, signalsWith({})).alertsCheckable).toBe(true);
     expect(buildEstimateInputs(beachRow({ eccc_zone: "Alpena" }), noAlerts, signalsWith({})).alertsCheckable).toBe(true);
   });
 
