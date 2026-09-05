@@ -167,7 +167,7 @@ jobs:
             --layers "$LAYERS_DIR" \
             --snapshot snapshot.json \
             --out discovery-delta.sql \
-            --marine-zones data/marine-zones-greatlakes.json 2>&1 | tee batch-timing.log
+            --marine-zones data/marine-zones.json 2>&1 | tee batch-timing.log
           echo "---- benchmark ----"
           grep -E "Elapsed \(wall clock\)|Maximum resident set size|classification done in|signals index built in|run complete" batch-timing.log || true
           echo "---- delta summary ----"

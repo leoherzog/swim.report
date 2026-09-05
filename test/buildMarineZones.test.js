@@ -1,5 +1,5 @@
 // Tests for scripts/build-marine-zones.js, the manual generator for
-// data/marine-zones-greatlakes.json, regenerated roughly biannually. Importing
+// data/marine-zones.json, regenerated roughly biannually. Importing
 // its pure exports touches no Deno and no network; every fixture is a synthetic
 // in-memory buffer built with DataView.
 

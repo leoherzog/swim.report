@@ -126,8 +126,8 @@ describe("parseArgs", function () {
   });
   it("defaults marineZones to null; --marine-zones takes a path", function () {
     expect(parseArgs([]).marineZones).toBe(null);
-    const a = parseArgs(["--marine-zones", "data/marine-zones-greatlakes.json"]);
-    expect(a.marineZones).toBe("data/marine-zones-greatlakes.json");
+    const a = parseArgs(["--marine-zones", "data/marine-zones.json"]);
+    expect(a.marineZones).toBe("data/marine-zones.json");
   });
   it("defaults layers to null and derives --report from --layers", function () {
     expect(parseArgs([]).layers).toBe(null);
@@ -150,7 +150,7 @@ describe("nothingToDo guard", function () {
     expect(nothingToDo(parseArgs(["--no-discovery", "--no-classify"]))).toBe(true);
   });
   it("marine-only is a valid mode", function () {
-    const a = parseArgs(["--no-discovery", "--no-classify", "--marine-zones", "data/marine-zones-greatlakes.json"]);
+    const a = parseArgs(["--no-discovery", "--no-classify", "--marine-zones", "data/marine-zones.json"]);
     expect(nothingToDo(a)).toBe(false);
   });
   it("any single mode is valid", function () {

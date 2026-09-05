@@ -10,7 +10,7 @@
     "either a day-one hard refusal that makes the pipeline unpublishable, or a number the interior",
     "surplus clears while every Great Lakes shoreline beach is missing. So every floor here is",
     "SEEDED FROM A REAL BUILD UNDER THE PUBLISHED MASK, cross-checked by a human against D1 truth,",
-    "and moved only by a reviewed commit - exactly the discipline data/marine-zones-greatlakes.json",
+    "and moved only by a reviewed commit - exactly the discipline data/marine-zones.json",
     "already has.",
     "",
     "WHY IT IS KEYED BY regionsDigest. The digest is sha256 over regionsDigestInput(REGIONS) from",

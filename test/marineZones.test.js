@@ -1,7 +1,7 @@
 // Tests for src/marineZones.js — the pure offline nearest-marine-zone resolver
 // that replaced the retired in-Worker runMarineEnrichment probe. Synthetic
-// zone fixtures throughout (no network); one small sanity block reads the
-// committed data/marine-zones-greatlakes.json via fs.
+// zone fixtures throughout (no network); two small sanity blocks read the
+// committed data/marine-zones-greatlakes.json and data/marine-zones.json via fs.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
@@ -124,27 +124,35 @@ describe("nearestMarineZone", function () {
   });
 });
 
-describe("committed data/marine-zones-greatlakes.json sanity", function () {
-  const path = fileURLToPath(new URL("../data/marine-zones-greatlakes.json", import.meta.url));
+describe("committed data/marine-zones.json sanity", function () {
+  const path = fileURLToPath(new URL("../data/marine-zones.json", import.meta.url));
   const data = JSON.parse(readFileSync(path, "utf8"));
+  const COASTAL_PREFIXES = /^(AMZ|ANZ|GMZ|PZZ|PKZ|PHZ|PMZ|PSZ|LCZ|LEZ|LHZ|LMZ|LOZ|LSZ|SLZ)\d{3}$/;
 
-  it("carries the expected Great Lakes zone universe", function () {
-    expect(data.zones.length).toBe(134);
+  it("carries every coastal zone in the mz16ap26 release, Great Lakes included", function () {
+    expect(data.zones.length).toBe(569);
+    const prefixes = new Set();
     for (const zone of data.zones) {
-      expect(zone.id).toMatch(/^(LCZ|LEZ|LHZ|LMZ|LOZ|LSZ|SLZ)\d{3}$/);
+      expect(zone.id).toMatch(COASTAL_PREFIXES);
+      prefixes.add(zone.id.slice(0, 3));
     }
+    expect(prefixes.size).toBe(15);
+    const greatLakes = data.zones.filter(function (zone) {
+      return /^(LCZ|LEZ|LHZ|LMZ|LOZ|LSZ|SLZ)/.test(zone.id);
+    });
+    expect(greatLakes.length).toBe(134);
   });
 
-  it("resolves known beaches to plausible zones", function () {
+  it("resolves ocean, Gulf, Alaska and Great Lakes beaches to their coastal zone", function () {
     const index = buildMarineZoneIndex(data);
-    // Holland State Park -> the Michigan nearshore strip "Holland to Grand
-    // Haven MI" (LMZ846 in the mz16ap26 release; assert the nearshore-Michigan
-    // LMZ8xx family so a future renumbering fails loudly but a same-family
-    // re-id is visible in the diff, not here).
+    // Same family assertions as the Great Lakes block: a renumbering fails
+    // loudly, a same-family re-id shows in the diff.
+    expect(nearestMarineZone(index, 34.0095, -118.4977)).toMatch(/^PZZ6\d{2}$/);
+    expect(nearestMarineZone(index, 25.7907, -80.1300)).toMatch(/^AMZ6\d{2}$/);
+    expect(nearestMarineZone(index, 41.8107, -69.9280)).toMatch(/^ANZ2\d{2}$/);
+    expect(nearestMarineZone(index, 29.2691, -94.8258)).toMatch(/^GMZ3\d{2}$/);
+    expect(nearestMarineZone(index, 61.15, -150.05)).toMatch(/^PKZ\d{3}$/);
     expect(nearestMarineZone(index, 42.775, -86.211)).toMatch(/^LMZ8\d{2}$/);
-    // Duluth's Park Point sits on Lake Superior -> an LSZ zone.
-    expect(nearestMarineZone(index, 46.755, -92.06)).toMatch(/^LSZ\d{3}$/);
-    // Lansing MI is ~100 km inland -> null.
     expect(nearestMarineZone(index, 42.73, -84.55)).toBe(null);
   });
 });

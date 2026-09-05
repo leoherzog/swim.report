@@ -58,7 +58,7 @@ enabled = true
 #
 # beaches.marine_zone is now derived OFFLINE by the GitHub Actions discovery
 # batch (a nearest-marine-zone point-in-polygon pass over the repo-committed NWS
-# marine-zone shapefile geometry in data/marine-zones-greatlakes.json), replacing
+# marine-zone shapefile geometry in data/marine-zones.json), replacing
 # the retired in-Worker marine enrichment cron. Beach discovery (prebuilt OSM
 # layers, fetched from R2 by the GitHub Actions job — never by this Worker) and
 # water-body classification also run only in that offline batch

@@ -190,7 +190,7 @@ export function parseArgs(argv) {
     classify: true,
     layers: null,           // directory holding the verified layer set + report.json
     report: null,           // defaults to <layers>/report.json once --layers is known
-    marineZones: null,      // path to data/marine-zones-greatlakes.json => run the offline marine_zone pass
+    marineZones: null,      // path to data/marine-zones.json => run the offline marine_zone pass
     now: null
   };
   for (let i = 0; i < argv.length; i = i + 1) {
@@ -683,7 +683,7 @@ export function reconciliationDelta(snapshotRows, producedIds, producedParkRowCo
 }
 
 // --- Offline marine_zone derivation ------------------------------------------
-// Pure local math against the repo-committed data/marine-zones-greatlakes.json
+// Pure local math against the repo-committed data/marine-zones.json
 // (see src/marineZones.js and scripts/build-marine-zones.js). Mirrors
 // reconcileStaleRows:
 //   - operates only on snapshot rows, so a beach discovered this run resolves on
@@ -1345,7 +1345,7 @@ export async function main() {
   // UPDATEs.
   //
   // Isolated from the delete-bearing discovery output. Everything that can throw —
-  // a missing or malformed data/marine-zones-greatlakes.json, and
+  // a missing or malformed data/marine-zones.json, and
   // buildMarineZoneIndex, which throws by design on malformed geometry — is
   // computed into a local buffer inside try/catch and appended to out[] only once
   // the whole pass succeeded. A broken marine data file therefore degrades to a

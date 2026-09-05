@@ -519,7 +519,7 @@ only *removes* delete candidates, so an editing mistake under-deletes rather tha
 a real, enriched beach. Bringing a new coast online is additive.
 
 **Marine-zone derivation.** The daily run also derives `beaches.marine_zone`
-(`--marine-zones data/marine-zones-greatlakes.json`): a nearest-marine-zone pass
+(`--marine-zones data/marine-zones.json`): a nearest-marine-zone pass
 (point-in-polygon plus nearest-edge, 15 km cap; `src/marineZones.js`) over snapshot rows that
 already have `nws_zone`, emitting change-only idempotent UPDATEs, never NULLing an existing
 value and never touching the delete path. Regenerate the committed geometry file with

@@ -1,8 +1,7 @@
 // scripts/build-marine-zones.js — one-time / ~biannual generator for
-// data/marine-zones-greatlakes.json, the committed Great Lakes marine-zone
-// geometry that the offline discovery batch (scripts/discovery-batch.js
-// --marine-zones) uses to derive beaches.marine_zone with zero runtime
-// upstream requests.
+// data/marine-zones.json, the committed US coastal marine-zone geometry that
+// the offline discovery batch (scripts/discovery-batch.js --marine-zones) uses
+// to derive beaches.marine_zone with zero runtime upstream requests.
 //
 // Run manually, never in CI, whenever NWS publishes a new coastal marine zone
 // shapefile release (https://www.weather.gov/gis/MarineZones):
@@ -34,12 +33,19 @@ import { pointInRing } from "../src/geo.js";
 // Update both constants together when a new release lands.
 const DEFAULT_ZIP_URL = "https://www.weather.gov/source/gis/Shapefiles/WSOM/mz16ap26.zip";
 const RELEASE_VALID_DATE = "2026-04-16";
-const DEFAULT_OUT = "data/marine-zones-greatlakes.json";
-const DEFAULT_TOLERANCE_DEG = 0.001;
+const DEFAULT_OUT = "data/marine-zones.json";
+const DEFAULT_TOLERANCE_DEG = 0.002;
 
-// Great Lakes plus St. Lawrence and St. Clair marine zone id prefixes. Extend
-// when src/regions.js REGIONS grows coasts beyond the Great Lakes system.
-const GREAT_LAKES_ZONE_PREFIXES = ["LCZ", "LEZ", "LHZ", "LMZ", "LOZ", "LSZ", "SLZ"];
+// Every zone id prefix in the NWS coastal marine zone shapefile: Atlantic
+// (AMZ, ANZ), Gulf (GMZ), Pacific (PZZ), Alaska (PKZ), Hawaii (PHZ), Marianas
+// (PMZ), American Samoa (PSZ), and the Great Lakes with St. Lawrence and St.
+// Clair (L?Z, SLZ). The offshore and high-seas shapefiles are separate releases
+// and stay out of scope. A prefix missing here is dropped silently, so compare
+// the logged per-prefix counts against the DBF when a release adds one.
+const COASTAL_ZONE_PREFIXES = [
+  "AMZ", "ANZ", "GMZ", "PZZ", "PKZ", "PHZ", "PMZ", "PSZ",
+  "LCZ", "LEZ", "LHZ", "LMZ", "LOZ", "LSZ", "SLZ"
+];
 
 function log(msg) {
   console.error("build-marine-zones: " + msg);
@@ -281,7 +287,7 @@ export function groupRingsToPolygons(rings) {
 }
 
 // --- Douglas-Peucker simplification -------------------------------------------
-// Planar perpendicular distance in degrees. toleranceDeg 0.001 is ~110 m of
+// Planar perpendicular distance in degrees. toleranceDeg 0.002 is ~220 m of
 // boundary displacement, negligible against the 15 km resolution cap and the
 // 5 NM zone widths. Endpoints are always kept, so a closed ring stays closed;
 // rings that would drop under 4 points keep their original geometry.
@@ -364,14 +370,19 @@ async function main() {
       " vs " + String(shpRecords.length) + ") — refusing to misalign attributes");
   }
 
-  // Filter to Great Lakes zones by id prefix, merging a zone split across
-  // records into one MultiPolygon.
+  // Filter to coastal zones by id prefix, merging a zone split across records
+  // into one MultiPolygon. Unlisted prefixes are counted so a new one in a
+  // release shows up in the log instead of vanishing.
   const byId = new Map();
+  const skippedPrefixCounts = {};
   for (let i = 0; i < dbfRecords.length; i = i + 1) {
     const id = dbfRecords[i].ID;
     if (!id || shpRecords[i] === null) { continue; }
     const prefix = id.slice(0, 3).toUpperCase();
-    if (GREAT_LAKES_ZONE_PREFIXES.indexOf(prefix) < 0) { continue; }
+    if (COASTAL_ZONE_PREFIXES.indexOf(prefix) < 0) {
+      skippedPrefixCounts[prefix] = (skippedPrefixCounts[prefix] || 0) + 1;
+      continue;
+    }
     if (!byId.has(id)) { byId.set(id, []); }
     const polys = groupRingsToPolygons(shpRecords[i]);
     for (const poly of polys) {
@@ -404,8 +415,11 @@ async function main() {
   }
   zones.sort(function (a, b) { return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0); });
 
-  for (const prefix of GREAT_LAKES_ZONE_PREFIXES) {
+  for (const prefix of COASTAL_ZONE_PREFIXES) {
     log("prefix " + prefix + ": " + String(prefixCounts[prefix] || 0) + " zone(s)");
+  }
+  for (const prefix of Object.keys(skippedPrefixCounts).sort()) {
+    log("SKIPPED unlisted prefix " + prefix + ": " + String(skippedPrefixCounts[prefix]) + " record(s)");
   }
   log("total zones: " + String(zones.length) + ", rings: " + String(totalRings) +
     ", points after simplification (tol " + String(args.tolerance) + " deg): " + String(totalPoints));
