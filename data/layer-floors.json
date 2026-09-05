@@ -203,6 +203,352 @@
           "other-relations": 0
         }
       }
+    },
+    "sha256:6e29be947af12e3ab9fa869e5f62a83994be7ce40b81d84f0c1ffd5dd99a697f": {
+      "_comment": [
+        "SEEDED from build 20260905T183614Z-7dbeb86, the first build under the coastal footprint (35 boxes), at 0.75x each measured count, rounded down. lakes-polygon carries exactly the six lakesIdentity QIDs.",
+        "",
+        "coastline is a real floor now: 46716 natural=coastline ways, the layer every saltwater row classifies through. parks-line, beaches-line, water-line and other-relations measured single or double digits rather than zero, so their floors are small but no longer vacuous.",
+        "",
+        "Puerto Rico + US Virgin Islands measured zero on every layer because the us Geofabrik extract does not carry them; the box is seeded null, not zero, so the build neither refuses on it nor pretends it was measured. Seed it from the first build after the puerto-rico and us-virgin-islands extracts join the download loop.",
+        "",
+        "Growth against the previous Great Lakes set warned as expected (beaches-point 12.7x, beaches-polygon 5.4x, parks-polygon 4.9x, water-polygon 5.1x); the discovery batch's own rails decide what that growth does to D1."
+      ],
+      "status": "seeded",
+      "seededFromBuildId": "20260905T183614Z-7dbeb86",
+      "seededAt": "2026-09-05T18:36:15.387Z",
+      "regionCount": 35,
+      "regionNames": [
+        "Alaska Bering Sea Coast",
+        "Alaska Panhandle",
+        "Alaska Peninsula + Aleutians + Bristol Bay",
+        "Alaska Southcentral",
+        "British Columbia North Coast + Haida Gwaii",
+        "British Columbia South Coast",
+        "Central California",
+        "Chesapeake + Delmarva",
+        "Florida Panhandle + Big Bend",
+        "Florida Peninsula + Keys",
+        "Georgia + South Carolina Coast",
+        "Hawaii",
+        "Lake Erie",
+        "Lake Huron + Georgian Bay",
+        "Lake Michigan",
+        "Lake Ontario",
+        "Lake St. Clair + St. Clair / Detroit Rivers",
+        "Lake Superior",
+        "Louisiana + Mississippi + Alabama Coast",
+        "Maritimes",
+        "New Jersey + New York Bight",
+        "Newfoundland",
+        "Niagara River",
+        "North Carolina Coast",
+        "Northern California + Oregon",
+        "Northern New England",
+        "Puerto Rico + US Virgin Islands",
+        "Quebec Lower North Shore",
+        "Southern California",
+        "Southern New England",
+        "St. Lawrence Estuary + Gaspé + Magdalen Islands",
+        "St. Marys River / Sault",
+        "Texas Coast",
+        "Upper St. Lawrence / Thousand Islands",
+        "Washington + Puget Sound"
+      ],
+      "layers": {
+        "beaches-point.fgb": 1365,
+        "beaches-line.fgb": 5,
+        "beaches-polygon.fgb": 16353,
+        "parks-polygon.fgb": 23526,
+        "parks-line.fgb": 17,
+        "coastline-line.fgb": 35037,
+        "water-line.fgb": 1,
+        "water-polygon.fgb": 91581,
+        "lakes-polygon.fgb": 4,
+        "other-relations.fgb": 1
+      },
+      "regions": {
+        "Lake Superior": {
+          "beaches": 890,
+          "parks-polygon": 331,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 2064,
+          "other-relations": 0
+        },
+        "St. Marys River / Sault": {
+          "beaches": 85,
+          "parks-polygon": 36,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 177,
+          "other-relations": 0
+        },
+        "Lake Michigan": {
+          "beaches": 803,
+          "parks-polygon": 2104,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 5768,
+          "other-relations": 0
+        },
+        "Lake Huron + Georgian Bay": {
+          "beaches": 638,
+          "parks-polygon": 1005,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 4055,
+          "other-relations": 0
+        },
+        "Lake St. Clair + St. Clair / Detroit Rivers": {
+          "beaches": 186,
+          "parks-polygon": 437,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 3128,
+          "other-relations": 0
+        },
+        "Lake Erie": {
+          "beaches": 676,
+          "parks-polygon": 1035,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 6580,
+          "other-relations": 0
+        },
+        "Niagara River": {
+          "beaches": 28,
+          "parks-polygon": 98,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 204,
+          "other-relations": 0
+        },
+        "Lake Ontario": {
+          "beaches": 255,
+          "parks-polygon": 903,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 1424,
+          "other-relations": 0
+        },
+        "Upper St. Lawrence / Thousand Islands": {
+          "beaches": 102,
+          "parks-polygon": 171,
+          "parks-line": 0,
+          "coastline": 0,
+          "water": 450,
+          "other-relations": 0
+        },
+        "Southern California": {
+          "beaches": 423,
+          "parks-polygon": 909,
+          "parks-line": 3,
+          "coastline": 672,
+          "water": 903,
+          "other-relations": 0
+        },
+        "Central California": {
+          "beaches": 459,
+          "parks-polygon": 879,
+          "parks-line": 0,
+          "coastline": 967,
+          "water": 1269,
+          "other-relations": 0
+        },
+        "Northern California + Oregon": {
+          "beaches": 420,
+          "parks-polygon": 461,
+          "parks-line": 6,
+          "coastline": 1442,
+          "water": 829,
+          "other-relations": 0
+        },
+        "Washington + Puget Sound": {
+          "beaches": 915,
+          "parks-polygon": 2234,
+          "parks-line": 0,
+          "coastline": 3419,
+          "water": 3360,
+          "other-relations": 0
+        },
+        "British Columbia South Coast": {
+          "beaches": 1609,
+          "parks-polygon": 2030,
+          "parks-line": 0,
+          "coastline": 4910,
+          "water": 3208,
+          "other-relations": 0
+        },
+        "British Columbia North Coast + Haida Gwaii": {
+          "beaches": 501,
+          "parks-polygon": 56,
+          "parks-line": 0,
+          "coastline": 578,
+          "water": 1272,
+          "other-relations": 0
+        },
+        "Alaska Panhandle": {
+          "beaches": 446,
+          "parks-polygon": 30,
+          "parks-line": 0,
+          "coastline": 220,
+          "water": 1767,
+          "other-relations": 0
+        },
+        "Alaska Southcentral": {
+          "beaches": 79,
+          "parks-polygon": 72,
+          "parks-line": 0,
+          "coastline": 198,
+          "water": 284,
+          "other-relations": 0
+        },
+        "Alaska Peninsula + Aleutians + Bristol Bay": {
+          "beaches": 36,
+          "parks-polygon": 6,
+          "parks-line": 0,
+          "coastline": 101,
+          "water": 160,
+          "other-relations": 0
+        },
+        "Alaska Bering Sea Coast": {
+          "beaches": 2,
+          "parks-polygon": 2,
+          "parks-line": 0,
+          "coastline": 2,
+          "water": 55,
+          "other-relations": 0
+        },
+        "Hawaii": {
+          "beaches": 354,
+          "parks-polygon": 294,
+          "parks-line": 0,
+          "coastline": 306,
+          "water": 666,
+          "other-relations": 0
+        },
+        "Texas Coast": {
+          "beaches": 140,
+          "parks-polygon": 152,
+          "parks-line": 0,
+          "coastline": 251,
+          "water": 1707,
+          "other-relations": 0
+        },
+        "Louisiana + Mississippi + Alabama Coast": {
+          "beaches": 128,
+          "parks-polygon": 141,
+          "parks-line": 0,
+          "coastline": 488,
+          "water": 972,
+          "other-relations": 0
+        },
+        "Florida Panhandle + Big Bend": {
+          "beaches": 541,
+          "parks-polygon": 234,
+          "parks-line": 0,
+          "coastline": 734,
+          "water": 2922,
+          "other-relations": 0
+        },
+        "Florida Peninsula + Keys": {
+          "beaches": 948,
+          "parks-polygon": 1101,
+          "parks-line": 0,
+          "coastline": 3334,
+          "water": 9678,
+          "other-relations": 0
+        },
+        "Georgia + South Carolina Coast": {
+          "beaches": 222,
+          "parks-polygon": 173,
+          "parks-line": 0,
+          "coastline": 210,
+          "water": 3231,
+          "other-relations": 0
+        },
+        "North Carolina Coast": {
+          "beaches": 252,
+          "parks-polygon": 258,
+          "parks-line": 0,
+          "coastline": 1285,
+          "water": 2760,
+          "other-relations": 0
+        },
+        "Chesapeake + Delmarva": {
+          "beaches": 635,
+          "parks-polygon": 879,
+          "parks-line": 0,
+          "coastline": 2253,
+          "water": 3630,
+          "other-relations": 0
+        },
+        "New Jersey + New York Bight": {
+          "beaches": 1462,
+          "parks-polygon": 2610,
+          "parks-line": 0,
+          "coastline": 3197,
+          "water": 6723,
+          "other-relations": 0
+        },
+        "Southern New England": {
+          "beaches": 2892,
+          "parks-polygon": 6447,
+          "parks-line": 0,
+          "coastline": 3320,
+          "water": 12666,
+          "other-relations": 0
+        },
+        "Northern New England": {
+          "beaches": 795,
+          "parks-polygon": 860,
+          "parks-line": 0,
+          "coastline": 1809,
+          "water": 2986,
+          "other-relations": 0
+        },
+        "Maritimes": {
+          "beaches": 1616,
+          "parks-polygon": 844,
+          "parks-line": 4,
+          "coastline": 5638,
+          "water": 6111,
+          "other-relations": 0
+        },
+        "St. Lawrence Estuary + Gaspé + Magdalen Islands": {
+          "beaches": 841,
+          "parks-polygon": 310,
+          "parks-line": 1,
+          "coastline": 2445,
+          "water": 5694,
+          "other-relations": 0
+        },
+        "Quebec Lower North Shore": {
+          "beaches": 92,
+          "parks-polygon": 6,
+          "parks-line": 0,
+          "coastline": 497,
+          "water": 3212,
+          "other-relations": 0
+        },
+        "Newfoundland": {
+          "beaches": 975,
+          "parks-polygon": 92,
+          "parks-line": 0,
+          "coastline": 3341,
+          "water": 10134,
+          "other-relations": 0
+        },
+        "Puerto Rico + US Virgin Islands": {
+          "beaches": null,
+          "parks-polygon": null,
+          "parks-line": null,
+          "coastline": null,
+          "water": null,
+          "other-relations": null
+        }
+      }
     }
   }
 }

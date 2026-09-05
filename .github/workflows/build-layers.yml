@@ -111,12 +111,13 @@ jobs:
         run: deno cache --lock=deno.lock --frozen scripts/clip-layers.js scripts/build-manifest.js scripts/print-spat-bbox.js
 
       # Reclaim runner disk. The per-country sequential plan peaks around 13.3 GB in
-      # the PBF stage, against a documented 14 GB, and $WORK/raw, $WORK/raw-lines and
-      # $WORK/gdaltmp are a second stage that grows continentally; every ogr2ogr step
-      # prints df before and after so the real peak stays a measurement. The 40 GB
-      # floor asserted below is sized for both stages: Actions commits only the 14 GB
-      # and anything above it is best effort, so this step buys the margin rather
-      # than betting on an observation.
+      # the PBF stage, and $WORK/raw, $WORK/raw-lines and $WORK/gdaltmp are a second
+      # stage sized by the -spat mask: the continental coastal mask measured 47 GB
+      # used at its peak on a 145 GB runner, 11 GB of it the raw stage. Every ogr2ogr
+      # step prints df before and after so the peak stays a measurement. The 40 GB
+      # floor asserted below covers both stages: Actions commits only 14 GB and
+      # anything above it is best effort, so this step buys the margin rather than
+      # betting on an observation.
       # tool-cache is deliberately not reclaimed: it holds the Node and Deno the
       # later steps need.
       - name: Reclaim disk
@@ -236,8 +237,10 @@ jobs:
           fi
           echo "geofabrik snapshot date: $DATE"
           : > "$WORK/sources.tsv"
-          for c in us canada mexico; do
-            f="$c-$DATE.osm.pbf"
+          # us does not carry Puerto Rico or the US Virgin Islands; they are
+          # sub-extracts under us/, so the local file takes the basename.
+          for c in us canada mexico us/puerto-rico us/us-virgin-islands; do
+            f="$(basename "$c")-$DATE.osm.pbf"
             # -f fails the step on an HTTP error instead of writing an HTML error
             # page into a .pbf. -L is mandatory: download.geofabrik.de 302-redirects
             # to mirrors and a request without it returns no body.
@@ -247,8 +250,8 @@ jobs:
             # than restarting a multi-gigabyte transfer from zero.
             curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -C - \
               --speed-limit 102400 --speed-time 120 --max-time 5400 \
-              -o "$f" "$BASE/$f"
-            curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f.md5" "$BASE/$f.md5"
+              -o "$f" "$BASE/$c-$DATE.osm.pbf"
+            curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f.md5" "$BASE/$c-$DATE.osm.pbf.md5"
             # The sidecar carries a bare basename, hence the cd above.
             md5sum -c "$f.md5"
             # The md5 pair is not merely checked here, it is recorded. Anything but
