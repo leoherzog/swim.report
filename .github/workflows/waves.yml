@@ -223,69 +223,22 @@ jobs:
           fi
 
       - name: Snapshot flag-worthy beaches from D1
-        # Read-only, and paginated from day one: this workflow reaches the row counts
-        # that force pagination before discovery.yml does, so it must not inherit the
-        # un-paginated version. The count guard still applies on top.
+        # Read-only. scripts/snapshot-d1.js pages the table by id and refuses to write
+        # unless the row count equals SELECT COUNT(*) under the same predicate.
         run: |
           set -euo pipefail
           # One spelling of the hide-until-flag-worthy gate, from
           # src/waterClass.js FLAG_WORTHY_WATER_SQL, used by both the paginated SELECT
-          # and the count guard below. An empty value would snapshot the whole table
-          # and the guard, comparing the same predicate against itself, would bless it,
-          # so the step fails here instead.
+          # and the count guard. The guard compares the same predicate against itself,
+          # so an empty value would snapshot the whole table and bless it;
+          # --require-where fails the step instead.
           FLAG_WORTHY=$(deno run --lock=deno.lock --frozen --allow-read scripts/print-flag-worthy-sql.js)
-          if [ -z "$FLAG_WORTHY" ]; then
-            echo "::error::scripts/print-flag-worthy-sql.js printed nothing — refusing to run an unbounded snapshot query"
-            exit 1
-          fi
-          echo "flag-worthy predicate: $FLAG_WORTHY"
-          offset=0
-          : > "$WORK/pages.json"
-          while : ; do
-            # --json writes API errors to stdout, so a naive redirect swallows them and
-            # the step fails with a blank log.
-            if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-              --command "SELECT id, lat, lon, water_class, last_viewed FROM beaches WHERE ${FLAG_WORTHY} ORDER BY id LIMIT ${SNAPSHOT_PAGE} OFFSET ${offset}" \
-              > "$WORK/page.json"; then
-              echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_D1_READ_TOKEN secret) — response below"
-              cat "$WORK/page.json"
-              exit 1
-            fi
-            got=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < "$WORK/page.json")
-            echo "page at offset $offset: $got row(s)"
-            # Compact to one line before appending. The assembler below splits on
-            # newlines and parses each part, but wrangler --json pretty-prints, so
-            # appending it raw feeds JSON.parse a bare "[". JSON.stringify escapes any
-            # newline inside a string, so one document per line holds.
-            node -e "const fs=require('fs');process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(process.argv[1],'utf8')))+'\n')" \
-              "$WORK/page.json" >> "$WORK/pages.json"
-            if [ "$got" -lt "$SNAPSHOT_PAGE" ]; then break; fi
-            offset=$((offset + SNAPSHOT_PAGE))
-          done
-          node -e "
-            const fs = require('fs');
-            const raw = fs.readFileSync(process.argv[1], 'utf8');
-            const rows = [];
-            for (const part of raw.split('\n')) {
-              if (part.trim() === '') { continue; }
-              const parsed = JSON.parse(part);
-              const list = Array.isArray(parsed) ? parsed : [parsed];
-              for (const envelope of list) {
-                for (const row of (envelope.results || [])) { rows.push(row); }
-              }
-            }
-            fs.writeFileSync(process.argv[2], JSON.stringify([{ results: rows }]));
-            console.log('assembled ' + rows.length + ' row(s)');
-          " "$WORK/pages.json" "$WORK/snapshot.json"
-          total=$(npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT COUNT(*) AS n FROM beaches WHERE ${FLAG_WORTHY}" \
-            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r[0].results[0].n)})")
-          snap=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);console.log(p[0].results.length)})" < "$WORK/snapshot.json")
-          echo "snapshot rows: $snap / db rows: $total"
-          if [ "$snap" != "$total" ]; then
-            echo "::error::snapshot truncated ($snap of $total rows) — aborting so the coverage gates never measure a partial table"
-            exit 1
-          fi
+          node scripts/snapshot-d1.js --db "$DB_NAME" --remote \
+            --columns "id, lat, lon, water_class, last_viewed" \
+            --where "$FLAG_WORTHY" --require-where \
+            --page "$SNAPSHOT_PAGE" --wrangler-version "$WRANGLER_VERSION" \
+            --token-hint CLOUDFLARE_D1_READ_TOKEN \
+            --out "$WORK/snapshot.json"
 
       - name: Fetch the GRIB2 cycle
         # The only network-touching script in this pipeline, and the only one carrying

@@ -290,7 +290,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   no per-box query cost, so scale-out stays purely additive: append coastal bboxes
   to `REGIONS` (commented-out placeholders already stubbed at the bottom of the
   file) and the build clips to them automatically. Adding a saltwater box also
-  wakes the dormant `ocean` branch of the water classifier. Two constraints remain:
+  wakes the dormant `ocean` branch of the water classifier. One constraint remains:
   - **`MAX_BEACHES_PER_RUN = 1200` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
     constraint, not two. Hot rows are covered every run; a cold row waits
     `ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot))` runs for its turn, and the flag
@@ -314,12 +314,6 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     seal at any time. At 1102 rows that is the whole table; at 10k it is most of it; past that
     real pagination is the prerequisite, and `skipNoSeal=` in the refresh cron's completion log
     is the number that reports it.
-  - **The D1 `--json` snapshot is size-capped and single-shot**, and the
-    delete-bearing snapshot just widened from 7 to 11 columns (discovery and
-    classification now share one). A truncated snapshot aborts the only delete path
-    there is. A **paginated snapshot is required before NA**, not after. Pagination is
-    implemented in the wave workflow, which reaches 16k rows first; `discovery.yml`
-    still needs it.
 
 ## Official-scraper fragility
 

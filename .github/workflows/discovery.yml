@@ -76,6 +76,7 @@ jobs:
       # unattended job gets 4.x fixes but a future wrangler 5 can never silently
       # change flags or --file parsing under a scheduled run.
       WRANGLER_VERSION: "4"
+      SNAPSHOT_PAGE: "5000"
       # workflow_dispatch inputs are absent on scheduled and workflow_run runs.
       APPLY: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_run') && 'true' || inputs.apply }}
     steps:
@@ -123,37 +124,21 @@ jobs:
           cat "$LAYERS_DIR/report.json"
 
       - name: Snapshot current beaches from D1
-        # Read-only, and guarded against a silently truncated snapshot — D1's --json
-        # response is size-capped — by comparing the row count to SELECT COUNT(*).
+        # Read-only. scripts/snapshot-d1.js pages the table by id and refuses to write
+        # unless the row count equals SELECT COUNT(*), because D1's --json response is
+        # size-capped and this is the only delete-bearing snapshot.
         #
-        # Columns are the union of what discovery, classify and marine read. The 11
-        # columns raise truncation risk on the only delete-bearing snapshot: watch the
-        # "snapshot bytes" line. A paginated LIMIT/OFFSET snapshot is the planned fix
-        # and is required before the North America expansion. It is also why
-        # discoverFromLayers applies pointInAnyRegion: without it the union -spat
-        # rectangle would add thousands of continental-interior inland-lake rows and
-        # this guard would abort the only delete path.
+        # Columns are the union of what discovery, classify and marine read. It is
+        # also why discoverFromLayers applies pointInAnyRegion: without it the union
+        # -spat rectangle would add thousands of continental-interior inland-lake rows
+        # to the delete-candidate universe.
         run: |
           set -euo pipefail
-          # --json writes API errors to stdout, so a naive redirect swallows them and
-          # the step fails with a blank log.
-          if ! npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class, water_class_version, water_class_attempts FROM beaches" \
-            > snapshot.json; then
-            echo "::error::wrangler snapshot query failed (likely a bad CLOUDFLARE_D1_EDIT_TOKEN secret) — response below"
-            cat snapshot.json
-            exit 1
-          fi
-          echo "snapshot bytes: $(wc -c < snapshot.json)"
-          total=$(npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" --remote --json \
-            --command "SELECT COUNT(*) AS n FROM beaches" \
-            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r[0].results[0].n)})")
-          snap=$(node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s);const rows=Array.isArray(p)?((p[0]&&p[0].results)||[]):[];console.log(rows.length)})" < snapshot.json)
-          echo "snapshot rows: $snap / db rows: $total"
-          if [ "$snap" != "$total" ]; then
-            echo "::error::snapshot truncated ($snap of $total rows) — aborting so reconciliation never runs on a partial table"
-            exit 1
-          fi
+          node scripts/snapshot-d1.js --db "$DB_NAME" --remote \
+            --columns "id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class, water_class_version, water_class_attempts" \
+            --page "$SNAPSHOT_PAGE" --wrangler-version "$WRANGLER_VERSION" \
+            --token-hint CLOUDFLARE_D1_EDIT_TOKEN \
+            --out snapshot.json
 
       - name: Run discovery + classification (emit SQL)
         # No --allow-net: the machine-enforced form of the offline-path contract. Any

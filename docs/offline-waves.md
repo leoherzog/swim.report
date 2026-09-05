@@ -150,11 +150,11 @@ and `.vrt`, removes that grid's entries from the plan, and continues. Deleting t
 load-bearing, because a truncated raster whose plane key still matches the plan is read by the
 sampler as a plane. Both steps read `requiredGridIds` from the JSON rather than naming a grid.
 
-The `WHERE` clause of the D1 snapshot comes from `FLAG_WORTHY_WATER_SQL` in
-`src/waterClass.js`, printed by `scripts/print-flag-worthy-sql.js` and interpolated into both
-the paginated `SELECT` and the truncation count guard. The guard compares the same predicate
-against itself, so an empty value would snapshot the whole table and pass; the step fails on an
-empty value instead.
+The D1 snapshot is read through `scripts/snapshot-d1.js` (see `docs/offline-discovery.md`),
+which pages by `id` and applies the truncation count guard. Its `WHERE` clause comes from
+`FLAG_WORTHY_WATER_SQL` in `src/waterClass.js`, printed by `scripts/print-flag-worthy-sql.js`.
+The guard compares the same predicate against itself, so an empty value would snapshot the whole
+table and pass; the step passes `--require-where`, which fails on an empty value instead.
 
 ## Publication
 

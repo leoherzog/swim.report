@@ -1486,8 +1486,8 @@ Two indexes, because the two questions have different costs.
       // the lakes, dense with inland-lake beach elements. Admitting them is not merely
       // wasteful: each would be UPSERTed, would sit outside every REGIONS bbox, and
       // would therefore be permanently un-deletable, because reconcileStaleRows scopes
-      // its delete candidates with pointInAnyRegion. It would also blow the 11-column D1
-      // --json snapshot past its size cap, aborting the only delete path there is.
+      // its delete candidates with pointInAnyRegion. It would also swell the 11-column
+      // snapshot every daily run pages through.
       // Scoping here makes the UPSERT universe and the delete-candidate universe the
       // same set.
 
@@ -2716,10 +2716,17 @@ only appends change-only UPDATEs.
   water_class_version, water_class_attempts` — the union of what `reconcileStaleRows`
   (id, name, lat, lon, park_name), `marineZoneSql` (id, lat, lon, nws_zone, marine_zone)
   and `buildClassifyQueue` (id, osm_id, water_class, water_class_version,
-  water_class_attempts) read. Do not introduce a second snapshot. This matters on the
-  delete rail: the snapshot step aborts the only delete-bearing run if D1's `--json`
-  response truncates, so a paginated snapshot is a recorded prerequisite for the North
-  America expansion (TODO.md).
+  water_class_attempts) read. Do not introduce a second snapshot. Both workflows read it
+  through `scripts/snapshot-d1.js` (Node): keyset pages on `id` through `wrangler d1 execute
+  --json`, because D1's `--json` response is size-capped and a single-shot SELECT over a grown
+  table silently truncates, and a `SELECT COUNT(*)` guard under the same predicate that
+  refuses to write the file on any mismatch. Keyset rather than LIMIT/OFFSET: an insert plus a
+  delete between two OFFSET pages keeps the total unchanged while one row is duplicated and
+  another dropped, which the guard cannot see; a keyset walk over the primary key cannot
+  duplicate, and an id that fails to ascend across pages aborts the run. The output is the
+  `[{ results }]` envelope `parseSnapshot` already accepts. The waves workflow passes
+  `--require-where` so an empty interpolated flag-worthy predicate fails the step instead of
+  snapshotting the whole table.
 
 Locally, `npm run seed:layers` fetches and verifies the layer set into `./.layers`, then
 `npm run seed` runs the batch against local D1 over it (`deno run --allow-read
@@ -2741,9 +2748,8 @@ scan of a fixed layer set — so box size and count are free. Wherever a step be
 
 Nationwide scale-out (adding Pacific, Gulf and Atlantic coasts) is purely additive: append
 boxes to REGIONS. The discovery half is cheap, but do not attempt it yet — the remaining
-blockers are the flag-worthy row count against the MAX_BEACHES_PER_RUN / FLAG_TTL_SECONDS
-inequality in section 7 and the size-capped single-shot D1 `--json` snapshot, both recorded
-in TODO.md.
+blocker on this side is the flag-worthy row count against the MAX_BEACHES_PER_RUN /
+FLAG_TTL_SECONDS inequality in section 7, recorded in TODO.md.
 
 runDiscovery(layers, report) is a local scan. There is no retry, no backoff, no per-tile
 budget and no circuit breaker, because there is no upstream to be flaky:
