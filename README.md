@@ -1,8 +1,8 @@
 # Swim Report (swim.report)
 
 Swim Report estimates beach hazard flag status (green / yellow / red / double-red /
-unknown) for US and Canadian Great Lakes beaches using public NOAA/NWS and Environment
-and Climate Change Canada (ECCC) data, and — where a municipality publishes one —
+unknown) for US and Canadian beaches on the Great Lakes and the Pacific, Gulf, Atlantic and
+Alaskan coasts using public NOAA/NWS and Environment and Climate Change Canada (ECCC) data, and — where a municipality publishes one —
 surfaces the real official flag alongside it.
 
 ## Estimated vs. official

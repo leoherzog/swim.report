@@ -654,8 +654,8 @@ export function renderListPage(data) {
 
   const introHtml = "<section class=\"list-intro wa-stack wa-gap-xs\">" +
     "<h1>Swim Report</h1>" +
-    "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags for pilot beaches across the " +
-    "Great Lakes region.</p>" +
+    "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags for Great Lakes and " +
+    "ocean-coast beaches across the United States and Canada.</p>" +
     "</section>";
 
   const mapHtml = renderHomeMap(nearParam, location);

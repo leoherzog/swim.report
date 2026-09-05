@@ -59,6 +59,19 @@ source timestamp, the `regionsDigest`, the sanity verdict, and a history array o
 builds' counts. Absolute floors come from the committed `data/layer-floors.json`, keyed by
 `regionsDigest`.
 
+**Seeding floors for a new `REGIONS` footprint.** Appending a box changes the digest, and a
+digest with no `status: "seeded"` entry makes the build upload its prefix and refuse to move
+the pointer (`floorsEntryFor` in `scripts/build-manifest.js`); the daily discovery run meanwhile
+reads `regions-digest-mismatch` and suppresses deletes. There is no seeding script. Dispatch
+`build-layers.yml` with `publish: true`, read the withheld build's `manifest.json`, confirm
+`lakes-polygon` still carries exactly the six QIDs in `lakesIdentity`, then commit an entry
+under `floors["sha256:<digest>"]` with `status: "seeded"`, `seededFromBuildId`, `seededAt`,
+`regionCount`, `regionNames`, a `layers{}` floor per `EXPECTED_LAYER_KEYS` and a `regions{}`
+floor per box per `_regionLayerNames`, each at `floor(0.75 × measured)` (`FLOOR_SEED_RATIO`),
+`null` where nothing was measured. Re-dispatch with `force_publish: true`. For a saltwater
+footprint `coastline` must be a real number, and `beaches-line`, `water-line` and `parks-line`
+stop being safely zero. A `bootstrap` entry is not a shortcut and is refused.
+
 **Publication order matters.** Ten layer files plus the manifest go to an **immutable per-build
 prefix** in the R2 bucket `swim-report`; the small `layers/current.json` pointer is overwritten
 **last**, so a reader can never see a torn set. Writes use the runner's preinstalled AWS CLI

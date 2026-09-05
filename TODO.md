@@ -51,10 +51,12 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches
     linger in D1 (their KV flags self-expire at the 25200 s TTL). Harmless and
     cheap — left in place.
-  - **The `ocean` branch stays dormant** until `REGIONS` gains a saltwater box. In the current
-    Great Lakes regions every keeper is a Great Lake, since shorelines are relation member ways
-    rather than `natural=coastline`. Harmless: ocean and great_lake are both flag-worthy and
-    pass the gate identically — only inland versus {ocean, great_lake} must be reliable.
+  - **The `ocean` branch has no live rows until the first coastal layer set publishes.** It
+    is implemented and tested (`coastlinePresent` decides ahead of the wikidata check), but
+    the served table is still the Great Lakes set, where shorelines are relation member ways
+    rather than `natural=coastline`. Harmless either way: ocean and great_lake are both
+    flag-worthy and pass the gate identically — only inland versus {ocean, great_lake} must
+    be reliable.
 - **GitHub Actions cron skipping is the wave pipeline's largest unclosed risk.** The
   scheduler skips occurrences rather than deferring them, and 8 slots a day against a 7 h
   absolute key expiration tolerates only two consecutive misses. The permanent fix is to
@@ -276,22 +278,45 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   `src/waveSources/ndbcBuoys.js` all become removable together in one coherent commit, and
   `migrations/0013_drop_wave_updated.sql` becomes the honest follow-up.
 - **NWS marine-zone shapefile refresh (~biannual chore).** `beaches.marine_zone` is derived
-  offline from `data/marine-zones-greatlakes.json`, generated from the NWS coastal
+  offline from `data/marine-zones.json`, generated from the NWS coastal
   marine-zone shapefile. NWS republishes it ~1–2×/year on a schedule announced on
   https://www.weather.gov/gis/MarineZones (current release `mz16ap26.zip`, effective
   2026-04-16). When a new release lands, follow the refresh procedure in
   `docs/offline-discovery.md` (update `DEFAULT_ZIP_URL` + `RELEASE_VALID_DATE` in
   `scripts/build-marine-zones.js`, regenerate, diff per-prefix counts, `npm test`, commit).
-  Also grow `GREAT_LAKES_ZONE_PREFIXES` in that script whenever `src/regions.js` `REGIONS`
-  gains coasts beyond the Great Lakes system.
-- **North America coastal expansion — add Pacific / Gulf / Atlantic boxes to
-  `src/regions.js`.** The DISCOVERY half of this is now genuinely cheap. `REGIONS`
-  feeds the layer build's clip mask, the per-region sanity floors and delete rail,
-  and `pointInAnyRegion` delete scoping — and nothing else. There is no tiling and
-  no per-box query cost, so scale-out stays purely additive: append coastal bboxes
-  to `REGIONS` (commented-out placeholders already stubbed at the bottom of the
-  file) and the build clips to them automatically. Adding a saltwater box also
-  wakes the dormant `ocean` branch of the water classifier. One constraint remains:
+  `COASTAL_ZONE_PREFIXES` carries every prefix in the coastal shapefile; a prefix a new release
+  adds is logged as SKIPPED rather than dropped silently, so read the log.
+- **North America coastal expansion — boxes are in, the first coastal build is not.**
+  `src/regions.js` carries 26 coastal boxes (US and Canadian Pacific, Gulf, Atlantic, Alaska
+  east of 180°, Hawaii, Puerto Rico) beside the nine Great Lakes boxes. What is still open,
+  in order:
+  - **Measure the continental raw stage.** The union `-spat` mask is now `-180 17.55 -52.45
+    67.25`, so the five unmasked `ogr2ogr` writes into `$WORK/raw` grow to the whole extract
+    against the ~27 GB left above the 13.3 GB PBF peak. Unmeasured; the first coastal build
+    tells. If it does not fit, the choice is per-box `ogr2ogr` invocations or dropping `-spat`
+    and leaning entirely on `clip-layers.js`.
+  - **Seed `data/layer-floors.json` for the new digest** (`sha256:6e29be94…`). The build
+    uploads its prefix and refuses to move the pointer until a `status: "seeded"` entry exists;
+    procedure in `docs/offline-discovery.md`. `coastline` must be a real number this time, and
+    `beaches-line` / `water-line` / `parks-line` stop being safely zero at ocean scope.
+  - **Seed the ocean wave floors by hand.** `data/wave-floors.json` is keyed by the grid set,
+    not by `REGIONS`, so no refusal prompts for `noaa_gfswave` / `noaa_gfswave_arctic`; a cycle
+    resolving 3 ocean beaches out of 20,000 would publish until they are seeded.
+  - **Enrichment drain rate.** `NWS_ENRICHMENT_LIMIT = 75` × 4 runs is 300 beaches a day, and a
+    beach without `nws_zone` is alert-blind with a caveat. Tens of thousands of new coastal rows
+    take months at that rate; the knobs are the limit and the cron cadence (a five-file edit),
+    bounded by api.weather.gov politeness, and the demand tiebreak drains viewed beaches first.
+  - **Antimeridian wrap** in `src/layerGrid.js` before any box west of 180° (Attu, Shemya).
+  - **Excluded by choice**: Mexico (no alert source; every row would burn five 404s ahead of US
+    rows in the shared enrichment queue), Labrador and Hudson Bay (no wave grid north of
+    52.58°N on the east side), Arctic Alaska and Canada, Greenland.
+  - **Delete-rail blast radius.** The rails are proportional, so 5 % of a 50k table is 2,500
+    deletes and `CLASSIFY_MAX_HIDE_FRACTION` 0.10 is 5,000 hides in one delta; re-derive the
+    fractions once the first coastal row count is known. `REGION_RECONCILE_MIN_DELETES = 2`
+    goes vestigial (no coastal box has a single-digit candidate tail).
+  - **Homepage list and map.** `GET /` is capped at 100 rows with no pagination, and the map
+    directory's practical ceiling is ~40k features (below).
+  The Worker-side constraint that predates all of this:
   - **`MAX_BEACHES_PER_RUN = 1200` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
     constraint, not two. Hot rows are covered every run; a cold row waits
     `ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot))` runs for its turn, and the flag

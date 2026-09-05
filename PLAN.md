@@ -2790,16 +2790,22 @@ line, so a split can never tear a statement) and applies each with its own
 file to miniflare/workerd as one SQL call capped at 100,000 bytes (`SQLITE_TOOBIG`). The
 workflow's `--remote` apply goes through the D1 import API and has no such cap.
 
-Discovery region — the Great Lakes shoreline, defined as the curated coastal boxes in
-REGIONS (src/regions.js, section 5). REGIONS feeds exactly three things: the layer build's
+Discovery region — the Great Lakes shoreline and the US and Canadian Pacific, Gulf, Atlantic
+and Alaskan coasts, defined as the curated coastal boxes in REGIONS (src/regions.js,
+section 5). REGIONS feeds exactly three things: the layer build's
 `-spat` clip mask, the per-region sanity floors and delete rail, and pointInAnyRegion
 delete scoping. There is no tiling and no per-box query cost — the batch does one local
 scan of a fixed layer set — so box size and count are free. Wherever a step below refers to
 "the region", read it as the union of the REGIONS boxes.
 
-Nationwide scale-out (adding Pacific, Gulf and Atlantic coasts) is purely additive: append
-boxes to REGIONS. The discovery half is cheap, but do not attempt it yet — the remaining
-blocker on this side is the flag-worthy row count against the MAX_BEACHES_PER_RUN /
+Bringing a further coast online is additive: append boxes to REGIONS. Two things follow
+that are not automatic. The new regionsDigest has no entry in data/layer-floors.json, so the
+next layer build uploads its prefix and refuses to move the pointer until the coast's floors
+are seeded and committed; and data/wave-floors.json is keyed by the grid set rather than by
+REGIONS, so the ocean grid floors are seeded by hand after the first cycle that samples ocean
+beaches. No box may cross the antimeridian (src/layerGrid.js has no longitude wrap). Mexico,
+Labrador, Hudson Bay, the Arctic and Greenland are excluded by choice (src/regions.js header).
+The Worker-side ceiling is the flag-worthy row count against the MAX_BEACHES_PER_RUN /
 FLAG_TTL_SECONDS inequality in section 7, recorded in TODO.md.
 
 runDiscovery(layers, report) is a local scan. There is no retry, no backoff, no per-tile

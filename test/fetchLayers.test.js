@@ -708,7 +708,10 @@ describe("print-spat-bbox", function () {
     expect(boxes.length).toBe(REGIONS.length);
     for (let i = 0; i < REGIONS.length; i = i + 1) {
       expect(boxes[i].name).toBe(REGIONS[i].name);
-      expect(boxes[i].bbox.minLon < REGIONS[i].bbox.minLon).toBe(true);
+      // The Aleutian box sits on -180 and clamps rather than pads.
+      const expectedMinLon = REGIONS[i].bbox.minLon <= -180 ? -180 : REGIONS[i].bbox.minLon;
+      expect(boxes[i].bbox.minLon <= expectedMinLon).toBe(true);
+      expect(boxes[i].bbox.minLon >= -180).toBe(true);
       expect(boxes[i].bbox.maxLat > REGIONS[i].bbox.maxLat).toBe(true);
     }
   });
