@@ -44,6 +44,7 @@ source.
 
 Example response:    {
       "type": "FeatureCollection",
+      "builtAt": "2026-07-04T15:00:03.000Z",
       "features": [
         {
           "type": "Feature",
@@ -56,6 +57,14 @@ Example response:    {
         }
       ]
     }
+
+The response is assembled by the crons into a single precomputed KV directory, so serving it
+costs one KV read no matter how many beaches the table holds. `builtAt` is the instant that
+directory was built, carried as a top-level GeoJSON foreign member so a stalled builder is
+visible from the endpoint itself. If the directory is missing the endpoint answers with every
+feature's `flag` set to `unknown`, `builtAt` `null` and `degraded` `true`, rather than a
+partial response or a green default; geometry is preserved, so the map is degraded rather
+than broken.
 
 Each feature's geometry is a `Point` in GeoJSON `[longitude, latitude]` order — lon first.
 `properties.name` is the beach's display name: the containing park name from OpenStreetMap
@@ -172,8 +181,12 @@ All `/api/*` responses set `content-type: application/json`, except
 `application/geo+json; charset=utf-8`; HTML responses set `text/html; charset=utf-8`.
 Responses are cached at Cloudflare's edge (Workers Cache, `[cache]` in `wrangler.toml`) under
 an explicit per-route policy: successful API and beach-detail responses send
-`cache-control: public, max-age=60, stale-while-revalidate=600, stale-if-error=600`; the
-`/api/flag` 404 sends plain `public, max-age=60`; the home page, `/health` and error
+`cache-control: public, max-age=60, stale-while-revalidate=600, stale-if-error=600`;
+`GET /api/beaches.geojson` sends `public, max-age=60, stale-while-revalidate=60,
+stale-if-error=600` on a served directory and `public, max-age=60, stale-if-error=600` (no
+stale-while-revalidate at all) on the degraded response, because its origin is a single KV
+read and a longer stale window would only add to the flag-flip latency the map exists to
+show; the `/api/flag` 404 sends plain `public, max-age=60`; the home page, `/health` and error
 responses send `no-store`, because the home page is personalized by IP-derived location and
 must never be shared across visitors.
 
@@ -296,7 +309,7 @@ dark follow the visitor's OS preference via a blocking inline script
 
 ### Cron jobs
 
-Five scheduled triggers run in production (`wrangler.toml`'s `crons` array). They are
+Six scheduled triggers run in production (`wrangler.toml`'s `crons` array). They are
 separate crons on purpose: each upstream's rate-limit posture is independent, and a
 failure in one job never starves another. Beach discovery, water-body classification and
 the `marine_zone` derivation are not in this list — they run offline (see [Discovery and
@@ -641,7 +654,9 @@ nothing to report must never return null, or it would raise a false alert.
          staleMs: 108000000,         // this source's own staleness horizon (ms)
          readingNote: "Morning reading — conditions may have changed since it was posted",
          // OPTIONAL, unrelated to the two above: extends this scraper's own
-         // official-KV TTL when it fetches on a reduced cadence.
+         // official-KV TTL when it fetches on a reduced cadence. Never longer than
+         // the estimate's 25200 s without teaching the map directory to carry this
+         // record's own expiry instant.
          // officialTtlSeconds: 21600,
          matches: function (beach) {
            // BeachRow -> boolean, pure. Match by name regex and/or a lat/lon
@@ -706,7 +721,10 @@ nothing to report must never return null, or it would raise a false alert.
    always wins, so a `readingNote` can never suppress a real stale warning. Both fields are
    validated when the record is written (`staleMs` a finite number > 0, `readingNote` a
    non-empty string) and are otherwise omitted. Neither has anything to do with
-   `officialTtlSeconds`, which governs how long the KV value itself lives.
+   `officialTtlSeconds`, which governs how long the KV value itself lives. Keep
+   `officialTtlSeconds` at or below the estimate's 25200 s: the precomputed map directory
+   infers an official's expiry from its paired estimate, so a longer-lived official would show
+   as `unknown` on the map while the detail page still renders its color.
 
    `staleMs` is an addition to honest `updated` stamping, never a substitute: stamping `nowIso`
    on a days-old reading and covering it with a long horizon is exactly the failure the honesty

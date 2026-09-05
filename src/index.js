@@ -11,16 +11,10 @@ import {
 } from "./clients/nws.js";
 import {
   fetchActiveEcccAlerts,
-  ecccAlertsForPoint,
   fetchEcccForecastZones,
-  ecccZoneNameForPoint,
-  ECCC_ALERTS_INFO_URL
+  ecccZoneNameForPoint
 } from "./clients/eccc.js";
-import {
-  fetchActiveEcccMarineAlerts,
-  ecccMarineAlertsForPoint,
-  ECCC_MARINE_INFO_URL
-} from "./clients/ecccMarine.js";
+import { fetchActiveEcccMarineAlerts } from "./clients/ecccMarine.js";
 import { parseRipCurrentRisk } from "./clients/srfParser.js";
 import { FLAG_WORTHY_WATER_SQL } from "./waterClass.js";
 import {
@@ -35,6 +29,18 @@ import { WIND_SOURCE, waveSourceLabel, waveSourceUrl } from "./waveModels.js";
 import { nearestWaterTempStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
 import { updateScraperHealth } from "./scraperHealth.js";
 import { HOT_VIEW_WINDOW_MS } from "./demandWindow.js";
+import { FLAG_TTL_SECONDS } from "./flagTtl.js";
+import {
+  buildAlertInputs,
+  buildEstimateInputs,
+  sealFromSignals
+} from "./flagInputs.js";
+import {
+  MAP_DIRECTORY_KEY,
+  MAP_DIRECTORY_TTL_SECONDS,
+  mapDirectoryEntry,
+  buildMapDirectory
+} from "./mapDirectory.js";
 import { makeDeadline, runPool } from "./pool.js";
 
 // Rows per hourly run. The cap bounds one run's wall clock and KV write budget
@@ -54,6 +60,10 @@ const MAX_BEACHES_PER_RUN = 1200;
 // HOT_VIEW_WINDOW_MS is imported from ./demandWindow.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry module
 // and fails the Worker at startup. See demandWindow.js.
+// FLAG_TTL_SECONDS (25200) is imported from ./flagTtl.js and deliberately not
+// re-exported: workerd rejects any non-function named export on the entry
+// module and fails the Worker at startup. src/mapDirectory.js reads the same
+// lease from there to reproduce KV expiry at read time.
 // The "flag:" estimate is rewritten on every rotation turn and never retracted,
 // so this TTL is pure expiry: it must outlive the gap between one beach's turns
 // rather than bound how long a withdrawn reading keeps rendering. That gap is
@@ -68,7 +78,7 @@ const MAX_BEACHES_PER_RUN = 1200;
 // The "official:" put shares this TTL. The two keys are the operands of
 // displayFlagColor, so the estimate must never outlive the posted flag it is
 // weighed against.
-const FLAG_TTL_SECONDS = 25200;
+//
 // "wqfloor:" keeps the shorter TTL: nothing deletes a KV key, so expiry is the
 // only way a cleared advisory stops rendering, and the advisory callout is
 // display-only — it never decides a color.
@@ -101,6 +111,12 @@ const WAVE_WRITE_DEADLINE_MS = 840000;
 // after the loop never runs when the invocation is killed mid-loop, so the cursor
 // never moves and the same prefix of beaches is reprocessed every run forever.
 const WAVE_CURSOR_FLUSH_SIZE = 100;
+// Wall-clock rail on the map-directory scan, measured from the start of the
+// scan. The scan is ~1.5 s over today's flag-worthy set and ~13 s at 10k rows at
+// the ~6 simultaneous connections the platform grants, so this is a guard
+// against a hung KV read rather than a routine truncation point, and it leaves
+// the hourly run's 900 s budget intact.
+const MAP_SCAN_DEADLINE_MS = 120000;
 // Rotation cursor per cron. A column name cannot be a bind parameter, so the
 // value is concatenated into the SQL as a literal: it must stay a lookup in this
 // two-entry whitelist and must never be caller-derived text.
@@ -257,6 +273,129 @@ function makeWaveCursorStamper(env, nowIso, flushSize) {
       await flush(ids);
     }
   };
+}
+
+// Every flag-worthy beach with the columns the map directory and the alert match
+// both need, in a stable order. No bind parameters: FLAG_WORTHY_WATER_SQL is an
+// inlined literal (src/waterClass.js). ORDER BY id makes the entry order
+// deterministic, so one build diffs meaningfully against the next.
+//
+// recompute_updated rides along for the refresh cron alone: D1 is strongly
+// consistent where KV is not, so the hourly's own stamp is what lets a stale
+// "flag:" replica be recognized as superseded.
+const MAP_DIRECTORY_SQL =
+  "SELECT id, name, park_name, lat, lon, nws_zone, marine_zone, eccc_zone, recompute_updated " +
+  "FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL + " ORDER BY id";
+
+// Scan budget read from env with a fallback to the module constant, the same
+// plain-number override runBudget(env) uses and for the same reason: a 0 makes
+// the deadline branch reachable under a frozen Date, where makeDeadline's
+// expired() uses >=.
+function mapScanBudgetMs(env) {
+  return env && typeof env.MAP_SCAN_DEADLINE_MS === "number"
+    ? env.MAP_SCAN_DEADLINE_MS : MAP_SCAN_DEADLINE_MS;
+}
+
+// Builds the map directory's entry list from rows plus the KV each row stands
+// on, and returns { entries, byId } — or null when the deadline tripped.
+//
+// Three disciplines this must keep:
+//
+// Streaming. Each chunk keeps only the four scalars an entry needs and lets the
+// parsed KV values go out of scope, so peak memory is one chunk plus the entry
+// array rather than the whole table's parsed payloads. That is what pushes the
+// 128 MB isolate ceiling out.
+//
+// Read-your-writes. KV offers no read-your-own-writes guarantee, so a cron that
+// just wrote a key can read the pre-write value milliseconds later. preload is
+// { estimates, officials }, two Maps of what this run already wrote; ids present
+// there are never requested from KV at all. Preloading BOTH is load-bearing: with
+// estimates only, a flag posted this run renders the previous hour's official
+// color on the map for an hour. A beach whose put FAILED is deliberately absent
+// from preload, so it falls through to the KV read and picks up its old standing
+// value.
+//
+// Whole or nothing. A scan that trips its deadline returns null and the caller
+// writes no artifact, leaving the previous one to ride its own TTL. A partial
+// directory would drop beaches from the map entirely, which is worse than an
+// unknown color.
+//
+// onRow(row, entry, standing, official) is synchronous, called once per row —
+// including rows dropped for non-finite coordinates, where entry is null — and
+// may be null. It exists so a caller can select on the standing estimate while it
+// is still in hand, at no second read.
+async function scanMapDirectory(env, rows, deadline, preload, onRow) {
+  const preEstimates = preload && preload.estimates ? preload.estimates : null;
+  const preOfficials = preload && preload.officials ? preload.officials : null;
+  const entries = [];
+  const byId = new Map();
+  const groups = chunk(rows, 100);
+  for (const group of groups) {
+    if (deadline && deadline.expired()) {
+      return null;
+    }
+    const flagKeys = [];
+    const officialKeys = [];
+    for (const row of group) {
+      if (!preEstimates || !preEstimates.has(row.id)) {
+        flagKeys.push("flag:" + row.id);
+      }
+      if (!preOfficials || !preOfficials.has(row.id)) {
+        officialKeys.push("official:" + row.id);
+      }
+    }
+    const reads = await Promise.all([
+      flagKeys.length > 0 ? env.FLAGS.get(flagKeys, { type: "json" }) : Promise.resolve(null),
+      officialKeys.length > 0 ? env.FLAGS.get(officialKeys, { type: "json" }) : Promise.resolve(null)
+    ]);
+    const flagMap = reads[0];
+    const officialMap = reads[1];
+    for (const row of group) {
+      const standing = preEstimates && preEstimates.has(row.id)
+        ? preEstimates.get(row.id)
+        : (flagMap ? flagMap.get("flag:" + row.id) || null : null);
+      const official = preOfficials && preOfficials.has(row.id)
+        ? preOfficials.get(row.id)
+        : (officialMap ? officialMap.get("official:" + row.id) || null : null);
+      const entry = mapDirectoryEntry(row, standing, official);
+      if (entry !== null) {
+        entries.push(entry);
+        byId.set(row.id, entry);
+      }
+      if (onRow) {
+        onRow(row, entry, standing, official);
+      }
+    }
+  }
+  return { entries: entries, byId: byId };
+}
+
+// Publishes the directory as one whole value. Returns true on success, false on
+// a throw, which is logged and never rethrown: a builder failure must not change
+// the calling run's own accounting.
+//
+// An empty entry list is refused rather than published. A D1 read that resolves
+// with no results — a response carrying no results array, a snapshot taken while
+// classification had hidden everything — otherwise publishes a structurally valid
+// directory the request path accepts as authoritative, blanking the map for three
+// hours with no degraded marker and no log line. An empty directory is the
+// maximal partial, and the whole-or-nothing rule the scan keeps applies to it.
+async function putMapDirectory(env, entries, builtAtIso) {
+  if (entries.length === 0) {
+    console.log("index: map directory build produced no entries; keeping the previous directory");
+    return false;
+  }
+  try {
+    await env.FLAGS.put(
+      MAP_DIRECTORY_KEY,
+      JSON.stringify(buildMapDirectory(entries, builtAtIso)),
+      { expirationTtl: MAP_DIRECTORY_TTL_SECONDS }
+    );
+    return true;
+  } catch (err) {
+    console.log("index: map directory put failed: " + err.message);
+    return false;
+  }
 }
 
 // Hourly estimate recompute. Fetches the fast-changing safety signals (alerts,
@@ -437,58 +576,22 @@ async function runFlagRecompute(env) {
     // depends on the previous iteration. estimateCount / failureCount are
     // incremented with a single synchronous statement, no await between read and
     // write, so concurrent runners cannot lose a count.
+    //
+    // The alert half of every beach's bundle is assembled by buildAlertInputs
+    // (src/flagInputs.js), the same function the alerts refresh cron calls, so
+    // the two crons cannot drift in how they match a zone or attribute a source.
+    const alertCtx = {
+      alertsMap: alertsMap,
+      ecccAlerts: ecccAlerts,
+      ecccMarineAlerts: ecccMarineAlerts
+    };
     await runPool(beaches, KV_WRITE_CONCURRENCY, async function (beach) {
       try {
-        const sources = [];
-
-        let alerts = null;
-        let alertDetails = null;
-        const landEntry = beach.nws_zone ? alertsMap.get(beach.nws_zone) : null;
-        const marineEntry = beach.marine_zone ? alertsMap.get(beach.marine_zone) : null;
-        if (landEntry || marineEntry) {
-          // US beach: land forecast-zone alerts plus adjacent marine-zone
-          // alerts, both matched from the one national NWS fetch. concat leaves
-          // alerts null only when both entries are absent — a failed fetch or an
-          // unenriched zone — so a real failure keeps alertsCheckable true with
-          // no false caveat. No dedup: alerts is read only via indexOf, and both
-          // estimateFlag and the hazard lane tolerate repeated events.
-          alerts = (landEntry ? landEntry.events : []).concat(marineEntry ? marineEntry.events : []);
-          alertDetails = (landEntry ? landEntry.details : []).concat(marineEntry ? marineEntry.details : []);
-          if (landEntry) {
-            sources.push({ label: "NWS Alerts", url: landEntry.sourceUrl });
-          }
-          if (marineEntry) {
-            sources.push({ label: "NWS Marine Alerts", url: marineEntry.sourceUrl });
-          }
-        } else if (beach.eccc_zone && (ecccAlerts !== null || ecccMarineAlerts !== null)) {
-          // Canadian beach: match the run's single ECCC land fetch and single
-          // marine fetch to this point via their region polygons, then concat
-          // into one alerts list, as the US branch does. A successful fetch with
-          // zero containing polygons is a real "no active alerts". The branch
-          // still processes when only one of the two fetches succeeded, so a
-          // land-alerts outage never hides an active marine gale or the
-          // reverse.
-          const landMatched = ecccAlerts !== null
-            ? ecccAlertsForPoint(ecccAlerts.alerts, beach.lat, beach.lon)
-            : { events: [], details: [] };
-          const marineMatched = ecccMarineAlerts !== null
-            ? ecccMarineAlertsForPoint(ecccMarineAlerts.alerts, beach.lat, beach.lon)
-            : { events: [], details: [] };
-          alerts = landMatched.events.concat(marineMatched.events);
-          alertDetails = landMatched.details.concat(marineMatched.details);
-          if (ecccAlerts !== null) {
-            sources.push({
-              label: "Environment Canada Alerts",
-              url: ECCC_ALERTS_INFO_URL
-            });
-          }
-          if (ecccMarineAlerts !== null) {
-            sources.push({
-              label: "Environment Canada Marine Alerts",
-              url: ECCC_MARINE_INFO_URL
-            });
-          }
-        }
+        // The non-alert source entries, kept separate from the alert ones so
+        // buildEstimateInputs can concat them in the same order the payload has
+        // always carried and sealFromSignals can store exactly this half.
+        const signalSources = [];
+        const alertPart = buildAlertInputs(beach, alertCtx);
 
         let ripCurrentRisk = null;
         const wfo = wfoFromGridUrl(beach.nws_grid_url);
@@ -496,7 +599,7 @@ async function runFlagRecompute(env) {
           const srfEntry = srfMap.get(wfo);
           if (srfEntry) {
             ripCurrentRisk = srfEntry.risk;
-            sources.push({
+            signalSources.push({
               label: "NWS Surf Zone Forecast",
               url: srfEntry.sourceUrl
             });
@@ -507,10 +610,13 @@ async function runFlagRecompute(env) {
         // input (or are absent when there is no fresh data for this beach).
         const waveInput = waveInputs.get(beach.id);
 
+        // Number.isFinite, not typeof "number": rules.js step 3's else branch has
+        // no finite guard, so a non-finite reading would decide green with a
+        // nonsense reason. Caller-side input validation, not a rule change.
         let waveHeightFt = null;
-        if (waveInput && typeof waveInput.waveHeightFt === "number") {
+        if (waveInput && Number.isFinite(waveInput.waveHeightFt)) {
           waveHeightFt = waveInput.waveHeightFt;
-          sources.push({
+          signalSources.push({
             label: waveSourceLabel(waveInput.model),
             url: waveSourceUrl(waveInput.model)
           });
@@ -518,12 +624,12 @@ async function runFlagRecompute(env) {
 
         // Wind is only a fallback for wave-null beaches, and only names its
         // source when it is the signal actually in play.
-        let windSpeedMph = waveInput && typeof waveInput.windSpeedMph === "number"
+        let windSpeedMph = waveInput && Number.isFinite(waveInput.windSpeedMph)
           ? waveInput.windSpeedMph : null;
-        let windGustMph = waveInput && typeof waveInput.windGustMph === "number"
+        let windGustMph = waveInput && Number.isFinite(waveInput.windGustMph)
           ? waveInput.windGustMph : null;
         if (waveHeightFt === null && (windSpeedMph !== null || windGustMph !== null)) {
-          sources.push(WIND_SOURCE);
+          signalSources.push(WIND_SOURCE);
         }
 
         // Water-quality advisory floor: resolve this beach against its group's
@@ -540,36 +646,43 @@ async function runFlagRecompute(env) {
           }
         }
         if (waterQualityAdvisory !== null) {
-          sources.push({
+          signalSources.push({
             label: waterQualityAdvisory.source,
             url: typeof wqSourceForBeach.infoUrl === "string" ? wqSourceForBeach.infoUrl : ""
           });
         }
 
-        // alertsCheckable distinguishes "alerts checked, none active"
-        // (alerts === []) from "alerts not checkable" (neither nws_zone nor
-        // eccc_zone resolved). When false, estimateFlag appends a "Weather alerts
-        // not yet available for this beach" caveat so a wave-only green is never
-        // presentable as alert-verified. A transient alerts-fetch failure for an
-        // enriched beach stays alertsCheckable true.
-        const inputs = {
-          beachId: beach.id,
-          alerts: alerts,
-          alertDetails: alertDetails,
-          alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false,
+        // The complete non-alert half, in one object, so the seal below cannot
+        // omit a field the estimate consumed: buildEstimateInputs and
+        // sealFromSignals are handed the SAME object. buildEstimateInputs also
+        // recomputes alertsCheckable, which distinguishes "alerts checked, none
+        // active" (alerts === []) from "alerts not checkable" (neither nws_zone
+        // nor eccc_zone resolved); when false, estimateFlag appends a "Weather
+        // alerts not yet available for this beach" caveat so a wave-only green is
+        // never presentable as alert-verified. A transient alerts-fetch failure
+        // for an enriched beach stays alertsCheckable true.
+        const signals = {
+          alertsResolved: alertPart.alertsResolved,
           ripCurrentRisk: ripCurrentRisk,
           waveHeightFt: waveHeightFt,
           windSpeedMph: windSpeedMph,
           windGustMph: windGustMph,
           waterQualityAdvisory: waterQualityAdvisory,
-          sources: sources,
+          signalSources: signalSources,
           updated: nowIso
         };
 
-        const estimate = estimateFlag(inputs);
+        const estimate = estimateFlag(buildEstimateInputs(beach, alertPart, signals));
+        // The seal is spread on AFTER estimateFlag returns, so rules.js neither
+        // sees nor produces it. It is what lets runAlertRefresh recompute this
+        // beach from fresh alerts without reconstructing — or losing — a single
+        // non-alert input.
+        const stored = Object.assign({}, estimate, {
+          estimateInputs: sealFromSignals(signals, alertPart)
+        });
         await env.FLAGS.put(
           "flag:" + beach.id,
-          JSON.stringify(estimate),
+          JSON.stringify(stored),
           { expirationTtl: FLAG_TTL_SECONDS }
         );
 
@@ -596,7 +709,8 @@ async function runFlagRecompute(env) {
         // shape: that silently inverts the guarantee.
         estimatesByBeach.set(beach.id, {
           color: estimate.color,
-          rulesVersion: estimate.rules_version
+          rulesVersion: estimate.rules_version,
+          updated: estimate.updated
         });
         estimateCount = estimateCount + 1;
       } catch (err) {
@@ -696,7 +810,8 @@ async function runFlagRecompute(env) {
             // that was never published.
             officialsByBeach.set(beach.id, {
               color: flag.color,
-              source: flag.scraperId || group.scraper.id
+              source: flag.scraperId || group.scraper.id,
+              updated: flag.updated
             });
             officialCount = officialCount + 1;
           }
@@ -755,6 +870,33 @@ async function runFlagRecompute(env) {
       }
     }
 
+    // Step 11: rebuild the map directory from KV truth plus the estimates and
+    // officials this run wrote, and publish it whole. The preload is what keeps
+    // this run's own writes out of a KV read that has no read-your-own-writes
+    // guarantee. Its own try/catch: a builder failure must never change the
+    // run's estimate, official or history accounting.
+    let mapdirState = "failed";
+    try {
+      const dirResult = await env.DB.prepare(MAP_DIRECTORY_SQL).all();
+      const dirRows = dirResult.results || [];
+      const scan = await scanMapDirectory(
+        env,
+        dirRows,
+        makeDeadline(Date.now(), mapScanBudgetMs(env)),
+        { estimates: estimatesByBeach, officials: officialsByBeach },
+        null
+      );
+      if (scan === null) {
+        mapdirState = "truncated";
+      } else {
+        mapdirState = await putMapDirectory(env, scan.entries, nowIso)
+          ? String(scan.entries.length)
+          : "failed";
+      }
+    } catch (err) {
+      console.log("index: map directory rebuild failed: " + err.message);
+    }
+
     const hotCount = beaches.filter(function (b) {
       return b.last_viewed && b.last_viewed >= hotCutoffIso;
     }).length;
@@ -775,7 +917,8 @@ async function runFlagRecompute(env) {
       " failures=" + String(failureCount) +
       " hot=" + String(hotCount) +
       " waveinputs=" + String(waveInputs.size) +
-      " oldest=" + (oldestCursor || "none")
+      " oldest=" + (oldestCursor || "none") +
+      " mapdir=" + mapdirState
     );
   } catch (err) {
     console.log("index: flag recompute failed: " + err.message);

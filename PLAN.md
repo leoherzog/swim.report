@@ -135,6 +135,17 @@ accepts legacy bare-string entries, rendered as their hostname with "www." strip
     {
       "beachId": "osm-node-123456",
       "color": "red",                // "green" | "yellow" | "red" | "double-red"
+waveHeightFt, ripCurrentRisk, sources and updated are echoed above, so the seal does not
+repeat them. Completeness rule: the seal, plus those echoed fields, plus alertsCheckable
+recomputed from the D1 row, must cover every estimateFlag input except alerts and
+alertDetails — otherwise a refresh would pass null for a missing one and silently LOWER the
+flag. src/flagInputs.js is where both halves are built, from one shared signals object, and
+test/flagInputs.test.js enforces the rule as a round-trip property (including a JSON hop,
+because JSON.stringify emits null for NaN and Infinity alike) rather than by discipline.
+alertsCheckable is deliberately NOT sealed: recomputing it from three D1 columns both crons
+hold is cheaper and strictly more correct, since a beach enriched between runs would
+otherwise carry a stale caveat beside a live alert.
+
                                      // (scraper-dependent subset)
       "reason": "Official flag reported by City of South Haven Beach Flag Program",
       "official": true,
@@ -310,6 +321,57 @@ migrations/0001_init.sql, exact SQL:
       lon REAL NOT NULL,
       nws_zone TEXT,
       nws_grid_url TEXT,
+### MapDirectory (KV value under "mapdirectory:v1")
+
+    {
+      "v": 1,
+      "builtAt": "2026-07-04T15:00:03.000Z",
+      "count": 1102,
+      "entries": [
+        { "id": "osm-node-354000095",
+          "name": "Holland State Park",   // park_name || name || "", the same display
+                                          // label the endpoint has always emitted
+          "lon": -86.2088, "lat": 42.7742,
+          "estColor": "green",            // the standing FlagEstimate's color, null when
+          "estUpdated": "2026-07-04T15:00:03.000Z",   // no "flag:" key existed at build time
+          "offColor": null,               // the OfficialFlag's color, null when no
+          "offUpdated": null }            // "official:" key existed (most rows)
+      ]
+    }
+
+An array of plain-named objects, not parallel columnar arrays: columnar is ~2.2x smaller and
+buys nothing at the scale this endpoint serves, while a cross-array index-alignment
+invariant is a correctness surface with no payoff. Rows with non-finite coordinates are
+dropped rather than emitted, so no NaN geometry reaches a client. Entry order follows the
+builder's ORDER BY id, so one build diffs meaningfully against the next.
+
+It stores INGREDIENTS and never a baked marker color. displayFlagColor (section 9) is
+raise-only in time — while the official record is fresher than STALE_MS it wins outright,
+and past that the gate becomes worst-of, which is never lower — so evaluating it at build
+time always under-reports, the one direction the product exists to prevent. It would also
+split one color rule between the map marker and the detail page's title flag, which
+section 9's own contract forbids. mapDirectoryFeatures resolves each entry at read time
+through the same markerFlagColor the detail page resolves through.
+
+Read-time resolution, in src/mapDirectory.js:
+
+- The estimate carries an expiry check, and it is exact for both writers. The key is written
+  with expirationTtl FLAG_TTL_SECONDS against the same `updated` the value echoes, so an age
+  at or past FLAG_TTL_MS (src/flagTtl.js) reproduces KV expiry rather than papering over it,
+  and the map reaches "unknown" at the instant the detail page does.
+- The official carries no independent expiry check, and that is a safety requirement rather
+  than an omission. An official record legitimately carries an `updated` far older than its
+  write time — nws-omr-grr posts a morning reading and declares staleMs 30 h — so an age
+  check would drop live officials, handing the marker the estimate's color where the live
+  path returns worst-of, which is never lower. Dropping an official lowers.
+- An expired estimate therefore drops its paired official with it. Both keys are written in
+  the same run and share FLAG_TTL_SECONDS (section 3), so an expired estimate proves the
+  official expired too; without the coupling an entry whose green official and estimate had
+  both expired would render green where the live path renders unknown.
+- Standing precondition: if a scraper ever declares an officialTtlSeconds LONGER than
+  FLAG_TTL_SECONDS, this artifact must start carrying the official's own expiry instant,
+  because it currently infers the pair's expiry from the estimate's timestamp alone.
+
       osm_id TEXT NOT NULL
     );
 
@@ -525,6 +587,11 @@ Binding name: FLAGS (single namespace for both key families).
   Display-only — never feeds src/rules.js. Absent key → the subtitle omits the fragment.
   Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential per-beach
   await env.FLAGS.put (section 7, "Run budgets and write pools").
+  Standing precondition the map directory depends on: because no scraper declares
+  `officialTtlSeconds`, an official's KV lease is never shorter than its paired estimate's,
+  which is what lets the directory infer the pair's expiry from the estimate's timestamp
+  alone. If one ever declares a LONGER one, the directory must start carrying the official's
+  own expiry instant (section 1, MapDirectory).
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
   with { expirationTtl: 7200 }, only when a src/wqFloor source resolved an active advisory;
   a clean or absent reading writes nothing and the key expires naturally, like "official:".
@@ -552,6 +619,15 @@ Pure module. No fetch, no Date, no env. Exports:
       // eccc_zone resolved yet).
 
     export const ALERT_PRECEDENCE = [
+- Key "mapdirectory:v1" → JSON.stringify(MapDirectory) (section 1). Written whole or not at
+  all by the beach-touching crons with { expirationTtl: 10800 } — three times the hourly
+  build period, so two consecutive dead builds are tolerated. A build whose scan trips its
+  deadline writes nothing and leaves the previous value to ride its own TTL, because a
+  partial directory would drop beaches from the map entirely rather than merely leave them
+  stale. A build that produced ZERO entries is refused on the same rule: it is the maximal
+  partial, and the read path would take it as an authoritative empty map for the full TTL
+  rather than degrading. Read by handleBeachesGeojson in a single get; absent, unparseable or
+  version-mismatched means the all-unknown degraded branch (section 8), never a color.
       // double-red (must precede every red — first match wins regardless of color)
       "Tornado Warning",             // -> double-red
       "High Surf Warning",           // -> double-red
@@ -2035,7 +2111,7 @@ matched job; an unrecognized cron is logged and ignored. The table:
                          rows the NWS runs have permanently parked.
 - "31 9 * * *"         → runWebcamSync(env).
 
-The five jobs are deliberately separate crons so each upstream's rate-limit posture is
+The six jobs are deliberately separate crons so each upstream's rate-limit posture is
 independent and a failure in one never starves another. The matched job is invoked via
 ctx.waitUntil with a top-level .catch that logs "index: scheduled <label> threw"; each
 runner logs its own summary line (beaches processed, per-source failure counts).
@@ -2043,7 +2119,7 @@ runner logs its own summary line (beaches processed, per-source failure counts).
 ### runFlagRecompute (hourly)
 
 Constants: MAX_BEACHES_PER_RUN = 1200, FLAG_TTL_SECONDS = 25200, KV_TTL_SECONDS = 7200,
-KV_WRITE_CONCURRENCY = 12,
+KV_WRITE_CONCURRENCY = 12, MAP_SCAN_DEADLINE_MS = 120000,
 HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
 src/demandWindow.js rather than src/index.js — see "Entry-module export shape" below).
 
@@ -2076,6 +2152,11 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    active demand lose its reading to the rotation the moment the table outgrows one run.
    Migration 0012 explains why one shared cursor is not viable. NULLs sort first within
    each tier, and the leading guard evaluates to 0 for NULL or older last_viewed, so
+FLAG_TTL_SECONDS lives in src/flagTtl.js for the same entry-module reason and is imported
+back; src/mapDirectory.js reads the matching FLAG_TTL_MS on the request path.
+The step-7 wave and wind reads use Number.isFinite, not typeof x === "number", so a
+malformed "waveinput:" value cannot reach rules.js step 3's unguarded else branch and decide
+green. That is caller-side input validation, not a rule change, and bumps no RULES_VERSION.
    never-viewed and stale-viewed rows sort into the cold tier after every hot row. The
    per-run summary log adds hot=<count> and oldest=<oldest cursor stamp selected, or
    none>.
@@ -2216,9 +2297,13 @@ national fetches (only when Canadian rows exist) + ~2×15 SRF calls + ≤1200 wa
 gets + one scrape() per matched wqFloor source + one scrape() per matched official scraper
 + ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch + ≤1200 flag KV
 puts + ~200 official KV puts + ≤1200 wqfloor KV puts under a table-wide active advisory +
-1 recompute_updated D1 batch ≈ 3,850 in the worst case at the 1200-row LIMIT, well under
+1 recompute_updated D1 batch ≈ 3,850 in the worst case at the 1200-row LIMIT, plus step 11's
+map-directory rebuild: 1 D1 statement + 2×ceil(N/100) bulk KV gets over the WHOLE flag-worthy
+set minus the preloaded ids + 1 artifact put. That last term is the Worker's first O(N)
+subrequest cost and does not stop at MAX_BEACHES_PER_RUN — about 12 reads at today's 1,102
+rows, ~200 at 10k and ~2,000 at 100k, where the hourly total would approach 5,700 of the
 10,000. Pooling the writes changes their latency, not their count, and wall clock rather
-than subrequest count is the binding limit on both crons. Both authorities' alerts are one
+than subrequest count is the binding limit on all three crons. Both authorities' alerts are one
 national fetch each, so alert cost stays flat as the table grows. The free plan (50
 subrequests, 1000 KV writes/day) is not sufficient at this cadence; a free-plan demo would
 need a low MAX_BEACHES_PER_RUN (TODO.md).
@@ -2248,6 +2333,27 @@ reaches src/rules.js, so it can never change a flag color and never bumps RULES_
    null (winter gap, all-"MM", stale, 404) is a normal outcome, not an error. No new
    upstream work starts after WAVE_GATHER_DEADLINE_MS.
 3. Write: one bounded-concurrency pool (runPool, KV_WRITE_CONCURRENCY, src/pool.js) writing
+11. Rebuild the map directory (section 1, MapDirectory), after the step-10 batch and before
+   the completion log, inside its own try/catch that logs and swallows — a builder failure
+   must never change this run's estimate, official or history accounting. One statement,
+   MAP_DIRECTORY_SQL, selects every flag-worthy row with its id/name/park_name/lat/lon plus
+   the three zone columns, ORDER BY id and no bind parameters. scanMapDirectory then walks
+   the rows in chunks of 100, bulk-reading "flag:" and "official:" for the ids it does not
+   already hold, and putMapDirectory publishes the whole value at
+   MAP_DIRECTORY_TTL_SECONDS.
+   The preload is load-bearing: KV offers no read-your-own-writes guarantee, so this run
+   passes BOTH estimatesByBeach and officialsByBeach and the scan never requests those keys
+   at all. With estimates only, a flag posted this run renders the previous hour's official
+   color on the map for an hour. A beach whose put FAILED is deliberately absent from the
+   preload, so it falls through to the KV read and keeps its old standing value rather than
+   dropping to unknown. Both maps carry `updated` alongside the color for this reason.
+   The scan streams: each chunk keeps only the four scalars an entry needs and lets the
+   parsed KV values go out of scope, so peak memory is one chunk plus the entry array rather
+   than the whole table's parsed payloads. It is bounded by MAP_SCAN_DEADLINE_MS, a rail
+   against a hung KV read rather than a routine truncation point; a scan that trips it
+   returns null, the run writes no artifact, and the completion log reads mapdir=truncated.
+   A build that produced zero entries is refused the same way and logs mapdir=failed. The log
+   line's mapdir field is otherwise the published entry count.
    "watertemp:" + beachId with { expirationTtl: WAVE_DATA_TTL_SECONDS } for every beach
    whose station produced a valid recent reading. The pool yields at
    WAVE_WRITE_DEADLINE_MS rather than being killed at the 900 s ceiling. No cron may
@@ -2923,7 +3029,7 @@ Routing table (method GET only; anything else → 405):
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. KV: one bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — two KV reads per page regardless of row count. HOME_LIST_LIMIT (100) is load-bearing, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil) | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null); 404 HTML if no row |
-| GET /api/beaches.geojson  | handleBeachesGeojson | D1: SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] — no bbox predicate, no LIMIT: the full flag-worthy directory. Then attachFeatureFlags: a bulk KV read of flag:/official: for every id, chunked to the 100-key bulk-get cap and read in parallel, stamps a per-feature `flag` keyword via markerFlagColor(estimate, official, nowIso) — the section-9 displayFlagColor rule with double-red collapsed to red, and missing or expired KV as "unknown". Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable; the homepage map fetches it once on load and feeds it to a native clustered GeoJSON source. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] } |
+| GET /api/beaches.geojson  | handleBeachesGeojson | ONE KV read: env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" }), resolved by mapDirectoryFeatures(directory, nowIso) — which calls markerFlagColor(estimate, official, nowIso) per entry, the section-9 displayFlagColor rule with double-red collapsed to red, from the ingredients the cron stored (section 1, MapDirectory). No D1 read at all on this path. When the key is absent, unparseable or version-mismatched the DEGRADED branch runs instead: D1 SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] ORDER BY id LIMIT 5000 (MAP_DEGRADED_MAX_FEATURES — a dead builder must not turn every colo's 60 s revalidation into an unbounded full-table scan), every feature's flag the literal "unknown", zero KV reads, and one console.log naming the feature count. There is deliberately no fallback to a per-beach bulk read: that is a silent cliff that keeps the map working while the builder has been dead for days, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped in both branches, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the directory's build instant, or null on the degraded branch), ["degraded": true on that branch,] "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt and degraded are top-level GeoJSON foreign members (RFC 7946 section 6.1), so a dead builder is visible to anyone hitting the endpoint instead of a silent cliff. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -2932,13 +3038,12 @@ Routing table (method GET only; anything else → 405):
   set. It is not personalized and takes no bbox.
 - /api/flag/:beachId: unknown beachId → 404 JSON { "error": "beach not found" }.
 - KV reads: env.FLAGS.get(key, { type: "json" }); null passes through as null. The bulk
-  form is also used (handleHome and handleBeachesGeojson): passing an array of up to 100
-  keys returns a Map<key, value|null>, and handleBeachesGeojson chunks the full directory
-  into 100-key batches read in parallel (attachFeatureFlags). Missing keys map to null, and
-  the router applies || null so an absent Map entry's undefined normalizes to null,
-  preserving the single-get shape. Any FLAGS test double must implement get() for both
-  forms: string key -> value|null, array of keys -> Map. handleDetail and handleApiFlag use
-  single-key gets (readFlagAndOfficial).
+  form is also used by handleHome: passing an array of up to 100 keys returns a
+  Map<key, value|null>. Missing keys map to null, and the router applies || null so an
+  absent Map entry's undefined normalizes to null, preserving the single-get shape. Any
+  FLAGS test double must implement get() for both forms: string key -> value|null, array of
+  keys -> Map, because the cron path's map-directory scan reads in bulk. handleDetail,
+  handleApiFlag and handleBeachesGeojson use single-key gets.
 - Headers: HTML "content-type": "text/html; charset=utf-8"; JSON
   "content-type": "application/json" — EXCEPT /api/beaches.geojson, which sends the
   RFC 7946 GeoJSON media type "content-type": "application/geo+json; charset=utf-8"
@@ -2946,7 +3051,8 @@ Routing table (method GET only; anything else → 405):
   cacheable policy). Every response carries an explicit cache-control for the Workers
   Cache layer ([cache] enabled in wrangler.toml):
   - CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600"
-    on detail-page 200s, /api/beaches.geojson 200s and /api/flag 200s. stale-if-error is
+    on detail-page 200s and /api/flag 200s (/api/beaches.geojson has its own policy,
+    below, since its origin is one KV read). stale-if-error is
     explicit because Cloudflare's default on Worker error is to serve stale indefinitely,
     which would freeze the HTML's embedded nowIso-based staleness warnings without bound;
     600 s caps the total stale window at ~11 min.
@@ -3542,6 +3648,13 @@ ripCurrentRisk output echoes.
   echoes land in "flag:"; and the Canadian path (an eccc_zone beach inside a stubbed GeoMet
   polygon → ECCC red plus "Environment Canada Alerts" source, no caveat; outside every
   polygon → checked-but-clear, no caveat; a failed ECCC fetch behaves like a transient NWS
-  alerts failure).
-- test/router.test.js — asserts handleDetail reads the "waves:" key (plus routing, the
-  /api/beaches.geojson clustered-map endpoint, and cache-control behavior).
+  alerts failure). It also covers step 11: the directory written exactly once per run after
+  the recompute_updated batch, the read-your-writes preload for BOTH estimates and officials
+  (asserted against a stub whose stored value carries a different color), a failed put
+  falling back to the stored standing value, the scan deadline writing no artifact at all,
+  a throwing artifact put leaving the run's own counters alone, and the Number.isFinite
+  guards refusing a non-finite wave height or wind speed. Its FLAGS stub must answer the
+  bulk (array) get form, or every scan read silently sees nothing.
+- test/router.test.js — asserts handleDetail reads the "waves:" key (plus routing,
+  /api/beaches.geojson served from the map directory in a single KV read with parity against
+  markerFlagColor, its bounded all-unknown degraded branch, and cache-control behavior).

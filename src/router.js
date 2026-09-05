@@ -1,6 +1,11 @@
-import { renderListPage, renderDetailPage, renderErrorPage, markerFlagColor } from "./frontend/render.js";
+import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/render.js";
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
+import {
+  MAP_DIRECTORY_KEY,
+  MAP_DIRECTORY_VERSION,
+  mapDirectoryFeatures
+} from "./mapDirectory.js";
 
 // Re-exported so existing importers keep working.
 export { distanceMi };
@@ -23,6 +28,21 @@ const HOME_GEO_FETCH_LIMIT = 500;
 const CACHE_CONTROL_CACHEABLE =
   "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
 const CACHE_CONTROL_NO_STORE = "no-store";
+// /api/beaches.geojson has its own policy. Its origin is now one KV read plus a
+// few milliseconds of CPU, where the 600 s stale-while-revalidate above was
+// sized to hide a multi-second cache-miss origin; keeping it would add up to ten
+// minutes to the very flip latency the read-time color gate exists to preserve.
+// 60 s still gives single-request-per-colo-per-minute herd protection.
+const CACHE_CONTROL_MAP_DIRECTORY =
+  "public, max-age=60, stale-while-revalidate=60, stale-if-error=600";
+// The degraded branch drops stale-while-revalidate entirely so the map recovers
+// within a minute of the builder returning, and keeps stale-if-error for the
+// reason the comment above gives.
+const CACHE_CONTROL_MAP_DEGRADED = "public, max-age=60, stale-if-error=600";
+// Cap on the degraded branch's D1 read. A dead builder must not turn every
+// colo's 60 s revalidation into an unbounded full-table scan; crossing this
+// limit is itself the signal that the builder needs fixing.
+const MAP_DEGRADED_MAX_FEATURES = 5000;
 
 // Throttle for the last_viewed demand stamp: at most one D1 write per beach per
 // hour. The enrichment crons order their candidate queues with last_viewed as a
@@ -285,23 +305,37 @@ async function handleDetail(env, ctx, beachId) {
 
 // Cacheable GeoJSON directory of every flag-worthy beach: the homepage map
 // fetches it once on load and hands it to a native MapLibre clustered GeoJSON
-// source. Location-independent, so fully cacheable, and it reads only D1 and KV.
-// Each feature is a Point [lon, lat] carrying { id, name, flag }, where flag is
-// the collapsed color keyword (green|yellow|red|unknown, double-red collapsing to
-// red) the browser keys its icon tint off. Beaches with non-finite coordinates
-// are skipped so no NaN coordinate is emitted. No LIMIT: the full flag-worthy set
-// is a few hundred KB and the 60 s edge cache absorbs the cost. A server
-// clustering or paging story is needed before the 10k-100k North America scaling
-// target (see PLAN.md / TODO.md).
+// source. Location-independent, so fully cacheable.
+//
+// One KV read. The cron path precomputes "mapdirectory:v1" (src/mapDirectory.js)
+// and this route resolves it into features against one nowIso, through the same
+// markerFlagColor the detail page's title flag uses, so the artifact stores
+// ingredients rather than a baked color and the two surfaces cannot disagree.
+// builtAt rides along as a top-level GeoJSON foreign member (RFC 7946 section
+// 6.1) so a dead builder is visible to anyone hitting the endpoint.
+//
+// A missing, unparseable or version-mismatched directory takes the degraded
+// branch below: every feature honest-unknown, geometry preserved, zero KV reads.
+// There is deliberately no fallback to a per-beach bulk read — that would keep
+// the map quietly working while the builder had been dead for days, and it is
+// exactly the shape that cannot run in the request path at nationwide scale.
 async function handleBeachesGeojson(env) {
+  const nowIso = new Date().toISOString();
+  const directory = await env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" });
+  if (directory && typeof directory === "object" &&
+      directory.v === MAP_DIRECTORY_VERSION && Array.isArray(directory.entries)) {
+    const features = mapDirectoryFeatures(directory, nowIso);
+    return geojsonResponse(
+      { type: "FeatureCollection", builtAt: directory.builtAt, features: features },
+      CACHE_CONTROL_MAP_DIRECTORY
+    );
+  }
   const result = await env.DB.prepare(
-    "SELECT id, name, park_name, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL
+    "SELECT id, name, park_name, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+    " ORDER BY id LIMIT " + String(MAP_DEGRADED_MAX_FEATURES)
   ).all();
   const rows = result.results || [];
-  // Drop non-finite-coordinate rows BEFORE the KV flag reads: only finite-coord
-  // rows become features, so filtering first means attachFeatureFlags never
-  // spends a bulk-get key on a row that would be discarded anyway.
-  const finite = [];
+  const features = [];
   for (let i = 0; i < rows.length; i = i + 1) {
     const row = rows[i];
     const lat = (row.lat === null || row.lat === undefined) ? NaN : Number(row.lat);
@@ -309,75 +343,34 @@ async function handleBeachesGeojson(env) {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       continue;
     }
-    row.lat = lat;
-    row.lon = lon;
-    finite.push(row);
-  }
-  // Same "now" the detail page's title flag is rendered against: the marker
-  // color rule is staleness-aware (render.js displayFlagColor), so it needs one.
-  await attachFeatureFlags(env, finite, new Date().toISOString());
-  const features = [];
-  for (let i = 0; i < finite.length; i = i + 1) {
-    const row = finite[i];
     features.push({
       type: "Feature",
-      geometry: { type: "Point", coordinates: [row.lon, row.lat] },
+      geometry: { type: "Point", coordinates: [lon, lat] },
       properties: {
         id: row.id,
-        // Retained for a possible future hover/popup label; the current
-        // clustered-map client does not read it.
         name: row.park_name || row.name || "",
-        flag: row.flag
+        flag: "unknown"
       }
     });
   }
-  // application/geo+json is the RFC 7946 media type (the client sends a matching
-  // Accept). Build the Response by hand so the content-type is set while keeping
-  // the same cacheable policy the other request-path routes use.
-  const body = JSON.stringify({ type: "FeatureCollection", features: features });
-  return new Response(body, {
+  console.log("router: map directory missing; serving " + String(features.length) + " unknown features");
+  return geojsonResponse(
+    { type: "FeatureCollection", builtAt: null, degraded: true, features: features },
+    CACHE_CONTROL_MAP_DEGRADED
+  );
+}
+
+// application/geo+json is the RFC 7946 media type (the client sends a matching
+// Accept). Built by hand so the media type is set alongside the route's own
+// cache policy.
+function geojsonResponse(payload, cacheControl) {
+  return new Response(JSON.stringify(payload), {
     status: 200,
     headers: {
       "content-type": "application/geo+json; charset=utf-8",
-      "cache-control": CACHE_CONTROL_CACHEABLE
+      "cache-control": cacheControl
     }
   });
-}
-
-// Bulk-reads flag: and official: KV for every row and stamps the collapsed color
-// keyword onto row.flag in place. nowIso feeds markerFlagColor's staleness gate,
-// where an aged point-in-time official reading may be raised by a fresher, more
-// severe estimate (see render.js displayFlagColor). Chunked to the 100-key
-// bulk-get ceiling and read in parallel, scaling linearly with row count. A
-// missing or expired KV value maps to the honest "unknown" keyword, never a green
-// default.
-async function attachFeatureFlags(env, rows, nowIso) {
-  if (!rows || rows.length === 0) {
-    return;
-  }
-  const chunks = [];
-  for (let i = 0; i < rows.length; i = i + 100) {
-    chunks.push(rows.slice(i, i + 100));
-  }
-  const reads = await Promise.all(chunks.map(function (chunk) {
-    const flagKeys = chunk.map(function (row) { return "flag:" + row.id; });
-    const officialKeys = chunk.map(function (row) { return "official:" + row.id; });
-    return Promise.all([
-      env.FLAGS.get(flagKeys, { type: "json" }),
-      env.FLAGS.get(officialKeys, { type: "json" })
-    ]);
-  }));
-  for (let i = 0; i < chunks.length; i = i + 1) {
-    const flagMap = reads[i][0];
-    const officialMap = reads[i][1];
-    const chunk = chunks[i];
-    for (let j = 0; j < chunk.length; j = j + 1) {
-      const row = chunk[j];
-      const estimate = flagMap.get("flag:" + row.id) || null;
-      const official = officialMap.get("official:" + row.id) || null;
-      row.flag = markerFlagColor(estimate, official, nowIso);
-    }
-  }
 }
 
 async function handleApiFlag(env, ctx, beachId) {

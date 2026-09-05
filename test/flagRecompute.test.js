@@ -11,6 +11,12 @@ import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
 import { HOT_VIEW_WINDOW_MS } from "../src/demandWindow.js";
 import { NDBC_HEAD_BYTES } from "../src/waveSources/ndbcBuoys.js";
 import { runScheduledCron } from "./helpers/cron.js";
+import { estimateFlag } from "../src/rules.js";
+import {
+  FLAG_SEAL_VERSION,
+  buildEstimateInputs,
+  signalsFromStanding
+} from "../src/flagInputs.js";
 
 function makeBeachRow(overrides) {
   const row = {
@@ -91,7 +97,16 @@ function makeEnv(beachRows, kvSeed) {
       }
     },
     FLAGS: {
+      // Both get forms, as the Workers binding implements them: a string key
+      // resolves to the value, an array of keys to a Map. The map directory
+      // scan reads in bulk, so a stub without the array form would silently see
+      // no inputs and let every assertion below pass for the wrong reason.
       get: function (key) {
+        if (Array.isArray(key)) {
+          return Promise.resolve(new Map(key.map(function (k) {
+            return [k, kvGets.has(k) ? kvGets.get(k) : null];
+          })));
+        }
         return Promise.resolve(kvGets.has(key) ? kvGets.get(key) : null);
       },
       put: function (key, value, opts) {
@@ -482,6 +497,11 @@ function makeBatchRecordingEnv(beachRows) {
     },
     FLAGS: {
       get: function (key) {
+        if (Array.isArray(key)) {
+          return Promise.resolve(new Map(key.map(function (k) {
+            return [k, kvStore.has(k) ? kvStore.get(k) : null];
+          })));
+        }
         return Promise.resolve(kvStore.has(key) ? kvStore.get(key) : null);
       },
       put: function (key, value, opts) {
@@ -1763,5 +1783,331 @@ describe("runFlagRecompute pooled per-beach writes", function () {
     expect(loggedLines(logSpy)).toContain(
       "index: flag estimate failed for beach osm-node-3: kv put rejected"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 11: the map directory rebuild.
+//
+// The hourly cron is the artifact's only writer in this half, and its whole
+// safety story is the preload: KV offers no read-your-own-writes guarantee, so a
+// scan that read back the keys this run just wrote could serve the previous
+// hour's colors on the map for an hour.
+// ---------------------------------------------------------------------------
+
+const MAP_KEY = "mapdirectory:v1";
+
+// Records puts and D1 batches into one ordered event list, so the artifact's
+// position relative to the trailing recompute_updated batch is assertable.
+function withEventLog(made) {
+  const events = [];
+  const realPut = made.env.FLAGS.put;
+  const realBatch = made.env.DB.batch;
+  made.env.FLAGS.put = function (key, value, opts) {
+    events.push("put:" + key);
+    return realPut(key, value, opts);
+  };
+  made.env.DB.batch = function (statements) {
+    const first = statements[0] && statements[0].sql ? statements[0].sql : "";
+    events.push("batch:" + first);
+    return realBatch(statements);
+  };
+  return events;
+}
+
+function directoryOf(made) {
+  const put = made.kvPuts.get(MAP_KEY);
+  expect(put).toBeDefined();
+  return JSON.parse(put.value);
+}
+
+function entryFor(directory, id) {
+  const found = directory.entries.filter(function (e) { return e.id === id; });
+  expect(found.length).toBe(1);
+  return found[0];
+}
+
+describe("runFlagRecompute map directory rebuild", function () {
+  beforeEach(function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+  });
+
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("writes the directory exactly once, after the recompute_updated batch", async function () {
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1" }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.9 })
+    ]);
+    const events = withEventLog(made);
+    await runHourlyCron(made.env);
+
+    const directoryPuts = events.filter(function (e) { return e === "put:" + MAP_KEY; });
+    expect(directoryPuts.length).toBe(1);
+    expect(events[events.length - 1]).toBe("put:" + MAP_KEY);
+    const cursorIndex = events.findIndex(function (e) {
+      return e.indexOf("batch:UPDATE beaches SET recompute_updated") === 0;
+    });
+    expect(cursorIndex).toBeGreaterThan(-1);
+    expect(cursorIndex).toBeLessThan(events.length - 1);
+
+    const directory = directoryOf(made);
+    expect(directory.v).toBe(1);
+    expect(directory.count).toBe(2);
+    expect(made.kvPuts.get(MAP_KEY).opts).toEqual({ expirationTtl: 10800 });
+  });
+
+  it("takes each entry's estimate from the run's own write, not the pre-write KV value", async function () {
+    // The seeded standing value is a DIFFERENT color from the one this run
+    // computes. Without the preload the scan reads it back and the map serves
+    // last hour's color for an hour.
+    const made = makeEnv([makeBeachRow({ id: "osm-node-1" })], {
+      "flag:osm-node-1": { color: "red", updated: "2020-01-01T00:00:00.000Z" }
+    });
+    await runHourlyCron(made.env);
+
+    const written = JSON.parse(made.kvPuts.get("flag:osm-node-1").value);
+    expect(written.color).toBe("unknown");
+    const entry = entryFor(directoryOf(made), "osm-node-1");
+    expect(entry.estColor).toBe("unknown");
+    expect(entry.estUpdated).toBe(written.updated);
+  });
+
+  it("takes each entry's official from the run's own write too", async function () {
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("rainoutline.com") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: function () {
+            return Promise.resolve(
+              "<div><span class=\"status2\">Closed</span>&nbsp;-&nbsp;" +
+              "Dangerous high waves and rip currents<br /><br />" +
+              "<span class=\"clue\"><em>Last updated at 7/18/26 8:00 am</em></span></div>"
+            );
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-tower-1",
+        name: "Tower Road Beach",
+        lat: 42.115585,
+        lon: -87.733837
+      })
+    ], {
+      "official:osm-node-tower-1": { color: "green", updated: "2020-01-01T00:00:00.000Z" }
+    });
+    await runHourlyCron(made.env);
+
+    const written = JSON.parse(made.kvPuts.get("official:osm-node-tower-1").value);
+    expect(written.color).toBe("red");
+    const entry = entryFor(directoryOf(made), "osm-node-tower-1");
+    expect(entry.offColor).toBe("red");
+    expect(entry.offUpdated).toBe(written.updated);
+  });
+
+  it("falls back to the stored standing value for a beach whose flag put threw", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1" }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.9 })
+    ], {
+      "flag:osm-node-2": { color: "yellow", updated: "2026-07-04T14:00:00.000Z" }
+    });
+    const realPut = made.env.FLAGS.put;
+    made.env.FLAGS.put = function (key, value, opts) {
+      if (key === "flag:osm-node-2") {
+        return Promise.reject(new Error("kv put rejected"));
+      }
+      return realPut(key, value, opts);
+    };
+    await runHourlyCron(made.env);
+    logSpy.mockRestore();
+
+    // A failed put records no estimate, so the beach is absent from the preload
+    // and the scan reads its old standing value instead of an invented null.
+    const directory = directoryOf(made);
+    expect(entryFor(directory, "osm-node-1").estColor).toBe("unknown");
+    const stale = entryFor(directory, "osm-node-2");
+    expect(stale.estColor).toBe("yellow");
+    expect(stale.estUpdated).toBe("2026-07-04T14:00:00.000Z");
+  });
+
+  it("writes no directory at all when the scan trips its deadline", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    try {
+      const made = makeEnv([makeBeachRow({ id: "osm-node-1" })]);
+      // makeDeadline's expired() uses >=, so a 0 override trips on the first
+      // chunk even under a frozen clock.
+      made.env.MAP_SCAN_DEADLINE_MS = 0;
+      await runHourlyCron(made.env);
+
+      // Whole or nothing: the previous artifact rides its own TTL rather than
+      // being replaced by a partial directory that silently drops beaches.
+      expect(made.kvPuts.get(MAP_KEY)).toBeUndefined();
+      expect(made.kvPuts.get("flag:osm-node-1")).toBeDefined();
+      expect(loggedLines(logSpy)).toContain(" mapdir=truncated");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("keeps the run's own accounting when the directory put throws", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    try {
+      const made = makeEnv([makeBeachRow({ id: "osm-node-1" })]);
+      const realPut = made.env.FLAGS.put;
+      made.env.FLAGS.put = function (key, value, opts) {
+        if (key === MAP_KEY) {
+          return Promise.reject(new Error("kv put rejected"));
+        }
+        return realPut(key, value, opts);
+      };
+      await runHourlyCron(made.env);
+
+      const logged = loggedLines(logSpy);
+      expect(logged).toContain("estimates=1");
+      expect(logged).toContain("officials=0");
+      expect(logged).toContain("history=0");
+      expect(logged).toContain("failures=0");
+      expect(logged).toContain(" mapdir=failed");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe("runFlagRecompute wave input finite guards", function () {
+  beforeEach(function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+  });
+
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  function waveInput(overrides) {
+    const base = {
+      beachId: "osm-node-1",
+      waveHeightFt: null,
+      model: "noaa_glwu",
+      windSpeedMph: null,
+      windGustMph: null,
+      updated: "2026-07-18T12:00:00.000Z"
+    };
+    const extra = overrides || {};
+    for (const key in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, key)) {
+        base[key] = extra[key];
+      }
+    }
+    return base;
+  }
+
+  function estimateFor(seed) {
+    const made = makeEnv([makeBeachRow({ id: "osm-node-1" })], { "waveinput:osm-node-1": seed });
+    return runHourlyCron(made.env).then(function () {
+      return JSON.parse(made.kvPuts.get("flag:osm-node-1").value);
+    });
+  }
+
+  it("refuses a non-finite wave height instead of calling it green", async function () {
+    // rules.js step 3's else branch has no finite check, so an unguarded
+    // Infinity decides green with a nonsense reason — a green from garbage in
+    // the one module that must never default to green.
+    const infinite = await estimateFor(waveInput({ waveHeightFt: Infinity }));
+    expect(infinite.trigger).not.toBe("wave-height");
+    expect(infinite.color).toBe("unknown");
+    expect(infinite.waveHeightFt).toBe(null);
+    const infiniteLabels = infinite.sources.map(function (s) { return s.label; });
+    expect(infiniteLabels.indexOf("NOAA Great Lakes Wave Model")).toBe(-1);
+
+    const notANumber = await estimateFor(waveInput({ waveHeightFt: NaN }));
+    expect(notANumber.trigger).not.toBe("wave-height");
+    expect(notANumber.color).toBe("unknown");
+  });
+
+  it("refuses a non-finite wind speed instead of falling back on it", async function () {
+    const estimate = await estimateFor(waveInput({ windSpeedMph: NaN }));
+    expect(estimate.trigger).not.toBe("wind");
+    expect(estimate.color).toBe("unknown");
+    const labels = estimate.sources.map(function (s) { return s.label; });
+    expect(labels.indexOf("Wind Forecast")).toBe(-1);
+  });
+
+  it("still takes a finite wave height", async function () {
+    const estimate = await estimateFor(waveInput({ waveHeightFt: 4.5 }));
+    expect(estimate.trigger).toBe("wave-height");
+    expect(estimate.color).toBe("red");
+  });
+});
+
+// The hourly is the seal's producer. If it ever wrote a value the refresh cron's
+// signalsFromStanding rejects, that cron would silently skip every beach — a
+// regression visible only as skipNoSeal= in a log line nobody reads.
+describe("runFlagRecompute writes the estimateInputs seal", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("stores a seal signalsFromStanding accepts, carrying the non-alert inputs", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const made = makeEnv(
+      [makeBeachRow({ id: "osm-node-seal", nws_zone: "MIZ071" })],
+      {
+        "waveinput:osm-node-seal": {
+          waveHeightFt: 2.6,
+          model: "noaa_glwu",
+          windSpeedMph: 12,
+          windGustMph: null,
+          updated: "2026-07-15T15:00:00.000Z"
+        }
+      }
+    );
+    await runHourlyCron(made.env);
+
+    const stored = JSON.parse(made.kvPuts.get("flag:osm-node-seal").value);
+    expect(stored.estimateInputs.v).toBe(FLAG_SEAL_VERSION);
+    // The national fetch failed, so the hourly decided this color with no alert
+    // evidence at all — the fact the refresh cron needs to re-select the beach.
+    expect(stored.estimateInputs.alertsResolved).toBe(false);
+    expect(stored.estimateInputs.windSpeedMph).toBe(12);
+    expect(stored.estimateInputs.waterQualityAdvisory).toBeNull();
+
+    const signals = signalsFromStanding(JSON.parse(JSON.stringify(stored)));
+    expect(signals).not.toBeNull();
+    expect(signals.waveHeightFt).toBe(2.6);
+    expect(signals.updated).toBe(stored.updated);
+    // The seal plus the echo reproduce the published color exactly.
+    expect(estimateFlag(buildEstimateInputs(
+      { id: "osm-node-seal", nws_zone: "MIZ071", marine_zone: null, eccc_zone: null },
+      { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false },
+      signals
+    ))).toEqual({
+      beachId: stored.beachId,
+      color: stored.color,
+      reason: stored.reason,
+      trigger: stored.trigger,
+      rules_version: stored.rules_version,
+      official: stored.official,
+      sources: stored.sources,
+      updated: stored.updated,
+      waveHeightFt: stored.waveHeightFt,
+      alertDetails: stored.alertDetails,
+      ripCurrentRisk: stored.ripCurrentRisk
+    });
   });
 });
