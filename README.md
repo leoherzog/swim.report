@@ -305,8 +305,11 @@ classification (offline)](#discovery-and-classification-offline)).
 - `7 * * * *` (hourly) — `runFlagRecompute`: reads up to `MAX_BEACHES_PER_RUN = 1200` beaches
   from D1, ordered hot-first then oldest-`recompute_updated`-first. A beach viewed within
   `HOT_VIEW_WINDOW_MS` (7 days, tracked by the `last_viewed` demand stamp) is covered every
-  run, so its 2 h flag KV TTL never lapses while it is in demand; cold rows rotate through the
-  remaining budget and can lapse to honest "no data" between turns. It fetches the
+  run; cold rows rotate through the remaining budget, and the `flag:` key's 25200 second TTL
+  spans several rotation turns plus a lost run, so a cold beach keeps showing its last reading
+  rather than dropping to "no data". The detail page marks that reading stale past 2 h; the
+  list chip and the map marker carry no age signal, so a rotation-old color reads there like a
+  fresh one. It fetches the
   fast-changing safety signals (alerts and SRF rip-current risk) and reads each beach's wave
   inputs from the `waveinput:` key the offline wave cycle writes — it performs **no** wave or
   wind fetch itself. Both alert authorities are fetched nationally once per run and matched
@@ -314,9 +317,10 @@ classification (offline)](#discovery-and-classification-offline)).
   `api.weather.gov/alerts/active` fetch matched by `nws_zone` and `marine_zone`, and one GeoMet
   `weather-alerts` fetch matched by alert-region polygon. It runs the inputs through
   `estimateFlag`, runs the official-source scrapers once per distinct matched scraper with
-  KV-backed health monitoring, and writes `flag:` and `official:` keys at a 7200 second TTL
-  through a bounded-concurrency write pool (`KV_WRITE_CONCURRENCY`, `src/pool.js`). A scraper's
-  optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs` and
+  KV-backed health monitoring, and writes `flag:` and `official:` keys at a 25200 second TTL
+  through a bounded-concurrency write pool (`KV_WRITE_CONCURRENCY`, `src/pool.js`) — the two
+  share a TTL so an estimate can never outlive the posted flag it is weighed against. A
+  scraper's optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs` and
   `readingNote` ride along as display-side hints, not TTLs. `waveinput:` keys expire on an
   absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
   required, and a missing key just means the estimate falls back to wind or `unknown`.

@@ -49,7 +49,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     card until it drains. Under the decisive classifier nothing can newly reach the cap, so a
     rising parked count means the classifier regressed to a pending state.
   - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches
-    linger in D1 (their KV flags self-expire at the 7200 s TTL). Harmless and
+    linger in D1 (their KV flags self-expire at the 25200 s TTL). Harmless and
     cheap — left in place.
   - **The `ocean` branch stays dormant** until `REGIONS` gains a saltwater box. In the current
     Great Lakes regions every keeper is a Great Lake, since shorelines are relation member ways
@@ -217,14 +217,12 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   fully covered) and a cold tier rotating through the remaining `MAX_BEACHES_PER_RUN` budget;
   the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue tiebreak. At
   pilot scale both tiers fit inside one run, so the split only starts mattering once beach
-  count approaches `MAX_BEACHES_PER_RUN`. Deferred residue: (1) a longer KV TTL for the cold
-  tier, so a cold beach's flag does not expire to "no data" every time it misses a rotation
-  turn; (2) stamping `last_viewed` from the home list view too, since only the two
-  single-beach routes stamp it today; (3) a real split-query implementation — today's is a
-  single ORDER BY guard, not two queries — plus the migration 0012-class indexes real
-  pagination will need; (4) real pagination itself. Workers Cache means cache hits do not run
-  the Worker, so `last_viewed` undercounts popular beaches slightly, which is fine for a
-  coarse priority signal.
+  count approaches `MAX_BEACHES_PER_RUN`. Deferred residue: (1) stamping `last_viewed` from the
+  home list view too, since only the two single-beach routes stamp it today; (2) a real
+  split-query implementation — today's is a single ORDER BY guard, not two queries — plus the
+  migration 0012-class indexes real pagination will need; (3) real pagination itself. Workers
+  Cache means cache hits do not run the Worker, so `last_viewed` undercounts popular beaches
+  slightly, which is fine for a coarse priority signal.
 - **Alerts-only fast cron (not yet built).** A `*/10`-ish alerts-only cron — NWS
   alerts are the one event-driven input; a High Surf Warning issued at :05
   currently waits up to 55 min for the hourly recompute. Since alerts are a
@@ -256,17 +254,24 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   no per-box query cost, so scale-out stays purely additive: append coastal bboxes
   to `REGIONS` (commented-out placeholders already stubbed at the bottom of the
   file) and the build clips to them automatically. Adding a saltwater box also
-  wakes the dormant `ocean` branch of the water classifier. Two blockers remain,
-  and the first is **already violated in production today**:
-  - **`MAX_BEACHES_PER_RUN = 1200`** (`src/index.js`) must always cover the whole
-    `beaches` table: any beach past the limit has its 2 h KV TTL expire between
-    rotation turns and goes flagless. **The table is already 1669 rows.** This is a
-    live gap right now, not a future NA blocker — the hot/cold demand-priority
-    rotation mitigates it (a beach in active demand is always covered) but does not
-    close it. Growth needs real pagination or multiple invocations, or a
-    TTL/cadence change to match. No upstream per-day request quota binds here any
-    more: wave data is sampled offline and bulk-written, so the beach count is
-    independent of it.
+  wakes the dormant `ocean` branch of the water classifier. Two constraints remain:
+  - **`MAX_BEACHES_PER_RUN = 1200` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
+    constraint, not two. Hot rows are covered every run; a cold row waits
+    `ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot))` runs for its turn, and the flag
+    TTL must span that wait plus the runs killed before their trailing `recompute_updated`
+    batch commits: `FLAG_TTL_SECONDS / 3600 >= that wait + 2`. At 1102 flag-worthy rows
+    (1771 total; 669 are hidden as inland) and 471 hot, the wait is one run and the TTL
+    absorbs five lost runs, so missing a turn no longer costs a beach its flag. A run
+    truncated at the 900 s ceiling is a different failure and the TTL only delays it:
+    neither write pool takes a deadline and the `recompute_updated` batch is
+    all-or-nothing, so an hourly truncation dies at the same point in the same selection
+    order and the same tail is never written. The residual is
+    growth: at the observed 43 % hot fraction the inequality fails near 2100 flag-worthy
+    rows, and above roughly 2810 the hot tier alone fills the run and the cold tier gets no
+    slots at all, which no TTL rescues. The hourly summary logs `oldest=`, the oldest cursor
+    stamp the run selected, so the wait is readable from the observability API. Past those
+    sizes the knob is a larger `MAX_BEACHES_PER_RUN`, bounded by the 900 s wall clock on a
+    cron that passes no deadline to either write pool, or real pagination.
   - **The D1 `--json` snapshot is size-capped and single-shot**, and the
     delete-bearing snapshot just widened from 7 to 11 columns (discovery and
     classification now share one). A truncated snapshot aborts the only delete path

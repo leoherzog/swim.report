@@ -13,8 +13,9 @@
 // Never re-add a non-function named export to src/index.js;
 // test/workerExports.test.js guards this.
 //
-// 7 days: far longer than the 2 h flag KV TTL, so hotness never flaps with the
-// flag lifecycle, and long enough to span weekly visit periodicity. Both
+// 7 days: far longer than the flag KV TTL (FLAG_TTL_SECONDS in src/index.js,
+// 7 h), so hotness never flaps with the flag lifecycle, and long enough to span
+// weekly visit periodicity. Both
 // beach-walking crons order their reads hot-first, so a beach with a last_viewed
 // stamp inside this window is covered every run, ahead of the cold remainder
 // rotating on the run's own cursor column.

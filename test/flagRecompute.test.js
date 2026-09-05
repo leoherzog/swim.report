@@ -136,7 +136,7 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
 
     const put = made.kvPuts.get("flag:osm-node-1");
     expect(put).toBeDefined();
-    expect(put.opts).toEqual({ expirationTtl: 7200 });
+    expect(put.opts).toEqual({ expirationTtl: 25200 });
     const estimate = JSON.parse(put.value);
     expect(estimate.color).toBe("unknown");
     expect(estimate.official).toBe(false);
@@ -885,17 +885,19 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
   });
 });
 
-// Step 8's official: KV TTL: default KV_TTL_SECONDS (7200) unless the scraper
-// declares a numeric officialTtlSeconds. No registered scraper currently
-// declares one (the override hook is retained as a generic extension point for
-// a future reduced-cadence scraper), so only the default branch is exercised.
+// Step 8's official: KV TTL: default FLAG_TTL_SECONDS (25200), so the record
+// never expires ahead of the estimate displayFlagColor weighs it against,
+// unless the scraper declares a numeric officialTtlSeconds. No registered
+// scraper currently declares one (the override hook is retained as a generic
+// extension point for a future reduced-cadence scraper), so only the default
+// branch is exercised.
 describe("runFlagRecompute official: KV TTL (default vs officialTtlSeconds)", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
-  it("a scraper without officialTtlSeconds gets the default 7200 s TTL (south-haven)", async function () {
+  it("a scraper without officialTtlSeconds gets the default 25200 s TTL (south-haven)", async function () {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
 
@@ -928,7 +930,7 @@ describe("runFlagRecompute official: KV TTL (default vs officialTtlSeconds)", fu
 
     const official = made.kvPuts.get("official:osm-node-sh");
     expect(official).toBeDefined();
-    expect(official.opts).toEqual({ expirationTtl: 7200 });
+    expect(official.opts).toEqual({ expirationTtl: 25200 });
     expect(JSON.parse(official.value).color).toBe("red");
   });
 
@@ -1105,8 +1107,8 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
     const staleIso = new Date(Date.now() - (HOT_VIEW_WINDOW_MS + 86400000)).toISOString(); // 8 days ago: cold
 
     const made = makeEnv([
-      makeBeachRow({ id: "osm-node-1", last_viewed: recentIso }),
-      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.81, lon: -83.31, last_viewed: staleIso }),
+      makeBeachRow({ id: "osm-node-1", last_viewed: recentIso, recompute_updated: "2026-01-02T00:00:00.000Z" }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.81, lon: -83.31, last_viewed: staleIso, recompute_updated: "2026-01-01T00:00:00.000Z" }),
       makeBeachRow({ id: "osm-node-3", name: "Test Beach Gamma", lat: 44.82, lon: -83.32, last_viewed: null })
     ]);
     await runHourlyCron(made.env);
@@ -1119,6 +1121,7 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
       .filter(function (line) { return typeof line === "string" && line.indexOf("flag recompute complete") !== -1; })[0];
     expect(summaryLine).toBeDefined();
     expect(summaryLine).toContain("hot=1");
+    expect(summaryLine).toContain("oldest=2026-01-01T00:00:00.000Z");
   });
 });
 
@@ -1718,8 +1721,8 @@ describe("runFlagRecompute pooled per-beach writes", function () {
     }
     expect(flags).toBe(120);
     expect(officials).toBe(120);
-    expect(made.kvPuts.get("flag:osm-node-0").opts).toEqual({ expirationTtl: 7200 });
-    expect(made.kvPuts.get("flag:osm-node-119").opts).toEqual({ expirationTtl: 7200 });
+    expect(made.kvPuts.get("flag:osm-node-0").opts).toEqual({ expirationTtl: 25200 });
+    expect(made.kvPuts.get("flag:osm-node-119").opts).toEqual({ expirationTtl: 25200 });
 
     // The history step iterates the beaches array, not the estimate/official Maps, so a
     // pooled (nondeterministic) write order must remain invisible here.

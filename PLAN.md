@@ -391,8 +391,8 @@ migrations/0007_last_viewed.sql:
   (LAST_VIEWED_MIN_INTERVAL_MS). NULL means never viewed. Consumed by runFlagRecompute
   and runWaterTempRefresh for their hot/cold rotation split, and by runNwsEnrichment /
   runEcccEnrichment / runWebcamSync as a last_viewed DESC (NULLS LAST) candidate-queue
-  tiebreak (section 7). Nationwide scale-out still needs a longer cold-tier KV TTL,
-  list-view stamping and real pagination (TODO.md "Scale-out").
+  tiebreak (section 7). Nationwide scale-out still needs list-view stamping
+  and real pagination (TODO.md "Scale-out").
 
 migrations/0008_eccc.sql:
 
@@ -488,9 +488,15 @@ migrations/0012_wave_updated.sql:
 Binding name: FLAGS (single namespace for both key families).
 
 - Key "flag:" + beachId  → JSON.stringify(FlagEstimate). Written by hourly cron with
-  { expirationTtl: 7200 }.
+  { expirationTtl: 25200 } (FLAG_TTL_SECONDS, section 7). The key is rewritten on every
+  rotation turn and never retracted, so the TTL is sized to the cold rotation period rather
+  than to a retraction window. "official:" shares it, because the two keys are the operands
+  of displayFlagColor (section 9) and an estimate that outlives the posted flag it is
+  weighed against downgrades a posted red to an estimated green; "wqfloor:" keeps the
+  shorter KV_TTL_SECONDS, since expiry is the only way a cleared advisory is withdrawn and
+  the callout decides no color.
 - Key "official:" + beachId → JSON.stringify(OfficialFlag). Written by the hourly cron with
-  { expirationTtl: 7200 } by default (KV_TTL_SECONDS); a scraper object may set an optional
+  { expirationTtl: 25200 } by default (FLAG_TTL_SECONDS); a scraper object may set an optional
   `officialTtlSeconds` to extend it when it fetches on a reduced cadence, so its last color
   persists in KV between fetches. No registered scraper declares one; the hook is a retained
   extension point. See section 7 step 8. Independently of the TTL, the written record may
@@ -2036,20 +2042,23 @@ runner logs its own summary line (beaches processed, per-source failure counts).
 
 ### runFlagRecompute (hourly)
 
-Constants: MAX_BEACHES_PER_RUN = 1200, KV_TTL_SECONDS = 7200, KV_WRITE_CONCURRENCY = 12,
+Constants: MAX_BEACHES_PER_RUN = 1200, FLAG_TTL_SECONDS = 25200, KV_TTL_SECONDS = 7200,
+KV_WRITE_CONCURRENCY = 12,
 HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
 src/demandWindow.js rather than src/index.js — see "Entry-module export shape" below).
 
-MAX_BEACHES_PER_RUN must cover all hot beaches every run: cold rows rotate through the
-remaining budget and lapse to honest no-data between turns. A beach is hot when its
-last_viewed falls within HOT_VIEW_WINDOW_MS of the run; the hot/cold split guarantees a
-recently-viewed beach's 2 h KV TTL never lapses while it is still in demand, at the cost of
-letting a rarely-viewed row's flag go stale for longer once the table exceeds
-MAX_BEACHES_PER_RUN. The limit must stay above the flag-worthy row count: below it the
-SELECT silently excludes rows every run — not truncated by a kill, never selected at all —
-and offline discovery grows that invisible dead zone daily. The ceiling on the number is
-the run's wall clock and its KV write budget; nationwide scale-out still needs a longer
-cold-tier KV TTL and real pagination (TODO.md).
+MAX_BEACHES_PER_RUN bounds one run's wall clock and KV write budget; it does not have to
+cover the table. A beach is hot when its last_viewed falls within HOT_VIEW_WINDOW_MS of the
+run, and every hot row is covered every run. Cold rows rotate through the remaining budget,
+so a cold beach waits ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot)) runs for its
+turn, and FLAG_TTL_SECONDS is what carries its flag across that wait: the two must satisfy
+FLAG_TTL_SECONDS / 3600 >= that wait + 2, the margin covering runs killed before the
+trailing recompute_updated batch at step 10 commits. That margin covers isolated kills
+only: neither write pool takes a deadline, so a run that truncates every hour dies at the
+same point in the same selection order and starves the same tail, which no TTL rescues.
+The hard requirement is
+MAX_BEACHES_PER_RUN above the hot count: at hot >= the limit the cold tier gets no slots and
+starves whatever the TTL is. Nationwide scale-out still needs real pagination (TODO.md).
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run);
    const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
@@ -2068,7 +2077,8 @@ cold-tier KV TTL and real pagination (TODO.md).
    Migration 0012 explains why one shared cursor is not viable. NULLs sort first within
    each tier, and the leading guard evaluates to 0 for NULL or older last_viewed, so
    never-viewed and stale-viewed rows sort into the cold tier after every hot row. The
-   per-run summary log adds a hot=<count> field.
+   per-run summary log adds hot=<count> and oldest=<oldest cursor stamp selected, or
+   none>.
 3. Alerts: build the set of distinct non-null nws_zone values; when non-empty, one
    fetchAllActiveAlerts() call for the whole run, then each zone's Map entry =
    nwsAlertsForZone(nationalAlerts.alerts, zone) as { events, details, sourceUrl:
@@ -2130,7 +2140,8 @@ cold-tier KV TTL and real pagination (TODO.md).
    scrapeWqFloorFromResult -> waterQualityAdvisory (null when clean or absent) and pass it
    into estimateFlag. waveHeightFt, windSpeedMph and windGustMph come from the beach's
    "waveinput:" KV payload (step 5); updated = nowIso; call estimateFlag; then
-   env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate), { expirationTtl: 7200 }).
+   env.FLAGS.put("flag:" + beach.id, JSON.stringify(estimate),
+   { expirationTtl: 25200 } (FLAG_TTL_SECONDS)).
    Only when the advisory is non-null, also write
    env.FLAGS.put("wqfloor:" + beach.id, JSON.stringify(waterQualityAdvisory),
    { expirationTtl: 7200 }) for the request path's water-quality callout — a clean reading
@@ -2147,10 +2158,11 @@ cold-tier KV TTL and real pagination (TODO.md).
    runPool over group.beaches — resolve the shared result via
    scrapeOfficialFlagFromResult(beach, scraper, result) and write the returned
    OfficialFlag to "official:" + beach.id with
-   { expirationTtl: scraper.officialTtlSeconds ?? KV_TTL_SECONDS }: a scraper may opt into
+   { expirationTtl: scraper.officialTtlSeconds ?? FLAG_TTL_SECONDS }: a scraper may opt into
    a longer official-KV TTL when it fetches on a reduced cadence, so its last color
-   persists between infrequent fetches; default 7200 (section 3). No registered scraper
-   declares officialTtlSeconds, so this resolves to the default. The record also carries
+   persists between infrequent fetches; default 25200, matching the estimate's TTL so the
+   record never expires ahead of the estimate it is weighed against (section 3). No
+   registered scraper declares officialTtlSeconds, so this resolves to the default. The record also carries
    the scraper's validated staleMs / readingNote when declared (copied by
    scrapeOfficialFlagFromResult, section 6) — a display-side horizon, orthogonal to
    expirationTtl. This cron rewrites the official record every hour no matter how slowly
@@ -2433,8 +2445,9 @@ scan of a fixed layer set — so box size and count are free. Wherever a step be
 
 Nationwide scale-out (adding Pacific, Gulf and Atlantic coasts) is purely additive: append
 boxes to REGIONS. The discovery half is cheap, but do not attempt it yet — the remaining
-blockers are the Worker-side MAX_BEACHES_PER_RUN cap and the size-capped single-shot D1
-`--json` snapshot, both recorded in TODO.md.
+blockers are the flag-worthy row count against the MAX_BEACHES_PER_RUN / FLAG_TTL_SECONDS
+inequality in section 7 and the size-capped single-shot D1 `--json` snapshot, both recorded
+in TODO.md.
 
 runDiscovery(layers, report) is a local scan. There is no retry, no backoff, no per-tile
 budget and no circuit breaker, because there is no upstream to be flaky:

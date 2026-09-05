@@ -37,16 +37,41 @@ import { updateScraperHealth } from "./scraperHealth.js";
 import { HOT_VIEW_WINDOW_MS } from "./demandWindow.js";
 import { makeDeadline, runPool } from "./pool.js";
 
-// Must cover the whole beaches table in one run: the recompute rotation combined
-// with the 2 h KV TTL means any beach not reached every other run shows "no data"
-// until its next turn. The limit must stay above the flag-worthy row count, or
-// the SELECT silently excludes rows every run and the dead zone grows invisibly
-// as offline discovery adds rows. Real pagination is still required for
-// nationwide scale-out (TODO.md).
+// Rows per hourly run. The cap bounds one run's wall clock and KV write budget
+// against the 900 s scheduled ceiling; it does not have to cover the table.
+// Cold rows rotate, and FLAG_TTL_SECONDS is what carries a beach between its
+// turns, so the two must satisfy:
+//
+//   FLAG_TTL_SECONDS / 3600 >= ceil((flagWorthy - hot) / (this - hot)) + 2
+//
+// The hard requirement is that this stay above the hot count (last_viewed inside
+// HOT_VIEW_WINDOW_MS, logged as hot=): hot rows are covered every run, so at
+// hot >= this the cold tier gets no slots and starves whatever the TTL is. The
+// run logs oldest=, the oldest cursor stamp it selected, so the left side of
+// that inequality is measurable rather than assumed. Real pagination is still
+// required for nationwide scale-out (TODO.md).
 const MAX_BEACHES_PER_RUN = 1200;
 // HOT_VIEW_WINDOW_MS is imported from ./demandWindow.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry module
 // and fails the Worker at startup. See demandWindow.js.
+// The "flag:" estimate is rewritten on every rotation turn and never retracted,
+// so this TTL is pure expiry: it must outlive the gap between one beach's turns
+// rather than bound how long a withdrawn reading keeps rendering. That gap is
+// ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot)) hourly runs, plus one
+// hour for every run killed before its trailing recompute_updated batch commits,
+// plus the put's position inside a run capped at 900 s. Seven hours covers a
+// four-run rotation with two lost runs. A beach at the far end renders its last
+// reading, marked stale on the detail page, instead of dropping to no-data; the
+// list chip and the map marker carry no age signal, so a rotation-old color
+// reads there exactly like a fresh one.
+//
+// The "official:" put shares this TTL. The two keys are the operands of
+// displayFlagColor, so the estimate must never outlive the posted flag it is
+// weighed against.
+const FLAG_TTL_SECONDS = 25200;
+// "wqfloor:" keeps the shorter TTL: nothing deletes a KV key, so expiry is the
+// only way a cleared advisory stops rendering, and the advisory callout is
+// display-only — it never decides a color.
 const KV_TTL_SECONDS = 7200;
 // The water-temp reading is refreshed on the 6-hourly cron, so its KV must
 // outlive the gap between runs plus slack for a failed one. The offline wave
@@ -545,7 +570,7 @@ async function runFlagRecompute(env) {
         await env.FLAGS.put(
           "flag:" + beach.id,
           JSON.stringify(estimate),
-          { expirationTtl: KV_TTL_SECONDS }
+          { expirationTtl: FLAG_TTL_SECONDS }
         );
 
         // Persist the structured advisory so the request path can render a
@@ -650,13 +675,17 @@ async function runFlagRecompute(env) {
         await runPool(group.beaches, KV_WRITE_CONCURRENCY, async function (beach) {
           const flag = scrapeOfficialFlagFromResult(beach, group.scraper, result);
           if (flag !== null) {
-            // A scraper may opt into a longer official-KV TTL via
-            // officialTtlSeconds when it fetches on a reduced cadence, so the
-            // last color persists between fetches; default 2 h.
+            // The default matches the estimate's TTL: displayFlagColor weighs
+            // this record against the "flag:" estimate, so an official key that
+            // lapses first hands a posted red to a stale green. Past the
+            // renderer's 2 h gate the surviving record is raise-only and its
+            // card carries the stale warning, so ageing together costs no
+            // safety. A scraper on a reduced cadence may still opt into a
+            // longer TTL via officialTtlSeconds.
             const officialTtl =
               typeof group.scraper.officialTtlSeconds === "number"
                 ? group.scraper.officialTtlSeconds
-                : KV_TTL_SECONDS;
+                : FLAG_TTL_SECONDS;
             await env.FLAGS.put(
               "official:" + beach.id,
               JSON.stringify(flag),
@@ -729,6 +758,15 @@ async function runFlagRecompute(env) {
     const hotCount = beaches.filter(function (b) {
       return b.last_viewed && b.last_viewed >= hotCutoffIso;
     }).length;
+    // Oldest cursor stamp in the selected set: the cold-tier wait
+    // FLAG_TTL_SECONDS must span. Rows never recomputed carry no wait, so they
+    // are skipped rather than reported as the oldest.
+    const oldestCursor = beaches.reduce(function (acc, b) {
+      if (!b.recompute_updated) {
+        return acc;
+      }
+      return acc === null || b.recompute_updated < acc ? b.recompute_updated : acc;
+    }, null);
     console.log(
       "index: flag recompute complete, beaches=" + String(beaches.length) +
       " estimates=" + String(estimateCount) +
@@ -736,7 +774,8 @@ async function runFlagRecompute(env) {
       " history=" + String(historyCount) +
       " failures=" + String(failureCount) +
       " hot=" + String(hotCount) +
-      " waveinputs=" + String(waveInputs.size)
+      " waveinputs=" + String(waveInputs.size) +
+      " oldest=" + (oldestCursor || "none")
     );
   } catch (err) {
     console.log("index: flag recompute failed: " + err.message);
