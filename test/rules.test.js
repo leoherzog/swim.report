@@ -38,9 +38,16 @@ function baseInputs(overrides) {
 describe("ALERT_PRECEDENCE", function () {
   it("lists alerts in the documented precedence order", function () {
     expect(ALERT_PRECEDENCE).toEqual([
+      "Tsunami Warning",
+      "Hurricane Warning",
+      "Storm Surge Warning",
+      "Extreme Wind Warning",
       "Tornado Warning",
       "High Surf Warning",
+      "Hurricane Force Wind Warning",
       "Storm Warning",
+      "Tropical Storm Warning",
+      "Tsunami Advisory",
       "Severe Thunderstorm Warning",
       "Beach Hazards Statement",
       "High Surf Advisory",
@@ -62,16 +69,38 @@ describe("ALERT_PRECEDENCE", function () {
     }, -1);
     expect(lastDoubleRed).toBeLessThan(firstRed);
   });
+
+  it("every entry maps to red or double-red, never yellow or null", function () {
+    ALERT_PRECEDENCE.forEach(function (e) {
+      expect(["red", "double-red"]).toContain(alertColorForEvent(e));
+    });
+  });
+
+  it("the tropical and tsunami double-reds sit in the double-red block", function () {
+    const firstRed = ALERT_PRECEDENCE.findIndex(function (e) {
+      return alertColorForEvent(e) === "red";
+    });
+    ["Tsunami Warning", "Hurricane Warning", "Storm Surge Warning",
+     "Extreme Wind Warning", "Hurricane Force Wind Warning"].forEach(function (e) {
+      expect(alertColorForEvent(e)).toBe("double-red");
+      expect(ALERT_PRECEDENCE.indexOf(e)).toBeLessThan(firstRed);
+    });
+  });
 });
 
 describe("NWS_FLOOR_PRECEDENCE", function () {
   it("lists NWS yellow watches/advisories in the documented order", function () {
     expect(NWS_FLOOR_PRECEDENCE).toEqual([
+      "Hurricane Watch",
+      "Tropical Storm Watch",
+      "Storm Surge Watch",
+      "Tsunami Watch",
       "Tornado Watch",
       "Severe Thunderstorm Watch",
       "High Wind Watch",
       "Wind Advisory",
       "Lake Wind Advisory",
+      "Hurricane Force Wind Watch",
       "Small Craft Advisory",
       "Lakeshore Flood Advisory",
       "Coastal Flood Advisory"
@@ -195,9 +224,94 @@ describe("estimateFlag - alerts (step 1)", function () {
     expect(result.color).toBe("double-red");
     expect(result.reason).toBe("Active NWS alert: Storm Warning");
   });
+
+  it("17. Tsunami Warning -> double-red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Tsunami Warning"] }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Tsunami Warning");
+  });
+
+  it("18. Hurricane Warning -> double-red ahead of a co-active High Surf Advisory", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["High Surf Advisory", "Hurricane Warning"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Hurricane Warning");
+  });
+
+  it("19. Storm Surge Warning, Extreme Wind Warning, marine Hurricane Force Wind Warning -> double-red", function () {
+    ["Storm Surge Warning", "Extreme Wind Warning", "Hurricane Force Wind Warning"].forEach(function (event) {
+      const result = estimateFlag(baseInputs({ alerts: [event] }));
+      expect(result.color).toBe("double-red");
+      expect(result.reason).toBe("Active NWS alert: " + event);
+    });
+  });
+
+  it("20. Tropical Storm Warning -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Tropical Storm Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Tropical Storm Warning");
+  });
+
+  it("21. Tsunami Advisory -> red", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Tsunami Advisory"] }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Active NWS alert: Tsunami Advisory");
+  });
+
+  it("22. a Tropical Storm Warning red does not shadow a co-active Hurricane Warning", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Tropical Storm Warning", "Hurricane Warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.reason).toBe("Active NWS alert: Hurricane Warning");
+  });
 });
 
 describe("estimateFlag - NWS yellow watch/advisory floor (step 6)", function () {
+  it("Hurricane Watch raises a wave green to yellow", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Hurricane Watch"],
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Hurricane Watch");
+  });
+
+  it("Hurricane Watch NEVER downgrades a wave-height red", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Hurricane Watch"],
+      waveHeightFt: 5.0
+    }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.reason).toBe("Estimated wave height 5.0 ft (at or above 4 ft)");
+  });
+
+  it("each tropical/tsunami watch floors green -> yellow", function () {
+    ["Tropical Storm Watch", "Storm Surge Watch", "Tsunami Watch",
+     "Hurricane Force Wind Watch"].forEach(function (event) {
+      const result = estimateFlag(baseInputs({ alerts: [event], waveHeightFt: 1.0 }));
+      expect(result.color).toBe("yellow");
+      expect(result.trigger).toBe("nws-floor");
+      expect(result.reason).toBe("Active NWS alert: " + event);
+    });
+  });
+
+  it("a Hurricane Warning still wins outright over a co-active Hurricane Watch", function () {
+    const result = estimateFlag(baseInputs({
+      alerts: ["Hurricane Watch", "Hurricane Warning"]
+    }));
+    expect(result.color).toBe("double-red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Hurricane Warning");
+  });
+
   it("Tornado Watch raises a wave green to yellow", function () {
     const result = estimateFlag(baseInputs({
       alerts: ["Tornado Watch"],
@@ -807,8 +921,8 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
 });
 
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
-  it("bumped RULES_VERSION for the step-5 wave-provider rewording", function () {
-    expect(RULES_VERSION).toBe("1.5.1");
+  it("bumped RULES_VERSION for the tropical and tsunami NWS products", function () {
+    expect(RULES_VERSION).toBe("1.6.0");
   });
 
   it("wave-only green with alertsCheckable false appends the caveat", function () {
@@ -885,9 +999,16 @@ describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", functio
 
 describe("alertColorForEvent / ripRiskColor", function () {
   it("maps every ALERT_PRECEDENCE / NWS_FLOOR_PRECEDENCE event to its flag color, unknown events to null", function () {
+    expect(alertColorForEvent("Tsunami Warning")).toBe("double-red");
+    expect(alertColorForEvent("Hurricane Warning")).toBe("double-red");
+    expect(alertColorForEvent("Storm Surge Warning")).toBe("double-red");
+    expect(alertColorForEvent("Extreme Wind Warning")).toBe("double-red");
     expect(alertColorForEvent("Tornado Warning")).toBe("double-red");
     expect(alertColorForEvent("High Surf Warning")).toBe("double-red");
+    expect(alertColorForEvent("Hurricane Force Wind Warning")).toBe("double-red");
     expect(alertColorForEvent("Storm Warning")).toBe("double-red");
+    expect(alertColorForEvent("Tropical Storm Warning")).toBe("red");
+    expect(alertColorForEvent("Tsunami Advisory")).toBe("red");
     expect(alertColorForEvent("Severe Thunderstorm Warning")).toBe("red");
     expect(alertColorForEvent("Beach Hazards Statement")).toBe("red");
     expect(alertColorForEvent("High Surf Advisory")).toBe("red");
@@ -897,6 +1018,11 @@ describe("alertColorForEvent / ripRiskColor", function () {
     expect(alertColorForEvent("Special Marine Warning")).toBe("red");
     expect(alertColorForEvent("Lakeshore Flood Warning")).toBe("red");
     expect(alertColorForEvent("Coastal Flood Warning")).toBe("red");
+    expect(alertColorForEvent("Hurricane Watch")).toBe("yellow");
+    expect(alertColorForEvent("Tropical Storm Watch")).toBe("yellow");
+    expect(alertColorForEvent("Storm Surge Watch")).toBe("yellow");
+    expect(alertColorForEvent("Tsunami Watch")).toBe("yellow");
+    expect(alertColorForEvent("Hurricane Force Wind Watch")).toBe("yellow");
     expect(alertColorForEvent("Tornado Watch")).toBe("yellow");
     expect(alertColorForEvent("Severe Thunderstorm Watch")).toBe("yellow");
     expect(alertColorForEvent("High Wind Watch")).toBe("yellow");

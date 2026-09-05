@@ -2,7 +2,7 @@
 // No fetch, no Date, no env, no client imports: structured inputs in, a complete
 // FlagEstimate out. This is the only place an estimated flag color is decided.
 
-export const RULES_VERSION = "1.5.1";
+export const RULES_VERSION = "1.6.0";
 
 // Flag color severity ordering. The raise-only water-quality floor (step 7)
 // compares an advisory's floor color against the already-decided color: it may
@@ -22,10 +22,10 @@ export const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-
 export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
 
 // NWS alerts that short-circuit the estimate at step 1, in precedence order:
-// beach-hazard products, life-threatening severe-weather warnings, high-wind and
-// lakeshore/coastal-flood warnings, and the marine warnings matched via a beach's
-// marine_zone. All map to red or double-red, so their top precedence can only
-// raise the flag.
+// tsunami and tropical-cyclone products, beach-hazard products, life-threatening
+// severe-weather warnings, high-wind and lakeshore/coastal-flood warnings, and
+// the marine warnings matched via a beach's marine_zone. All map to red or
+// double-red, so their top precedence can only raise the flag.
 //
 // Order matters: the loop takes the first match regardless of color, so every
 // double-red must precede every red or a red would shadow it. NWS watches and
@@ -35,10 +35,17 @@ export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for t
 // estimate.
 export const ALERT_PRECEDENCE = [
   // double-red (most severe) — must come first so a later red cannot shadow them
+  "Tsunami Warning",
+  "Hurricane Warning",
+  "Storm Surge Warning",
+  "Extreme Wind Warning",         // tropical-cyclone eyewall, sustained >= 100 kt
   "Tornado Warning",
   "High Surf Warning",
-  "Storm Warning",                // marine, sustained >= 48 kt
+  "Hurricane Force Wind Warning", // marine, sustained >= 64 kt
+  "Storm Warning",                // marine, sustained 48-63 kt
   // red
+  "Tropical Storm Warning",
+  "Tsunami Advisory",
   "Severe Thunderstorm Warning",
   "Beach Hazards Statement",
   "High Surf Advisory",
@@ -55,20 +62,32 @@ export const ALERT_PRECEDENCE = [
 // downgrade a higher color — rather than as a step-1 short-circuit. "Floor" names
 // the mechanism, which is what unifies these members, not any alert subtype.
 export const NWS_FLOOR_PRECEDENCE = [
+  "Hurricane Watch",
+  "Tropical Storm Watch",
+  "Storm Surge Watch",
+  "Tsunami Watch",
   "Tornado Watch",
   "Severe Thunderstorm Watch",
   "High Wind Watch",
   "Wind Advisory",
   "Lake Wind Advisory",
+  "Hurricane Force Wind Watch",   // marine
   "Small Craft Advisory",         // marine
   "Lakeshore Flood Advisory",
   "Coastal Flood Advisory"
 ];
 
 const ALERT_COLOR_MAP = {
+  "Tsunami Warning": "double-red",
+  "Hurricane Warning": "double-red",
+  "Storm Surge Warning": "double-red",
+  "Extreme Wind Warning": "double-red",
   "Tornado Warning": "double-red",
   "High Surf Warning": "double-red",
+  "Hurricane Force Wind Warning": "double-red",
   "Storm Warning": "double-red",
+  "Tropical Storm Warning": "red",
+  "Tsunami Advisory": "red",
   "Severe Thunderstorm Warning": "red",
   "Beach Hazards Statement": "red",
   "High Surf Advisory": "red",
@@ -78,11 +97,16 @@ const ALERT_COLOR_MAP = {
   "Special Marine Warning": "red",
   "Lakeshore Flood Warning": "red",
   "Coastal Flood Warning": "red",
+  "Hurricane Watch": "yellow",
+  "Tropical Storm Watch": "yellow",
+  "Storm Surge Watch": "yellow",
+  "Tsunami Watch": "yellow",
   "Tornado Watch": "yellow",
   "Severe Thunderstorm Watch": "yellow",
   "High Wind Watch": "yellow",
   "Wind Advisory": "yellow",
   "Lake Wind Advisory": "yellow",
+  "Hurricane Force Wind Watch": "yellow",
   "Small Craft Advisory": "yellow",
   "Lakeshore Flood Advisory": "yellow",
   "Coastal Flood Advisory": "yellow"

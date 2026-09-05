@@ -203,8 +203,8 @@ raising a lower result but never downgrading a higher color.
 
 | # | Signal | Source | Condition | Color | Reason |
 |---|--------|--------|-----------|-------|--------|
-| 1 | Active NWS alert | `api.weather.gov/alerts/active` (land matched by `nws_zone`, marine by `marine_zone`) | Event = "Tornado Warning", "High Surf Warning", or marine "Storm Warning" | double-red | "Active NWS alert: &lt;event&gt;" |
-| 1 | Active NWS alert | same | Event = "Severe Thunderstorm Warning", "Beach Hazards Statement", "High Surf Advisory", "Rip Current Statement", "High Wind Warning", marine "Gale Warning", marine "Special Marine Warning", "Lakeshore Flood Warning", or "Coastal Flood Warning" | red | "Active NWS alert: &lt;event&gt;" |
+| 1 | Active NWS alert | `api.weather.gov/alerts/active` (land matched by `nws_zone`, marine by `marine_zone`) | Event = "Tsunami Warning", "Hurricane Warning", "Storm Surge Warning", "Extreme Wind Warning", "Tornado Warning", "High Surf Warning", marine "Hurricane Force Wind Warning", or marine "Storm Warning" | double-red | "Active NWS alert: &lt;event&gt;" |
+| 1 | Active NWS alert | same | Event = "Tropical Storm Warning", "Tsunami Advisory", "Severe Thunderstorm Warning", "Beach Hazards Statement", "High Surf Advisory", "Rip Current Statement", "High Wind Warning", marine "Gale Warning", marine "Special Marine Warning", "Lakeshore Flood Warning", or "Coastal Flood Warning" | red | "Active NWS alert: &lt;event&gt;" |
 | 1b | Active ECCC alert (Canadian beaches) | `api.weather.gc.ca` `weather-alerts` matched by alert-region polygon; `marineweather-realtime` matched by marine-zone polygon | Event = "tornado warning", "storm surge warning", or marine "storm warning" (≥ 48 kt) | double-red | "Active Environment Canada alert: &lt;event&gt;" |
 | 1b | Active ECCC alert | same | Event = "squall warning", "waterspout warning", "severe thunderstorm warning", marine "gale warning" (≥ 34 kt), or "wind warning" | red | "Active Environment Canada alert: &lt;event&gt;" |
 | 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product, regex-parsed | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
@@ -213,7 +213,7 @@ raising a lower result but never downgrading a higher color.
 | 4 | Wind (fallback only when wave height is null) | NOAA wave-model WIND (m/s converted to mph, `m/s * 2.2369362920544`); gusts are always null | sustained >= 25 mph or gust >= 35 mph / sustained >= 15 mph or gust >= 25 mph / below both | red / yellow / green | "No wave data; wind S mph sustained, G mph gusts (at or above 25 mph sustained or 35 mph gust threshold \| at or above 15 mph sustained or 25 mph gust threshold \| below advisory thresholds)" |
 | 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
 | 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models" |
-| 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Tornado, Severe Thunderstorm, High Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
+| 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Hurricane, Tropical Storm, Storm Surge, Tsunami, Tornado, Severe Thunderstorm, High Wind, Hurricane Force Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
 | 6b | ECCC marine yellow floor (Canadian beaches) | `marineweather-realtime` collection | Event = "strong wind warning" or "marine weather advisory", **and** the decided color is green/unknown | yellow | "Active Environment Canada alert: <event>" |
 | 7 | Water-quality advisory floor (raise-only) | `src/wqFloor/` registry (E. coli / bacteria / HAB advisories) | An active advisory whose floor color (yellow or red) **outranks** the color steps 1–6b decided | yellow or red | "Water-quality advisory (<source>): <detail>" |
 
@@ -224,7 +224,8 @@ Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
   of color, so the list must place every double-red before every red — otherwise a red could
   shadow a co-active double-red such as a Storm Warning. Every step-1 event is red or
   double-red, so step 1 can only raise the flag, never lower it.
-- **Marine** alerts (Storm / Gale / Special Marine Warning, Small Craft Advisory) are issued
+- **Marine** alerts (Hurricane Force Wind / Storm / Gale / Special Marine Warning, Hurricane
+  Force Wind Watch, Small Craft Advisory) are issued
   for a beach's adjacent *marine* zone, not its land `nws_zone`. A US beach's `marine_zone` is
   derived once offline by the discovery batch and matched from the **same** national
   `/alerts/active` fetch. They are a bonus signal: a beach with no resolved `marine_zone` still

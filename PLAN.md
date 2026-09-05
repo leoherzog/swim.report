@@ -645,7 +645,7 @@ official card when official is null.
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.5.1";
+    export const RULES_VERSION = "1.6.0";
 
     export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
       // Appended to the reason (see the caveat rule after step 5) when the cron
@@ -654,10 +654,17 @@ Pure module. No fetch, no Date, no env. Exports:
 
     export const ALERT_PRECEDENCE = [
       // double-red (must precede every red — first match wins regardless of color)
+      "Tsunami Warning",             // -> double-red
+      "Hurricane Warning",           // -> double-red
+      "Storm Surge Warning",         // -> double-red
+      "Extreme Wind Warning",        // -> double-red (tropical-cyclone eyewall, >= 100 kt)
       "Tornado Warning",             // -> double-red
       "High Surf Warning",           // -> double-red
-      "Storm Warning",               // -> double-red (marine, sustained >= 48 kt)
+      "Hurricane Force Wind Warning",// -> double-red (marine, sustained >= 64 kt)
+      "Storm Warning",               // -> double-red (marine, sustained 48-63 kt)
       // red
+      "Tropical Storm Warning",      // -> red
+      "Tsunami Advisory",            // -> red
       "Severe Thunderstorm Warning", // -> red
       "Beach Hazards Statement",     // -> red
       "High Surf Advisory",          // -> red
@@ -668,8 +675,9 @@ Pure module. No fetch, no Date, no env. Exports:
       "Lakeshore Flood Warning",     // -> red
       "Coastal Flood Warning"        // -> red
     ];
-      // NWS alerts that short-circuit at step 1. Beach-hazard products,
-      // severe-weather warnings, high-wind and lakeshore/coastal-flood warnings, plus
+      // NWS alerts that short-circuit at step 1. Tsunami and tropical-cyclone
+      // products, beach-hazard products, severe-weather warnings, high-wind and
+      // lakeshore/coastal-flood warnings, plus
       // marine warnings matched via marine_zone — all red/double-red, so top
       // precedence can only raise the flag, never lower it. Order matters: the loop
       // takes the first match regardless of color, so every double-red must precede
@@ -678,11 +686,16 @@ Pure module. No fetch, no Date, no env. Exports:
       // are floored in at step 6 instead.
 
     export const NWS_FLOOR_PRECEDENCE = [
-      "Tornado Watch",               // -> yellow (floor only, step 6)
+      "Hurricane Watch",             // -> yellow (floor only, step 6)
+      "Tropical Storm Watch",        // -> yellow
+      "Storm Surge Watch",           // -> yellow
+      "Tsunami Watch",               // -> yellow
+      "Tornado Watch",               // -> yellow
       "Severe Thunderstorm Watch",   // -> yellow
       "High Wind Watch",             // -> yellow
       "Wind Advisory",               // -> yellow
       "Lake Wind Advisory",          // -> yellow
+      "Hurricane Force Wind Watch",  // -> yellow (marine)
       "Small Craft Advisory",        // -> yellow (marine)
       "Lakeshore Flood Advisory",    // -> yellow
       "Coastal Flood Advisory"       // -> yellow
@@ -815,11 +828,14 @@ is never mutated.
    order (not input order); exact string equality on the event name; unknown events ignored.
    The cron fills inputs.alerts for a US beach by merging land-zone (nws_zone) and marine-zone
    (marine_zone) matches from the one national fetch, so marine warnings appear here too.
-   - "Tornado Warning" / "High Surf Warning" / "Storm Warning" (marine) → color "double-red",
+   - "Tsunami Warning" / "Hurricane Warning" / "Storm Surge Warning" / "Extreme Wind Warning" /
+     "Tornado Warning" / "High Surf Warning" / "Hurricane Force Wind Warning" (marine) /
+     "Storm Warning" (marine) → color "double-red",
      reason: "Active NWS alert: " + eventName
-   - "Severe Thunderstorm Warning" / "Beach Hazards Statement" / "High Surf Advisory" /
-     "Rip Current Statement" / "High Wind Warning" / "Gale Warning" (marine) /
-     "Special Marine Warning" (marine) / "Lakeshore Flood Warning" / "Coastal Flood Warning"
+   - "Tropical Storm Warning" / "Tsunami Advisory" / "Severe Thunderstorm Warning" /
+     "Beach Hazards Statement" / "High Surf Advisory" / "Rip Current Statement" /
+     "High Wind Warning" / "Gale Warning" (marine) / "Special Marine Warning" (marine) /
+     "Lakeshore Flood Warning" / "Coastal Flood Warning"
      → "red", reason: "Active NWS alert: " + eventName
 1b. Environment Canada alerts. Same inputs.alerts array (the cron fills it from ECCC
    for Canadian beaches, merging land weather-alerts AND marine warnings — the two
@@ -872,9 +888,11 @@ is never mutated.
    downgrades an already-higher color (worst-of, not short-circuit). This keeps a yellow
    alert from masking a wave-height red, the same masking concern that leaves ECCC watches
    unmapped.
-   - "Tornado Watch" / "Severe Thunderstorm Watch" / "High Wind Watch" / "Wind Advisory" /
-     "Lake Wind Advisory" / "Small Craft Advisory" (marine) / "Lakeshore Flood Advisory" /
-     "Coastal Flood Advisory" (over green/unknown) → "yellow",
+   - "Hurricane Watch" / "Tropical Storm Watch" / "Storm Surge Watch" / "Tsunami Watch" /
+     "Tornado Watch" / "Severe Thunderstorm Watch" / "High Wind Watch" / "Wind Advisory" /
+     "Lake Wind Advisory" / "Hurricane Force Wind Watch" (marine) / "Small Craft Advisory"
+     (marine) / "Lakeshore Flood Advisory" / "Coastal Flood Advisory" (over green/unknown)
+     → "yellow",
      trigger "nws-floor", reason: "Active NWS alert: " + eventName
 6b. Environment Canada marine yellow floor, applied after step 6. Scan inputs.alerts
    against ECCC_FLOOR_PRECEDENCE in that order. If one is present and the decided color
