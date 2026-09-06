@@ -13,6 +13,14 @@
 // most severe color. Gray means unmonitored (9pm-9am local, or the Sept 15 -
 // May 15 off-season) and maps to NO DATA for that site, never a color.
 //
+// Empty-success contract (PLAN.md section 6): a scrape that fetched the CSV and
+// recognized its lines but has no site to report, because every flag is gray or
+// mixed with gray, returns a perBeach result with sites [] and counts as a
+// healthy run. null is reserved for a failed fetch, a markup or empty body, and
+// a feed in which no line is recognized. The pre-fetch season and hours skip is
+// a third case: it returns null without fetching, and healthMonitored keeps the
+// health tracker from counting it either way.
+//
 // scrape() runs cron-side only; parseSouthHavenCsv and
 // extractSouthHavenCsvUrl are pure and exported for tests.
 
@@ -371,9 +379,10 @@ export const southHaven = {
     }
     try {
       const sites = parseSouthHavenCsv(csvText, nowIso);
-      if (!sites || sites.length === 0) {
-        // null: unparseable. []: every site gray/unmonitored. Either way
-        // there is no official data this tick.
+      // null is an unusable feed and must surface as a failure. [] means every
+      // recognized site is gray or unmonitored: a successful scrape with nothing
+      // to report, which resolves to no site and counts as healthy.
+      if (sites === null) {
         return null;
       }
       return {

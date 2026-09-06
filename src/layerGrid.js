@@ -32,16 +32,23 @@
 // the per-segment test is the same local-planar math minEdgeDistanceKm uses.
 // Mode A deliberately over-includes.
 //
-// Scope limit, stated rather than handled: no antimeridian wrap. Cells are keyed
-// off raw degrees, so a query at lon 179.99 does not see a feature at -179.99.
-// Every region this pipeline covers is far from the 180th meridian; a Pacific
-// region would need that wrap added here.
+// The longitude axis is a circle. Cells are keyed off longitude wrapped into
+// [-180, 180), a cell walk that runs past either edge continues on the other
+// side, and an envelope or query box may reach past ±180 (a padded box) or be
+// given with minLon > maxLon, which means it wraps through 180. Every segment is
+// read as the shorter of its two arcs (src/geo.js lonSegmentEndOffsetDeg), so a
+// way with vertices at 179.9 and -179.9 is indexed at the seam and measured 0.2
+// degrees wide, and a probe at 179.99 sees a feature at -179.99. Away from the
+// antimeridian every answer is unchanged bit for bit: wrapping is the identity
+// on in-range longitude and the short-arc offset is the raw difference.
 
 import {
   KM_PER_DEG,
   geometryPolygons,
   geometryLines,
-  anySegmentWithinKm
+  anySegmentWithinKm,
+  lonOffsetDeg,
+  lonSegmentEndOffsetDeg
 } from "./geo.js";
 
 // Cell size in degrees (~5.5 km north-south), an order of magnitude above every
@@ -61,9 +68,16 @@ export const GRID_CELL_DEG = 0.05;
 const CELL_KEY_OFFSET = 40000;
 const CELL_KEY_STRIDE = 100000;
 
-// Cell indices are clamped into the key range rather than rejected, so a corrupt
-// bound or a 1e12 longitude lands in an edge bucket instead of producing a
-// colliding or non-integer key. Correctness is unharmed because the exact
+// Longitude cells per full turn, and the index range a wrapped longitude maps
+// to: [-180, 180) is cells LON_CELL_MIN .. LON_CELL_MAX, and the cell after
+// LON_CELL_MAX is LON_CELL_MIN again.
+const LON_CELLS = Math.round(360 / GRID_CELL_DEG);
+const LON_CELL_MIN = -LON_CELLS / 2;
+const LON_CELL_MAX = LON_CELL_MIN + LON_CELLS - 1;
+
+// Latitude cell indices are clamped into the key range rather than rejected, so
+// a corrupt bound or a 1e12 latitude lands in an edge bucket instead of producing
+// a colliding or non-integer key. Correctness is unharmed because the exact
 // envelope or distance test still decides every candidate.
 const CELL_INDEX_MIN = -(CELL_KEY_OFFSET - 1);
 const CELL_INDEX_MAX = CELL_KEY_OFFSET - 1;
@@ -107,7 +121,41 @@ function isFiniteNumber(value) {
   return typeof value === "number" && isFinite(value);
 }
 
-function cellIndexFor(degrees) {
+// Longitude wrapped into [-180, 180). The identity, bit for bit, for a value
+// already inside that range.
+function wrapLon(lon) {
+  if (lon >= -180 && lon < 180) {
+    return lon;
+  }
+  return lon - 360 * Math.floor((lon + 180) / 360);
+}
+
+// A longitude cell index in continuous (unwrapped) space brought onto the
+// circle, so a walk that ran past LON_CELL_MAX continues at LON_CELL_MIN.
+function wrapLonCell(cx) {
+  const m = (cx - LON_CELL_MIN) % LON_CELLS;
+  return (m < 0 ? m + LON_CELLS : m) + LON_CELL_MIN;
+}
+
+// The continuous longitude cell index of a degree value, wrapped later by the
+// walk that consumes it. Kept unwrapped here so a span across the seam is still
+// cxHi - cxLo + 1.
+function lonCellIndexFor(degrees) {
+  return Math.floor(degrees / GRID_CELL_DEG);
+}
+
+// How many longitude cells a continuous index range covers, capped at one full
+// turn so no walk visits a cell twice.
+function lonCellSpan(cxLo, cxHi) {
+  const span = cxHi - cxLo + 1;
+  return span > LON_CELLS ? LON_CELLS : span;
+}
+
+function nextLonCell(cx) {
+  return cx === LON_CELL_MAX ? LON_CELL_MIN : cx + 1;
+}
+
+function latCellIndexFor(degrees) {
   const raw = Math.floor(degrees / GRID_CELL_DEG);
   if (raw < CELL_INDEX_MIN) { return CELL_INDEX_MIN; }
   if (raw > CELL_INDEX_MAX) { return CELL_INDEX_MAX; }
@@ -132,6 +180,19 @@ function validBounds(bounds) {
 
 // --- Mode A: the envelope grid -------------------------------------------------
 
+// Inclusive overlap of two longitude spans read on the circle. The raw line test
+// comes first and is boundsOverlap byte for byte; the shifted tests can only
+// succeed when a span reaches ±180, so away from the seam nothing changes.
+function lonSpansOverlap(aLo, aHi, bLo, bHi) {
+  if (aLo <= bHi && aHi >= bLo) {
+    return true;
+  }
+  if (aLo + 360 <= bHi && aHi + 360 >= bLo) {
+    return true;
+  }
+  return aLo - 360 <= bHi && aHi - 360 >= bLo;
+}
+
 // Index an array of features by their bounding boxes. Features are identified by
 // their original array index throughout and every query returns indices in
 // ascending order, because the consumers' tie-break rules
@@ -143,6 +204,9 @@ function validBounds(bounds) {
 // so indices stay aligned with the caller's array, but is registered in no cell
 // and matches no query: its stored bounds are NaN and every comparison against
 // NaN is false. Malformed input is upstream data, not a programming error.
+//
+// A bounds record with minLon > maxLon wraps through 180 and is stored in its
+// continuous form, maxLon + 360, so the overlap test above sees one span.
 export function buildLayerGrid(features) {
   const list = Array.isArray(features) ? features : [];
   const count = list.length;
@@ -162,20 +226,24 @@ export function buildLayerGrid(features) {
       maxLon[i] = NaN;
       continue;
     }
+    const lonLo = bounds.minLon;
+    const lonHi = bounds.maxLon < lonLo ? bounds.maxLon + 360 : bounds.maxLon;
     minLat[i] = bounds.minLat;
-    minLon[i] = bounds.minLon;
+    minLon[i] = lonLo;
     maxLat[i] = bounds.maxLat;
-    maxLon[i] = bounds.maxLon;
-    const cxLo = cellIndexFor(Math.min(bounds.minLon, bounds.maxLon));
-    const cxHi = cellIndexFor(Math.max(bounds.minLon, bounds.maxLon));
-    const cyLo = cellIndexFor(Math.min(bounds.minLat, bounds.maxLat));
-    const cyHi = cellIndexFor(Math.max(bounds.minLat, bounds.maxLat));
-    const spanned = (cxHi - cxLo + 1) * (cyHi - cyLo + 1);
+    maxLon[i] = lonHi;
+    const cxLo = lonCellIndexFor(lonLo);
+    const cxHi = lonCellIndexFor(lonHi);
+    const cyLo = latCellIndexFor(Math.min(bounds.minLat, bounds.maxLat));
+    const cyHi = latCellIndexFor(Math.max(bounds.minLat, bounds.maxLat));
+    const spanX = lonCellSpan(cxLo, cxHi);
+    const spanned = spanX * (cyHi - cyLo + 1);
     if (spanned > MAX_CELLS_PER_FEATURE) {
       oversized.push(i);
       continue;
     }
-    for (let cx = cxLo; cx <= cxHi; cx = cx + 1) {
+    let cx = wrapLonCell(cxLo);
+    for (let k = 0; k < spanX; k = k + 1) {
       for (let cy = cyLo; cy <= cyHi; cy = cy + 1) {
         const key = cellKeyFor(cx, cy);
         const bucket = cells.get(key);
@@ -185,6 +253,7 @@ export function buildLayerGrid(features) {
           bucket.push(i);
         }
       }
+      cx = nextLonCell(cx);
     }
   }
   // Buckets are built by ascending i, so each one is already ascending; freezing
@@ -206,46 +275,17 @@ export function buildLayerGrid(features) {
   };
 }
 
-// Does feature i's envelope, padded by (latPad, lonPad), contain the point?
-function paddedEnvelopeHit(grid, i, lat, lon, latPad, lonPad) {
-  return lat >= grid.minLat[i] - latPad && lat <= grid.maxLat[i] + latPad &&
-    lon >= grid.minLon[i] - lonPad && lon <= grid.maxLon[i] + lonPad;
-}
-
-// Walk the cell neighbourhood of one padded point, calling visit(featureIndex)
-// for every registered candidate (duplicates included — the caller dedupes).
-// The neighbourhood is widened by a full cell on every side so a query sitting
-// on a cell boundary still sees the neighbouring cell's features.
-function visitPointCells(grid, lat, lon, latPad, lonPad, visit) {
-  const cxLo = cellIndexFor(lon - lonPad) - 1;
-  const cxHi = cellIndexFor(lon + lonPad) + 1;
-  const cyLo = cellIndexFor(lat - latPad) - 1;
-  const cyHi = cellIndexFor(lat + latPad) + 1;
-  for (let cx = cxLo; cx <= cxHi; cx = cx + 1) {
-    for (let cy = cyLo; cy <= cyHi; cy = cy + 1) {
-      const bucket = grid.cells.get(cellKeyFor(cx, cy));
-      if (bucket === undefined) {
-        continue;
-      }
-      for (let k = 0; k < bucket.length; k = k + 1) {
-        visit(bucket[k]);
-      }
-    }
-  }
-  for (let k = 0; k < grid.oversized.length; k = k + 1) {
-    visit(grid.oversized[k]);
-  }
-}
-
 function ascending(a, b) {
   return a - b;
 }
 
 // Candidates whose envelope overlaps a query rectangle, in ascending index order.
-// Unpadded and inclusive, matching osmSelect's boundsOverlap byte for byte:
-// associateParkForBeach matches bbox to bbox rather than point to bbox, and its
-// smallest-area-then-first-seen tie-break is only reproducible if this returns
-// the same set in the same order as a full-list scan.
+// Unpadded and inclusive, matching osmSelect's boundsOverlap byte for byte away
+// from the antimeridian: associateParkForBeach matches bbox to bbox rather than
+// point to bbox, and its smallest-area-then-first-seen tie-break is only
+// reproducible if this returns the same set in the same order as a full-list
+// scan. At the seam the longitude axis is read on the circle: a query reaching
+// past ±180, or given with minLon > maxLon, overlaps envelopes on the other side.
 export function queryGridByBounds(grid, bounds) {
   if (grid === null || typeof grid !== "object" || grid.count === 0) {
     return [];
@@ -253,14 +293,15 @@ export function queryGridByBounds(grid, bounds) {
   if (!validBounds(bounds)) {
     return [];
   }
-  const qMinLon = Math.min(bounds.minLon, bounds.maxLon);
-  const qMaxLon = Math.max(bounds.minLon, bounds.maxLon);
+  const qLonLo = bounds.minLon;
+  const qLonHi = bounds.maxLon < qLonLo ? bounds.maxLon + 360 : bounds.maxLon;
   const qMinLat = Math.min(bounds.minLat, bounds.maxLat);
   const qMaxLat = Math.max(bounds.minLat, bounds.maxLat);
-  const cxLo = cellIndexFor(qMinLon);
-  const cxHi = cellIndexFor(qMaxLon);
-  const cyLo = cellIndexFor(qMinLat);
-  const cyHi = cellIndexFor(qMaxLat);
+  const cxLo = lonCellIndexFor(qLonLo);
+  const cxHi = lonCellIndexFor(qLonHi);
+  const cyLo = latCellIndexFor(qMinLat);
+  const cyHi = latCellIndexFor(qMaxLat);
+  const spanX = lonCellSpan(cxLo, cxHi);
   const out = [];
   const seen = new Set();
   const consider = function (i) {
@@ -269,20 +310,22 @@ export function queryGridByBounds(grid, bounds) {
     }
     seen.add(i);
     if (grid.minLat[i] <= bounds.maxLat && grid.maxLat[i] >= bounds.minLat &&
-      grid.minLon[i] <= bounds.maxLon && grid.maxLon[i] >= bounds.minLon) {
+      lonSpansOverlap(grid.minLon[i], grid.maxLon[i], qLonLo, qLonHi)) {
       out.push(i);
     }
   };
-  for (let cx = cxLo; cx <= cxHi; cx = cx + 1) {
+  let cx = wrapLonCell(cxLo);
+  for (let k = 0; k < spanX; k = k + 1) {
     for (let cy = cyLo; cy <= cyHi; cy = cy + 1) {
       const bucket = grid.cells.get(cellKeyFor(cx, cy));
       if (bucket === undefined) {
         continue;
       }
-      for (let k = 0; k < bucket.length; k = k + 1) {
-        consider(bucket[k]);
+      for (let b = 0; b < bucket.length; b = b + 1) {
+        consider(bucket[b]);
       }
     }
+    cx = nextLonCell(cx);
   }
   for (let k = 0; k < grid.oversized.length; k = k + 1) {
     consider(grid.oversized[k]);
@@ -322,32 +365,39 @@ function growBuilder(builder) {
   builder.capacity = capacity;
 }
 
+// Register one segment given in continuous longitude (the endpoints differ by at
+// most a half turn, and one may lie past ±180). Cells come from the continuous
+// span so a piece across the seam lands in the seam cells alone; the stored
+// endpoints are wrapped, so segs always holds longitudes in [-180, 180) and the
+// evaluator's short-arc rule recovers the piece.
 function pushSegment(builder, featureIndex, ax, ay, bx, by) {
   if (builder.count === builder.capacity) {
     growBuilder(builder);
   }
   const index = builder.count;
   const base = index * 4;
-  builder.segs[base] = ax;
+  builder.segs[base] = wrapLon(ax);
   builder.segs[base + 1] = ay;
-  builder.segs[base + 2] = bx;
+  builder.segs[base + 2] = wrapLon(bx);
   builder.segs[base + 3] = by;
   builder.owners[index] = featureIndex;
   builder.count = index + 1;
   if (featureIndex > builder.maxOwner) {
     builder.maxOwner = featureIndex;
   }
-  const cxLo = cellIndexFor(Math.min(ax, bx));
-  const cxHi = cellIndexFor(Math.max(ax, bx));
-  const cyLo = cellIndexFor(Math.min(ay, by));
-  const cyHi = cellIndexFor(Math.max(ay, by));
-  if ((cxHi - cxLo + 1) * (cyHi - cyLo + 1) > MAX_CELLS_PER_FEATURE) {
+  const cxLo = lonCellIndexFor(Math.min(ax, bx));
+  const cxHi = lonCellIndexFor(Math.max(ax, bx));
+  const cyLo = latCellIndexFor(Math.min(ay, by));
+  const cyHi = latCellIndexFor(Math.max(ay, by));
+  const spanX = lonCellSpan(cxLo, cxHi);
+  if (spanX * (cyHi - cyLo + 1) > MAX_CELLS_PER_FEATURE) {
     // Only reachable for a segment whose endpoints are pathological (clamped
     // coordinates); the subdivision below normally keeps this at a 2x2 box.
     builder.oversized.push(index);
     return;
   }
-  for (let cx = cxLo; cx <= cxHi; cx = cx + 1) {
+  let cx = wrapLonCell(cxLo);
+  for (let k = 0; k < spanX; k = k + 1) {
     for (let cy = cyLo; cy <= cyHi; cy = cy + 1) {
       const key = cellKeyFor(cx, cy);
       const bucket = builder.cells.get(key);
@@ -357,6 +407,7 @@ function pushSegment(builder, featureIndex, ax, ay, bx, by) {
         bucket.push(index);
       }
     }
+    cx = nextLonCell(cx);
   }
 }
 
@@ -435,6 +486,11 @@ function geometrySinglePoints(geometry) {
 // Chop one feature's geometry into segments and register them under featureIndex.
 // Returns the number of indexed segments, for diagnostics. Malformed coordinates
 // are skipped silently: layer bytes are upstream data.
+//
+// Each segment is read as the shorter of its two arcs: after wrapping both
+// endpoints, an endpoint pair more than a half turn apart has the second moved
+// by a full turn, so a way crossing the antimeridian is subdivided and indexed
+// across the seam instead of around the globe.
 export function addFeatureSegments(builder, featureIndex, geometry) {
   if (builder === null || typeof builder !== "object") {
     return 0;
@@ -452,14 +508,22 @@ export function addFeatureSegments(builder, featureIndex, geometry) {
         !isFiniteNumber(b[0]) || !isFiniteNumber(b[1])) {
         continue;
       }
-      added = added + addSubdividedSegment(builder, featureIndex, a[0], a[1], b[0], b[1]);
+      const ax = wrapLon(a[0]);
+      let bx = wrapLon(b[0]);
+      if (bx - ax > 180) {
+        bx = bx - 360;
+      } else if (bx - ax < -180) {
+        bx = bx + 360;
+      }
+      added = added + addSubdividedSegment(builder, featureIndex, ax, a[1], bx, b[1]);
     }
   }
   for (const point of geometrySinglePoints(geometry)) {
     if (!Array.isArray(point) || !isFiniteNumber(point[0]) || !isFiniteNumber(point[1])) {
       continue;
     }
-    pushSegment(builder, featureIndex, point[0], point[1], point[0], point[1]);
+    const x = wrapLon(point[0]);
+    pushSegment(builder, featureIndex, x, point[1], x, point[1]);
     added = added + 1;
   }
   return added;
@@ -516,15 +580,18 @@ export function segmentGridStats(segGrid) {
   };
 }
 
+// The cheap rejection, in the probe's own short-arc frame: the endpoints become
+// offsets from the probe, so a segment just across the seam sits at its true
+// small offset and one on the far side of the globe at a large one.
 function segmentBboxMiss(segs, index, lat, lon, latPad, lonPad) {
   const base = index * 4;
-  const ax = segs[base];
+  const dax = lonOffsetDeg(segs[base], lon);
   const ay = segs[base + 1];
-  const bx = segs[base + 2];
+  const dbx = lonSegmentEndOffsetDeg(segs[base + 2], lon, dax);
   const by = segs[base + 3];
   const lonSlack = lonPad + SEGMENT_BBOX_EPSILON_DEG;
   const latSlack = latPad + SEGMENT_BBOX_EPSILON_DEG;
-  if (lon < Math.min(ax, bx) - lonSlack || lon > Math.max(ax, bx) + lonSlack) {
+  if (Math.min(dax, dbx) - lonSlack > 0 || Math.max(dax, dbx) + lonSlack < 0) {
     return true;
   }
   if (lat < Math.min(ay, by) - latSlack || lat > Math.max(ay, by) + latSlack) {
@@ -533,17 +600,20 @@ function segmentBboxMiss(segs, index, lat, lon, latPad, lonPad) {
   return false;
 }
 
-// Walk the cell neighbourhood of a probe point, handing each cell's segment index
-// array to visit(). The neighbourhood is the padded query box widened by a full
-// cell, and the pad is scaled by 1/cos(lat) on the longitude axis — that scaling
-// is what makes this mode exact: every segment within maxKm of the point is
-// provably inside the cells visited here.
+// Walk the cell neighbourhood of a probe point (lon already wrapped), handing
+// each cell's segment index array to visit(). The neighbourhood is the padded
+// query box widened by a full cell, and the pad is scaled by 1/cos(lat) on the
+// longitude axis — that scaling is what makes this mode exact: every segment
+// within maxKm of the point is provably inside the cells visited here. The
+// longitude walk continues across the seam.
 function visitSegmentCells(segGrid, lat, lon, latPad, lonPad, visit) {
-  const cxLo = cellIndexFor(lon - lonPad) - 1;
-  const cxHi = cellIndexFor(lon + lonPad) + 1;
-  const cyLo = cellIndexFor(lat - latPad) - 1;
-  const cyHi = cellIndexFor(lat + latPad) + 1;
-  for (let cx = cxLo; cx <= cxHi; cx = cx + 1) {
+  const cxLo = lonCellIndexFor(lon - lonPad) - 1;
+  const cxHi = lonCellIndexFor(lon + lonPad) + 1;
+  const cyLo = latCellIndexFor(lat - latPad) - 1;
+  const cyHi = latCellIndexFor(lat + latPad) + 1;
+  const spanX = lonCellSpan(cxLo, cxHi);
+  let cx = wrapLonCell(cxLo);
+  for (let k = 0; k < spanX; k = k + 1) {
     for (let cy = cyLo; cy <= cyHi; cy = cy + 1) {
       const bucket = segGrid.cells.get(cellKeyFor(cx, cy));
       if (bucket === undefined) {
@@ -553,6 +623,7 @@ function visitSegmentCells(segGrid, lat, lon, latPad, lonPad, visit) {
         return true;
       }
     }
+    cx = nextLonCell(cx);
   }
   if (segGrid.oversized.length > 0) {
     return visit(segGrid.oversized) === true;
@@ -571,14 +642,15 @@ export function anySegmentWithinKmOfPoint(segGrid, lat, lon, maxKm) {
   if (!isFiniteNumber(lat) || !isFiniteNumber(lon) || !isFiniteNumber(maxKm) || maxKm < 0) {
     return false;
   }
+  const qLon = wrapLon(lon);
   const latPad = maxKm / KM_PER_DEG;
   const lonPad = lonPadFor(lat, latPad);
   const segs = segGrid.segs;
   const stats = segGrid.stats;
   stats.probes = stats.probes + 1;
-  return visitSegmentCells(segGrid, lat, lon, latPad, lonPad, function (bucket) {
+  return visitSegmentCells(segGrid, lat, qLon, latPad, lonPad, function (bucket) {
     stats.segmentsExamined = stats.segmentsExamined + bucket.length;
-    return anySegmentWithinKm(segs, bucket, bucket.length, lat, lon, maxKm);
+    return anySegmentWithinKm(segs, bucket, bucket.length, lat, qLon, maxKm);
   });
 }
 
@@ -612,7 +684,7 @@ export function featuresWithinKmOfVertices(segGrid, vertices, maxKm) {
       continue;
     }
     const lat = vertex.lat;
-    const lon = vertex.lon;
+    const lon = wrapLon(vertex.lon);
     const latPad = maxKm / KM_PER_DEG;
     const lonPad = lonPadFor(lat, latPad);
     stats.probes = stats.probes + 1;

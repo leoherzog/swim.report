@@ -7,6 +7,8 @@ import {
   ECCC_FLOOR_PRECEDENCE,
   ALERTS_UNAVAILABLE_CAVEAT,
   waveColorForHeight,
+  waveThresholdsForWaterClass,
+  WAVE_THRESHOLDS_FT,
   alertColorForEvent,
   alertAuthorityForEvent,
   ripRiskColor,
@@ -829,6 +831,38 @@ describe("estimateFlag - wave height (step 3)", function () {
     expect(result.reason).toBe("Estimated wave height 2.0 ft (at or above 2 ft)");
   });
 
+  it("ocean beach: 4.5 ft is yellow against the ocean set, quoting 3 ft", function () {
+    const result = estimateFlag(baseInputs({ waveHeightFt: 4.5, waterClass: "ocean" }));
+    expect(result.color).toBe("yellow");
+    expect(result.reason).toBe("Estimated wave height 4.5 ft (at or above 3 ft)");
+    expect(result.trigger).toBe("wave-height");
+  });
+
+  it("ocean beach: 6.0 ft exactly is red, quoting 6 ft", function () {
+    const result = estimateFlag(baseInputs({ waveHeightFt: 6.0, waterClass: "ocean" }));
+    expect(result.color).toBe("red");
+    expect(result.reason).toBe("Estimated wave height 6.0 ft (at or above 6 ft)");
+  });
+
+  it("ocean beach: 2.9 ft is green, quoting 3 ft", function () {
+    const result = estimateFlag(baseInputs({ waveHeightFt: 2.9, waterClass: "ocean" }));
+    expect(result.color).toBe("green");
+    expect(result.reason).toBe("Estimated wave height 2.9 ft (below 3 ft)");
+  });
+
+  it("great_lake and null water classes decide identically", function () {
+    const lake = estimateFlag(baseInputs({ waveHeightFt: 4.5, waterClass: "great_lake" }));
+    const none = estimateFlag(baseInputs({ waveHeightFt: 4.5 }));
+    expect(lake.color).toBe("red");
+    expect(lake.reason).toBe(none.reason);
+  });
+
+  it("ocean thresholds never outrank an alert or rip risk", function () {
+    const rip = estimateFlag(baseInputs({ waveHeightFt: 7.0, waterClass: "ocean", ripCurrentRisk: "MODERATE" }));
+    expect(rip.color).toBe("yellow");
+    expect(rip.trigger).toBe("rip-current");
+  });
+
   it("15. waveHeightFt 1.99 -> green, exact toFixed rounding string", function () {
     const result = estimateFlag(baseInputs({ waveHeightFt: 1.99 }));
     expect(result.color).toBe("green");
@@ -921,8 +955,8 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
 });
 
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
-  it("bumped RULES_VERSION for the tropical and tsunami NWS products", function () {
-    expect(RULES_VERSION).toBe("1.6.0");
+  it("bumped RULES_VERSION for the water-class wave thresholds", function () {
+    expect(RULES_VERSION).toBe("1.7.0");
   });
 
   it("wave-only green with alertsCheckable false appends the caveat", function () {
@@ -1219,6 +1253,46 @@ describe("waveColorForHeight", function () {
 
   it("non-numeric string -> null", function () {
     expect(waveColorForHeight("3")).toBe(null);
+  });
+
+  it("ocean class uses the 3 ft / 6 ft set, at boundaries", function () {
+    expect(waveColorForHeight(6.0, "ocean")).toBe("red");
+    expect(waveColorForHeight(5.99, "ocean")).toBe("yellow");
+    expect(waveColorForHeight(3.0, "ocean")).toBe("yellow");
+    expect(waveColorForHeight(2.99, "ocean")).toBe("green");
+  });
+
+  it("great_lake, inland, null and unknown classes all use the default set", function () {
+    const classes = ["great_lake", "inland", null, undefined, "", "OCEAN", 42];
+    for (let i = 0; i < classes.length; i++) {
+      expect(waveColorForHeight(4.0, classes[i])).toBe("red");
+      expect(waveColorForHeight(2.0, classes[i])).toBe("yellow");
+      expect(waveColorForHeight(1.99, classes[i])).toBe("green");
+    }
+  });
+});
+
+describe("waveThresholdsForWaterClass", function () {
+  it("carries the documented threshold pairs", function () {
+    expect(WAVE_THRESHOLDS_FT).toEqual({
+      "default": { yellow: 2, red: 4 },
+      "ocean": { yellow: 3, red: 6 }
+    });
+  });
+
+  it("selects ocean only for the exact string and never returns a copy", function () {
+    expect(waveThresholdsForWaterClass("ocean")).toBe(WAVE_THRESHOLDS_FT.ocean);
+    expect(waveThresholdsForWaterClass("great_lake")).toBe(WAVE_THRESHOLDS_FT["default"]);
+    expect(waveThresholdsForWaterClass(null)).toBe(WAVE_THRESHOLDS_FT["default"]);
+    expect(waveThresholdsForWaterClass(undefined)).toBe(WAVE_THRESHOLDS_FT["default"]);
+  });
+
+  it("every set keeps yellow strictly below red", function () {
+    for (const key in WAVE_THRESHOLDS_FT) {
+      if (Object.prototype.hasOwnProperty.call(WAVE_THRESHOLDS_FT, key)) {
+        expect(WAVE_THRESHOLDS_FT[key].yellow).toBeLessThan(WAVE_THRESHOLDS_FT[key].red);
+      }
+    }
   });
 });
 

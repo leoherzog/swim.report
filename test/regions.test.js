@@ -38,7 +38,7 @@ describe("REGIONS shape", function () {
     }
   });
 
-  it("no box crosses the antimeridian: src/layerGrid.js has no longitude wrap", function () {
+  it("no single box crosses the antimeridian: consumers read raw minLon..maxLon", function () {
     for (let i = 0; i < REGIONS.length; i = i + 1) {
       const b = REGIONS[i].bbox;
       expect(b.minLon).toBeGreaterThanOrEqual(-180);

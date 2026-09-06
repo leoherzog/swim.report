@@ -13,10 +13,11 @@
 // found nothing", never "I do not know" — which is exactly what reassembling the
 // advisory from the shorter-lived "wqfloor:" key could not say.
 //
-// alertsCheckable is deliberately NOT sealed: it is a pure expression over two
-// D1 columns both crons hold, so recomputing it is cheaper and strictly more
-// correct, since a beach enriched between runs would otherwise carry a stale
-// caveat beside a live alert.
+// alertsCheckable and waterClass are deliberately NOT sealed: each is read
+// straight from D1 columns both crons hold, so recomputing them is cheaper and
+// strictly more correct, since a beach enriched or reclassified between runs
+// would otherwise carry a stale caveat beside a live alert or the wrong wave
+// thresholds.
 
 import { ecccAlertsForPoint, ECCC_ALERTS_INFO_URL } from "./clients/eccc.js";
 import { ecccMarineAlertsForPoint, ECCC_MARINE_INFO_URL } from "./clients/ecccMarine.js";
@@ -128,6 +129,9 @@ export function buildEstimateInputs(beach, alertPart, signals) {
     // marine warnings but none of the land products the caveat is about, so a
     // beach whose only zone is marine still reads "alerts not yet available".
     alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false,
+    // Selects the step 3 wave thresholds; null and every non-ocean class share
+    // the default set.
+    waterClass: typeof beach.water_class === "string" ? beach.water_class : null,
     ripCurrentRisk: riskOrNull(signals.ripCurrentRisk),
     waveHeightFt: finiteOrNull(signals.waveHeightFt),
     windSpeedMph: finiteOrNull(signals.windSpeedMph),

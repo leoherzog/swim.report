@@ -3,22 +3,40 @@
 // in render.js), the prose summaries, and the model-comparison chart config. No
 // fetch, and time comes from the caller-supplied nowIso, never Date.now().
 //
-// The 2 ft / 4 ft color thresholds live only in src/rules.js#waveColorForHeight,
-// so this strip colors each hour from the exact numbers the flag estimate uses.
+// The per-water-class color thresholds live only in src/rules.js
+// (waveColorForHeight, waveThresholdsForWaterClass), so this strip colors each
+// hour and labels each band from the exact numbers the flag estimate uses.
 
-import { waveColorForHeight, alertColorForEvent, alertAuthorityForEvent, ripRiskColor } from "../rules.js";
+import {
+  waveColorForHeight,
+  waveThresholdsForWaterClass,
+  alertColorForEvent,
+  alertAuthorityForEvent,
+  ripRiskColor
+} from "../rules.js";
 
-// Band presentation: label + palette token per waveColorForHeight result.
-// null (non-numeric/masked hour) maps to the "no-data" band, which uses the
-// same gray token as the "unknown" flag — gray means honest absence, never a
-// guessed condition. Yellow uses tint 70 (tint 50 reads olive in the mild
-// palette; see PLAN.md section 9).
-const BAND_DEFS = {
-  "green": { band: "green", label: "Under 2 ft", tokenVar: "var(--wa-color-green-50)" },
-  "yellow": { band: "yellow", label: "2–4 ft", tokenVar: "var(--wa-color-yellow-70)" },
-  "red": { band: "red", label: "4 ft or more", tokenVar: "var(--wa-color-red-50)" },
-  "no-data": { band: "no-data", label: "No data", tokenVar: "var(--wa-color-gray-50)" }
+// Band presentation: palette token per waveColorForHeight result; the label is
+// built per beach from its thresholds. null (non-numeric/masked hour) maps to
+// the "no-data" band, which uses the same gray token as the "unknown" flag —
+// gray means honest absence, never a guessed condition. Yellow uses tint 70
+// (tint 50 reads olive in the mild palette; see PLAN.md section 9).
+const BAND_TOKENS = {
+  "green": "var(--wa-color-green-50)",
+  "yellow": "var(--wa-color-yellow-70)",
+  "red": "var(--wa-color-red-50)",
+  "no-data": "var(--wa-color-gray-50)"
 };
+
+// Band labels for a water class, e.g. "Under 2 ft", "2–4 ft", "4 ft or more".
+export function bandLabelsForWaterClass(waterClass) {
+  const t = waveThresholdsForWaterClass(waterClass);
+  return {
+    "green": "Under " + String(t.yellow) + " ft",
+    "yellow": String(t.yellow) + "–" + String(t.red) + " ft",
+    "red": String(t.red) + " ft or more",
+    "no-data": "No data"
+  };
+}
 
 // Ordered known-model mapping: model id to display name. This order is the
 // display order for the per-model caption, the comparison chart's dataset
@@ -289,20 +307,21 @@ export function computeHazardBands(estimate, totalHours, nowIso) {
   return out;
 }
 
-// Run-length-encode consecutive hours that share a color band.
+// Run-length-encode consecutive hours that share a color band, banded by the
+// beach's water-class thresholds.
 // -> [{ band, tokenVar, label, hours }]; the hour counts sum to hoursFt.length.
-export function computeWaveRuns(hoursFt) {
+export function computeWaveRuns(hoursFt, waterClass) {
   const list = Array.isArray(hoursFt) ? hoursFt : [];
+  const labels = bandLabelsForWaterClass(waterClass);
   const runs = [];
   for (let i = 0; i < list.length; i++) {
-    const color = waveColorForHeight(list[i]);
+    const color = waveColorForHeight(list[i], waterClass);
     const band = color === null ? "no-data" : color;
     const last = runs.length > 0 ? runs[runs.length - 1] : null;
     if (last && last.band === band) {
       last.hours += 1;
     } else {
-      const def = BAND_DEFS[band];
-      runs.push({ band: def.band, tokenVar: def.tokenVar, label: def.label, hours: 1 });
+      runs.push({ band: band, tokenVar: BAND_TOKENS[band], label: labels[band], hours: 1 });
     }
   }
   return runs;

@@ -98,7 +98,7 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.5.1",
+        "rules_version": "1.7.0",
         "official": false,
         "waveHeightFt": 2.62,
         "alertDetails": [],
@@ -137,7 +137,7 @@ carries, its distance, and a link. The section is omitted when nothing lies with
 
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from the
 estimate's structured `waveHeightFt`) plus a horizontal strip of the next up-to-24 hours of
-forecast wave height, colored by the same 2 ft / 4 ft thresholds the rules engine uses, gray
+forecast wave height, colored and labeled by the same per-water-class thresholds the rules engine uses, gray
 for hours with no model data. The strip is a flex row of proportionally sized segments, one per
 run of consecutive same-band hours, built server-side from the hourly `waves:` KV series. Each
 segment carries a `wa-tooltip` and a matching `aria-label` naming its band and hour range ("2–4
@@ -198,7 +198,7 @@ must never be shared across visitors.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.5.1`, and the same inputs always return the same output.
+`rules_version` is `1.7.0`, and the same inputs always return the same output.
 
 Precedence is strict: the first matching rule (steps 1–5) wins, top to bottom. Steps 6, 6b and
 7 are raise-only *floors* applied after a color is decided — an NWS severe-weather
@@ -213,7 +213,7 @@ raising a lower result but never downgrading a higher color.
 | 1b | Active ECCC alert | same | Event = "squall warning", "waterspout warning", "severe thunderstorm warning", marine "gale warning" (≥ 34 kt), or "wind warning" | red | "Active Environment Canada alert: &lt;event&gt;" |
 | 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product, regex-parsed | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
 | 2 | Rip current risk | same | MODERATE | yellow | "NWS surf zone forecast rip current risk: MODERATE" |
-| 3 | Wave height | NOAA wave-model HTSGW (m converted to ft, `m * 3.28084`) | >= 4 ft / >= 2 ft / < 2 ft non-null | red / yellow / green | "Estimated wave height X.X ft (at or above 4 ft \| at or above 2 ft \| below 2 ft)" |
+| 3 | Wave height | NOAA wave-model HTSGW (m converted to ft, `m * 3.28084`), thresholds by `water_class` | Great Lakes and every non-ocean class: >= 4 ft / >= 2 ft / < 2 ft non-null. `ocean`: >= 6 ft / >= 3 ft / < 3 ft (provisional, uncalibrated) | red / yellow / green | "Estimated wave height X.X ft (at or above R ft \| at or above Y ft \| below Y ft)" with the deciding threshold quoted |
 | 4 | Wind (fallback only when wave height is null) | NOAA wave-model WIND (m/s converted to mph, `m/s * 2.2369362920544`); gusts are always null | sustained >= 25 mph or gust >= 35 mph / sustained >= 15 mph or gust >= 25 mph / below both | red / yellow / green | "No wave data; wind S mph sustained, G mph gusts (at or above 25 mph sustained or 35 mph gust threshold \| at or above 15 mph sustained or 25 mph gust threshold \| below advisory thresholds)" |
 | 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
 | 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models" |

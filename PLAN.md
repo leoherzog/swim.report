@@ -142,9 +142,10 @@ alertDetails — otherwise a refresh would pass null for a missing one and silen
 flag. src/flagInputs.js is where both halves are built, from one shared signals object, and
 test/flagInputs.test.js enforces the rule as a round-trip property (including a JSON hop,
 because JSON.stringify emits null for NaN and Infinity alike) rather than by discipline.
-alertsCheckable is deliberately NOT sealed: recomputing it from three D1 columns both crons
-hold is cheaper and strictly more correct, since a beach enriched between runs would
-otherwise carry a stale caveat beside a live alert.
+alertsCheckable and waterClass are deliberately NOT sealed: recomputing them from D1 columns
+both crons hold is cheaper and strictly more correct, since a beach enriched or reclassified
+between runs would otherwise carry a stale caveat beside a live alert or the wrong wave
+thresholds. MAP_DIRECTORY_SQL selects water_class for that reason.
 
 Source entries are { label, url } objects: label is short display text (wave labels name
 the grid that supplied the reading, mapped by waveSourceLabel in src/waveModels.js); url is
@@ -251,7 +252,7 @@ this run, degrading to the wind fallback or "unknown", never a wrong flag.
 The units contract. GRIB HTSGW is metres and waveHeightFt is feet: metres * 3.28084
 (metersToFeet, src/geo.js). GRIB WIND is metres per second and windSpeedMph is mph: m/s *
 2.2369362920544 (metersPerSecondToMph, src/waveGrids.js). rules.js thresholds are 2 ft yellow
-and 4 ft red, and 15/25 mph; handing it metres makes every sea state below 1.22 m read green
+and 4 ft red (3 / 6 ft on ocean rows), and 15/25 mph; handing it metres makes every sea state below 1.22 m read green
 sitewide, and handing it m/s makes an actual 25 mph arrive as 11, with no error anywhere in
 either case. GRIB nodata is a number that survives JSON — 9999 on gfswave, 9.999000260554009e+20
 on GLWU, read per band from the raster header and never hardcoded — and 9999 m is 32,808 ft,
@@ -656,7 +657,7 @@ official card when official is null.
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.6.0";
+    export const RULES_VERSION = "1.7.0";
 
     export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
       // Appended to the reason (see the caveat rule after step 5) when the cron
@@ -755,12 +756,21 @@ Pure module. No fetch, no Date, no env. Exports:
 
     // metersToFeet lives in src/geo.js (section 5).
 
-    export function waveColorForHeight(waveHeightFt)
-      // Pure. Finite number >= 4 -> "red"; >= 2 -> "yellow"; other finite -> "green";
-      // null/undefined/NaN/non-numeric/non-finite -> null. The 2 ft / 4 ft wave
-      // thresholds live only here — estimateFlag's step 3 derives its color from this
-      // function, and the frontend colors the per-hour wave-forecast cells (section 9)
-      // from it too, so the strip and the flag can never disagree on thresholds.
+    export const WAVE_THRESHOLDS_FT = {
+      "default": { yellow: 2, red: 4 },   // great_lake, inland, NULL: the Great Lakes flag convention
+      "ocean":   { yellow: 3, red: 6 }    // provisional; uncalibrated until flag_history holds ocean pairs
+    };
+
+    export function waveThresholdsForWaterClass(waterClass)
+      // Pure. WAVE_THRESHOLDS_FT.ocean for the exact string "ocean", else the default set.
+
+    export function waveColorForHeight(waveHeightFt, waterClass)
+      // Pure. Finite number >= red -> "red"; >= yellow -> "yellow"; other finite -> "green"
+      // against waveThresholdsForWaterClass(waterClass); null/undefined/NaN/non-numeric/
+      // non-finite -> null. The thresholds live only here — estimateFlag's step 3 derives
+      // its color from this function, and the frontend colors and labels the per-hour
+      // wave-forecast cells (section 9) from it too, so the strip and the flag can never
+      // disagree on thresholds.
 
     export function alertColorForEvent(eventName)
       // Pure. The flag color a recognized alert maps to, for both authorities in one
@@ -864,13 +874,16 @@ is never mutated.
    - "LOW" → fall through to step 3 (LOW is not terminal unless steps 3 and 4 have no data —
      see step 5). Strict precedence is intentional: MODERATE rip risk yields yellow even at
      6 ft wave height.
-3. Wave height (feet, threshold comparisons use >=):
-   - waveHeightFt >= 4 → "red",
-     reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above 4 ft)"
-   - waveHeightFt >= 2 → "yellow",
-     reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above 2 ft)"
+3. Wave height (feet, threshold comparisons use >=). Let { yellow, red } =
+   waveThresholdsForWaterClass(waterClass), where waterClass is the beach's water_class read
+   from D1 by both crons (buildEstimateInputs) and never sealed: 2 / 4 ft for every class but
+   "ocean", 3 / 6 ft for "ocean".
+   - waveHeightFt >= red → "red",
+     reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " + red + " ft)"
+   - waveHeightFt >= yellow → "yellow",
+     reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " + yellow + " ft)"
    - waveHeightFt !== null → "green",
-     reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (below 2 ft)"
+     reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (below " + yellow + " ft)"
 4. Wind fallback — only when waveHeightFt === null and at least one of windSpeedMph /
    windGustMph is non-null. Null members fail every threshold (compare only the non-null
    values). Thresholds (advisory-aligned):
@@ -2816,7 +2829,8 @@ that are not automatic. The new regionsDigest has no entry in data/layer-floors.
 next layer build uploads its prefix and refuses to move the pointer until the coast's floors
 are seeded and committed; and data/wave-floors.json is keyed by the grid set rather than by
 REGIONS, so the ocean grid floors are seeded by hand after the first cycle that samples ocean
-beaches. No box may cross the antimeridian (src/layerGrid.js has no longitude wrap). Mexico,
+beaches. No single box may cross the antimeridian (every consumer reads raw minLon..maxLon;
+src/layerGrid.js wraps longitude, so a coast straddling 180 is two boxes split there). Mexico,
 Labrador, Hudson Bay, the Arctic and Greenland are excluded by choice (src/regions.js header).
 The Worker-side ceiling is the flag-worthy row count against the MAX_BEACHES_PER_RUN /
 FLAG_TTL_SECONDS inequality in section 7, recorded in TODO.md.
@@ -3645,8 +3659,9 @@ exporting a CSS string); render.js is the sole module the router imports.
   omitted, with their with-* attributes, when there is no estimate.
 - Wave forecast section (detail page only, between the estimate card and the wave map
   section; helpers in src/frontend/waveStrip.js, pure, importing waveColorForHeight /
-  alertColorForEvent / ripRiskColor from src/rules.js — the 2/4 ft thresholds and the
-  alert/rip color mappings are never restated in the frontend):
+  waveThresholdsForWaterClass / alertColorForEvent / ripRiskColor from src/rules.js — the
+  per-water-class wave thresholds, the band labels built from them, and the alert/rip color
+  mappings are never restated in the frontend; computeWaveRuns takes the beach's water_class):
   - No section heading. The ESTIMATE badge rides the "now" stat line instead; when the stat
     is absent (a legacy payload without waveHeightFt) a badge-only wa-cluster row still
     renders, so the section always carries the estimated framing.
@@ -3771,11 +3786,14 @@ exporting a CSS string); render.js is the sole module the router imports.
   framed-embed container as the wave map, its title attribute the webcam title or "Nearby
   webcam" when untitled, 16:9 responsive, fetched by the browser. Heading "Nearby webcam":
   the caption must stay honest that the cam is nearby, not necessarily the beach itself, so
-  it shows beach.webcam_title when non-empty and nothing else. The shared footer carries the
-  Windy credit and is the single place that obligation is satisfied.
-  beaches.webcam_detail_url (migration 0011) is written every night by the webcam cron and
-  read by nothing — see TODO.md's open decision between restoring a per-cam deep link and
-  dropping the column. All dynamic values escape through escapeHtml, including attribute
+  it shows beach.webcam_title when non-empty, plus a "View on Windy" anchor
+  (rel="noopener noreferrer", target="_blank") to beaches.webcam_detail_url whenever that
+  column holds an absolute http(s) URL; a null, empty, relative or non-http(s) value emits
+  no anchor, and an untitled cam still gets the link-only caption. The per-cam link is what
+  Windy's Webcams API Terms require ("Link every image with either our webcam page or
+  timelapse player for full view"); the shared footer carries the courtesy credit.
+  beaches.webcam_detail_url (migration 0011) is written every night by the webcam cron from
+  webcam.urls.detail. All dynamic values escape through escapeHtml, including attribute
   positions.
 
 ## 10. Test plan (Vitest, node environment — default)

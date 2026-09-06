@@ -3,6 +3,13 @@
 // scrape() runs cron-side only; parseChicagoFlags is pure and exported for
 // tests. Contract v2 multi-site (per-beach) shape.
 //
+// Empty-success contract (PLAN.md section 6): a scrape that fetched the feed
+// and recognized its records but has no site to report, because every fresh
+// row was gated out as stale or as a green without a fresh Surf row, returns a
+// perBeach result with sites [] and counts as a healthy run. null is reserved
+// for a failed fetch, malformed or non-array JSON, and a payload in which no
+// record carries the expected parent, date and classifiable flag fields.
+//
 // Source: an undocumented but unauthenticated Drupal JSON view that powers the
 // CPD "flag-status" widget. It returns ~69 records (23 beaches x 3 categories:
 // Surf Conditions / Weather / Water Quality), each shaped
@@ -135,13 +142,15 @@ function reasonForBeach(afterhours, parentTrimmed) {
     parentTrimmed;
 }
 
-// Pure. (text, nowIso) -> sites[] | null; null only on malformed or non-array
-// JSON, or an unparseable nowIso. Groups the three category rows by trimmed
-// parent, discards any individual row older than CHICAGO_MAX_AGE_HOURS, and
-// resolves each beach to the most severe color among its surviving fresh rows. A
-// beach with no fresh, confidently classifiable row is omitted rather than given
-// a guessed color, and a beach resolving to green is omitted too unless its own
-// Surf row is among the fresh classified rows.
+// Pure. (text, nowIso) -> sites[] | null; null on malformed or non-array JSON,
+// an unparseable nowIso, or a payload in which no record carries a parent, a
+// numeric date and a classifiable flag. Groups the three category rows by
+// trimmed parent, discards any individual row older than CHICAGO_MAX_AGE_HOURS,
+// and resolves each beach to the most severe color among its surviving fresh
+// rows. A beach with no fresh, confidently classifiable row is omitted rather
+// than given a guessed color, and a beach resolving to green is omitted too
+// unless its own Surf row is among the fresh classified rows. [] means the feed
+// was recognized but every row was gated out, distinct from null.
 export function parseChicagoFlags(text, nowIso) {
   let data;
   try {
@@ -165,6 +174,10 @@ export function parseChicagoFlags(text, nowIso) {
   // prefer a genuine (non-after-hours) row so a real daytime hazard is never
   // relabeled as a mere after-hours closure.
   const byBeach = Object.create(null);
+  // Records carrying the expected parent, date and flag fields, stale or not.
+  // Zero means the payload is not the feed this parser understands: an empty
+  // array, or a field rename that would otherwise read as "nothing to report".
+  let recognized = 0;
   for (const record of data) {
     if (!record || typeof record.parent !== "string") {
       continue;
@@ -177,12 +190,15 @@ export function parseChicagoFlags(text, nowIso) {
     if (!isFinite(epochSec)) {
       continue;
     }
+    const classified = classifyFlag(record.flag);
+    if (classified) {
+      recognized++;
+    }
     // MANDATORY staleness gate, applied PER ROW: a stale prior-season row must
     // never contribute a color (in either direction).
     if (epochSec < minEpochSec) {
       continue;
     }
-    const classified = classifyFlag(record.flag);
     if (!classified) {
       continue;
     }
@@ -212,6 +228,13 @@ export function parseChicagoFlags(text, nowIso) {
       current.afterhours = classified.afterhours;
       current.severity = severity;
     }
+  }
+
+  // The live feed carries ~69 records year-round, so an empty or unrecognized
+  // payload is a broken source, never a legitimate off-season empty.
+  if (recognized === 0) {
+    console.log("chicagoParkDistrict: no recognizable records in payload");
+    return null;
   }
 
   const sites = [];
@@ -258,7 +281,10 @@ export const chicagoParkDistrict = {
     }
     try {
       const sites = parseChicagoFlags(text, nowIso);
-      if (!sites || sites.length === 0) {
+      // null is a real parse failure and must surface as one. [] means the feed
+      // was recognized but every row was gated out: a successful scrape with
+      // nothing to report, which resolves to no site and counts as healthy.
+      if (sites === null) {
         return null;
       }
       return perBeachResult(sites, CHICAGO_FLAG_STATUS_URL, nowIso);

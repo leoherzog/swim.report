@@ -44,9 +44,11 @@
 // Expansion is additive. Bringing a new coast online means appending boxes here;
 // the build's union rectangle, the per-box clip, discovery, pointInAnyRegion
 // scoping and the delete rail all iterate REGIONS and pick up new coasts
-// automatically. No box may cross the antimeridian: src/layerGrid.js keys cells
-// off raw degrees with no wrap, so the Aleutian box stops at -180 and the
-// islands west of it are out of scope. Two things are not free. (1)
+// automatically. No single box may cross the antimeridian (minLon < maxLon
+// always): every REGIONS consumer reads a box as raw minLon..maxLon, and
+// scripts/clip-layers.js normalizeBox would silently read a wrapped box as its
+// complement. A coast straddling 180 is two boxes split there; the grid itself
+// wraps longitude. Two things are not free. (1)
 // data/layer-floors.json: the floors are keyed by a digest over REGIONS
 // (src/layerManifest.js), so appending a box invalidates them and the next build
 // refuses to move the pointer until the new coast's floors are seeded and
@@ -182,8 +184,8 @@ export const REGIONS = [
   {
     name: "Alaska Peninsula + Aleutians + Bristol Bay",
     bbox: { minLon: -180.0, minLat: 51.0, maxLon: -155.0, maxLat: 59.6 },
-    note: "Stops at the antimeridian by construction; Attu and the islands " +
-      "west of 180 are out of scope until src/layerGrid.js wraps longitude."
+    note: "Stops at the antimeridian; Attu and the islands west of 180 take a " +
+      "second box split at 180 plus a floors reseed."
   },
   {
     name: "Alaska Bering Sea Coast",

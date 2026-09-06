@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   trimWaveSeries,
   computeWaveRuns,
+  bandLabelsForWaterClass,
   computeHazardBands,
   waveStripSummary,
   modelDisplayName,
@@ -376,6 +377,32 @@ describe("computeWaveRuns", () => {
     const runs = computeWaveRuns([2.0, 4.0]);
     expect(runs[0].band).toBe("yellow");
     expect(runs[1].band).toBe("red");
+  });
+
+  it("bands and labels an ocean beach by the ocean thresholds", () => {
+    const runs = computeWaveRuns([2.9, 3.0, 5.99, 6.0], "ocean");
+    expect(runs.map(function (r) { return r.band; })).toEqual(["green", "yellow", "red"]);
+    expect(runs[0]).toMatchObject({ label: "Under 3 ft", hours: 1 });
+    expect(runs[1]).toMatchObject({ label: "3–6 ft", hours: 2 });
+    expect(runs[2]).toMatchObject({ label: "6 ft or more", hours: 1 });
+  });
+
+  it("a great_lake or null class keeps the default labels", () => {
+    const lake = computeWaveRuns([1, 3, 5], "great_lake");
+    const none = computeWaveRuns([1, 3, 5]);
+    expect(lake.map(function (r) { return r.label; })).toEqual(["Under 2 ft", "2–4 ft", "4 ft or more"]);
+    expect(none.map(function (r) { return r.label; })).toEqual(["Under 2 ft", "2–4 ft", "4 ft or more"]);
+  });
+});
+
+describe("bandLabelsForWaterClass", () => {
+  it("derives every label from the rules thresholds", () => {
+    expect(bandLabelsForWaterClass("ocean")).toEqual({
+      "green": "Under 3 ft", "yellow": "3–6 ft", "red": "6 ft or more", "no-data": "No data"
+    });
+    expect(bandLabelsForWaterClass(null)).toEqual({
+      "green": "Under 2 ft", "yellow": "2–4 ft", "red": "4 ft or more", "no-data": "No data"
+    });
   });
 });
 

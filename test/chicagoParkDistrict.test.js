@@ -230,6 +230,35 @@ describe("parseChicagoFlags", function() {
     ]);
     expect(parseChicagoFlags(stale, NOW_ISO)).toEqual([]);
   });
+
+  it("returns an empty array when the only fresh row is a green without a fresh Surf row", function() {
+    const wqOnly = JSON.stringify([
+      { title: "Albion Beach - Water Quality", parent: "Albion Beach", date: "1783271048", flag: "Green" }
+    ]);
+    expect(parseChicagoFlags(wqOnly, NOW_ISO)).toEqual([]);
+  });
+
+  it("returns null for an empty JSON array (a broken source, not an off-season empty)", function() {
+    expect(parseChicagoFlags("[]", NOW_ISO)).toBe(null);
+  });
+
+  it("returns null when no record carries the parent and date fields", function() {
+    // A field rename upstream must read as a parse failure, never as "nothing
+    // to report".
+    const renamed = JSON.stringify([
+      { title: "Foster Beach - Surf Conditions", beach: "Foster Beach", stamp: "1783271048", flag: "Green" },
+      { title: "Montrose Beach - Weather", beach: "Montrose Beach", stamp: "1783270000", flag: "Yellow" }
+    ]);
+    expect(parseChicagoFlags(renamed, NOW_ISO)).toBe(null);
+  });
+
+  it("returns null when no record carries a classifiable flag", function() {
+    const unclassifiable = JSON.stringify([
+      { title: "Foster Beach - Surf Conditions", parent: "Foster Beach", date: "1783271048", flag: "Purple" },
+      { title: "Montrose Beach - Weather", parent: "Montrose Beach", date: "1783270000", status: "Green" }
+    ]);
+    expect(parseChicagoFlags(unclassifiable, NOW_ISO)).toBe(null);
+  });
 });
 
 describe("beachNameKeys", function() {
@@ -309,7 +338,7 @@ describe("chicagoParkDistrict.scrape", function() {
     expect(result.sources).toEqual([CHICAGO_FLAG_STATUS_URL]);
   });
 
-  it("returns null when every record parses out as stale (empty sites)", async function() {
+  it("returns an empty perBeachResult (NOT null) when every record parses out as stale", async function() {
     const staleOnly = JSON.stringify([
       { title: "Foster Beach - Surf Conditions", parent: "Foster Beach", date: "1756482510", flag: "Green" }
     ]);
@@ -317,9 +346,44 @@ describe("chicagoParkDistrict.scrape", function() {
       return Promise.resolve(textResponse(staleOnly));
     });
     const result = await chicagoParkDistrict.scrape(NOW_ISO);
-    // parseChicagoFlags yields [] here; scrape must degrade that to null, not
-    // an empty perBeach result.
+    // The feed was recognized and every row gated out: a healthy run with
+    // nothing to report, which must not feed the consecutive-null streak.
     expect(calls.length).toBe(1);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    expect(result.source).toBe(CHICAGO_FLAG_STATUS_URL);
+    expect(result.updated).toBe(NOW_ISO);
+  });
+
+  it("returns an empty perBeachResult when the only fresh row is a surfless green", async function() {
+    const wqOnly = JSON.stringify([
+      { title: "Albion Beach - Water Quality", parent: "Albion Beach", date: "1783271048", flag: "Green" }
+    ]);
+    installFetch(function() {
+      return Promise.resolve(textResponse(wqOnly));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.sites).toEqual([]);
+  });
+
+  it("returns null for an empty JSON array body", async function() {
+    installFetch(function() {
+      return Promise.resolve(textResponse("[]"));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
+    expect(result).toBe(null);
+  });
+
+  it("returns null when every record lacks the expected fields", async function() {
+    const renamed = JSON.stringify([
+      { title: "Foster Beach - Surf Conditions", beach: "Foster Beach", stamp: "1783271048", flag: "Green" }
+    ]);
+    installFetch(function() {
+      return Promise.resolve(textResponse(renamed));
+    });
+    const result = await chicagoParkDistrict.scrape(NOW_ISO);
     expect(result).toBe(null);
   });
 

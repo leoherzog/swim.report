@@ -74,6 +74,8 @@ import {
   geometryPolygons,
   minEdgeDistanceKm,
   pointToSegmentKm,
+  lonOffsetDeg,
+  lonSegmentEndOffsetDeg,
   KM_PER_DEG
 } from "../src/geo.js";
 
@@ -360,6 +362,68 @@ describe("anySegmentWithinKm", function () {
       const reference = minGeometryDistanceKm(line, lat, lon) <= maxKm;
       expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat, lon, maxKm)).toBe(reference);
     }
+  });
+});
+
+// --- the antimeridian ------------------------------------------------------
+
+describe("lonOffsetDeg / lonSegmentEndOffsetDeg — the short arc", function () {
+  it("is the raw difference, bit for bit, within a half turn", function () {
+    expect(lonOffsetDeg(-86.98, -87.01)).toBe(-86.98 - -87.01);
+    expect(lonOffsetDeg(100, -80)).toBe(180);
+    expect(lonOffsetDeg(-80, 100)).toBe(-180);
+    expect(lonSegmentEndOffsetDeg(-86.98, -87.01, lonOffsetDeg(-87.0, -87.01))).toBe(-86.98 - -87.01);
+  });
+
+  it("shifts an offset past a half turn by one full turn", function () {
+    expect(lonOffsetDeg(-179.99, 179.99)).toBeCloseTo(0.02, 12);
+    expect(lonOffsetDeg(179.99, -179.99)).toBeCloseTo(-0.02, 12);
+  });
+
+  it("reads a segment as its shorter arc from either side of the globe", function () {
+    // A way with vertices at 179.9 and -179.9, seen from just east of it.
+    const fromNear = lonOffsetDeg(179.9, 179.95);
+    expect(fromNear).toBeCloseTo(-0.05, 12);
+    expect(lonSegmentEndOffsetDeg(-179.9, 179.95, fromNear)).toBeCloseTo(0.15, 12);
+    // Seen from lon 0, the same way spans 179.9 .. 180.1, not 179.9 .. -179.9.
+    const fromFar = lonOffsetDeg(179.9, 0);
+    expect(fromFar).toBe(179.9);
+    expect(lonSegmentEndOffsetDeg(-179.9, 0, fromFar)).toBeCloseTo(180.1, 12);
+  });
+});
+
+describe("segment distance across the antimeridian", function () {
+  const lat = 52;
+  const crossing = { type: "LineString", coordinates: [[179.9, lat], [-179.9, lat]] };
+
+  it("measures a crossing segment at its true short distance", function () {
+    expect(minGeometryDistanceKm(crossing, lat + 0.001, -179.9999)).toBeCloseTo(0.001 * KM_PER_DEG, 6);
+    expect(minGeometryDistanceKm(crossing, lat + 0.001, 179.9999)).toBeCloseTo(0.001 * KM_PER_DEG, 6);
+    expect(minGeometryDistanceKm(crossing, lat + 0.001, 180)).toBeCloseTo(0.001 * KM_PER_DEG, 6);
+    // From the far side of the globe it is thousands of km away, never a
+    // segment passing through lon 0.
+    expect(minGeometryDistanceKm(crossing, lat + 0.001, 0)).toBeGreaterThan(1000);
+    const packed = packSegments([crossing.coordinates]);
+    expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat + 0.001, -179.9999, 0.15)).toBe(true);
+    expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat + 0.002, -179.9999, 0.15)).toBe(false);
+    expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat + 0.001, 0, 0.15)).toBe(false);
+  });
+
+  it("measures a probe at 179.999 against a segment at -179.999 across the seam", function () {
+    const west = { type: "LineString", coordinates: [[-179.999, lat - 0.01], [-179.999, lat + 0.01]] };
+    const expected = 0.002 * Math.cos(lat * Math.PI / 180) * KM_PER_DEG;
+    expect(minGeometryDistanceKm(west, lat, 179.999)).toBeCloseTo(expected, 9);
+    const packed = packSegments([west.coordinates]);
+    expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat, 179.999, 0.15)).toBe(true);
+    expect(anySegmentWithinKm(packed.segs, packed.idx, packed.count, lat, 179.999, 0.12)).toBe(false);
+  });
+
+  it("control: a segment far from the seam is unchanged", function () {
+    // The same shape translated to Lake Michigan gives the same number.
+    const west = { type: "LineString", coordinates: [[-179.999, lat - 0.01], [-179.999, lat + 0.01]] };
+    const plain = { type: "LineString", coordinates: [[-87.001, lat - 0.01], [-87.001, lat + 0.01]] };
+    expect(minGeometryDistanceKm(plain, lat, -86.999)).toBeCloseTo(minGeometryDistanceKm(west, lat, 179.999), 9);
+    expect(minGeometryDistanceKm(SHORE_LINE, 42.005, -85.99)).toBeCloseTo(0.8263, 3);
   });
 });
 

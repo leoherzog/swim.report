@@ -117,6 +117,30 @@ export function pointInGeometry(geometry, lat, lon) {
 // cannot drift between them.
 export const KM_PER_DEG = 111.195;
 
+// Signed longitude offset of lon from origin on the short arc, in degrees: the
+// raw difference when it already lies within [-180, 180], otherwise shifted by
+// one full turn. Away from the antimeridian this is lon - origin, bit for bit.
+export function lonOffsetDeg(lon, origin) {
+  const d = lon - origin;
+  if (d > 180) { return d - 360; }
+  if (d < -180) { return d + 360; }
+  return d;
+}
+
+// The short-arc offset of a segment's second endpoint given the first's, so the
+// two offsets differ by at most a half turn. Every segment is read as the
+// shorter of its two arcs: a way with vertices at 179.9 and -179.9 is 0.2
+// degrees wide across the antimeridian, never 359.8 the long way round, and a
+// probe on the far side of the globe from it cannot see it pass through lon 0.
+// A segment genuinely wider than a half turn has no representation here.
+export function lonSegmentEndOffsetDeg(lon, origin, firstOffset) {
+  const d = lonOffsetDeg(lon, origin);
+  const span = d - firstOffset;
+  if (span > 180) { return d - 360; }
+  if (span < -180) { return d + 360; }
+  return d;
+}
+
 // GeoJSON Polygon/MultiPolygon -> array of polygons (each an array of rings).
 // Anything else (malformed, other types) -> [] so callers skip it.
 export function geometryPolygons(geometry) {
@@ -156,7 +180,8 @@ export function pointToSegmentKm(ax, ay, bx, by) {
 // and resolves via the nearest hole edge. Malformed rings and points are skipped,
 // never thrown on, since GeoMet responses are upstream input. Returns Infinity
 // when no usable edge exists. The per-caller distance cap stays at the call site;
-// this returns a raw distance.
+// this returns a raw distance. Longitude offsets are taken on the short arc, so
+// an edge across the antimeridian measures at its true width.
 export function minEdgeDistanceKm(geometry, lat, lon) {
   const cosLat = Math.cos(lat * Math.PI / 180);
   let best = Infinity;
@@ -176,9 +201,11 @@ export function minEdgeDistanceKm(geometry, lat, lon) {
             typeof b[0] !== "number" || typeof b[1] !== "number") {
           continue;
         }
-        const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
+        const dax = lonOffsetDeg(a[0], lon);
+        const dbx = lonSegmentEndOffsetDeg(b[0], lon, dax);
+        const ax = dax * cosLat * KM_PER_DEG;
         const ay = (a[1] - lat) * KM_PER_DEG;
-        const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
+        const bx = dbx * cosLat * KM_PER_DEG;
         const by = (b[1] - lat) * KM_PER_DEG;
         const d = pointToSegmentKm(ax, ay, bx, by);
         if (d < best) { best = d; }
@@ -236,9 +263,11 @@ function minPositionsDistanceKm(positions, lat, lon, cosLat, asLine) {
         typeof b[0] !== "number" || typeof b[1] !== "number") {
       continue;
     }
-    const ax = (a[0] - lon) * cosLat * KM_PER_DEG;
+    const dax = lonOffsetDeg(a[0], lon);
+    const dbx = lonSegmentEndOffsetDeg(b[0], lon, dax);
+    const ax = dax * cosLat * KM_PER_DEG;
     const ay = (a[1] - lat) * KM_PER_DEG;
-    const bx = (b[0] - lon) * cosLat * KM_PER_DEG;
+    const bx = dbx * cosLat * KM_PER_DEG;
     const by = (b[1] - lat) * KM_PER_DEG;
     const d = pointToSegmentKm(ax, ay, bx, by);
     if (d < best) { best = d; }
@@ -321,9 +350,11 @@ export function anySegmentWithinKm(segs, idx, count, lat, lon, maxKm) {
     if (!(s >= 0) || base + 3 >= segs.length) {
       continue;
     }
-    const ax = (segs[base] - lon) * cosLat * KM_PER_DEG;
+    const dax = lonOffsetDeg(segs[base], lon);
+    const dbx = lonSegmentEndOffsetDeg(segs[base + 2], lon, dax);
+    const ax = dax * cosLat * KM_PER_DEG;
     const ay = (segs[base + 1] - lat) * KM_PER_DEG;
-    const bx = (segs[base + 2] - lon) * cosLat * KM_PER_DEG;
+    const bx = dbx * cosLat * KM_PER_DEG;
     const by = (segs[base + 3] - lat) * KM_PER_DEG;
     // No cheap axis-aligned pre-reject here, deliberately. The obvious one —
     // both endpoints beyond maxKm on the same axis, so skip — is mathematically

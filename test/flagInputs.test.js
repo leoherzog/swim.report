@@ -65,7 +65,7 @@ describe("flagInputs seal round trip", function () {
   // fails here instead of silently defaulting to null in a fast recompute.
   const SEAL_FIELDS = ["windSpeedMph", "windGustMph", "waterQualityAdvisory", "signalSources"];
   const ECHOED_FIELDS = ["ripCurrentRisk", "waveHeightFt", "updated"];
-  const RECOMPUTED_FIELDS = ["alerts", "alertDetails", "alertsCheckable", "beachId"];
+  const RECOMPUTED_FIELDS = ["alerts", "alertDetails", "alertsCheckable", "waterClass", "beachId"];
 
   it("covers every estimateFlag input between the seal, the echo and the D1 row", function () {
     // The input names are READ OUT OF src/rules.js, never transcribed: a
@@ -148,8 +148,11 @@ describe("flagInputs seal round trip", function () {
         ecccMarineAlerts: { alerts: [] }
       }
     ];
+    // The ocean row rides on the land-zone beach rather than adding a fifth
+    // row, keeping the matrix size flat; waves 2.6 and 4.5 decide differently
+    // under the two threshold sets, so a dropped waterClass fails here.
     const beaches = [
-      beachRow({ nws_zone: "MIZ071" }),
+      beachRow({ nws_zone: "MIZ071", water_class: "ocean" }),
       beachRow({ nws_zone: "MIZ071", marine_zone: "LHZ441" }),
       beachRow({ eccc_zone: "Alpena - Ontario" }),
       beachRow({})
@@ -293,6 +296,23 @@ describe("buildEstimateInputs normalization", function () {
     expect(inputs.waveHeightFt).toBeNull();
     expect(inputs.windSpeedMph).toBeNull();
     expect(inputs.windGustMph).toBeNull();
+  });
+
+  it("passes water_class through as waterClass and nulls a non-string", function () {
+    expect(buildEstimateInputs(beachRow({ water_class: "ocean" }), noAlerts, signalsWith({})).waterClass)
+      .toBe("ocean");
+    expect(buildEstimateInputs(beachRow({ water_class: "great_lake" }), noAlerts, signalsWith({})).waterClass)
+      .toBe("great_lake");
+    expect(buildEstimateInputs(beachRow({}), noAlerts, signalsWith({})).waterClass).toBeNull();
+    expect(buildEstimateInputs(beachRow({ water_class: 7 }), noAlerts, signalsWith({})).waterClass).toBeNull();
+  });
+
+  it("an ocean row decides step 3 against the ocean thresholds in both crons' bundles", function () {
+    const ocean = beachRow({ water_class: "ocean" });
+    const lake = beachRow({ water_class: "great_lake" });
+    const signals = signalsWith({ waveHeightFt: 4.5 });
+    expect(estimateFlag(buildEstimateInputs(ocean, noAlerts, signals)).color).toBe("yellow");
+    expect(estimateFlag(buildEstimateInputs(lake, noAlerts, signals)).color).toBe("red");
   });
 
   it("normalizes an unrecognized rip-current risk to null", function () {

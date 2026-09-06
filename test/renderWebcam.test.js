@@ -1,8 +1,9 @@
 // test/renderWebcam.test.js
 // Covers the nearby-webcam section on the detail page (src/frontend/render.js):
 // it renders only when beach.webcam_player_url is a non-empty string, stays
-// absent for null and pre-migration (undefined) rows, and escapes all dynamic
-// values (title and player URL) into the markup.
+// absent for null and pre-migration (undefined) rows, links the cam's own Windy
+// detail page only for an http(s) webcam_detail_url, and escapes all dynamic
+// values (title, player URL and detail URL) into the markup.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
@@ -114,6 +115,77 @@ describe("nearby-webcam section", () => {
     // the quote is escaped, so the src attribute stays intact
     expect(html).toContain(
       "src=\"https://webcams.windy.com/embed/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\"");
+    expect(html).not.toContain("<script>alert(1)</script>");
+  });
+
+  it("links the caption to the cam's own Windy detail page in a new tab", () => {
+    const html = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "South Pier Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: "https://windy.com/webcams/1595253287"
+    });
+    expect(html).toContain("<span class=\"webcam-title\">South Pier Cam</span>");
+    expect(html).toContain(
+      "<a class=\"webcam-link\" href=\"https://windy.com/webcams/1595253287\"" +
+      " rel=\"noopener noreferrer\" target=\"_blank\">View on Windy</a>");
+  });
+
+  it("renders a link-only caption for an untitled cam with a detail URL", () => {
+    const html = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: "https://windy.com/webcams/1595253287"
+    });
+    expect(html).toContain("class=\"webcam-caption");
+    expect(html).not.toContain("webcam-title");
+    expect(html).toContain("href=\"https://windy.com/webcams/1595253287\"");
+    expect(html).toContain(">View on Windy</a>");
+  });
+
+  it("renders the caption without a link when webcam_detail_url is null or undefined", () => {
+    const nullUrl = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "South Pier Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: null
+    });
+    expect(nullUrl).toContain("<span class=\"webcam-title\">South Pier Cam</span>");
+    expect(nullUrl).not.toContain("webcam-link");
+    expect(nullUrl).not.toContain("View on Windy");
+    const undefinedUrl = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "South Pier Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day"
+    });
+    expect(undefinedUrl).toContain("<span class=\"webcam-title\">South Pier Cam</span>");
+    expect(undefinedUrl).not.toContain("webcam-link");
+  });
+
+  it("emits no link for a non-http(s) detail URL", () => {
+    const schemes = ["javascript:alert(1)", "data:text/html,hi", "/webcams/1", "ftp://x/y", ""];
+    for (const bad of schemes) {
+      const html = renderWith({
+        webcam_id: "1595253287",
+        webcam_title: "South Pier Cam",
+        webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+        webcam_detail_url: bad
+      });
+      expect(html).not.toContain("webcam-link");
+      expect(html).not.toContain("javascript:");
+    }
+  });
+
+  it("escapes a quote in the detail URL so it cannot break out of the href attribute", () => {
+    const html = renderWith({
+      webcam_id: "1595253287",
+      webcam_title: "Cam",
+      webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day",
+      webcam_detail_url: "https://windy.com/webcams/\"><script>alert(1)</script>"
+    });
+    expect(html).toContain(
+      "href=\"https://windy.com/webcams/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\"");
     expect(html).not.toContain("<script>alert(1)</script>");
   });
 });

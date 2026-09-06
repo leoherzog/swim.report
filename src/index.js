@@ -370,10 +370,11 @@ function makeWaveCursorStamper(env, nowIso, flushSize) {
 //
 // recompute_updated rides along for the refresh cron alone: D1 is strongly
 // consistent where KV is not, so the hourly's own stamp is what lets a stale
-// "flag:" replica be recognized as superseded.
+// "flag:" replica be recognized as superseded. water_class rides along for the
+// same cron, which recomputes step 3 against the row's own thresholds.
 const MAP_DIRECTORY_SQL =
-  "SELECT id, name, park_name, lat, lon, nws_zone, marine_zone, eccc_zone, recompute_updated " +
-  "FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL + " ORDER BY id";
+  "SELECT id, name, park_name, lat, lon, nws_zone, marine_zone, eccc_zone, water_class, " +
+  "recompute_updated FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL + " ORDER BY id";
 
 // Scan budget read from env with a fallback to the module constant, the same
 // plain-number override runBudget(env) uses and for the same reason: a 0 makes
@@ -1417,6 +1418,10 @@ async function runWaterTempRefresh(env) {
   // and from a beach with no reading at all, which writes nothing and is still
   // stamped.
   let writeFailureCount = 0;
+  // Unique stations the gather fetched, and the subset that yielded a reading.
+  // live=0 against a nonzero stations= is a station family gone dark.
+  let stationCount = 0;
+  let liveStationCount = 0;
   // Beaches whose station the gather deadline stopped this run from ever
   // fetching: neither written nor stamped, so they sort first next run.
   const unattempted = new Set();
@@ -1471,6 +1476,7 @@ async function runWaterTempRefresh(env) {
           break;
         }
         let reading = null;
+        stationCount = stationCount + 1;
         try {
           reading = await stationWaterTemp(stationId, nowIso, env);
         } catch (err) {
@@ -1482,6 +1488,7 @@ async function runWaterTempRefresh(env) {
         if (reading === null) {
           continue;
         }
+        liveStationCount = liveStationCount + 1;
         for (const member of members) {
           waterTempByBeach.set(member.beachId, {
             beachId: member.beachId,
@@ -1542,7 +1549,9 @@ async function runWaterTempRefresh(env) {
     // The completion log is the operator trip-wire and reports the two failure
     // shapes separately: truncated= means the run ran out of clock, so coverage
     // depends on the rotation cursor, while failures= near beaches= with
-    // stamped=0 is a systemic KV write outage.
+    // stamped=0 is a systemic KV write outage. stations= and live= report the
+    // upstream side: live=0 with stations= intact is NDBC gone dark, not a
+    // Worker fault.
     const truncated = writeReached < beaches.length || unattempted.size > 0;
     console.log(
       "index: water temp refresh complete, beaches=" + String(beaches.length) +
@@ -1552,6 +1561,8 @@ async function runWaterTempRefresh(env) {
       " failures=" + String(writeFailureCount) +
       " watertemp=" + String(waterTempCount) +
       " truncated=" + (truncated ? "yes" : "no") +
+      " stations=" + String(stationCount) +
+      " live=" + String(liveStationCount) +
       " elapsedMs=" + String(Date.now() - startedMs)
     );
   } catch (err) {

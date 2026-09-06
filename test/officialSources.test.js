@@ -965,7 +965,7 @@ describe("southHaven.scrape orchestration", function() {
     expect(result.updated).toBe(IN_WINDOW_ISO);
   });
 
-  it("resolves null when every site in the CSV is gray (no data, not a color)", async function() {
+  it("resolves an empty perBeach result (NOT null) when every site in the CSV is gray", async function() {
     const calls = installFetch(function(url) {
       if (url === SOUTH_HAVEN_URL) {
         return csvResponse("<html><body>no links here</body></html>");
@@ -973,8 +973,50 @@ describe("southHaven.scrape orchestration", function() {
       return csvResponse(ALL_GRAY_CSV);
     });
     const result = await southHaven.scrape(IN_WINDOW_ISO);
-    expect(result).toBe(null);
+    // The feed was fetched and recognized with no site to report: a healthy
+    // run, not a failure, so it must not feed the consecutive-null streak.
     expect(calls.length).toBe(2);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    expect(result.source).toBe(SOUTH_HAVEN_URL);
+    expect(result.sources).toEqual([SOUTH_HAVEN_URL, SOUTH_HAVEN_CSV_URL]);
+    expect(result.updated).toBe(IN_WINDOW_ISO);
+  });
+
+  it("resolves an empty perBeach result when every site mixes gray with a color", async function() {
+    const mixedCsv = "Flag #6 North Beach is Green\r\nFlag #7 North Beach is Gray";
+    installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse("<html><body>no links here</body></html>");
+      }
+      return csvResponse(mixedCsv);
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(result).not.toBe(null);
+    expect(result.sites).toEqual([]);
+  });
+
+  it("resolves null for an empty CSV body (a broken feed, not an empty success)", async function() {
+    installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse("<html><body>no links here</body></html>");
+      }
+      return csvResponse("");
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(result).toBe(null);
+  });
+
+  it("resolves null when no CSV line is recognized", async function() {
+    installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse("<html><body>no links here</body></html>");
+      }
+      return csvResponse("Beach,Status\r\nNorth Beach,Green");
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(result).toBe(null);
   });
 });
 

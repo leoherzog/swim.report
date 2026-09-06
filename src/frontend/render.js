@@ -757,19 +757,30 @@ function renderNearby(nearby) {
     "</section>";
 }
 
+// Only an absolute http(s) URL may become an href; anything else (javascript:,
+// data:, a relative path, a non-string) renders no link.
+function isHttpUrl(value) {
+  return typeof value === "string" &&
+    (value.indexOf("https://") === 0 || value.indexOf("http://") === 0);
+}
+
 // Nearby-webcam player embedded from Windy's free webcam API, in the same
 // plain-<iframe> wrapper as the wave map. The browser fetches the embed; the
 // request path itself still reads only D1 and KV. Rendered only when
 // webcam_player_url is a non-empty string, so both null (no nearby cam) and
-// undefined are skipped. The site-wide Windy credit lives once in the footer, so
-// this section carries no per-cam attribution line. The frame's accessible name
-// falls back to "Nearby webcam" when the title is empty.
+// undefined are skipped. The caption carries the cam's own Windy detail page as a
+// "View on Windy" link when webcam_detail_url is an http(s) URL: the Windy
+// webcams Terms require every displayed cam to link its webcam page or player,
+// and the footer credit alone does not satisfy that per-cam obligation. The
+// site-wide credit stays in the footer. The frame's accessible name falls back to
+// "Nearby webcam" when the title is empty.
 function renderWebcam(beach) {
   const playerUrl = beach.webcam_player_url;
   if (typeof playerUrl !== "string" || playerUrl.length === 0) {
     return "";
   }
   const title = (typeof beach.webcam_title === "string") ? beach.webcam_title : "";
+  const detailUrl = isHttpUrl(beach.webcam_detail_url) ? beach.webcam_detail_url : null;
   const frameTitle = title ? title : "Nearby webcam";
   const lines = [];
   lines.push("<section class=\"webcam-section wa-stack wa-gap-s\">");
@@ -777,9 +788,17 @@ function renderWebcam(beach) {
     "<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
     " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen></iframe>" +
     "</div>");
-  if (title) {
-    lines.push("<p class=\"webcam-caption wa-caption-s\">" +
-      "<span class=\"webcam-title\">" + escapeHtml(title) + "</span></p>");
+  if (title || detailUrl !== null) {
+    const captionParts = [];
+    if (title) {
+      captionParts.push("<span class=\"webcam-title\">" + escapeHtml(title) + "</span>");
+    }
+    if (detailUrl !== null) {
+      captionParts.push("<a class=\"webcam-link\" href=\"" + escapeHtml(detailUrl) + "\"" +
+        " rel=\"noopener noreferrer\" target=\"_blank\">View on Windy</a>");
+    }
+    lines.push("<p class=\"webcam-caption wa-caption-s wa-cluster wa-gap-xs\">" +
+      captionParts.join("") + "</p>");
   }
   lines.push("</section>");
   return lines.join("\n");
@@ -854,7 +873,7 @@ function renderWaveStrip(runs, totalHours, summaryText) {
 // pieces of the wave forecast. Returned as named parts (not pre-joined) so the
 // caller can interleave the model-comparison chart in the correct slot; hasNow
 // gates whether the whole section renders. Pure.
-function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
+function renderWaveStripParts(estimate, series, nowIso, wavesUpdated, waterClass) {
   const hasNow = !!estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt);
   const nowStat = hasNow
@@ -868,7 +887,7 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated) {
   let staleHtml = "";
   let modelNowHtml = "";
   if (series) {
-    const runs = computeWaveRuns(series.hoursFt);
+    const runs = computeWaveRuns(series.hoursFt, waterClass);
     const summaryText = waveStripSummary(runs);
     const totalHours = series.totalHours;
     const chartHtml = renderWaveStrip(runs, totalHours, summaryText);
@@ -942,11 +961,12 @@ function renderWaveModelCompare(series) {
 
 // Wave forecast section (detail page): a "now" wave-height stat plus a
 // horizontal color strip of the next up-to-24 hours. Colored by estimated wave
-// height only, never the official flag. Returns "" when there is neither a
-// finite now-height nor a renderable series.
-function renderWaveForecast(estimate, waves, nowIso) {
+// height only, against the beach's water-class thresholds, never the official
+// flag. Returns "" when there is neither a finite now-height nor a renderable
+// series.
+function renderWaveForecast(estimate, waves, nowIso, waterClass) {
   const series = trimWaveSeries(waves, nowIso);
-  const strip = renderWaveStripParts(estimate, series, nowIso, waves && waves.updated);
+  const strip = renderWaveStripParts(estimate, series, nowIso, waves && waves.updated, waterClass);
   const modelCompareHtml = renderWaveModelCompare(series);
   // The hazard lane needs the strip's timeline to position bands against, and
   // with no renderable series there is nothing to overlay; the estimate card
@@ -1054,7 +1074,8 @@ export function renderDetailPage(data) {
     stackParts.push(officialHtml);
   }
   stackParts.push(estimateHtml);
-  const waveForecastHtml = renderWaveForecast(estimate, waves, nowIso);
+  const waveForecastHtml = renderWaveForecast(estimate, waves, nowIso,
+    typeof beach.water_class === "string" ? beach.water_class : null);
   if (waveForecastHtml) {
     stackParts.push(waveForecastHtml);
   }

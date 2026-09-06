@@ -150,9 +150,10 @@ function normalizeBox(box) {
 }
 
 // Inclusive rectangle overlap: edge-touching counts as intersecting, matching
-// src/layerGrid.js queryGridByBounds and src/osmSelect.js boundsOverlap byte for
-// byte. A feature straddling a region boundary must be kept by both boxes it
-// touches; a strict inequality here would drop a park sitting exactly on the
+// src/layerGrid.js queryGridByBounds away from the antimeridian seam and
+// src/osmSelect.js boundsOverlap byte for byte. A feature straddling a region
+// boundary must be kept by both boxes it touches; a strict inequality here
+// would drop a park sitting exactly on the
 // padded edge and, through it, the park-origin rows that park names.
 export function boxesIntersect(a, b) {
   const boxA = normalizeBox(a);

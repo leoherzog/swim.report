@@ -172,7 +172,8 @@ export function parseSurfFeet(surf) {
   return max;
 }
 
-// Pure. Surf string -> hazard color via the shared 2/4 ft thresholds, or null.
+// Pure. Surf string -> hazard color via the default (Great Lakes) wave
+// thresholds, or null. Every enabled layer is a Great Lakes forecast.
 export function surfColor(surf) {
   const feet = parseSurfFeet(surf);
   if (feet === null) {

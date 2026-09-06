@@ -29,8 +29,9 @@ export const WEBCAM_FETCH_LIMIT = 50;
 // it is an object with status === "active", a player object exposing a non-empty
 // .live or .day, and finite location.latitude / location.longitude. playerUrl
 // prefers player.live over player.day. detailUrl is the cam's own Windy detail
-// page (urls.detail from include=urls), the Terms' "link every image with our
-// webcam page" target; renderWebcam falls back to the generic hub when it is null.
+// page (urls.detail from include=urls), which renderWebcam links as "View on
+// Windy" to meet the Terms' per-cam link requirement; null when the API sent no
+// usable urls.detail, and the caption then carries no link.
 //
 // The radius guard is what makes this safe against a bbox query's wider result
 // set, where a shared bbox may return cams nearer some other beach in the bucket.

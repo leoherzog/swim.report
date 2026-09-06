@@ -1508,7 +1508,7 @@ describe("runWaterTempRefresh bounded-concurrency write pool", function () {
     // Full coverage is reported as such: nothing truncated, every beach stamped.
     expect(loggedLines(logSpy)).toContain(
       "index: water temp refresh complete, beaches=120 stamped=120 reached=120 " +
-      "unattempted=0 failures=0 watertemp=120 truncated=no"
+      "unattempted=0 failures=0 watertemp=120 truncated=no stations=1 live=1"
     );
   });
 
@@ -1558,7 +1558,7 @@ describe("runWaterTempRefresh bounded-concurrency write pool", function () {
     // "no", so a flaky put cannot trip the truncation alarm.
     expect(logged).toContain(
       "index: water temp refresh complete, beaches=60 stamped=59 reached=60 " +
-      "unattempted=0 failures=1 watertemp=59 truncated=no"
+      "unattempted=0 failures=1 watertemp=59 truncated=no stations=1 live=1"
     );
     const stamped = findWaveStamps(made.batchCalls).map(function (u) { return u.args[1]; });
     expect(stamped.length).toBe(59);
@@ -1595,7 +1595,7 @@ describe("runWaterTempRefresh bounded-concurrency write pool", function () {
     expect(findWaveStamps(made.batchCalls).length).toBe(0);
     expect(loggedLines(logSpy)).toContain(
       "index: water temp refresh complete, beaches=3 stamped=0 reached=3 " +
-      "unattempted=3 failures=0 watertemp=0 truncated=yes"
+      "unattempted=3 failures=0 watertemp=0 truncated=yes stations=0 live=0"
     );
   });
 });
@@ -1699,6 +1699,9 @@ describe("runWaterTempRefresh water temperature (watertemp: KV)", function () {
     expect(reading.updated).toBe("2026-07-15T16:00:00.000Z");
 
     expect(loggedLines(logSpy)).toContain("watertemp=60");
+    // One unique station consulted, one live: the trip-wire for a station
+    // family going dark is live= falling to 0 while stations= holds.
+    expect(loggedLines(logSpy)).toContain("watertemp=60 truncated=no stations=1 live=1");
   });
 
   it("writes NO wave KV: waveinput:/waves: belong to the offline pipeline", async function () {
@@ -1755,7 +1758,7 @@ describe("runWaterTempRefresh water temperature (watertemp: KV)", function () {
     expect(findWaveStamps(made.batchCalls).length).toBe(3);
     expect(loggedLines(logSpy)).toContain(
       "index: water temp refresh complete, beaches=3 stamped=3 reached=3 " +
-      "unattempted=0 failures=0 watertemp=0 truncated=no"
+      "unattempted=0 failures=0 watertemp=0 truncated=no stations=1 live=0"
     );
   });
 });

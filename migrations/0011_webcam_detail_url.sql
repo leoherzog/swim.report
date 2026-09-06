@@ -1,5 +1,4 @@
--- Windy Terms compliance (F13): "Link every image with either our webcam page
--- or timelapse player for full view" — store each cam's OWN detail-page URL
--- (webcam.urls.detail from include=urls) so renderWebcam's caption can link
--- the specific cam rather than the generic webcams hub.
+-- Each cam's own Windy detail-page URL (webcam.urls.detail from include=urls),
+-- written nightly by the webcam cron and linked from renderWebcam's caption as
+-- "View on Windy" to meet the Windy Terms' per-cam link requirement.
 ALTER TABLE beaches ADD COLUMN webcam_detail_url TEXT;

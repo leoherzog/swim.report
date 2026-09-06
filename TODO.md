@@ -67,9 +67,10 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   cycle**, so a present-but-under-covering GLWU takes the ocean down with it. Dropping that
   grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside the
   build. The exposure is dormant while every floor in `data/wave-floors.json` is null.
-- **The permission guard in `.github/workflows/test.yml` checks `--allow-net` only.** No
-  Deno script in the wave pipeline may carry `--allow-run` (GDAL runs in the workflow
-  shell), but nothing enforces that machine-side; extend the same loop to `--allow-run`.
+- **The `test.yml` permission guard is a fixed script list.** It checks `--allow-net` on
+  every pure-math offline script and `--allow-run` on every wave-pipeline Deno script;
+  `build-manifest.js` keeps `--allow-run=ogrinfo,osmium` by design, so the run check is
+  scoped to the wave list and a new script on either side needs its own entry.
 - **Measure the slot hit rate before trusting the cadence.** No second wave source is left to
   shadow against, so read the hit rate from `waves.yml`'s run history and the per-beach coverage
   from `manifest.beaches.resolved` across consecutive cycles. A run of missed slots is the
@@ -102,18 +103,25 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   between active and inactive, so a beach keeps a stored player URL up to 14 days after its cam
   dies.
 
-  **Open decision (not pending work):** nothing reads `webcam_detail_url`. Both `/webcams`
-  queries request `&include=player,location,urls`, the client returns `detailUrl`, migration
-  0011 added the column, and the daily cron writes it — but the render-side per-cam anchor was
-  removed when Windy attribution moved to the site-wide footer, so the column is written every
-  night and never displayed. Two coherent resolutions; pick one rather than leaving it as-is:
-  (a) restore the per-caption deep link in `render.js` so each cam links its own Windy detail
-  page, or (b) stop writing the column and let the footer credit stand alone. Migration 0011's
-  stated rationale — the Windy Terms line "Link every image with either our webcam page or
-  timelapse player for full view", satisfied by `renderWebcam`'s caption — is currently unmet,
-  and both `src/clients/windyWebcams.js`'s header and migration 0011's comment still describe
-  that removed fallback. Whoever decides should confirm against Windy's current Terms whether
-  the footer credit alone suffices.
+  `webcam_detail_url` (migration 0011) is written nightly from `webcam.urls.detail` and
+  rendered by `renderWebcam` as a "View on Windy" link beside the caption, because Windy's
+  Webcams API Terms require it: "Link every image with either our webcam page or timelapse
+  player for full view". The link is emitted only for an absolute http(s) value. Remaining
+  gap: the Terms' stated courtesy format is "Webcams provided by Windy.com — add a webcam",
+  with the second phrase linking windy.com/webcams/add, and the footer currently says
+  "Windy.com for webcams" with only the first link.
+- **Ocean wave thresholds are provisional and uncalibrated.** `WAVE_THRESHOLDS_FT.ocean` in
+  `src/rules.js` (3 ft yellow, 6 ft red, selected by `beaches.water_class === "ocean"`) was
+  chosen by reasoning, not measurement: gfswave HTSGW is offshore significant wave height, a
+  routine open-coast swell sits at or above the Great Lakes 4 ft red, and the regional hazard
+  on the coast is carried first by SRF rip risk and the High Surf products, whose WFO criteria
+  run from ~6 ft breakers in the Southeast to 15 ft or more in Hawaii and the Pacific
+  Northwest. No `flag_history` pair exists for an ocean beach yet: every registered official
+  scraper is Great Lakes. Calibration needs an ocean official source first (a Florida or
+  California lifeguard flag feed), then the same estimate-versus-posted comparison below, run
+  per class since the two cohorts must never be pooled. Candidate refinements once data
+  exists: a per-WFO threshold keyed on `nws_zone`, and a swell-period term from `PERPW`,
+  which arrives in the GRIB messages already fetched. Any move is a `RULES_VERSION` bump.
 - **Threshold calibration against real flag history.** The `flag_history` table (migration
   0006, PLAN.md sections 2 and 7) accumulates estimated-versus-official pairs for beaches with a
   scraped official flag; the raise-only wqFloor water-quality sources are not official and do
@@ -310,7 +318,9 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     without `nws_zone` is alert-blind with a caveat meanwhile. The next knob is the cron
     cadence (a five-file edit), bounded by api.weather.gov politeness; watch the enrichment
     log for 429s. The demand tiebreak drains viewed beaches first.
-  - **Antimeridian wrap** in `src/layerGrid.js` before any box west of 180° (Attu, Shemya).
+  - **Boxes west of 180° (Attu, Shemya)** need a second Aleutian box split at 180 plus a
+    floors reseed. `src/layerGrid.js` and `src/geo.js` wrap longitude, but every `REGIONS`
+    consumer reads a box as raw `minLon..maxLon`, so a single wrapped box is not expressible.
   - **Excluded by choice**: Mexico (no alert source; every row would burn five 404s ahead of US
     rows in the shared enrichment queue), Labrador and Hudson Bay (no wave grid north of
     52.58°N on the east side), Arctic Alaska and Canada, Greenland.
@@ -354,11 +364,12 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   example by repurposing a status string, still needs a human to notice.
 - **Scraper health alerting is log-only.** `src/scraperHealth.js` logs a loud `ALERT:` line once
   a matched scraper has returned null for 24 consecutive hourly runs, but nothing pages a human.
-- **Not every scraper implements empty-success yet.** The contract (PLAN.md §6) distinguishes
+- **Four scrapers are unaudited for empty-success.** The contract (PLAN.md §6) distinguishes
   "parsed cleanly, nothing to report" (an empty `sites: []` result, a health success) from
-  `null` (a genuine fetch or parse failure). metroparks complies; south-haven and
-  chicago-park-district still return `null` when they parse fine but no site survives their
-  gates, which off-season or stale-only data would log as a false failure streak.
+  `null` (a genuine fetch or parse failure). metroparks, south-haven and chicago-park-district
+  comply; `nws-omr-grr`, `winnetka-tower-beach`, `pa-dcnr-presque-isle` and
+  `nws-marine-beach-forecast` have not been checked for a clean-parse-nothing-to-report path
+  that still returns `null`.
 - **Deferred: tier-2 HTML entity-decoder consolidation.** `decodeCellText` lives in
   `src/officialSources/util.js`, with the two byte-identical copies folded into it. Five
   near-variants are deliberately left alone: `kenoshaBeachConditions.js` `htmlToText`,
@@ -433,11 +444,11 @@ gaps, not wrong-color risks.
   the Great Lakes, not a list problem: even at a 75 km cap winter coverage only reaches ~36%.
   GLOS Seagull exposes `sea_water_temperature` on a denser network and is the obvious next
   source; it would need the same siting review this list got.
-- **Station-list rot has no trip-wire** — station 45161 (Muskegon) went off-air and nothing
-  noticed; it was found by hand. The 12 h freshness window correctly degrades a dark station to
-  null, which is exactly why the failure is invisible. The gather knows, per run, how many
-  unique stations it consulted and how many returned a reading, so logging `stations=<n>
-  live=<n>` would make a station family going dark visible in the observability query.
+- **Station-list rot is visible only to a log reader.** The water-temp completion line
+  carries `stations=<n> live=<n>` (stations fetched, stations that returned a reading; a
+  deadline-truncated run shows a lower `stations=` beside a nonzero `unattempted=`), but no
+  alert fires on `live=0`, so a station family going dark still needs someone to run the
+  observability query.
 
 ### Registered scrapers — live caveats
 

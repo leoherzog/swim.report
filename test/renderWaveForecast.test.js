@@ -143,6 +143,23 @@ describe("wave-forecast section", () => {
     expect(html).toContain("tabindex=\"0\"");
   });
 
+  it("bands an ocean beach's strip by the ocean thresholds", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({}),
+      beach: beachWith({ water_class: "ocean" })
+    });
+    // The fixture's 3 ft hours are yellow on a lake and yellow on the ocean, but
+    // its 5 ft hours are red on a lake and yellow on the ocean, so the yellow
+    // run absorbs them: 3 + 2 hours.
+    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-green-50);\"");
+    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-yellow-70);\"");
+    expect(html).not.toContain("var(--wa-color-red-50);\"");
+    expect(html).toContain("Under 3 ft waves (estimated) — now through +5 h");
+    expect(html).toContain("3–6 ft waves (estimated) — +5 h to +10 h");
+  });
+
   it("carries a wa-tooltip per segment with band label and hour range", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),

@@ -515,6 +515,113 @@ describe("segment grid — the megapolygon an envelope index cannot prune", func
   });
 });
 
+// --- the antimeridian ----------------------------------------------------------
+
+describe("antimeridian wrap — both modes read longitude on the circle", function () {
+  // Aleutian latitude, where 0.001 deg of longitude is ~68 m.
+  const lat = 52;
+
+  it("mode A: a query padded past 180 sees an envelope at -179.99, and vice versa", function () {
+    const features = [
+      squareFeature("west-of-seam", -179.995, lat, 0.01),
+      squareFeature("east-of-seam", 179.985, lat, 0.01),
+      squareFeature("far", -170.0, lat, 0.01)
+    ];
+    const grid = buildLayerGrid(features);
+    // A query at 179.99 padded 0.02 deg reaches 180.01, and finds the feature
+    // whose western edge is -179.995 (= 180.005 on the circle).
+    expect(queryGridByBounds(grid, { minLon: 179.97, minLat: lat, maxLon: 180.01, maxLat: lat + 0.01 }))
+      .toEqual([0, 1]);
+    // The mirror: a query at -179.99 padded past -180 finds the eastern one.
+    expect(queryGridByBounds(grid, { minLon: -180.01, minLat: lat, maxLon: -179.97, maxLat: lat + 0.01 }))
+      .toEqual([0, 1]);
+    // The wrapped form, minLon > maxLon, means the same span.
+    expect(queryGridByBounds(grid, { minLon: 179.97, minLat: lat, maxLon: -179.97, maxLat: lat + 0.01 }))
+      .toEqual([0, 1]);
+    // Unpadded and short of the seam: only the feature on its own side.
+    expect(queryGridByBounds(grid, { minLon: 179.97, minLat: lat, maxLon: 179.99, maxLat: lat + 0.01 }))
+      .toEqual([1]);
+    // Nothing at the seam is a candidate for a query 10 degrees away.
+    expect(queryGridByBounds(grid, { minLon: -170.01, minLat: lat, maxLon: -169.99, maxLat: lat + 0.01 }))
+      .toEqual([2]);
+  });
+
+  it("mode A: a wrapped envelope (minLon > maxLon) is found from both sides and not from lon 0", function () {
+    const straddling = { name: "straddling", bounds: { minLon: 179.99, minLat: lat, maxLon: -179.99, maxLat: lat + 0.01 } };
+    const grid = buildLayerGrid([straddling]);
+    expect(grid.oversized.length).toBe(0);
+    expect(queryGridByBounds(grid, { minLon: 179.98, minLat: lat, maxLon: 179.995, maxLat: lat + 0.01 }))
+      .toEqual([0]);
+    expect(queryGridByBounds(grid, { minLon: -179.995, minLat: lat, maxLon: -179.98, maxLat: lat + 0.01 }))
+      .toEqual([0]);
+    expect(queryGridByBounds(grid, { minLon: 0, minLat: lat, maxLon: 0.1, maxLat: lat + 0.01 }))
+      .toEqual([]);
+  });
+
+  it("mode B: a probe at 179.999 finds a segment at -179.999, and vice versa, at the true distance", function () {
+    const west = { geometry: lineString([[-179.999, lat - 0.01], [-179.999, lat + 0.01]]) };
+    const east = { geometry: lineString([[179.999, lat - 0.01], [179.999, lat + 0.01]]) };
+    // 0.002 deg of longitude at 52 N is ~137 m: inside 150 m, outside 120 m.
+    const segGrid = segmentGridOf([west]);
+    expect(anySegmentWithinKmOfPoint(segGrid, lat, 179.999, 0.15)).toBe(true);
+    expect(anySegmentWithinKmOfPoint(segGrid, lat, 179.999, 0.12)).toBe(false);
+    expect(anySegmentWithinKmOfPoint(segGrid, lat, 179.99, 0.15)).toBe(false);
+    expect(minGeometryDistanceKm(west.geometry, lat, 179.999)).toBeCloseTo(0.002 * Math.cos(lat * Math.PI / 180) * KM_PER_DEG, 9);
+    const mirror = segmentGridOf([east]);
+    expect(anySegmentWithinKmOfPoint(mirror, lat, -179.999, 0.15)).toBe(true);
+    expect(anySegmentWithinKmOfPoint(mirror, lat, -179.999, 0.12)).toBe(false);
+    expect(anySegmentWithinKmOfPoint(mirror, lat, -179.99, 0.15)).toBe(false);
+    // A probe given as exactly 180 is the seam itself.
+    expect(anySegmentWithinKmOfPoint(mirror, lat, 180, 0.15)).toBe(true);
+  });
+
+  it("mode B: a segment crossing the antimeridian is indexed at the seam and measured 0.2 deg wide", function () {
+    const crossing = { geometry: lineString([[179.9, lat], [-179.9, lat]]) };
+    const segGrid = segmentGridOf([crossing]);
+    // Read as its short arc: a few pieces in a few seam cells, never the
+    // 7,000-cell globe-spanning envelope its raw bounds describe.
+    const stats = segmentGridStats(segGrid);
+    expect(stats.segments).toBeGreaterThan(1);
+    expect(stats.cells).toBeLessThan(20);
+    expect(segGrid.oversized.length).toBe(0);
+    // 0.001 deg north of the seam crossing is ~111 m away.
+    expect(anySegmentWithinKmOfPoint(segGrid, lat + 0.001, 180, 0.15)).toBe(true);
+    expect(anySegmentWithinKmOfPoint(segGrid, lat + 0.001, -179.9999, 0.15)).toBe(true);
+    expect(anySegmentWithinKmOfPoint(segGrid, lat + 0.001, 179.9999, 0.15)).toBe(true);
+    expect(anySegmentWithinKmOfPoint(segGrid, lat + 0.002, 180, 0.15)).toBe(false);
+    // The far side of the globe never sees it pass through lon 0.
+    expect(anySegmentWithinKmOfPoint(segGrid, lat + 0.001, 0, 0.15)).toBe(false);
+    expect(minGeometryDistanceKm(crossing.geometry, lat + 0.001, -179.9999)).toBeCloseTo(0.001 * KM_PER_DEG, 6);
+    expect(minGeometryDistanceKm(crossing.geometry, lat + 0.001, 0)).toBeGreaterThan(1000);
+  });
+
+  it("mode B: featuresWithinKmOfVertices crosses the seam through the bbox pre-reject", function () {
+    const features = [
+      { geometry: lineString([[-179.999, lat - 0.01], [-179.999, lat + 0.01]]) },
+      { geometry: lineString([[-170.0, lat - 0.01], [-170.0, lat + 0.01]]) },
+      { geometry: lineString([[179.999, lat - 0.01], [179.999, lat + 0.01]]) }
+    ];
+    const segGrid = segmentGridOf(features);
+    expect(featuresWithinKmOfVertices(segGrid, [{ lat: lat, lon: 179.9995 }], 0.15)).toEqual([0, 2]);
+    expect(featuresWithinKmOfVertices(segGrid, [{ lat: lat, lon: -179.9995 }], 0.15)).toEqual([0, 2]);
+    expect(featuresWithinKmOfVertices(segGrid, [{ lat: lat, lon: -170.0001 }], 0.15)).toEqual([1]);
+  });
+
+  it("control: the same shapes translated to -87 answer identically, so the wrap is inert away from the seam", function () {
+    const seamGrid = segmentGridOf([{ geometry: lineString([[-179.999, lat - 0.01], [-179.999, lat + 0.01]]) }]);
+    const plainGrid = segmentGridOf([{ geometry: lineString([[-87.001, lat - 0.01], [-87.001, lat + 0.01]]) }]);
+    for (const dLon of [0.002, 0.003, 0.0015, 0.0025]) {
+      expect(anySegmentWithinKmOfPoint(seamGrid, lat, -179.999 + dLon, 0.15))
+        .toBe(anySegmentWithinKmOfPoint(plainGrid, lat, -87.001 + dLon, 0.15));
+    }
+    const plainEnvelopes = buildLayerGrid([squareFeature("a", -87.005, lat, 0.01)]);
+    expect(queryGridByBounds(plainEnvelopes, { minLon: -87.03, minLat: lat, maxLon: -86.99, maxLat: lat + 0.01 }))
+      .toEqual([0]);
+    expect(queryGridByBounds(plainEnvelopes, { minLon: -87.03, minLat: lat, maxLon: -87.01, maxLat: lat + 0.01 }))
+      .toEqual([]);
+  });
+});
+
 // --- one composed pipeline test -------------------------------------------------
 
 describe("composed: one beach resolved against parks, coastline and a lake", function () {

@@ -63,7 +63,7 @@ worst cases, and the residual is bounded only by the cap and accepted.
 
 GRIB `HTSGW` is **metres**; feet are `metres * 3.28084` (`metersToFeet`, `src/geo.js`). GRIB
 `WIND` is **metres per second**; mph is `m/s * 2.2369362920544` (`metersPerSecondToMph`,
-`src/waveGrids.js`). `src/rules.js` thresholds are 2 ft yellow, 4 ft red, and 15/25 mph.
+`src/waveGrids.js`). `src/rules.js` thresholds are 2 ft yellow, 4 ft red (3 / 6 ft on `ocean` rows), and 15/25 mph.
 Handing it metres makes every sea state below 1.22 m read green sitewide; handing it m/s makes
 an actual 25 mph arrive as 11. Neither raises an error anywhere, which is why
 `test/buildWaveKv.test.js` pins both conversions directly. `windGustMph` is always null,

@@ -2,7 +2,7 @@
 // No fetch, no Date, no env, no client imports: structured inputs in, a complete
 // FlagEstimate out. This is the only place an estimated flag color is decided.
 
-export const RULES_VERSION = "1.6.0";
+export const RULES_VERSION = "1.7.0";
 
 // Flag color severity ordering. The raise-only water-quality floor (step 7)
 // compares an advisory's floor color against the already-decided color: it may
@@ -202,18 +202,35 @@ export function ripRiskColor(risk) {
   return null;
 }
 
-// The wave-height color thresholds (2 ft yellow, 4 ft red) live only here, so the
-// frontend colors per-hour forecast cells from the same numbers without restating
-// them. Returns "red"/"yellow"/"green" for a finite numeric height, null for
-// anything else.
-export function waveColorForHeight(waveHeightFt) {
+// Wave-height color thresholds in feet, keyed by beaches.water_class. They live
+// only here, so the frontend colors per-hour forecast cells and labels its bands
+// from the same numbers without restating them. The default set is the Great
+// Lakes flag convention and applies to great_lake, inland and unclassified rows;
+// the ocean set is provisional, chosen so a routine open-coast swell does not
+// read red while the rip-risk and High Surf products carry the regional hazard,
+// and is uncalibrated until flag_history holds ocean pairs (TODO.md).
+export const WAVE_THRESHOLDS_FT = {
+  "default": { yellow: 2, red: 4 },
+  "ocean": { yellow: 3, red: 6 }
+};
+
+// The threshold pair for a water class. Only "ocean" selects the ocean set;
+// every other value, including null, is the default.
+export function waveThresholdsForWaterClass(waterClass) {
+  return waterClass === "ocean" ? WAVE_THRESHOLDS_FT.ocean : WAVE_THRESHOLDS_FT["default"];
+}
+
+// Returns "red"/"yellow"/"green" for a finite numeric height against the water
+// class's thresholds, null for anything else.
+export function waveColorForHeight(waveHeightFt, waterClass) {
   if (typeof waveHeightFt !== "number" || !isFinite(waveHeightFt)) {
     return null;
   }
-  if (waveHeightFt >= 4) {
+  const thresholds = waveThresholdsForWaterClass(waterClass);
+  if (waveHeightFt >= thresholds.red) {
     return "red";
   }
-  if (waveHeightFt >= 2) {
+  if (waveHeightFt >= thresholds.yellow) {
     return "yellow";
   }
   return "green";
@@ -227,6 +244,9 @@ export function estimateFlag(inputs) {
   const alertDetails = source.alertDetails !== undefined ? source.alertDetails : null;
   const ripCurrentRisk = source.ripCurrentRisk !== undefined ? source.ripCurrentRisk : null;
   const waveHeightFt = source.waveHeightFt !== undefined ? source.waveHeightFt : null;
+  // beaches.water_class, read from D1 by both crons; it selects the step 3
+  // threshold set and is never sealed.
+  const waterClass = source.waterClass !== undefined ? source.waterClass : null;
   const windSpeedMph = source.windSpeedMph !== undefined ? source.windSpeedMph : null;
   const windGustMph = source.windGustMph !== undefined ? source.windGustMph : null;
   const sources = source.sources !== undefined ? source.sources : [];
@@ -286,19 +306,24 @@ export function estimateFlag(inputs) {
   }
 
   // Step 3: wave height from the NOAA wave grids, already in feet. Color comes
-  // from waveColorForHeight; the per-branch reason strings are built here.
+  // from waveColorForHeight against the water class's thresholds; the per-branch
+  // reason strings are built here and quote the threshold that decided.
   if (color === null && waveHeightFt !== null) {
     trigger = "wave-height";
-    const waveColor = waveColorForHeight(waveHeightFt);
+    const thresholds = waveThresholdsForWaterClass(waterClass);
+    const waveColor = waveColorForHeight(waveHeightFt, waterClass);
     if (waveColor === "red") {
       color = "red";
-      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above 4 ft)";
+      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " +
+        String(thresholds.red) + " ft)";
     } else if (waveColor === "yellow") {
       color = "yellow";
-      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above 2 ft)";
+      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " +
+        String(thresholds.yellow) + " ft)";
     } else {
       color = "green";
-      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (below 2 ft)";
+      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (below " +
+        String(thresholds.yellow) + " ft)";
     }
   }
 
