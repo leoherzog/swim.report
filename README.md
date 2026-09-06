@@ -376,14 +376,17 @@ classification (offline)](#discovery-and-classification-offline)).
   not share a cursor: `runFlagRecompute` rewrites `recompute_updated` to one timestamp for its
   whole run, which flattens the column, collapses a second cron's rotation to `id ASC`, and
   starves a fixed tail of the table.
-- `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 200 beaches per run with
-  `nws_zone` NULL get their NWS forecast zone and gridpoint URL from api.weather.gov/points. A
+- `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: beaches with `nws_zone` NULL get their
+  NWS forecast zone and gridpoint URL from api.weather.gov/points, 400 selected per run and as
+  many walked as fit a 780 s wall-clock deadline (about 1,300 spaced requests). A
   beach without `nws_zone` silently skips the alert and rip-current rules, so draining this
   queue fast is a safety property. A centroid over water answers with the *marine* zone
   (`LMZ221`, `ANZ050`), which no land product is issued for; that answer is never stored.
   Instead the cron re-probes 16 nudged coordinates (300 m and 1 km rings) and stores the first
-  land zone and its grid URL, capped at 20 such beaches per run so the extra requests fit the
-  wall clock; an unrecoverable point fails like any other. Migration 0013 requeued every row
+  land zone and its grid URL; nearly every ocean centroid takes this path at a mean of ~3
+  probes, which is why the run is bounded by time rather than by count. A row the deadline
+  leaves unreached is untouched and re-selects; an unrecoverable point fails like any other.
+  Migration 0013 requeued every row
   that already held a marine id. Queue order is fewest failed attempts first, then
   `last_viewed DESC`, then `RANDOM()`. Failures bump `enrichment_attempts` (migration 0003);
   after 5 a row is parked, so permanently-404ing non-US points cannot starve US beaches.

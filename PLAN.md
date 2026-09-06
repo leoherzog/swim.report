@@ -2925,24 +2925,28 @@ costs an enrichment day.
 
 ### runNwsEnrichment (4x daily: "17 3,9,15,21 * * *")
 
-Constants: NWS_ENRICHMENT_LIMIT = 200 (per run — up to 800 points/day),
-NWS_ENRICHMENT_MAX_ATTEMPTS = 5, NWS_NUDGE_BEACH_LIMIT = 20.
+Constants: NWS_ENRICHMENT_LIMIT = 400 (rows selected per run), NWS_ENRICHMENT_DEADLINE_MS =
+780000 (the binding limit), NWS_ENRICHMENT_MAX_ATTEMPTS = 5.
 
 A beach with nws_zone NULL silently skips rules steps 1-2 (alerts, SRF rip risk) in
 runFlagRecompute, so draining this queue quickly is a safety property, not just throughput.
 api.weather.gov publishes no numeric rate limit — it answers 429 with Retry-After when
-unhappy — and at most 200 + 20 × 16 = 520 sequential polite requests per run, four times a
-day, is well within reasonable use (~680 s at 300 ms spacing plus 1 s latency, inside the
-900 s ceiling; 200 nudged beaches would not fit).
+unhappy — and ~1,300 sequential polite requests per run (780 s at the measured ~0.6 s per
+request: 300 ms spacing plus latency), four times a day, is well within reasonable use.
+Nearly every ocean centroid answers with a marine zone and costs a mean 3.25 nudge probes on
+top of its own lookup, so a run drains roughly 300 marine beaches; a count cap would either
+waste the budget on land hits or blow the ceiling on marine ones, which is why time, not
+count, bounds the run.
 
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < 5
-ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 200; for each,
-fetchPointMetadata(lat, lon) sequentially. A response whose nwsZone is a marine zone
+ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 400; for each,
+until the deadline (makeDeadline from the run's start, checked before every beach and every
+probe), fetchPointMetadata(lat, lon) sequentially. A response whose nwsZone is a marine zone
 (isMarineZoneId: a centroid over water) is never stored: the loop re-probes landProbePoints
 (16 nudged coordinates, ENRICHMENT_REQUEST_SPACING_MS before each) and stores the first land
-response's nwsZone AND nwsGridUrl; no land hit is a failure below; and once
-NWS_NUDGE_BEACH_LIMIT beaches have entered the nudge path in one run, further marine beaches
-are left untouched (no write, no bump, counted as marineDeferred) and re-select next run. On
+response's nwsZone AND nwsGridUrl; no land hit is a failure below. Rows the deadline leaves
+unreached, and a beach it interrupts mid-probe, are left untouched (no write, no bump,
+counted as deferred) and re-select next run. On
 success UPDATE beaches SET nws_zone = ?, nws_grid_url = ? WHERE id = ?; on failure
 (fetchPointMetadata returns null or throws, or every probe is marine or null)
 UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?, issued via
@@ -2956,8 +2960,8 @@ within a tied bucket no id-prefix class of beaches is ever drained after another
 attempts cap stops permanent failures — non-US points swept in by the discovery REGIONS
 that api.weather.gov 404s forever — from occupying the batch and starving US beaches; after
 5 attempts a row is parked and no longer requeued. The per-run summary log reports
-attempted / enriched / failures / marineRecovered / marineUnrecovered / marineDeferred /
-parked (nws_zone IS NULL AND enrichment_attempts >= 5). Migration 0013 sent every row whose
+selected / attempted / enriched / failures / marineRecovered / marineUnrecovered / deferred /
+elapsedMs / parked (nws_zone IS NULL AND enrichment_attempts >= 5). Migration 0013 sent every row whose
 nws_zone carried a marine id back through this path.
 
 ### runEcccEnrichment (4x daily: "29 4,10,16,22 * * *")

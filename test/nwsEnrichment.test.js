@@ -1,6 +1,6 @@
 // runNwsEnrichment (cron "17 3,9,15,21 * * *"): beaches with nws_zone NULL
-// get their forecast zone + gridpoint URL from api.weather.gov/points, 200 per
-// run; a null lookup (404, missing fields, or a swallowed network throw)
+// get their forecast zone + gridpoint URL from api.weather.gov/points, 400
+// selected per run and walked until the run deadline; a null lookup (404, missing fields, or a swallowed network throw)
 // bumps enrichment_attempts so permanently-failing points eventually park,
 // and one bad beach never aborts the rest of the batch.
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -124,6 +124,7 @@ describe("landProbePoints", function () {
 describe("runNwsEnrichment", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("re-probes a marine forecastZone and stores the first land probe's zone and grid URL", async function () {
@@ -187,31 +188,72 @@ describe("runNwsEnrichment", function () {
     expect(bumps.map(function (c) { return c.args[0]; })).toEqual(["osm-node-1"]);
   });
 
-  it("caps the nudge path at 20 beaches per run and leaves the rest untouched", async function () {
-    const marineGrid = "https://api.weather.gov/gridpoints/GRR/44,41";
+  // Slows every stubbed points fetch so a tiny run deadline expires after the
+  // first request, without faking timers.
+  function delayFetch(ms) {
+    const inner = globalThis.fetch;
+    vi.stubGlobal("fetch", function () {
+      const args = arguments;
+      return new Promise(function (resolve) { setTimeout(resolve, ms); })
+        .then(function () { return inner.apply(null, args); });
+    });
+  }
+
+  it("stops walking the selection when the run deadline expires and leaves the rest untouched", async function () {
+    const landGrid = "https://api.weather.gov/gridpoints/GRR/43,41";
     const byUrl = {};
     const rows = [];
-    for (let i = 0; i < 21; i++) {
+    for (let i = 0; i < 3; i++) {
       const lat = 42.0 + i * 0.01;
       rows.push({ id: "osm-node-" + String(i), lat: lat, lon: -86.288 });
-      byUrl[pointsUrl(lat, -86.288)] = pointsPayload("LMZ221", marineGrid);
+      byUrl[pointsUrl(lat, -86.288)] = pointsPayload("MIZ071", landGrid);
     }
     const fetchState = stubPointsFetch(byUrl);
-
+    delayFetch(5);
     const made = makeEnrichmentEnv(rows);
+    made.env.NWS_ENRICHMENT_DEADLINE_MS = 1;
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (msg) { logs.push(String(msg)); });
     await runNwsCron(made.env);
 
-    // 20 nudged beaches burn 17 requests each; the 21st gets its centroid
-    // lookup only, no probes, no write and no attempt bump.
-    expect(fetchState.urls.length).toBe(20 * 17 + 1);
-    expect(made.runCalls.some(function (c) {
-      return c.sql.indexOf("SET nws_zone") !== -1;
-    })).toBe(false);
-    const bumps = made.runCalls.filter(function (c) {
-      return c.sql.indexOf("enrichment_attempts + 1") !== -1;
+    // The first beach is inside the deadline and stores; the check before the
+    // second sees it expired, so rows 2 and 3 get no request, no write, no bump.
+    expect(fetchState.urls).toEqual([pointsUrl(42.0, -86.288)]);
+    const zoneUpdates = made.runCalls.filter(function (c) {
+      return c.sql.indexOf("SET nws_zone = ?1, nws_grid_url = ?2") !== -1;
     });
-    expect(bumps.length).toBe(20);
-    expect(bumps.some(function (c) { return c.args[0] === "osm-node-20"; })).toBe(false);
+    expect(zoneUpdates.map(function (c) { return c.args[2]; })).toEqual(["osm-node-0"]);
+    expect(made.runCalls.some(function (c) {
+      return c.sql.indexOf("enrichment_attempts + 1") !== -1;
+    })).toBe(false);
+    const summary = logs.find(function (l) { return l.indexOf("nws enrichment complete") !== -1; });
+    expect(summary).toContain("selected=3 attempted=1 enriched=1");
+    expect(summary).toContain("deferred=2");
+  });
+
+  it("leaves a beach the deadline interrupts mid-probe untouched, with no bump", async function () {
+    const marineGrid = "https://api.weather.gov/gridpoints/GRR/44,41";
+    const probes = landProbePoints(42.401, -86.288);
+    const byUrl = {};
+    byUrl[pointsUrl(42.401, -86.288)] = pointsPayload("LMZ221", marineGrid);
+    for (let i = 0; i < probes.length; i++) {
+      byUrl[pointsUrl(probes[i].lat, probes[i].lon)] = pointsPayload("LMZ221", marineGrid);
+    }
+    const fetchState = stubPointsFetch(byUrl);
+    delayFetch(5);
+    const made = makeEnrichmentEnv([{ id: "osm-node-1", lat: 42.401, lon: -86.288 }]);
+    made.env.NWS_ENRICHMENT_DEADLINE_MS = 1;
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (msg) { logs.push(String(msg)); });
+    await runNwsCron(made.env);
+
+    // The centroid lookup answers marine after the deadline has passed, so no
+    // probe fires and the row keeps its attempts for the next run.
+    expect(fetchState.urls.length).toBe(1);
+    expect(made.runCalls.length).toBe(0);
+    const summary = logs.find(function (l) { return l.indexOf("nws enrichment complete") !== -1; });
+    expect(summary).toContain("attempted=0");
+    expect(summary).toContain("deferred=1");
   });
 
   it("stamps nws_zone + nws_grid_url from a successful points lookup", async function () {
@@ -280,7 +322,7 @@ describe("runNwsEnrichment", function () {
     expect(bumps.map(function (c) { return c.args[0]; })).toEqual(["osm-node-1"]);
   });
 
-  it("selects candidates attempts-first, hot last_viewed tiebreak, RANDOM() last, capped at 200", async function () {
+  it("selects candidates attempts-first, hot last_viewed tiebreak, RANDOM() last, capped at 400", async function () {
     stubPointsFetch({});
     const made = makeEnrichmentEnv([]);
     await runNwsCron(made.env);
@@ -291,7 +333,7 @@ describe("runNwsEnrichment", function () {
     expect(selects.length).toBe(1);
     expect(selects[0]).toContain("enrichment_attempts < 5");
     expect(selects[0]).toContain("ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM()");
-    expect(selects[0]).toContain("LIMIT 200");
+    expect(selects[0]).toContain("LIMIT 400");
     // The attempts key MUST stay first (it is the parking guarantee);
     // last_viewed is only a demand-aware tiebreak, and RANDOM() stays last so
     // ties among equally-cold rows still shuffle.

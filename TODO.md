@@ -236,9 +236,11 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 - **Marine-zone `nws_zone` rows are requeued, not yet re-drained.** Migration 0013 NULLed
   `nws_zone` on every row whose id carried a marine prefix (336 at the time) and
   `runNwsEnrichment` now rejects a marine `forecastZone` and re-probes 16 nudged points for the
-  land zone, 20 such beaches per run. At four runs a day that queue takes 4-5 days, during
-  which those rows read `alertsCheckable` false (marine_zone alone no longer counts) and carry
-  the alerts-unavailable caveat, and skip SRF until `nws_grid_url` is restored. Watch
+  land zone. The first coastal run showed 199 of 200 selected rows answering marine, at a mean
+  of 3.25 probes each (all 20 recovered), so the run is bounded by a 780 s deadline rather than
+  a per-run count: ~300 marine beaches per run, ~5-6 days for the 6,465-row coastal queue,
+  during which those rows read `alertsCheckable` false (marine_zone alone no longer counts),
+  carry the alerts-unavailable caveat, and skip SRF until `nws_grid_url` is restored. Watch
   `marineUnrecovered=` in the completion log: a beach whose 1 km ring finds no land zone parks
   at the attempts cap, and a large count means the rings need a third radius.
 - **`rules.js` step 3's else branch still has no finite check**, so any future caller passing a
@@ -299,11 +301,12 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   - **Seed the ocean wave floors by hand.** `data/wave-floors.json` is keyed by the grid set,
     not by `REGIONS`, so no refusal prompts for `noaa_gfswave` / `noaa_gfswave_arctic`; a cycle
     resolving 3 ocean beaches out of 20,000 would publish until they are seeded.
-  - **Enrichment drain rate.** `NWS_ENRICHMENT_LIMIT = 200` × 4 runs is 800 beaches a day,
-    about eight days for the 6,465 rows the coastal set added, and a beach without `nws_zone`
-    is alert-blind with a caveat. The next knob is the cron cadence (a five-file edit), bounded
-    by api.weather.gov politeness; watch the enrichment log for 429s. The demand tiebreak
-    drains viewed beaches first.
+  - **Enrichment drain rate.** Each run walks the 400 rows it selects until
+    `NWS_ENRICHMENT_DEADLINE_MS` (780 s, ~1,300 requests at the measured ~0.6 s each), about
+    300 marine beaches, so 4 runs a day drain the 6,465-row coastal queue in 5-6 days; a beach
+    without `nws_zone` is alert-blind with a caveat meanwhile. The next knob is the cron
+    cadence (a five-file edit), bounded by api.weather.gov politeness; watch the enrichment
+    log for 429s. The demand tiebreak drains viewed beaches first.
   - **Antimeridian wrap** in `src/layerGrid.js` before any box west of 180° (Attu, Shemya).
   - **Excluded by choice**: Mexico (no alert source; every row would burn five 404s ahead of US
     rows in the shared enrichment queue), Labrador and Hudson Bay (no wave grid north of
