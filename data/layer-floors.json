@@ -210,7 +210,7 @@
         "",
         "coastline is a real floor now: 46716 natural=coastline ways, the layer every saltwater row classifies through. parks-line, beaches-line, water-line and other-relations measured single or double digits rather than zero, so their floors are small but no longer vacuous.",
         "",
-        "Puerto Rico + US Virgin Islands measured zero on every layer because the us Geofabrik extract does not carry them; the box is seeded null, not zero, so the build neither refuses on it nor pretends it was measured. Seed it from the first build after the puerto-rico and us-virgin-islands extracts join the download loop.",
+        "Puerto Rico + US Virgin Islands measured zero on the seeding build because the us Geofabrik extract does not carry them; its floors come from build 20260906T003648Z-445753f, the first with the us/puerto-rico and us/us-virgin-islands sub-extracts in the download loop.",
         "",
         "Growth against the previous Great Lakes set warned as expected (beaches-point 12.7x, beaches-polygon 5.4x, parks-polygon 4.9x, water-polygon 5.1x); the discovery batch's own rails decide what that growth does to D1."
       ],
@@ -541,12 +541,12 @@
           "other-relations": 0
         },
         "Puerto Rico + US Virgin Islands": {
-          "beaches": null,
-          "parks-polygon": null,
-          "parks-line": null,
-          "coastline": null,
-          "water": null,
-          "other-relations": null
+          "beaches": 367,
+          "parks-polygon": 330,
+          "parks-line": 0,
+          "coastline": 703,
+          "water": 697,
+          "other-relations": 0
         }
       }
     }
