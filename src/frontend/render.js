@@ -522,32 +522,19 @@ function subtitleName(beach) {
   return null;
 }
 
-// Composes the detail-page .beach-subtitle string from the beach's own name (the
-// park-first subtitle) plus an optional NDBC water-temperature fragment. Pure —
-// nowIso is passed in; no fetch, no Date. The reading is display-only and never
-// touches the flag color. The temp fragment is included only when waterTemp is a
-// non-null object with a finite tempF and its observedIso parses to within
-// WATER_TEMP_STALE_MS of nowIso; a missing or unparseable observedIso omits the
-// temp rather than showing a stale value. Returns the final subtitle string, or null when neither
-// piece is present (the caller's guard then renders no <p class="beach-subtitle">).
-function beachSubtitle(beach, waterTemp, nowIso) {
-  const base = subtitleName(beach);
-  let temp = null;
+// The detail page's water-temperature fragment ("72°F Water"), rendered on the
+// coordinates line. Pure — nowIso is passed in; no fetch, no Date. The reading is
+// display-only and never touches the flag color. Returns the fragment only when
+// waterTemp is a non-null object with a finite tempF and its observedIso parses to
+// within WATER_TEMP_STALE_MS of nowIso; a missing or unparseable observedIso yields
+// null rather than a stale value.
+function waterTempLabel(waterTemp, nowIso) {
   if (waterTemp && typeof waterTemp === "object" &&
       typeof waterTemp.tempF === "number" && isFinite(waterTemp.tempF) &&
       !isStale(nowIso, waterTemp.observedIso, WATER_TEMP_STALE_MS) &&
       typeof waterTemp.observedIso === "string" &&
       !Number.isNaN(Date.parse(waterTemp.observedIso))) {
-    temp = String(Math.round(waterTemp.tempF)) + "°F Water";
-  }
-  if (base && temp) {
-    return base + " • " + temp;
-  }
-  if (base) {
-    return base;
-  }
-  if (temp) {
-    return temp;
+    return String(Math.round(waterTemp.tempF)) + "°F Water";
   }
   return null;
 }
@@ -1025,16 +1012,23 @@ export function renderDetailPage(data) {
   const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null,
     FLAG_ICON_LABELS[normalizeColor(titleColor)]);
 
-  // The park-first beach name plus, when fresh, an NDBC water-temp fragment. The
-  // guard keeps the <p> off the page when the subtitle is null.
-  const subtitle = beachSubtitle(beach, waterTemp, nowIso);
+  // The park-first beach name, only when it differs from the title. The guard
+  // keeps the <p> off the page when there is none.
+  const subtitle = subtitleName(beach);
   const subtitleHtml = subtitle ?
     ("<p class=\"beach-subtitle\">" + escapeHtml(subtitle) + "</p>") : "";
 
   // Coordinates link out to OpenStreetMap (consistent with the footer's OSM
-  // attribution), demoted to caption size.
+  // attribution), demoted to caption size. A fresh NDBC water temp shares the
+  // line ("43.7842, -86.4400 • 71°F Water") so it never sits as a lone subtitle.
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
+  const temp = waterTempLabel(waterTemp, nowIso);
+  const tempHtml = temp ? (" • " + escapeHtml(temp)) : "";
+  const metaHtml = "<p class=\"beach-meta wa-caption-s\"><a class=\"coords-link\" href=\"" +
+    escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
+    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a>" +
+    tempHtml + "</p>";
 
   // The identity block sits in its own tight nested stack so the outer
   // app-main stack's wa-gap-l separates the whole header from the cards below.
@@ -1046,9 +1040,7 @@ export function renderDetailPage(data) {
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
-    "<p class=\"wa-caption-s\"><a class=\"coords-link\" href=\"" + escapeHtml(osmHref) +
-    "\" rel=\"noopener noreferrer\">" +
-    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>" +
+    metaHtml +
     "</div>";
 
   const officialHtml = renderOfficialCard(official, nowIso);

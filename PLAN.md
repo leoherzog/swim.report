@@ -293,11 +293,11 @@ cap is tight because a temperature is displayed as a precise number next to the 
 both cross-lake attribution (Erie's central basin is ~57 km wide) and summer upwelling (the
 thermal front sits 5-15 km offshore) bound how far a reading may travel. Read by
 handleDetail and passed to renderDetailPage, which appends a fresh reading to the
-.beach-subtitle ("Ottawa Beach • 72°F Water") only when tempF is finite and observedIso is
+coordinates line .beach-meta ("42.7742, -86.2115 • 72°F Water") only when tempF is finite and observedIso is
 within WATER_TEMP_STALE_MS (12 h) of now. It never feeds src/rules.js: it colors no flag and
 does not bump RULES_VERSION. Written only when the station fetch and parse produced a valid
 recent reading; a null (winter gap, all-"MM", stale, 404) writes nothing, so the old key
-expires on its own and the subtitle omits the temp fragment. It is the only KV family the
+expires on its own and the coordinates line omits the temp fragment. It is the only KV family the
 Worker writes on the wave side, and is independent of the offline wave cycle in every
 respect: a different upstream, a per-station observedIso time basis rather than one
 cycle-wide valid time, and no path into a flag color.
@@ -619,8 +619,8 @@ Binding name: FLAGS (single namespace for both key families).
 - Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly
   water-temperature cron with { expirationTtl: 25200 }, only when the beach's nearest
   CAP_WATER_TEMP station within 25 km produced a valid recent reading. Read only by the
-  detail route and passed to renderDetailPage as the .beach-subtitle temp fragment.
-  Display-only — never feeds src/rules.js. Absent key → the subtitle omits the fragment.
+  detail route and passed to renderDetailPage as the .beach-meta temp fragment.
+  Display-only — never feeds src/rules.js. Absent key → the coordinates line omits the fragment.
   Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential per-beach
   await env.FLAGS.put (section 7, "Run budgets and write pools").
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
@@ -1273,7 +1273,7 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
 The water-temperature half of the NDBC client, and the only module under
 src/waveSources/ — a directory name that predates the wave lane's removal. Read by
 runWaterTempRefresh (section 7) and nothing else. Display-only: its output reaches the
-detail page's .beach-subtitle and never src/rules.js.
+detail page's .beach-meta coordinates line and never src/rules.js.
 
     export const NDBC_WATER_TEMP_MAX_DISTANCE_KM  // 25 km cap on station attribution
     export const NDBC_WATER_TEMP_MAX_OBS_AGE_MS   // 12 h freshness window

@@ -1,8 +1,9 @@
 // test/renderSubtitle.test.js
-// Covers the detail-page .beach-subtitle composition (src/frontend/render.js),
-// exercised through renderDetailPage: the park-first beach name plus an optional
-// NDBC water-temperature fragment ("Ottawa Beach • 72°F Water"). The temp is
-// display-only, never a flag input, and is shown only when fresh.
+// Covers the detail-page header composition (src/frontend/render.js), exercised
+// through renderDetailPage: the park-first beach name in .beach-subtitle, and an
+// optional NDBC water-temperature fragment on the coordinates line
+// ("43.7842, -86.4400 • 72°F Water"). The temp is display-only, never a flag
+// input, and is shown only when fresh.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
@@ -41,47 +42,58 @@ function subtitleText(html) {
   return m ? m[1] : null;
 }
 
-describe("beach-subtitle composition (renderDetailPage)", function () {
-  it("renders base name and fresh water temp joined by a bullet", function () {
-    // Distinct park + beach name -> base is the beach's own name.
+// The text that follows the coordinates link inside .beach-meta, "" when the
+// line carries only the coordinates.
+function metaTail(html) {
+  const m = html.match(/<p class="beach-meta wa-caption-s"><a class="coords-link"[^>]*>.*?<\/a>([^<]*)<\/p>/);
+  return m ? m[1] : null;
+}
+
+describe("beach header composition (renderDetailPage)", function () {
+  it("keeps the subtitle to the beach name and puts the temp on the coordinates line", function () {
+    // Distinct park + beach name -> subtitle is the beach's own name.
     const html = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       waterTempWith({})
     );
-    expect(subtitleText(html)).toBe("Ottawa Beach • 72°F Water");
+    expect(subtitleText(html)).toBe("Ottawa Beach");
+    expect(metaTail(html)).toBe(" • 72°F Water");
   });
 
   it("rounds a fractional tempF to the nearest whole degree", function () {
     // parseNdbcWaterTempF always yields a fractional tempF (e.g. 24.6 C -> 76.28 F),
-    // so the subtitle must round it — 72.6 F -> "73°F Water", never "72.6°F Water".
+    // so the label must round it — 72.6 F -> "73°F Water", never "72.6°F Water".
     const html = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       waterTempWith({ tempF: 72.6 })
     );
-    expect(subtitleText(html)).toBe("Ottawa Beach • 73°F Water");
+    expect(metaTail(html)).toBe(" • 73°F Water");
   });
 
-  it("renders temp only when the beach has no distinct subtitle name", function () {
-    // park_name null -> subtitleName is null, so only the temp fragment shows.
+  it("renders the temp on the coordinates line with no subtitle when there is no park", function () {
+    // park_name null -> subtitleName is null, so no subtitle paragraph at all.
     const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, waterTempWith({}));
-    expect(subtitleText(html)).toBe("72°F Water");
+    expect(subtitleText(html)).toBe(null);
+    expect(metaTail(html)).toBe(" • 72°F Water");
   });
 
-  it("renders base only when there is no water temp", function () {
+  it("renders the coordinates alone when there is no water temp", function () {
     const html = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       null
     );
     expect(subtitleText(html)).toBe("Ottawa Beach");
+    expect(metaTail(html)).toBe("");
   });
 
-  it("omits a stale water temp, keeping the base name alone", function () {
+  it("omits a stale water temp", function () {
     // observedIso 24 h before NOW_ISO -> older than WATER_TEMP_STALE_MS (12 h).
     const html = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       waterTempWith({ observedIso: "2026-07-04T12:00:00.000Z" })
     );
-    expect(subtitleText(html)).toBe("Ottawa Beach");
+    expect(metaTail(html)).toBe("");
+    expect(html.indexOf("°F Water")).toBe(-1);
   });
 
   it("omits the temp when observedIso is missing or unparseable", function () {
@@ -89,18 +101,18 @@ describe("beach-subtitle composition (renderDetailPage)", function () {
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       waterTempWith({ observedIso: undefined })
     );
-    expect(subtitleText(missing)).toBe("Ottawa Beach");
+    expect(metaTail(missing)).toBe("");
     const bad = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       waterTempWith({ observedIso: "not-a-date" })
     );
-    expect(subtitleText(bad)).toBe("Ottawa Beach");
+    expect(metaTail(bad)).toBe("");
   });
 
-  it("renders no subtitle paragraph when neither base nor temp is present", function () {
-    // No distinct name and no water temp -> the <p class=\"beach-subtitle\"> is absent.
+  it("renders no subtitle paragraph when the beach has no distinct name", function () {
     const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, null);
     expect(subtitleText(html)).toBe(null);
     expect(html.indexOf("class=\"beach-subtitle\"")).toBe(-1);
+    expect(metaTail(html)).toBe("");
   });
 });

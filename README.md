@@ -367,7 +367,7 @@ classification (offline)](#discovery-and-classification-offline)).
   the WTMP water temperature from the nearest station able to serve that reading (see "Water
   temperature stations"), deduped by station id so each file is fetched once and fanned to
   every beach sharing it, written at a 7 h TTL. The reading is **display-only**: the detail
-  page appends it to the beach subtitle ("Ottawa Beach • 72°F Water") when fresh, but it never
+  page appends it to the coordinates line ("42.7742, -86.2115 • 72°F Water") when fresh, but it never
   feeds `src/rules.js` and cannot change a flag color. A beach whose fetch merely failed is
   left untouched so its last-good KV survives. The run is bounded against the 900 s ceiling: no
   new upstream work starts after T+480 s, and the write pool yields at T+840 s instead of being
@@ -443,7 +443,7 @@ NDBC's `realtime2` endpoint, selected with `nearestWaterTempStation(lat, lon)`:
 
 | Capability | Constant | Stations | Cap | Consumer |
 | --- | --- | --- | --- | --- |
-| Water temperature | `CAP_WATER_TEMP` | 72 | `NDBC_WATER_TEMP_MAX_DISTANCE_KM` = 25 km | detail-page subtitle — display only |
+| Water temperature | `CAP_WATER_TEMP` | 72 | `NDBC_WATER_TEMP_MAX_DISTANCE_KM` = 25 km | detail-page coordinates line — display only |
 
 Station admission is on a water-temperature criterion, not a wave one. That distinction is
 load-bearing: a wave criterion ("reports standard-met WVHT") would exclude the entire NOAA
