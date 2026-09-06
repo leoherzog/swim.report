@@ -299,10 +299,11 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   - **Seed the ocean wave floors by hand.** `data/wave-floors.json` is keyed by the grid set,
     not by `REGIONS`, so no refusal prompts for `noaa_gfswave` / `noaa_gfswave_arctic`; a cycle
     resolving 3 ocean beaches out of 20,000 would publish until they are seeded.
-  - **Enrichment drain rate.** `NWS_ENRICHMENT_LIMIT = 75` × 4 runs is 300 beaches a day, and a
-    beach without `nws_zone` is alert-blind with a caveat. Tens of thousands of new coastal rows
-    take months at that rate; the knobs are the limit and the cron cadence (a five-file edit),
-    bounded by api.weather.gov politeness, and the demand tiebreak drains viewed beaches first.
+  - **Enrichment drain rate.** `NWS_ENRICHMENT_LIMIT = 200` × 4 runs is 800 beaches a day,
+    about eight days for the 6,465 rows the coastal set added, and a beach without `nws_zone`
+    is alert-blind with a caveat. The next knob is the cron cadence (a five-file edit), bounded
+    by api.weather.gov politeness; watch the enrichment log for 429s. The demand tiebreak
+    drains viewed beaches first.
   - **Antimeridian wrap** in `src/layerGrid.js` before any box west of 180° (Attu, Shemya).
   - **Excluded by choice**: Mexico (no alert source; every row would burn five 404s ahead of US
     rows in the shared enrichment queue), Labrador and Hudson Bay (no wave grid north of
@@ -314,27 +315,28 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   - **Homepage list and map.** `GET /` is capped at 100 rows with no pagination, and the map
     directory's practical ceiling is ~40k features (below).
   The Worker-side constraint that predates all of this:
-  - **`MAX_BEACHES_PER_RUN = 1200` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
+  - **`MAX_BEACHES_PER_RUN = 3000` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
     constraint, not two. Hot rows are covered every run; a cold row waits
     `ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot))` runs for its turn, and the flag
     TTL must span that wait plus the runs killed before their trailing `recompute_updated`
-    batch commits: `FLAG_TTL_SECONDS / 3600 >= that wait + 2`. At 1102 flag-worthy rows
-    (1771 total; 669 are hidden as inland) and 471 hot, the wait is one run and the TTL
-    absorbs five lost runs, so missing a turn no longer costs a beach its flag. A run
+    batch commits: `FLAG_TTL_SECONDS / 3600 >= that wait + 2`. At 7,219 flag-worthy rows and
+    ~520 hot the wait is three runs and the TTL absorbs two lost runs; at 1200 the wait was
+    ten and half the cold coast read gray between turns. The 1,102-row run took about a
+    minute of wall clock, so 3000 budgets roughly three; the next raise wants the run's
+    own timestamps read first. A run
     truncated at the 900 s ceiling is a different failure and the TTL only delays it:
     neither write pool takes a deadline and the `recompute_updated` batch is
     all-or-nothing, so an hourly truncation dies at the same point in the same selection
     order and the same tail is never written. The residual is
-    growth: at the observed 43 % hot fraction the inequality fails near 2100 flag-worthy
-    rows, and above roughly 2810 the hot tier alone fills the run and the cold tier gets no
-    slots at all, which no TTL rescues. The hourly summary logs `oldest=`, the oldest cursor
+    growth: at ~520 hot the inequality fails near 12,900 flag-worthy rows, and once the hot
+    tier alone fills the run the cold tier gets no slots at all, which no TTL rescues. The hourly summary logs `oldest=`, the oldest cursor
     stamp the run selected, so the wait is readable from the observability API. Past those
     sizes the knob is a larger `MAX_BEACHES_PER_RUN`, bounded by the 900 s wall clock on a
     cron that passes no deadline to either write pool, or real pagination.
     The alerts refresh cron inherits that reach rather than extending it: a seal and a
     standing `flag:` value exist only for the rows a run covered, so
-    `MAX_BEACHES_PER_RUN × (FLAG_TTL_SECONDS / 3600)` beaches — about 8,400 — can hold a live
-    seal at any time. At 1102 rows that is the whole table; at 10k it is most of it; past that
+    `MAX_BEACHES_PER_RUN × (FLAG_TTL_SECONDS / 3600)` beaches — 21,000 — can hold a live
+    seal at any time. At 7,219 rows that is the whole table; past 21k
     real pagination is the prerequisite, and `skipNoSeal=` in the refresh cron's completion log
     is the number that reports it.
 

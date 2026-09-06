@@ -1,5 +1,5 @@
 // runNwsEnrichment (cron "17 3,9,15,21 * * *"): beaches with nws_zone NULL
-// get their forecast zone + gridpoint URL from api.weather.gov/points, 75 per
+// get their forecast zone + gridpoint URL from api.weather.gov/points, 200 per
 // run; a null lookup (404, missing fields, or a swallowed network throw)
 // bumps enrichment_attempts so permanently-failing points eventually park,
 // and one bad beach never aborts the rest of the batch.
@@ -280,7 +280,7 @@ describe("runNwsEnrichment", function () {
     expect(bumps.map(function (c) { return c.args[0]; })).toEqual(["osm-node-1"]);
   });
 
-  it("selects candidates attempts-first, hot last_viewed tiebreak, RANDOM() last, capped at 75", async function () {
+  it("selects candidates attempts-first, hot last_viewed tiebreak, RANDOM() last, capped at 200", async function () {
     stubPointsFetch({});
     const made = makeEnrichmentEnv([]);
     await runNwsCron(made.env);
@@ -291,7 +291,7 @@ describe("runNwsEnrichment", function () {
     expect(selects.length).toBe(1);
     expect(selects[0]).toContain("enrichment_attempts < 5");
     expect(selects[0]).toContain("ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM()");
-    expect(selects[0]).toContain("LIMIT 75");
+    expect(selects[0]).toContain("LIMIT 200");
     // The attempts key MUST stay first (it is the parking guarantee);
     // last_viewed is only a demand-aware tiebreak, and RANDOM() stays last so
     // ties among equally-cold rows still shuffle.

@@ -316,7 +316,7 @@ failure in one job never starves another. Beach discovery, water-body classifica
 the `marine_zone` derivation are not in this list — they run offline (see [Discovery and
 classification (offline)](#discovery-and-classification-offline)).
 
-- `7 * * * *` (hourly) — `runFlagRecompute`: reads up to `MAX_BEACHES_PER_RUN = 1200` beaches
+- `7 * * * *` (hourly) — `runFlagRecompute`: reads up to `MAX_BEACHES_PER_RUN = 3000` beaches
   from D1, ordered hot-first then oldest-`recompute_updated`-first. A beach viewed within
   `HOT_VIEW_WINDOW_MS` (7 days, tracked by the `last_viewed` demand stamp) is covered every
   run; cold rows rotate through the remaining budget, and the `flag:` key's 25200 second TTL
@@ -372,7 +372,7 @@ classification (offline)](#discovery-and-classification-offline)).
   not share a cursor: `runFlagRecompute` rewrites `recompute_updated` to one timestamp for its
   whole run, which flattens the column, collapses a second cron's rotation to `id ASC`, and
   starves a fixed tail of the table.
-- `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 75 beaches per run with
+- `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: up to 200 beaches per run with
   `nws_zone` NULL get their NWS forecast zone and gridpoint URL from api.weather.gov/points. A
   beach without `nws_zone` silently skips the alert and rip-current rules, so draining this
   queue fast is a safety property. A centroid over water answers with the *marine* zone

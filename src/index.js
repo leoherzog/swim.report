@@ -60,9 +60,14 @@ import { makeDeadline, runPool } from "./pool.js";
 // HOT_VIEW_WINDOW_MS, logged as hot=): hot rows are covered every run, so at
 // hot >= this the cold tier gets no slots and starves whatever the TTL is. The
 // run logs oldest=, the oldest cursor stamp it selected, so the left side of
-// that inequality is measurable rather than assumed. Real pagination is still
-// required for nationwide scale-out (TODO.md).
-const MAX_BEACHES_PER_RUN = 1200;
+// that inequality is measurable rather than assumed. At 7,219 flag-worthy rows
+// and ~520 hot, 3000 gives the cold tier ~2,480 slots and a three-run wait
+// against the seven-hour TTL; 1200 gave a ten-run wait, so half the cold coast
+// read gray between turns. The 1,102-row run took about a minute of wall
+// clock, so this budgets roughly three; read oldest= and the run's own
+// timestamps before raising it again. Real pagination is still required past
+// what one run can walk (TODO.md).
+const MAX_BEACHES_PER_RUN = 3000;
 // HOT_VIEW_WINDOW_MS is imported from ./demandWindow.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry module
 // and fails the Worker at startup. See demandWindow.js.
@@ -188,19 +193,21 @@ const ALERT_PARSE_DROP_MAX = 5;
 // Each cron is single-writer of its own column.
 const ROTATION_COLUMNS = { flag: "recompute_updated", wave: "wave_updated" };
 // Per run of the enrichment cron, 4x daily. api.weather.gov publishes no numeric
-// rate limit (it 429s with Retry-After when unhappy); 75 sequential polite
-// requests per run drains a freshly discovered region in days, not weeks.
-const NWS_ENRICHMENT_LIMIT = 75;
+// rate limit (it 429s with Retry-After when unhappy); 200 spaced polite requests
+// per run, 800 a day, drains a freshly discovered coast in about a week, where
+// 75 took three. A beach without nws_zone is alert-blind, so the drain rate is
+// a safety property; watch the enrichment log for 429s before raising it.
+const NWS_ENRICHMENT_LIMIT = 200;
 // Rows that fail fetchPointMetadata this many times are permanently parked.
 // Otherwise non-US points that api.weather.gov 404s forever would occupy the
 // whole nightly batch and starve US beaches (TODO.md).
 const NWS_ENRICHMENT_MAX_ATTEMPTS = 5;
 // Beaches per run that may enter the marine-zone nudge path (up to 16 extra
-// /points probes each, see landProbePoints). 75 plain lookups plus 20 nudged
-// beaches is at most 395 spaced requests: at 300 ms spacing and 1 s latency that
-// is ~515 s, inside the 900 s ceiling with room for a few 45 s timeouts, where
-// 75 nudged beaches (1,275 requests) would not fit. A marine beach past the cap
-// is left untouched, with no attempt burned, so it re-selects next run.
+// /points probes each, see landProbePoints). 200 plain lookups plus 20 nudged
+// beaches is at most 520 spaced requests: at 300 ms spacing and 1 s latency that
+// is ~680 s, inside the 900 s ceiling with room for a few 45 s timeouts, where
+// 200 nudged beaches would not fit. A marine beach past the cap is left
+// untouched, with no attempt burned, so it re-selects next run.
 const NWS_NUDGE_BEACH_LIMIT = 20;
 // ECCC zone enrichment, own cron, 4x daily: only rows NWS permanently parked
 // (nws_zone NULL at the attempts cap) are candidates. Its own attempts cap parks
@@ -218,7 +225,7 @@ const ECCC_ENRICHMENT_MAX_ATTEMPTS = 5;
 const ECCC_ZONES_SANITY_MIN = 100;
 // Fixed pause between the sequential api.weather.gov / GeoMet requests the
 // enrichment loops make. The Worker egresses from a shared IP pool, which
-// api.weather.gov treats like a proxy, so firing 75 back-to-back /points requests
+// api.weather.gov treats like a proxy, so firing 200 back-to-back /points requests
 // risks a 429 the whole run inherits. Applied between iterations only, never
 // before the first request or after the last.
 const ENRICHMENT_REQUEST_SPACING_MS = 300;

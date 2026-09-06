@@ -2193,7 +2193,7 @@ runner logs its own summary line (beaches processed, per-source failure counts).
 
 ### runFlagRecompute (hourly)
 
-Constants: MAX_BEACHES_PER_RUN = 1200, FLAG_TTL_SECONDS = 25200, KV_TTL_SECONDS = 7200,
+Constants: MAX_BEACHES_PER_RUN = 3000, FLAG_TTL_SECONDS = 25200, KV_TTL_SECONDS = 7200,
 KV_WRITE_CONCURRENCY = 12, MAP_SCAN_DEADLINE_MS = 120000,
 HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
 src/demandWindow.js rather than src/index.js — see "Entry-module export shape" below).
@@ -2220,7 +2220,7 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
 2. SELECT * FROM beaches WHERE <FLAG_WORTHY_WATER_SQL>
    ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
-   recompute_updated ASC, id ASC LIMIT 1200, bound with hotCutoffIso as ?1.
+   recompute_updated ASC, id ASC LIMIT 3000, bound with hotCutoffIso as ?1.
    Both beach-walking crons emit this statement from one shared helper,
    selectRunBeaches(env, columns, hotCutoffIso, rotation), so the WHERE, hot-first guard,
    id ASC tiebreak, LIMIT and single bind live there once. The callers differ only in the
@@ -2403,11 +2403,11 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
 
 Subrequest budget (paid plan, 10,000 per invocation): 1 NWS national alerts call + 2 ECCC
 national fetches (only when Canadian rows exist) + one SRF call per distinct WFO (~15 at Great
-Lakes scope, 60+ continental, pooled) + ≤1200 waveinput KV
+Lakes scope, 60+ continental, pooled) + ≤3000 waveinput KV
 gets + one scrape() per matched wqFloor source + one scrape() per matched official scraper
-+ ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch + ≤1200 flag KV
-puts + ~200 official KV puts + ≤1200 wqfloor KV puts under a table-wide active advisory +
-1 recompute_updated D1 batch ≈ 3,850 in the worst case at the 1200-row LIMIT, plus step 11's
++ ~2 scraper-health KV ops per matched scraper + ≤1 flag_history D1 batch + ≤3000 flag KV
+puts + ~200 official KV puts + ≤3000 wqfloor KV puts under a table-wide active advisory +
+1 recompute_updated D1 batch ≈ 9,250 in the worst case at the 3000-row LIMIT, plus step 11's
 map-directory rebuild: 1 D1 statement + 2×ceil(N/100) bulk KV gets over the WHOLE flag-worthy
 set minus the preloaded ids + 1 artifact put. That last term is the Worker's first O(N)
 subrequest cost and does not stop at MAX_BEACHES_PER_RUN — about 12 reads at today's 1,102
@@ -2925,18 +2925,18 @@ costs an enrichment day.
 
 ### runNwsEnrichment (4x daily: "17 3,9,15,21 * * *")
 
-Constants: NWS_ENRICHMENT_LIMIT = 75 (per run — up to 300 points/day),
+Constants: NWS_ENRICHMENT_LIMIT = 200 (per run — up to 800 points/day),
 NWS_ENRICHMENT_MAX_ATTEMPTS = 5, NWS_NUDGE_BEACH_LIMIT = 20.
 
 A beach with nws_zone NULL silently skips rules steps 1-2 (alerts, SRF rip risk) in
 runFlagRecompute, so draining this queue quickly is a safety property, not just throughput.
 api.weather.gov publishes no numeric rate limit — it answers 429 with Retry-After when
-unhappy — and at most 75 + 20 × 16 = 395 sequential polite requests per run, four times a
-day, is well within reasonable use (~515 s at 300 ms spacing plus 1 s latency, inside the
-900 s ceiling; 75 nudged beaches would not fit).
+unhappy — and at most 200 + 20 × 16 = 520 sequential polite requests per run, four times a
+day, is well within reasonable use (~680 s at 300 ms spacing plus 1 s latency, inside the
+900 s ceiling; 200 nudged beaches would not fit).
 
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < 5
-ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 75; for each,
+ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 200; for each,
 fetchPointMetadata(lat, lon) sequentially. A response whose nwsZone is a marine zone
 (isMarineZoneId: a centroid over water) is never stored: the loop re-probes landProbePoints
 (16 nudged coordinates, ENRICHMENT_REQUEST_SPACING_MS before each) and stores the first land
