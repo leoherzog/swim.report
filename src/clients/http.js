@@ -8,9 +8,18 @@
 //
 // timeoutMs bounds a request at the transport layer via AbortController, and it
 // is armed only when timeoutMs > 0, so a call site that omits it is genuinely
-// unbounded. Returns the parsed JSON on success, null on any failure.
+// unbounded. fetchJson returns the parsed JSON on success, null on any failure.
+// fetchJsonWithStatus returns { json, status } instead: status is the HTTP
+// status whenever a response arrived (json is null unless it was 2xx and
+// parsed) and null when the request threw or timed out, so a caller can tell a
+// definitive answer such as a 404 from a transient failure. Neither throws.
 
 export async function fetchJson(url, opts) {
+  const result = await fetchJsonWithStatus(url, opts);
+  return result.json;
+}
+
+export async function fetchJsonWithStatus(url, opts) {
   const options = opts || {};
   const label = options.label || "";
   const init = {};
@@ -33,12 +42,12 @@ export async function fetchJson(url, opts) {
     const response = await fetch(url, init);
     if (!response.ok) {
       console.log(label + " fetch failed: HTTP " + response.status);
-      return null;
+      return { json: null, status: response.status };
     }
-    return await response.json();
+    return { json: await response.json(), status: response.status };
   } catch (err) {
     console.log(label + " fetch failed: " + err.message);
-    return null;
+    return { json: null, status: null };
   } finally {
     if (timer !== null) {
       clearTimeout(timer);

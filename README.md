@@ -388,8 +388,9 @@ classification (offline)](#discovery-and-classification-offline)).
   leaves unreached is untouched and re-selects; an unrecoverable point fails like any other.
   Migration 0013 requeued every row
   that already held a marine id. Queue order is fewest failed attempts first, then
-  `last_viewed DESC`, then `RANDOM()`. Failures bump `enrichment_attempts` (migration 0003);
-  after 5 a row is parked, so permanently-404ing non-US points cannot starve US beaches.
+  `last_viewed DESC`, then `RANDOM()`. A `404` from `/points` means the point is outside the
+  NWS domain and parks the row immediately, so Canadian rows reach the ECCC cron on their first
+  touch; other failures bump `enrichment_attempts` (migration 0003) and park after 5.
 - `29 4,10,16,22 * * *` (4x daily) — `runEcccEnrichment`: the Canadian counterpart. Beaches NWS
   enrichment permanently parked get their ECCC public forecast region name from the GeoMet
   `public-standard-forecast-zones` collection (`src/clients/eccc.js`), up to 50 per run, same

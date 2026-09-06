@@ -9,6 +9,7 @@ import {
   wfoFromGridUrl,
   fetchLatestSrfText,
   fetchPointMetadata,
+  fetchPointMetadataDetailed,
   isMarineZoneId,
   landProbePoints
 } from "./clients/nws.js";
@@ -1582,6 +1583,11 @@ async function bumpAttempts(env, beachId, sql, label) {
 }
 
 const NWS_ATTEMPTS_BUMP_SQL = "UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1 WHERE id = ?1";
+// A /points 404 is api.weather.gov saying the point is outside its domain, which
+// never changes between runs, so the row parks on the first touch and reaches
+// the ECCC cron that night instead of after five wasted requests.
+const NWS_ATTEMPTS_PARK_SQL = "UPDATE beaches SET enrichment_attempts = " +
+  String(NWS_ENRICHMENT_MAX_ATTEMPTS) + " WHERE id = ?1";
 const ECCC_ATTEMPTS_BUMP_SQL = "UPDATE beaches SET eccc_attempts = eccc_attempts + 1 WHERE id = ?1";
 
 // NWS point enrichment (own cron, 4x daily): beaches with nws_zone NULL get
@@ -1599,6 +1605,7 @@ async function runNwsEnrichment(env) {
   let marineUnrecovered = 0;
   let deferred = 0;
   let attempted = 0;
+  let notFound = 0;
   const spacingMs = env && typeof env.ENRICHMENT_REQUEST_SPACING_MS === "number"
     ? env.ENRICHMENT_REQUEST_SPACING_MS : ENRICHMENT_REQUEST_SPACING_MS;
   const deadlineMs = env && typeof env.NWS_ENRICHMENT_DEADLINE_MS === "number"
@@ -1625,7 +1632,14 @@ async function runNwsEnrichment(env) {
       firstRequest = false;
       attempted = attempted + 1;
       try {
-        let meta = await fetchPointMetadata(beach.lat, beach.lon);
+        const lookup = await fetchPointMetadataDetailed(beach.lat, beach.lon);
+        if (lookup.notFound) {
+          notFound = notFound + 1;
+          enrichmentFailures = enrichmentFailures + 1;
+          await bumpAttempts(env, beach.id, NWS_ATTEMPTS_PARK_SQL, "nws");
+          continue;
+        }
+        let meta = lookup.meta;
         if (meta !== null && isMarineZoneId(meta.nwsZone)) {
           // A centroid over water resolves to the marine zone, which no land
           // product is issued for. Re-probe nudged coordinates for the land zone
@@ -1699,6 +1713,7 @@ async function runNwsEnrichment(env) {
       " failures=" + String(enrichmentFailures) +
       " marineRecovered=" + String(marineRecovered) +
       " marineUnrecovered=" + String(marineUnrecovered) +
+      " notFound=" + String(notFound) +
       " deferred=" + String(deferred) +
       " elapsedMs=" + String(deadline.elapsedMs()) +
       " parked=" + String(parkedCount)

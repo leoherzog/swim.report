@@ -302,7 +302,9 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     resolved, arctic 107, 1,208 ocean rows unresolved inside masked bays). `gridsDigest` covers
     the grid set, not the beach set, so a further coast prompts no refusal; re-seed by hand when
     the resolved counts step up.
-  - **Enrichment drain rate.** Each run walks the 400 rows it selects until
+  - **Enrichment drain rate.** A `/points` 404 parks a row on the first touch, so the ~1,200
+    Canadian rows in the coastal queue cost one request each rather than five before the ECCC
+    cron takes them. Each run walks the 400 rows it selects until
     `NWS_ENRICHMENT_DEADLINE_MS` (780 s, ~1,300 requests at the measured ~0.6 s each), about
     300 marine beaches, so 4 runs a day drain the 6,465-row coastal queue in 5-6 days; a beach
     without `nws_zone` is alert-blind with a caveat meanwhile. The next knob is the cron

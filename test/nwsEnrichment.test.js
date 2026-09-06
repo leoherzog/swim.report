@@ -282,7 +282,7 @@ describe("runNwsEnrichment", function () {
     })).toBe(false);
   });
 
-  it("bumps enrichment_attempts on a 404 points lookup and writes no zone", async function () {
+  it("parks a row outright on a 404 points lookup (outside the NWS domain) and writes no zone", async function () {
     stubPointsFetch({
       "https://api.weather.gov/points/44.5000,-80.2170": "http-404"
     });
@@ -290,17 +290,40 @@ describe("runNwsEnrichment", function () {
     const made = makeEnrichmentEnv([
       { id: "osm-node-ca-1", lat: 44.5, lon: -80.217 }
     ]);
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (msg) { logs.push(String(msg)); });
     await runNwsCron(made.env);
 
     expect(made.runCalls.some(function (c) {
       return c.sql.indexOf("SET nws_zone") !== -1;
     })).toBe(false);
+    expect(made.runCalls.some(function (c) {
+      return c.sql.indexOf("enrichment_attempts + 1") !== -1;
+    })).toBe(false);
+    const parks = made.runCalls.filter(function (c) {
+      return c.sql.indexOf("SET enrichment_attempts = 5") !== -1;
+    });
+    expect(parks.length).toBe(1);
+    expect(parks[0].args).toEqual(["osm-node-ca-1"]);
+    const summary = logs.find(function (l) { return l.indexOf("nws enrichment complete") !== -1; });
+    expect(summary).toContain("notFound=1");
+  });
+
+  it("bumps rather than parks on a 5xx or a thrown fetch, which may be transient", async function () {
+    stubPointsFetch({
+      "https://api.weather.gov/points/44.5000,-80.2170": "throw"
+    });
+    const made = makeEnrichmentEnv([
+      { id: "osm-node-ca-1", lat: 44.5, lon: -80.217 }
+    ]);
+    await runNwsCron(made.env);
     const bumps = made.runCalls.filter(function (c) {
       return c.sql.indexOf("enrichment_attempts + 1") !== -1;
     });
-    expect(bumps.length).toBe(1);
-    expect(bumps[0].sql).toContain("UPDATE beaches SET enrichment_attempts = enrichment_attempts + 1");
-    expect(bumps[0].args).toEqual(["osm-node-ca-1"]);
+    expect(bumps.map(function (c) { return c.args[0]; })).toEqual(["osm-node-ca-1"]);
+    expect(made.runCalls.some(function (c) {
+      return c.sql.indexOf("SET enrichment_attempts = 5") !== -1;
+    })).toBe(false);
   });
 
   it("treats a 200 payload missing forecastZone/forecastGridData as a failed attempt", async function () {

@@ -954,7 +954,14 @@ return null.
 
 ### src/clients/http.js (shared transport layer)
 
+    export async function fetchJsonWithStatus(url, opts)
+      // The same pipeline as fetchJson, resolving to { json, status }: status is the HTTP
+      // status whenever a response arrived (json null unless 2xx and parsed) and null when
+      // the request threw or timed out, so a caller can tell a definitive answer such as
+      // a 404 from a transient failure. Never throws.
+
     export async function fetchJson(url, opts)
+      // fetchJsonWithStatus(url, opts).json.
       // opts: { method, headers, body, label, timeoutMs }, all optional; each init field
       // is set only when supplied. timeoutMs, when > 0, bounds the request via an
       // AbortController — on expiry fetch aborts and the catch returns null, which is
@@ -1132,7 +1139,13 @@ shapes it walks are the clients' wire shapes, not general geography.
       //              sourceUrl: "https://api.weather.gov/products/types/SRF/locations/" + wfo + "/latest" }
       // Missing productText or failure -> null (parseRipCurrentRisk reads only .text).
 
+    export async function fetchPointMetadataDetailed(lat, lon)
+      // -> { meta, notFound }. meta as fetchPointMetadata below; notFound true only for an
+      // HTTP 404, api.weather.gov's answer for a point outside its domain, which the
+      // enrichment cron treats as definitive and parks on the first touch.
+
     export async function fetchPointMetadata(lat, lon)
+      // fetchPointMetadataDetailed(lat, lon).meta.
       // GET "https://api.weather.gov/points/" + lat.toFixed(4) + "," + lon.toFixed(4)
       // Success -> { nwsZone: "MIZ071", nwsGridUrl: "https://api.weather.gov/gridpoints/GRR/33,33" }
       //   nwsZone = last path segment of json.properties.forecastZone
@@ -2941,7 +2954,10 @@ count, bounds the run.
 SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts < 5
 ORDER BY enrichment_attempts ASC, last_viewed DESC NULLS LAST, RANDOM() LIMIT 400; for each,
 until the deadline (makeDeadline from the run's start, checked before every beach and every
-probe), fetchPointMetadata(lat, lon) sequentially. A response whose nwsZone is a marine zone
+probe), fetchPointMetadataDetailed(lat, lon) sequentially. A 404 (outside the NWS domain:
+a Canadian or Mexican point) parks the row on the spot — UPDATE beaches SET
+enrichment_attempts = 5 WHERE id = ?, NWS_ATTEMPTS_PARK_SQL — so the ECCC cron picks it up
+that night instead of after five wasted requests. A response whose nwsZone is a marine zone
 (isMarineZoneId: a centroid over water) is never stored: the loop re-probes landProbePoints
 (16 nudged coordinates, ENRICHMENT_REQUEST_SPACING_MS before each) and stores the first land
 response's nwsZone AND nwsGridUrl; no land hit is a failure below. Rows the deadline leaves
@@ -2960,8 +2976,8 @@ within a tied bucket no id-prefix class of beaches is ever drained after another
 attempts cap stops permanent failures — non-US points swept in by the discovery REGIONS
 that api.weather.gov 404s forever — from occupying the batch and starving US beaches; after
 5 attempts a row is parked and no longer requeued. The per-run summary log reports
-selected / attempted / enriched / failures / marineRecovered / marineUnrecovered / deferred /
-elapsedMs / parked (nws_zone IS NULL AND enrichment_attempts >= 5). Migration 0013 sent every row whose
+selected / attempted / enriched / failures / marineRecovered / marineUnrecovered / notFound /
+deferred / elapsedMs / parked (nws_zone IS NULL AND enrichment_attempts >= 5). Migration 0013 sent every row whose
 nws_zone carried a marine id back through this path.
 
 ### runEcccEnrichment (4x daily: "29 4,10,16,22 * * *")

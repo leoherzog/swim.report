@@ -6,7 +6,7 @@
 // wiring an AbortController that is cleared on completion.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fetchJson } from "../src/clients/http.js";
+import { fetchJson, fetchJsonWithStatus } from "../src/clients/http.js";
 import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 const URL = "https://example.test/api";
@@ -15,6 +15,32 @@ afterEach(function () {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("fetchJsonWithStatus { json, status } contract", function () {
+  it("carries the HTTP status beside the parsed body on success", async function () {
+    installFetch(function () {
+      return Promise.resolve(jsonResponse({ ok: 1 }));
+    });
+    const result = await fetchJsonWithStatus(URL, { label: "t" });
+    expect(result).toEqual({ json: { ok: 1 }, status: 200 });
+  });
+
+  it("carries the status with a null body on a non-2xx response", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    installFetch(function () {
+      return Promise.resolve({ ok: false, status: 404, json: function () { return Promise.resolve({}); } });
+    });
+    expect(await fetchJsonWithStatus(URL, { label: "t" })).toEqual({ json: null, status: 404 });
+  });
+
+  it("carries a null status when no response arrived at all", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    installFetch(function () {
+      return Promise.reject(new Error("network down"));
+    });
+    expect(await fetchJsonWithStatus(URL, { label: "t" })).toEqual({ json: null, status: null });
+  });
 });
 
 describe("fetchJson data-or-null contract", function () {

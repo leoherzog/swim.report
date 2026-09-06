@@ -2,7 +2,7 @@
 // never throws across the module boundary: any network error, non-2xx status or
 // JSON parse failure is caught, logged, and resolved to null.
 
-import { fetchJson } from "./http.js";
+import { fetchJson, fetchJsonWithStatus } from "./http.js";
 import { matchedAlerts, pickIsoString } from "./alertMatch.js";
 
 export const NWS_USER_AGENT = "swim.report (hello@swim.report)";
@@ -37,15 +37,19 @@ export function alertsUrlForZone(zoneId) {
 // Shared fetch-JSON wrapper for every api.weather.gov request: sends the required
 // User-Agent and Accept headers, checks response.ok, parses JSON, and resolves to
 // null on any failure rather than throwing.
-function fetchNwsJson(url, label) {
-  return fetchJson(url, {
+function nwsRequestOptions(label) {
+  return {
     headers: {
       "User-Agent": NWS_USER_AGENT,
       "Accept": "application/geo+json"
     },
     label: "nws: " + label,
     timeoutMs: NWS_TIMEOUT_MS
-  });
+  };
+}
+
+function fetchNwsJson(url, label) {
+  return fetchJson(url, nwsRequestOptions(label));
 }
 
 // Every zone id a single alert feature applies to, deduped: the UGC geocode
@@ -247,22 +251,35 @@ export function landProbePoints(lat, lon) {
   return points;
 }
 
-// Success -> { nwsZone, nwsGridUrl }, which may carry a MARINE zone id: the
-// caller decides what to do with it via isMarineZoneId. Failure -> null.
-export async function fetchPointMetadata(lat, lon) {
+// { meta, notFound }. meta is { nwsZone, nwsGridUrl } on success, which may
+// carry a MARINE zone id the caller resolves via isMarineZoneId, and null on any
+// failure. notFound is true only for an HTTP 404, which api.weather.gov answers
+// for a point outside its domain; that is a definitive answer, never transient,
+// so the enrichment cron parks such a row on the first touch instead of
+// spending its attempts cap on it. A timeout, a 5xx or a malformed payload
+// leaves notFound false.
+export async function fetchPointMetadataDetailed(lat, lon) {
   const url = "https://api.weather.gov/points/" + lat.toFixed(4) + "," + lon.toFixed(4);
-  const json = await fetchNwsJson(url, "points for " + lat + "," + lon);
+  const result = await fetchJsonWithStatus(url, nwsRequestOptions("points for " + lat + "," + lon));
+  const notFound = result.status === 404;
+  const json = result.json;
   if (json === null) {
-    return null;
+    return { meta: null, notFound: notFound };
   }
   const properties = json.properties || {};
   const forecastZone = properties.forecastZone;
   const nwsGridUrl = properties.forecastGridData;
   if (!forecastZone || !nwsGridUrl) {
     console.log("nws: points fetch for " + lat + "," + lon + " missing forecastZone/forecastGridData");
-    return null;
+    return { meta: null, notFound: false };
   }
   const segments = forecastZone.split("/");
   const nwsZone = segments[segments.length - 1];
-  return { nwsZone: nwsZone, nwsGridUrl: nwsGridUrl };
+  return { meta: { nwsZone: nwsZone, nwsGridUrl: nwsGridUrl }, notFound: false };
+}
+
+// Success -> { nwsZone, nwsGridUrl }; failure of any kind -> null.
+export async function fetchPointMetadata(lat, lon) {
+  const result = await fetchPointMetadataDetailed(lat, lon);
+  return result.meta;
 }

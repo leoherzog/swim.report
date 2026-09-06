@@ -13,6 +13,7 @@ import {
   fetchAllActiveAlerts,
   fetchLatestSrfText,
   fetchPointMetadata,
+  fetchPointMetadataDetailed,
   nwsAlertsForZone
 } from "../src/clients/nws.js";
 
@@ -375,6 +376,34 @@ describe("fetchAllActiveAlerts with missing or malformed features", function () 
     expect(result).toEqual({
       alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount: 0, truncated: false
     });
+  });
+});
+
+describe("fetchPointMetadataDetailed", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("flags a 404 as notFound with null meta", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 404 });
+    });
+    expect(await fetchPointMetadataDetailed(45.0, -82.0)).toEqual({ meta: null, notFound: true });
+  });
+
+  it("leaves notFound false on a 5xx, a thrown fetch and a malformed 200", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 503 });
+    });
+    expect(await fetchPointMetadataDetailed(45.0, -82.0)).toEqual({ meta: null, notFound: false });
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("connection reset"));
+    });
+    expect(await fetchPointMetadataDetailed(45.0, -82.0)).toEqual({ meta: null, notFound: false });
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ properties: {} }); } });
+    });
+    expect(await fetchPointMetadataDetailed(45.0, -82.0)).toEqual({ meta: null, notFound: false });
   });
 });
 
