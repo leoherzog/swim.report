@@ -286,19 +286,16 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   `scripts/build-marine-zones.js`, regenerate, diff per-prefix counts, `npm test`, commit).
   `COASTAL_ZONE_PREFIXES` carries every prefix in the coastal shapefile; a prefix a new release
   adds is logged as SKIPPED rather than dropped silently, so read the log.
-- **North America coastal expansion — boxes are in, the first coastal build is not.**
+- **North America coastal expansion — live since build `20260906T003648Z-445753f`.**
   `src/regions.js` carries 26 coastal boxes (US and Canadian Pacific, Gulf, Atlantic, Alaska
-  east of 180°, Hawaii, Puerto Rico) beside the nine Great Lakes boxes. What is still open,
-  in order:
-  - **Measure the continental raw stage.** The union `-spat` mask is now `-180 17.55 -52.45
-    67.25`, so the five unmasked `ogr2ogr` writes into `$WORK/raw` grow to the whole extract
-    against the ~27 GB left above the 13.3 GB PBF peak. Unmeasured; the first coastal build
-    tells. If it does not fit, the choice is per-box `ogr2ogr` invocations or dropping `-spat`
-    and leaning entirely on `clip-layers.js`.
-  - **Seed `data/layer-floors.json` for the new digest** (`sha256:6e29be94…`). The build
-    uploads its prefix and refuses to move the pointer until a `status: "seeded"` entry exists;
-    procedure in `docs/offline-discovery.md`. `coastline` must be a real number this time, and
-    `beaches-line` / `water-line` / `parks-line` stop being safely zero at ocean scope.
+  east of 180°, Hawaii, Puerto Rico + USVI) beside the nine Great Lakes boxes; the floors for
+  digest `sha256:6e29be94…` are seeded. Measured on the first coastal build and discovery run:
+  the build peaks at 47 GB used on a 145 GB runner (raw stage +11 GB) in 49 min, so disk is not
+  a constraint; the batch loads 24,123 beaches, 47,654 coastline and 123,041 water features
+  into 17.4M indexed segments in 15 s, classifies 7,899 rows in 38 s, and finishes in 7:31 at
+  6.57 GB RSS, above the 6000 MB early-warning line in `discovery.yml` and inside the 12 GB
+  heap. The table went from 1,102 to 7,219 flag-worthy rows (6,131 ocean), 2,417 hidden
+  inland. What is still open, in order:
   - **Seed the ocean wave floors by hand.** `data/wave-floors.json` is keyed by the grid set,
     not by `REGIONS`, so no refusal prompts for `noaa_gfswave` / `noaa_gfswave_arctic`; a cycle
     resolving 3 ocean beaches out of 20,000 would publish until they are seeded.
