@@ -31,7 +31,7 @@ Five scoped Cloudflare credentials, no shared account token. Each job holds the 
 - `CLOUDFLARE_D1_READ_TOKEN` — repo secret, read by the `waves.yml` sample job for its read-only beach snapshot.
 - `CLOUDFLARE_KV_WRITE_TOKEN` — repo secret carrying Workers KV Storage: Edit, read by the `waves.yml` publish-kv job. That job holds no R2 keys, and the sample job holds no KV token.
 - `CLOUDFLARE_R2_ACCESS_KEY` / `CLOUDFLARE_R2_SECRET_ACCESS_KEY` — repo secrets, the S3-API pair both publishers use against the `swim-report` bucket.
-- `CLOUDFLARE_WORKERS_EDIT_TOKEN` — lives in `.dev.vars` only and is deliberately never a repo secret, so no CI job can change the code running at swim.report. Export it as `CLOUDFLARE_API_TOKEN` for a local deploy, remote migration, secret write or tail.
+- `CLOUDFLARE_WORKERS_EDIT_TOKEN` — lives in `.dev.vars` only and is deliberately never a repo secret, so no CI job can change the code running at swim.report. Export it as `CLOUDFLARE_API_TOKEN` for a local deploy, secret write or tail. It is not authorized for D1 (code 7403); a remote migration or `d1 execute --remote` takes `CLOUDFLARE_D1_EDIT_TOKEN` (or the read token for a SELECT).
 
 ## Mandatory JavaScript style
 
