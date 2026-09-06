@@ -354,6 +354,41 @@ const RULES = [
   "  white-space: nowrap;",
   "}",
 
+  // Nearby cards: the whole card is one link, so the anchor fills the body and
+  // carries the text color; the grid wraps at a card width that keeps a name,
+  // chip and distance readable in one column on a phone.
+  ".nearby-heading {",
+  "  margin: 0;",
+  "  font-size: var(--wa-font-size-l);",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+
+  ".nearby-grid {",
+  "  --min-column-size: 12rem;",
+  "}",
+
+  ".nearby-card {",
+  "  --spacing: var(--wa-space-m);",
+  "}",
+
+  ".nearby-card-link {",
+  "  text-decoration: none;",
+  "  color: var(--wa-color-text-normal);",
+  "}",
+
+  ".nearby-card:hover {",
+  "  background: var(--wa-color-neutral-fill-quiet);",
+  "}",
+
+  ".nearby-card-name {",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+
+  ".nearby-card-subtitle,",
+  ".nearby-card-distance {",
+  "  color: var(--wa-color-text-quiet);",
+  "}",
+
   // Homepage map: MapLibre collapses to 0px and renders blank without an
   // explicit height. The overflow clip keeps the tiles inside the rounded
   // corners the wa-border-radius-m utility supplies.

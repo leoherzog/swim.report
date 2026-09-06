@@ -270,6 +270,65 @@ async function handleHome(env, location, rawQuery, nearParam) {
   return htmlResponse(html, 200, cacheControl);
 }
 
+// Nearby cards on the detail page. The planar ORDER BY keeps the D1 read to
+// the NEARBY_FETCH_LIMIT nearest candidates, the JS haversine decides the final
+// order, and NEARBY_LIMIT of them render. NEARBY_MAX_MI drops the far tail so a
+// lone beach never advertises "nearby" beaches a day's drive away; a beach with
+// nothing inside it simply gets no section.
+const NEARBY_FETCH_LIMIT = 12;
+const NEARBY_LIMIT = 3;
+const NEARBY_MAX_MI = 50;
+
+// The NEARBY_LIMIT nearest flag-worthy beaches to `beach`, each carrying its
+// distance, or [] when none lies within NEARBY_MAX_MI or the coordinates are
+// unusable. The beach's own row is excluded in SQL and again here, since the
+// second guard costs nothing and keeps a stale id-less row out.
+async function nearbyBeaches(env, beach) {
+  const orderBy = proximityOrderByClause({ lat: beach.lat, lon: beach.lon });
+  if (orderBy === null) {
+    return [];
+  }
+  const stmt = env.DB.prepare(
+    "SELECT id, name, park_name, lat, lon, water_class, water_class_attempts FROM beaches WHERE " +
+    FLAG_WORTHY_WATER_SQL + " AND id <> ?1 ORDER BY " + orderBy +
+    " LIMIT " + String(NEARBY_FETCH_LIMIT)
+  ).bind(beach.id);
+  const result = await stmt.all();
+  const rows = (result && result.results) || [];
+  const scored = [];
+  for (const row of rows) {
+    if (!row || row.id === beach.id) {
+      continue;
+    }
+    const miles = distanceMi(beach.lat, beach.lon, row.lat, row.lon);
+    if (!Number.isFinite(miles) || miles > NEARBY_MAX_MI) {
+      continue;
+    }
+    scored.push({ beach: row, distanceMi: miles });
+  }
+  scored.sort(function (a, b) { return a.distanceMi - b.distanceMi; });
+  return scored.slice(0, NEARBY_LIMIT);
+}
+
+// One bulk get per key family for the nearby rows, the same shape the home list
+// uses, so the cards carry the same estimate chip and OFFICIAL badge a row does.
+async function attachNearbyFlags(env, nearby) {
+  if (nearby.length === 0) {
+    return nearby;
+  }
+  const flagKeys = nearby.map(function (entry) { return "flag:" + entry.beach.id; });
+  const officialKeys = nearby.map(function (entry) { return "official:" + entry.beach.id; });
+  const maps = await Promise.all([
+    env.FLAGS.get(flagKeys, { type: "json" }),
+    env.FLAGS.get(officialKeys, { type: "json" })
+  ]);
+  for (const entry of nearby) {
+    entry.estimate = (maps[0] && maps[0].get("flag:" + entry.beach.id)) || null;
+    entry.official = (maps[1] && maps[1].get("official:" + entry.beach.id)) || null;
+  }
+  return nearby;
+}
+
 async function handleDetail(env, ctx, beachId) {
   const beach = await env.DB.prepare("SELECT * FROM beaches WHERE id = ?1").bind(beachId).first();
   // A confirmed-inland beach (or a parked-unresolved one) is not flag-worthy,
@@ -279,18 +338,21 @@ async function handleDetail(env, ctx, beachId) {
     return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
   }
   touchLastViewed(env, ctx, beach);
-  // The 24 h wave-forecast series and the NDBC water-temperature reading are
-  // both detail-page-only reads (the list page must never gain a per-row KV
-  // get). Fetched alongside the flag/official reads so the extra keys cost no
-  // added latency.
+  // The 24 h wave-forecast series, the NDBC water-temperature reading and the
+  // nearby-beach rows are all detail-page-only reads (the list page must never
+  // gain a per-row KV get). Fetched alongside the flag/official reads so the
+  // extra keys cost no added latency; the nearby rows' own flags are one more
+  // bulk get per family behind them.
   const results = await Promise.all([
     readFlagAndOfficial(env, beachId),
     env.FLAGS.get("waves:" + beachId, { type: "json" }),
-    env.FLAGS.get("watertemp:" + beachId, { type: "json" })
+    env.FLAGS.get("watertemp:" + beachId, { type: "json" }),
+    nearbyBeaches(env, beach)
   ]);
   const data = results[0];
   const waves = results[1];
   const waterTemp = results[2];
+  const nearby = await attachNearbyFlags(env, results[3]);
   const nowIso = new Date().toISOString();
   const html = renderDetailPage({
     beach: beach,
@@ -298,6 +360,7 @@ async function handleDetail(env, ctx, beachId) {
     official: data.official,
     waves: waves,
     waterTemp: waterTemp,
+    nearby: nearby,
     nowIso: nowIso
   });
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);

@@ -607,7 +607,8 @@ describe("handleDetail waves: KV read", () => {
       prepare: function () {
         const st = {
           bind: function () { return st; },
-          first: function () { return Promise.resolve(beach); }
+          first: function () { return Promise.resolve(beach); },
+          all: function () { return Promise.resolve({ results: [] }); }
         };
         return st;
       }
@@ -615,6 +616,9 @@ describe("handleDetail waves: KV read", () => {
     const flags = {
       get: function (key) {
         keys.push(key);
+        if (Array.isArray(key)) {
+          return Promise.resolve(new Map(key.map(function (k) { return [k, null]; })));
+        }
         if (key.indexOf("waves:") === 0) {
           return Promise.resolve(wavesValue || null);
         }
@@ -651,6 +655,138 @@ describe("handleDetail waves: KV read", () => {
     const { env } = detailEnv(beach, series);
     const res = await handleRequest(detailRequest("b-1"), env);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("handleDetail nearby beaches", () => {
+  const self = { id: "b-self", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
+  // Candidates deliberately out of distance order, with the beach itself and a
+  // far row the SQL cap would already have dropped in production.
+  const candidates = [
+    { id: "b-far", name: "Far Beach", lat: 44.5, lon: -86.2, water_class: "great_lake" },
+    { id: "b-3", name: "Third", lat: 42.70, lon: -86.21, water_class: "great_lake" },
+    { id: "b-self", name: "Oval Beach", lat: 42.6579, lon: -86.2114, water_class: "great_lake" },
+    { id: "b-1", name: "Nearest", park_name: "Dune Park", lat: 42.66, lon: -86.21, water_class: "great_lake" },
+    { id: "b-4", name: "Fourth", lat: 42.75, lon: -86.21, water_class: "great_lake" },
+    { id: "b-2", name: "Second", lat: 42.68, lon: -86.21, water_class: "great_lake" }
+  ];
+
+  function nearbyEnv(rows) {
+    const statements = [];
+    const bulkKeys = [];
+    const db = {
+      prepare: function (sql) {
+        const st = {
+          sql: sql,
+          params: null,
+          bind: function () { st.params = Array.prototype.slice.call(arguments); return st; },
+          first: function () { statements.push(st); return Promise.resolve(self); },
+          all: function () { statements.push(st); return Promise.resolve({ results: rows }); },
+          run: function () { return Promise.resolve({ success: true }); }
+        };
+        return st;
+      }
+    };
+    const flags = {
+      get: function (key) {
+        if (Array.isArray(key)) {
+          bulkKeys.push(key);
+          const map = new Map(key.map(function (k) { return [k, null]; }));
+          if (map.has("flag:b-2")) {
+            map.set("flag:b-2", { color: "red", reason: "x", official: false, updated: "2026-07-05T11:00:00.000Z" });
+          }
+          if (map.has("official:b-1")) {
+            map.set("official:b-1", { color: "green", official: true, source: "s", updated: "2026-07-05T11:00:00.000Z" });
+          }
+          return Promise.resolve(map);
+        }
+        return Promise.resolve(null);
+      }
+    };
+    return { env: { DB: db, FLAGS: flags }, statements: statements, bulkKeys: bulkKeys };
+  }
+
+  function detailRequest(id) {
+    return { method: "GET", url: "https://swim.report/beach/" + id, cf: {} };
+  }
+
+  it("selects flag-worthy candidates nearest-first, excluding the beach itself", async () => {
+    const { env, statements } = nearbyEnv(candidates);
+    const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
+    expect(res.status).toBe(200);
+    const nearbySql = statements.map(function (s) { return s.sql; })
+      .find(function (sql) { return sql.indexOf("id <> ?1") !== -1; });
+    expect(nearbySql).toBeDefined();
+    expect(nearbySql).toContain("water_class");
+    expect(nearbySql).toContain("ORDER BY (lat - (42.6579))");
+    expect(nearbySql).toContain("LIMIT 12");
+    const bound = statements.find(function (s) { return s.sql === nearbySql; });
+    expect(bound.params).toEqual(["b-self"]);
+  });
+
+  it("renders the three nearest as cards in distance order, dropping self and the far row", async () => {
+    const { env, bulkKeys } = nearbyEnv(candidates);
+    const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
+    const html = await res.text();
+    const section = sliceBetween(html, "<section class=\"nearby", "</section>");
+    expect(section).toContain("Nearby beaches");
+    expect(section.split("<wa-card class=\"nearby-card\"").length - 1).toBe(3);
+    expect(section.indexOf("/beach/b-1")).toBeLessThan(section.indexOf("/beach/b-2"));
+    expect(section.indexOf("/beach/b-2")).toBeLessThan(section.indexOf("/beach/b-3"));
+    expect(section).not.toContain("/beach/b-4");
+    expect(section).not.toContain("/beach/b-far");
+    expect(section).not.toContain("/beach/b-self");
+    // Distance-sorted ids drive the bulk gets, one per key family.
+    expect(bulkKeys).toEqual([
+      ["flag:b-1", "flag:b-2", "flag:b-3"],
+      ["official:b-1", "official:b-2", "official:b-3"]
+    ]);
+    // The estimate chip and OFFICIAL badge read exactly as a list row's do.
+    const first = sliceBetween(section, "<wa-card class=\"nearby-card\"", "</wa-card>");
+    expect(first).toContain("Dune Park");
+    expect(first).toContain("OFFICIAL");
+    expect(first).toContain("&lt;1 mi");
+    expect(section).toContain("RED");
+  });
+
+  it("renders no section when nothing flag-worthy is nearby", async () => {
+    const { env } = nearbyEnv([]);
+    const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
+    const html = await res.text();
+    expect(html).not.toContain("<section class=\"nearby");
+    expect(html).not.toContain("Nearby beaches");
+  });
+
+  it("drops candidates beyond the 50 mi cap even when the SQL returned them", async () => {
+    const { env } = nearbyEnv([candidates[0]]);
+    const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
+    const html = await res.text();
+    expect(html).not.toContain("<section class=\"nearby");
+  });
+});
+
+describe("renderDetailPage nearby section placement", () => {
+  const base = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1",
+    webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1/day" };
+  const nearby = [
+    { beach: { id: "n-1", name: "North Beach", lat: 42.67, lon: -86.21 }, estimate: null, official: null, distanceMi: 0.8 },
+    { beach: { id: "n-2", name: "South Beach", lat: 42.64, lon: -86.21 }, estimate: null, official: null, distanceMi: 1.3 }
+  ];
+
+  it("sits below the wave map and above the webcam", () => {
+    const html = renderDetailPage({ beach: base, estimate: null, official: null, nearby: nearby, nowIso: "2026-07-05T12:00:00.000Z" });
+    const map = html.indexOf("<section class=\"wave-map\"");
+    const near = html.indexOf("<section class=\"nearby");
+    const cam = html.indexOf("<section class=\"webcam");
+    expect(map).toBeGreaterThan(-1);
+    expect(near).toBeGreaterThan(map);
+    expect(cam).toBeGreaterThan(near);
+    expect(html).toContain("aria-labelledby=\"nearby-heading\"");
+  });
+
+  it("is absent when the router passes no nearby list", () => {
+    const html = renderDetailPage({ beach: base, estimate: null, official: null, nowIso: "2026-07-05T12:00:00.000Z" });
+    expect(html).not.toContain("<section class=\"nearby");
   });
 });
 

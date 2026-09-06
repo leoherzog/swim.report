@@ -131,6 +131,10 @@ confirmed-inland beaches: they are absent from the list and search, and a detail
 returns `404`. Only ocean and Great Lakes rows, plus still-unclassified rows during backfill,
 are shown.
 
+Below the wave map the detail page lists up to three **nearby beaches** as cards: the nearest
+flag-worthy rows within 50 mi, each with the same estimate chip and OFFICIAL badge a list row
+carries, its distance, and a link. The section is omitted when nothing lies within range.
+
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from the
 estimate's structured `waveHeightFt`) plus a horizontal strip of the next up-to-24 hours of
 forecast wave height, colored by the same 2 ft / 4 ft thresholds the rules engine uses, gray

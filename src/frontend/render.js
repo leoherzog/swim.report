@@ -737,6 +737,39 @@ function renderWaveMap(beach) {
     "</section>";
 }
 
+// Nearby beaches, below the wave map: one card per entry in a responsive
+// wa-grid. Each card is one link carrying the same estimate chip and OFFICIAL
+// badge a list row does, so the estimated/official distinction reads the same
+// on every surface. Entries arrive distance-sorted from the router; an empty
+// list renders nothing rather than an empty heading.
+function renderNearbyCard(entry) {
+  const beach = entry.beach;
+  const href = "/beach/" + encodeURIComponent(beach.id);
+  const officialBadgeHtml = entry.official ? (" " + renderOfficialBadge(null)) : "";
+  const subtitleHtml = span("nearby-card-subtitle wa-caption-s", subtitleName(beach));
+  const distanceHtml = span("nearby-card-distance wa-caption-s", formatMiles(entry.distanceMi));
+  return "<wa-card class=\"nearby-card\" appearance=\"outlined\">" +
+    "<a class=\"nearby-card-link wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
+    "<span class=\"nearby-card-name\">" + escapeHtml(displayName(beach)) + "</span>" +
+    subtitleHtml +
+    "<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(entry.estimate) + officialBadgeHtml + "</span>" +
+    distanceHtml +
+    "</a>" +
+    "</wa-card>";
+}
+
+function renderNearby(nearby) {
+  const entries = Array.isArray(nearby) ? nearby : [];
+  if (entries.length === 0) {
+    return "";
+  }
+  const cards = entries.map(renderNearbyCard).join("\n");
+  return "<section class=\"nearby wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">" +
+    "<h2 id=\"nearby-heading\" class=\"nearby-heading\">Nearby beaches</h2>" +
+    "<div class=\"wa-grid wa-gap-m nearby-grid\">" + cards + "</div>" +
+    "</section>";
+}
+
 // Nearby-webcam player embedded from Windy's free webcam API, in the same
 // plain-<iframe> wrapper as the wave map. The browser fetches the embed; the
 // request path itself still reads only D1 and KV. Rendered only when
@@ -980,6 +1013,8 @@ export function renderDetailPage(data) {
   // until the water-temperature cron writes it, so default to null; the
   // subtitle omits the temp fragment when it is null or stale.
   const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
+  // Distance-sorted nearby entries from the router; absent renders no section.
+  const nearby = Array.isArray(data.nearby) ? data.nearby : [];
   const title = displayName(beach) + " — Swim Report";
   const lat = Number(beach.lat).toFixed(4);
   const lon = Number(beach.lon).toFixed(4);
@@ -1034,6 +1069,10 @@ export function renderDetailPage(data) {
   const waveMapHtml = renderWaveMap(beach);
   if (waveMapHtml) {
     stackParts.push(waveMapHtml);
+  }
+  const nearbyHtml = renderNearby(nearby);
+  if (nearbyHtml) {
+    stackParts.push(nearbyHtml);
   }
   const webcamHtml = renderWebcam(beach);
   if (webcamHtml) {
