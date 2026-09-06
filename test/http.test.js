@@ -20,7 +20,7 @@ afterEach(function () {
 describe("fetchJsonWithStatus { json, status } contract", function () {
   it("carries the HTTP status beside the parsed body on success", async function () {
     installFetch(function () {
-      return Promise.resolve(jsonResponse({ ok: 1 }));
+      return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ ok: 1 }); } });
     });
     const result = await fetchJsonWithStatus(URL, { label: "t" });
     expect(result).toEqual({ json: { ok: 1 }, status: 200 });

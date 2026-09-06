@@ -199,7 +199,8 @@ describe("flagInputs seal round trip", function () {
       risks.length * waves.length * winds.length * gusts.length *
       advisories.length * sourceSets.length
     );
-  });
+  // Exhaustive over the input grid; a few seconds of pure compute under full-suite load.
+  }, 20000);
 });
 
 describe("signalsFromStanding rejection", function () {

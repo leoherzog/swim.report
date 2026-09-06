@@ -125,6 +125,7 @@ describe("runNwsEnrichment", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("re-probes a marine forecastZone and stores the first land probe's zone and grid URL", async function () {
@@ -188,14 +189,15 @@ describe("runNwsEnrichment", function () {
     expect(bumps.map(function (c) { return c.args[0]; })).toEqual(["osm-node-1"]);
   });
 
-  // Slows every stubbed points fetch so a tiny run deadline expires after the
-  // first request, without faking timers.
-  function delayFetch(ms) {
+  // Charges every stubbed points fetch ms of faked wall clock, so a run
+  // deadline expires after the first request regardless of real load. Only
+  // Date is faked; the loop's zero-ms spacing sleeps keep real timers.
+  function chargeFetchClock(ms) {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const inner = globalThis.fetch;
     vi.stubGlobal("fetch", function () {
-      const args = arguments;
-      return new Promise(function (resolve) { setTimeout(resolve, ms); })
-        .then(function () { return inner.apply(null, args); });
+      vi.setSystemTime(Date.now() + ms);
+      return inner.apply(null, arguments);
     });
   }
 
@@ -209,9 +211,9 @@ describe("runNwsEnrichment", function () {
       byUrl[pointsUrl(lat, -86.288)] = pointsPayload("MIZ071", landGrid);
     }
     const fetchState = stubPointsFetch(byUrl);
-    delayFetch(5);
+    chargeFetchClock(5000);
     const made = makeEnrichmentEnv(rows);
-    made.env.NWS_ENRICHMENT_DEADLINE_MS = 1;
+    made.env.NWS_ENRICHMENT_DEADLINE_MS = 1000;
     const logs = [];
     vi.spyOn(console, "log").mockImplementation(function (msg) { logs.push(String(msg)); });
     await runNwsCron(made.env);
@@ -240,9 +242,9 @@ describe("runNwsEnrichment", function () {
       byUrl[pointsUrl(probes[i].lat, probes[i].lon)] = pointsPayload("LMZ221", marineGrid);
     }
     const fetchState = stubPointsFetch(byUrl);
-    delayFetch(5);
+    chargeFetchClock(5000);
     const made = makeEnrichmentEnv([{ id: "osm-node-1", lat: 42.401, lon: -86.288 }]);
-    made.env.NWS_ENRICHMENT_DEADLINE_MS = 1;
+    made.env.NWS_ENRICHMENT_DEADLINE_MS = 1000;
     const logs = [];
     vi.spyOn(console, "log").mockImplementation(function (msg) { logs.push(String(msg)); });
     await runNwsCron(made.env);
