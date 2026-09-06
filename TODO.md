@@ -298,9 +298,10 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   6.57 GB RSS, above the 6000 MB early-warning line in `discovery.yml` and inside the 12 GB
   heap. The table went from 1,102 to 7,219 flag-worthy rows (6,131 ocean), 2,417 hidden
   inland. What is still open, in order:
-  - **Seed the ocean wave floors by hand.** `data/wave-floors.json` is keyed by the grid set,
-    not by `REGIONS`, so no refusal prompts for `noaa_gfswave` / `noaa_gfswave_arctic`; a cycle
-    resolving 3 ocean beaches out of 20,000 would publish until they are seeded.
+  - **Wave floors are seeded for the ocean grids** from cycle `20260906T0400Z` (gfswave 4,816
+    resolved, arctic 107, 1,208 ocean rows unresolved inside masked bays). `gridsDigest` covers
+    the grid set, not the beach set, so a further coast prompts no refusal; re-seed by hand when
+    the resolved counts step up.
   - **Enrichment drain rate.** Each run walks the 400 rows it selects until
     `NWS_ENRICHMENT_DEADLINE_MS` (780 s, ~1,300 requests at the measured ~0.6 s each), about
     300 marine beaches, so 4 runs a day drain the 6,465-row coastal queue in 5-6 days; a beach

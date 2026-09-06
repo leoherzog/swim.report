@@ -46,29 +46,30 @@
   "floors": {
     "sha256:c4eafd4a4b0045968b45b70dfcace999395cb3f1af218a69167cb9cef2d7be9b": {
       "_comment": [
-        "SEEDED from cycle 20260904T1600Z-g20260904T12Z-6dce772 at 0.75x each measured count,",
-        "rounded down. Cross-checked against D1 before commit: 1102 flag-worthy rows, every one",
-        "water_class great_lake, matching the manifest's beaches.total 1102 and resolved 1102.",
-        "GLWU resolved every beach with ring0Fraction 0.79, median search 0.84 km and max search",
-        "8.33 km against its 10 km cap, so no beach reached the search ceiling.",
+        "SEEDED from cycle 20260906T0400Z-g20260906T00Z-01f4154, the first cycle over the coastal",
+        "beach set, at 0.75x each measured count, rounded down. Cross-checked against D1 before commit:",
+        "7219 flag-worthy rows (6131 ocean, 1088 great_lake), matching the manifest's beaches.total",
+        "7219; resolved 6011 (noaa_glwu 1088, noaa_gfswave 4816, noaa_gfswave_arctic 107).",
         "",
-        "noaa_gfswave and noaa_gfswave_arctic are null because the table carries no ocean beach:",
-        "both measured zero assigned beaches, and a floor of zero would read as a measured",
-        "baseline while being satisfied by every possible cycle. They become structurally",
-        "required the moment a saltwater box lands in src/regions.js.",
+        "The 1208 unresolved rows are ocean beaches with no wet gfswave cell inside the search cap,",
+        "mostly inner bays, sounds and estuaries the 0.16-degree grid masks; they render no wave input",
+        "rather than a wrong one, and the floors below are set against the resolved count so a cycle",
+        "that loses coast coverage refuses while one that never had it passes.",
         "",
-        "That expansion will NOT re-withhold auto-publish. gridsDigest covers the GRID SET, not",
-        "the beach set, so adding ocean beaches leaves this entry matching and seeding those two",
-        "floors is a manual follow-up no refusal will prompt for."
+        "noaa_glwu keeps the floor its own first cycle seeded (1102 rows, every one resolved, median",
+        "search 0.84 km against the 10 km cap).",
+        "",
+        "gridsDigest covers the GRID SET, not the beach set, so a coast that adds beaches does not",
+        "re-withhold auto-publish; re-seed by hand when the resolved counts step up materially."
       ],
       "status": "seeded",
-      "seededFromCycleId": "20260904T1600Z-g20260904T12Z-6dce772",
-      "waveinputRecords": 826,
-      "wavesRecords": 826,
+      "seededFromCycleId": "20260906T0400Z-g20260906T00Z-01f4154",
+      "waveinputRecords": 4508,
+      "wavesRecords": 4508,
       "grids": {
         "noaa_glwu": 826,
-        "noaa_gfswave": null,
-        "noaa_gfswave_arctic": null
+        "noaa_gfswave": 3612,
+        "noaa_gfswave_arctic": 80
       }
     }
   }
