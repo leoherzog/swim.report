@@ -844,10 +844,12 @@ function isHttpUrl(value) {
 // plain-<iframe> wrapper as the wave map. The browser fetches the embed; the
 // request path itself still reads only D1 and KV. Rendered only when
 // webcam_player_url is a non-empty string, so both null (no nearby cam) and
-// undefined are skipped. The caption carries the cam's own Windy detail page as a
-// "View on Windy" link when webcam_detail_url is an http(s) URL: the Windy
-// webcams Terms require every displayed cam to link its webcam page or player,
-// and the footer credit alone does not satisfy that per-cam obligation. The
+// undefined are skipped. The cam is the nearest active one within a few kilometres,
+// so the "Nearby webcam" heading and the always-rendered note keep the page from
+// implying the view is of this beach. The caption carries the cam's own Windy
+// detail page as a "View on Windy" link when webcam_detail_url is an http(s) URL:
+// the Windy webcams Terms require every displayed cam to link its webcam page or
+// player, and the footer credit alone does not satisfy that per-cam obligation. The
 // site-wide credit stays in the footer. The frame's accessible name falls back to
 // "Nearby webcam" when the title is empty.
 function renderWebcam(beach) {
@@ -859,7 +861,8 @@ function renderWebcam(beach) {
   const detailUrl = isHttpUrl(beach.webcam_detail_url) ? beach.webcam_detail_url : null;
   const frameTitle = title ? title : "Nearby webcam";
   const lines = [];
-  lines.push("<section class=\"webcam-section wa-stack wa-gap-s\">");
+  lines.push("<section class=\"webcam-section wa-stack wa-gap-s\" aria-labelledby=\"webcam-heading\">");
+  lines.push("<h2 id=\"webcam-heading\" class=\"nearby-heading\">Nearby webcam</h2>");
   lines.push("<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
     "<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
     " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen></iframe>" +
@@ -876,6 +879,8 @@ function renderWebcam(beach) {
     lines.push("<p class=\"webcam-caption wa-caption-s wa-cluster wa-gap-xs\">" +
       captionParts.join("") + "</p>");
   }
+  lines.push("<p class=\"webcam-note wa-caption-s\">This camera is near this beach and " +
+    "may not show the beach itself.</p>");
   lines.push("</section>");
   return lines.join("\n");
 }

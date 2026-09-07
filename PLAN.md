@@ -3880,14 +3880,20 @@ exporting a CSS string); render.js is the sole module the router imports.
   pre-migration rows where the webcam fields are undefined. Embeds the Windy player URL in a
   plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> wrapped in the same
   framed-embed container as the wave map, its title attribute the webcam title or "Nearby
-  webcam" when untitled, 16:9 responsive, fetched by the browser. Heading "Nearby webcam":
-  the caption must stay honest that the cam is nearby, not necessarily the beach itself, so
-  it shows beach.webcam_title when non-empty, plus a "View on Windy" anchor
+  webcam" when untitled, 16:9 responsive, fetched by the browser. The section is
+  <section class="webcam-section wa-stack wa-gap-s" aria-labelledby="webcam-heading">
+  and opens with <h2 id="webcam-heading" class="nearby-heading">Nearby webcam</h2>,
+  the same level and class as the "Nearby beaches" heading. Under the frame, an optional
+  p.webcam-caption shows beach.webcam_title when non-empty, plus a "View on Windy" anchor
   (rel="noopener noreferrer", target="_blank") to beaches.webcam_detail_url whenever that
   column holds an absolute http(s) URL; a null, empty, relative or non-http(s) value emits
-  no anchor, and an untitled cam still gets the link-only caption. The per-cam link is what
-  Windy's Webcams API Terms require ("Link every image with either our webcam page or
-  timelapse player for full view"); the shared footer carries the courtesy credit.
+  no anchor, and an untitled cam still gets the link-only caption. Last comes the
+  unconditional note <p class="webcam-note wa-caption-s">This camera is near this beach
+  and may not show the beach itself.</p>, which renders even for an untitled, unlinked
+  cam, because the cam is only the nearest active one within a few kilometres and the page
+  must never read as a view of this beach. The per-cam link is what Windy's Webcams API
+  Terms require ("Link every image with either our webcam page or timelapse player for full
+  view"); the shared footer carries the courtesy credit.
   beaches.webcam_detail_url (migration 0011) is written every night by the webcam cron from
   webcam.urls.detail. All dynamic values escape through escapeHtml, including attribute
   positions.

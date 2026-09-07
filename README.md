@@ -413,9 +413,10 @@ classification (offline)](#discovery-and-classification-offline)).
   buckets fall back to per-beach `nearby` queries. Only the nearest *active* cam's id, title
   and embed **player** URL are stored (migration 0005): free-tier still-image URLs expire in
   ~15 minutes and are useless under a read-only request path, while the player embeds durably.
-  The detail page renders it in a plain `<iframe>` labeled as a *nearby* webcam with the
-  Windy.com attribution link the free tier requires, and the footer carries the Windy credit on
-  every page independently. An API failure leaves the row untouched; a confirmed
+  The detail page renders it in a plain `<iframe>` under a "Nearby webcam" heading, with a note
+  reading "This camera is near this beach and may not show the beach itself." and the Windy.com
+  attribution link the free tier requires; the footer carries the Windy credit on every page
+  independently. An API failure leaves the row untouched; a confirmed
   no-cam-within-radius answer clears the webcam columns and stamps the check time.
 
 `wrangler dev` does not run cron triggers on a schedule; trigger them manually while
