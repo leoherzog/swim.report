@@ -3,7 +3,13 @@
 // and the distance/sort-note rendering in src/frontend/render.js.
 
 import { describe, it, expect } from "vitest";
-import { distanceMi, resolveUserLocation, escapeLike, handleRequest } from "../src/router.js";
+import {
+  distanceMi,
+  resolveUserLocation,
+  escapeLike,
+  parseBeachIds,
+  handleRequest
+} from "../src/router.js";
 import { renderListPage, renderDetailPage, markerFlagColor } from "../src/frontend/render.js";
 import {
   MAP_DIRECTORY_KEY,
@@ -2072,5 +2078,137 @@ describe("renderListPage green-only filter and distance origin", () => {
     };
     expect(await (await handleRequest(ipRequest, env2)).text())
       .toContain("Distances from your approximate location</p>");
+  });
+});
+
+// GET /?ids=... — the bounded, order-preserving list mode the browser-side
+// "Your beaches" section fetches.
+describe("GET /?ids= list mode", () => {
+  const ONE = { id: "osm-way-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114 };
+  const TWO = { id: "osm-node-2", name: "Ottawa Beach", lat: 42.775, lon: -86.211 };
+
+  function idsRequest(search) {
+    return { method: "GET", url: "https://swim.report/?ids=" + search, cf: {} };
+  }
+
+  function selectStatements(statements) {
+    return statements.filter(function (st) {
+      return st.sql.indexOf("SELECT * FROM beaches") === 0;
+    });
+  }
+
+  it("binds every id as a parameter behind the flag-worthy gate", async () => {
+    const { env, statements } = makeEnv([ONE, TWO]);
+    const res = await handleRequest(idsRequest("osm-way-1,osm-node-2"), env);
+    expect(res.status).toBe(200);
+    const selects = selectStatements(statements);
+    expect(selects.length).toBe(1);
+    expect(selects[0].sql).toContain("WHERE id IN (?1, ?2) AND ");
+    expect(selects[0].sql).toContain("water_class");
+    expect(selects[0].params).toEqual(["osm-way-1", "osm-node-2"]);
+    // No proximity ordering, no LIKE clause: q and near are ignored here.
+    expect(selects[0].sql).not.toContain("ORDER BY");
+    expect(selects[0].sql).not.toContain("LIKE");
+  });
+
+  it("renders the rows in the requested order, not the order SQLite returned", async () => {
+    const { env } = makeEnv([TWO, ONE]);
+    const res = await handleRequest(idsRequest("osm-way-1,osm-node-2"), env);
+    const html = await res.text();
+    expect(html.indexOf("/beach/osm-way-1")).toBeLessThan(html.indexOf("/beach/osm-node-2"));
+
+    const reversed = await handleRequest(idsRequest("osm-node-2,osm-way-1"), makeEnv([TWO, ONE]).env);
+    const reversedHtml = await reversed.text();
+    expect(reversedHtml.indexOf("/beach/osm-node-2"))
+      .toBeLessThan(reversedHtml.indexOf("/beach/osm-way-1"));
+  });
+
+  it("skips ids with no matching row and renders the rest", async () => {
+    const { env } = makeEnv([ONE]);
+    const res = await handleRequest(idsRequest("osm-way-1,osm-way-999"), env);
+    const html = await res.text();
+    expect(html).toContain("/beach/osm-way-1");
+    expect(html).not.toContain("/beach/osm-way-999");
+  });
+
+  it("drops malformed ids before they reach SQL and skips the read entirely when none survive", async () => {
+    const { env, statements } = makeEnv([ONE]);
+    const res = await handleRequest(idsRequest("osm-way-1,osm-boat-3,12345,osm-way-x"), env);
+    expect(res.status).toBe(200);
+    const selects = selectStatements(statements);
+    expect(selects[0].params).toEqual(["osm-way-1"]);
+
+    const none = makeEnv([ONE]);
+    const empty = await handleRequest(idsRequest("nope,%2E%2E%2F"), none.env);
+    expect(empty.status).toBe(200);
+    expect(selectStatements(none.statements).length).toBe(0);
+    expect(await empty.text()).not.toContain("class=\"beach-row\"");
+  });
+
+  it("names the ids rather than claiming the database is empty", async () => {
+    const { env } = makeEnv([ONE]);
+    const res = await handleRequest(idsRequest("osm-way-999"), env);
+    const html = await res.text();
+    expect(html).toContain("No beaches match those ids.");
+    expect(html).not.toContain("No beaches found yet. Check back soon.");
+    expect(html).not.toContain("No beaches match your search.");
+  });
+
+  it("caps the list at 10 ids", async () => {
+    const many = [];
+    for (let i = 1; i <= 14; i = i + 1) {
+      many.push("osm-way-" + i);
+    }
+    const { env, statements } = makeEnv([ONE]);
+    await handleRequest(idsRequest(many.join(",")), env);
+    const selects = selectStatements(statements);
+    expect(selects[0].params.length).toBe(10);
+    expect(selects[0].params[9]).toBe("osm-way-10");
+    expect(selects[0].sql).toContain("?10)");
+    expect(selects[0].sql).not.toContain("?11");
+  });
+
+  it("is cacheable and never asserts data-complete", async () => {
+    const { env } = makeEnv([ONE]);
+    const res = await handleRequest(idsRequest("osm-way-1"), env);
+    expect(res.headers.get("cache-control")).toBe(CACHEABLE);
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    const html = await res.text();
+    // data-complete asserts the rendered rows are the whole flag-worthy table,
+    // which one caller-chosen slice never is.
+    expect(html).not.toContain("data-complete=\"1\"");
+  });
+
+  it("writes no last_viewed stamp for the listed beaches", async () => {
+    const { env, statements } = makeEnv([ONE, TWO]);
+    const ctx = makeCtx();
+    await handleRequest(idsRequest("osm-way-1,osm-node-2"), env, ctx);
+    expect(ctx.promises.length).toBe(0);
+    const updates = statements.filter(function (st) {
+      return st.sql.indexOf("UPDATE") === 0;
+    });
+    expect(updates.length).toBe(0);
+  });
+});
+
+describe("parseBeachIds", () => {
+  it("keeps well-formed ids in order, deduped, trimmed and capped at 10", () => {
+    expect(parseBeachIds("osm-way-1, osm-node-2 ,osm-relation-3"))
+      .toEqual(["osm-way-1", "osm-node-2", "osm-relation-3"]);
+    expect(parseBeachIds("osm-way-1,osm-way-1")).toEqual(["osm-way-1"]);
+    const many = [];
+    for (let i = 1; i <= 12; i = i + 1) {
+      many.push("osm-way-" + i);
+    }
+    expect(parseBeachIds(many.join(",")).length).toBe(10);
+  });
+
+  it("drops anything that is not an osm-<type>-<digits> id", () => {
+    expect(parseBeachIds("osm-boat-1")).toEqual([]);
+    expect(parseBeachIds("osm-way-")).toEqual([]);
+    expect(parseBeachIds("osm-way-1x")).toEqual([]);
+    expect(parseBeachIds("' OR 1=1 --")).toEqual([]);
+    expect(parseBeachIds("")).toEqual([]);
+    expect(parseBeachIds(null)).toEqual([]);
   });
 });

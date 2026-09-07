@@ -230,6 +230,25 @@ rendered rows alone, so it means green among the beaches on this page, not acros
 table. It combines with the search term in one pass, and remembers its position between visits,
 re-applying it as the page loads; with JavaScript off it is inert and every row shows.
 
+`GET /?ids=osm-way-1,osm-node-2` renders the same list page for exactly those beaches, in
+the order given. At most 10 ids are read, each must match the `osm-<node|way|relation>-<id>`
+format, and ids that are malformed, unknown or not flag-worthy are skipped silently, so a
+list nothing matches renders the honest "No beaches match those ids." rather than the
+empty-database copy. The mode ignores `q`, `near` and the visitor's IP location, so the
+response depends only on the URL and is cacheable. It is what the **Your beaches** section
+fetches.
+
+**Your beaches.** The list page carries a saved-and-recently-viewed section above the main
+list, filled in the browser from `localStorage` — no accounts, no cookie, and nothing about
+the lists is stored server-side beyond the bounded `?ids=` request. The detail page's
+**Save** button toggles a beach in the saved list, and every detail view records the beach in
+a recently-viewed list of the last 8. The section shows saved beaches first, then recently
+viewed ones that are not saved, using the server's own rows so they search and filter with
+the rest of the list. Rows already rendered in the list below are reused as they are, so the
+`?ids=` request is made only for the beaches the page does not already hold, and often not at
+all. With JavaScript off the Save button never appears and the section stays hidden; a failed
+fetch leaves it hidden too.
+
 **The staleness warning.** When a flag card's `updated` time is older than its staleness
 horizon, the card carries a visible warning callout reading "Stale data — last updated
 <em>N hours ago</em>". The horizon is 2 hours by default, matching the hourly recompute, and
@@ -244,7 +263,7 @@ All `/api/*` responses set `content-type: application/json`, except
 `GET /api/beaches.geojson`, which sends the RFC 7946 GeoJSON media type
 `application/geo+json; charset=utf-8`; HTML responses set `text/html; charset=utf-8`.
 Responses are cached at Cloudflare's edge (Workers Cache, `[cache]` in `wrangler.toml`) under
-an explicit per-route policy: successful API and beach-detail responses send
+an explicit per-route policy: successful API, beach-detail and `?ids=` responses send
 `cache-control: public, max-age=60, stale-while-revalidate=600, stale-if-error=600`;
 `GET /api/beaches.geojson` sends `public, max-age=60, stale-while-revalidate=60,
 stale-if-error=600` on a served directory and `public, max-age=60, stale-if-error=600` (no
@@ -252,7 +271,8 @@ stale-while-revalidate at all) on the degraded response, because its origin is a
 read and a longer stale window would only add to the flag-flip latency the map exists to
 show; the `/api/flag` 404 sends plain `public, max-age=60`; the home page, `/health` and error
 responses send `no-store`, because the home page is personalized by IP-derived location and
-must never be shared across visitors.
+must never be shared across visitors. The `near=` and `ids=` modes are the exceptions: neither
+reads that location, so both are fully determined by the URL.
 
 ## Estimation rules
 

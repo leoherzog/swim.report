@@ -3399,6 +3399,15 @@ src/router.js:
       // backslash escape char, so a user's ?q= term is matched literally. The
       // result is wrapped in "%" ... "%" and bound to a "LIKE ?n ESCAPE '\'" clause.
 
+    export function parseBeachIds(raw)
+      // -> string[]. Pure; exported for tests. The valid, deduped beach ids in a
+      // comma-separated ?ids= value, in the order given, capped at IDS_LIST_LIMIT
+      // (10, from src/idsListLimit.js — its own module because the browser-side
+      // "Your beaches" script bakes the same bound into the id list it asks for).
+      // An id must match /^osm-(node|way|relation)-\d+$/ (the format
+      // src/discovery.js mints) or it is dropped, so no request text can reach SQL
+      // as anything but a bound parameter.
+
     export function resolveUserLocation(request, url)
       // -> { lat, lon } | null. A valid "near" query param ("lat,lon", finite,
       // in range) wins over request.cf.latitude/longitude (IP-derived strings;
@@ -3409,6 +3418,7 @@ Routing table (method GET only; anything else → 405):
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. KV: one bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — two KV reads per page regardless of row count. HOME_LIST_LIMIT (100) is load-bearing, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located, plus preciseLocation — true only for an explicit near param, i.e. a browser fix rather than the request.cf IP estimate, and wording only; data also carries query, hasMore, near — section 9) |
+| GET /?ids=id1,id2,...     | handleIdsList  | The same list page rendered for exactly the listed beaches, in the order given. parseBeachIds validates and dedupes the comma-separated value and caps it at 10 BEFORE any SQL; the ids are bound as parameters (D1: SELECT * FROM beaches WHERE id IN (?1, ?2, ...) AND [flag-worthy gate] — no ORDER BY, since SQLite returns an IN-set in its own order and the caller's order is restored in JS by id), then the same two bulk KV gets handleHome makes. Ids that do not match the id format, that name no row, or that name a non-flag-worthy row are skipped silently; an empty result reads no D1 at all. q, near and request.cf are ignored on this route, which is what makes the response fully URL-determined and therefore CACHEABLE. It writes no last_viewed stamp — only the two single-beach routes carry the demand signal. This is what the browser-side "Your beaches" section (section 9) fetches for a visitor's saved and recently viewed ids; nothing about those lists reaches the server beyond the bounded id list in the URL. | HTML renderListPage with idsMode: true, query "", hasMore false and no location, so the page renders unsorted, un-filtered rows and never asserts data-complete. idsMode also owns the empty-state copy: a page with no rows reads "No beaches match those ids.", since an unrecognized id list is neither a search miss nor an empty database |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp: + wqfloor:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT id,name,park_name,lat,lon,water_class,water_class_attempts FROM beaches WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), then one bulk flag: get and one bulk official: get for those ids | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE KV read: env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" }), resolved by mapDirectoryFeatures(directory, nowIso) — which calls markerFlagColor(estimate, official, nowIso) per entry, the section-9 displayFlagColor rule with double-red collapsed to red, from the ingredients the cron stored (section 1, MapDirectory). No D1 read at all on this path. When the key is absent, unparseable or version-mismatched the DEGRADED branch runs instead: D1 SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] ORDER BY id LIMIT 5000 (MAP_DEGRADED_MAX_FEATURES — a dead builder must not turn every colo's 60 s revalidation into an unbounded full-table scan), every feature's flag the literal "unknown", zero KV reads, and one console.log naming the feature count. There is deliberately no fallback to a per-beach bulk read: that is a silent cliff that keeps the map working while the builder has been dead for days, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped in both branches, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the directory's build instant, or null on the degraded branch), ["degraded": true on that branch,] "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt and degraded are top-level GeoJSON foreign members (RFC 7946 section 6.1), so a dead builder is visible to anyone hitting the endpoint instead of a silent cliff. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
@@ -3433,7 +3443,8 @@ Routing table (method GET only; anything else → 405):
   cacheable policy). Every response carries an explicit cache-control for the Workers
   Cache layer ([cache] enabled in wrangler.toml):
   - CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600"
-    on detail-page 200s and /api/flag 200s (/api/beaches.geojson has its own policy,
+    on detail-page 200s, /?ids= 200s (URL-determined: the route reads neither request.cf
+    nor q/near) and /api/flag 200s (/api/beaches.geojson has its own policy,
     below, since its origin is one KV read). stale-if-error is
     explicit because Cloudflare's default on Worker error is to serve stale indefinitely,
     which would freeze the HTML's embedded nowIso-based staleness warnings without bound;
@@ -3451,7 +3462,8 @@ Routing table (method GET only; anything else → 405):
   - "no-store" on the home page, /health, and all other 404s and error pages. The home page
     is personalized by request.cf geolocation, which is not in the cache key and not
     expressible via Vary, so caching it would serve one visitor's proximity sort to
-    everyone.
+    everyone. The ?near= and ?ids= modes are the exceptions above, because neither reads
+    request.cf.
 - last_viewed demand stamp (touchLastViewed): on a found beach, handleDetail and
   handleApiFlag issue UPDATE beaches SET last_viewed = nowIso WHERE id = ? inside
   ctx.waitUntil, only when the row's last_viewed is NULL, invalid, or older than
@@ -3534,7 +3546,11 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                 rendered; drives the empty-state "Search all beaches" submit
       //                 button, shown only when hasMore && query is empty),
       //          near: string (optional — raw near param, preserved in a hidden form
-      //                 input so proximity sorting survives a search submit) }
+      //                 input so proximity sorting survives a search submit),
+      //          idsMode: boolean (optional — this page is the ?ids= slice, so it may
+      //                 not assert data-complete however few rows it holds, and its
+      //                 empty state reads "No beaches match those ids." rather than
+      //                 the search-miss or empty-database copy) }
       // -> full HTML document string.
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite or
       // null renders nothing. sortedByProximity names the origin those labels are
@@ -3566,7 +3582,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // search." when it has hidden every row the term matched, and restores the server's
       // own copy and visibility when switched off. A term that matched no row at all
       // leaves the server's copy standing, so the filter never takes the blame for a
-      // plain search miss.
+      // plain search miss. Both counts behind that decision are taken inside
+      // #beach-list-items, so rows in the "Your beaches" section can neither suppress the
+      // main list's empty state nor be counted twice.
       // The page embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a browser-side
       // geolocation upgrade: on load, when the URL has no "near" param, it calls
       // navigator.geolocation.getCurrentPosition and on success fetch()es the same list
@@ -3586,7 +3604,10 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // browser state. __swimReportSwapList dispatches a "swimreport:listswap"
       // CustomEvent on document after every successful swap, because the replaced rows
       // lose the inline display the client filters wrote and searchScript.js has to
-      // re-apply both of them. It then rewrites the URL via history.replaceState and
+      // re-apply both of them. That event means fresh server markup arrived, so its
+      // listener re-captures the server's empty-state copy before filtering; rows merely
+      // appended elsewhere on the page announce themselves with "swimreport:rowsadded"
+      // instead, which only re-filters. It then rewrites the URL via history.replaceState and
       // dispatches a "swimreport:nearupdate" CustomEvent on document so the map script
       // re-centers, and announces the reorder into the
       // #geo-live-region aria-live element (rendered empty, class wa-visually-hidden,
@@ -3649,6 +3670,51 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // constructor, so an 'error' listener console.logs it — the construction try/catch
       // alone would let a WebGL2-less browser surface an unhandled error.
 
+      // Between the live region and the main list the page renders an empty, hidden
+      // "Your beaches" shell: <section id="your-beaches"
+      // class="your-beaches wa-stack wa-gap-s" aria-labelledby="your-beaches-heading"
+      // hidden> holding an h2 "Your beaches", a hidden p#your-beaches-saved-label
+      // "Saved" plus ul#your-beaches-saved, and a hidden p#your-beaches-recent-label
+      // "Recently viewed" plus ul#your-beaches-recent. The server renders no rows there
+      // and knows nothing about the visitor. LIST_FAVORITES_SCRIPT
+      // (src/frontend/favoritesScript.js) fills it in the browser: it reads the favorite
+      // ids, then the recently viewed ids with the favorites removed, and caps the pair
+      // at IDS_LIST_LIMIT (10, src/idsListLimit.js — the same constant the route
+      // enforces). It then matches those ids against the .beach-row markup already in
+      // #beach-list-items, each row identified by its own /beach/<id> link, and fetches
+      // "/?ids=" + only the ids still missing (section 8), parsed with DOMParser exactly
+      // as the geo upgrade does. A returning visitor whose beaches are all in the
+      // rendered list therefore costs no request at all, which matters because this runs
+      // on every home-page load and the response is a whole list document. A browser
+      // without fetch or DOMParser takes the same branch and shows the rows it has.
+      // Every row is then copied (document.importNode) into the saved or the recent list
+      // in the id order above. The server owns row markup and the row order — the script
+      // never re-sorts or rebuilds a row. The two sub-labels are revealed only when both
+      // groups have rows; one group alone is already named by the heading. No stored ids,
+      // an empty response or a failed fetch leaves the section hidden, which is the page
+      // a first-time visitor sees.
+      // Three deliberate consequences. The inserted rows carry class beach-row plus the
+      // data-name and data-flag attributes the row filters read, so the live search and
+      // the green-only switch treat them as rows like any other. They land after both
+      // passes have already run, so the script dispatches a "swimreport:rowsadded"
+      // CustomEvent once the rows are in — searchScript.js handles it by re-running the
+      // filter pass alone, which is what re-applies a persisted green-only state and an
+      // in-progress search term over them. It is deliberately NOT "swimreport:listswap":
+      // that event also re-captures the server's empty-state copy, and with no fresh
+      // server markup on the page the capture would latch whatever the green filter last
+      // wrote there and restore it as the server's message the next time the filter is
+      // switched off. __swimReportListGen is left alone for a related reason — the main
+      // list was never replaced, and a bump would restart an in-flight live search. And
+      // every count in searchScript.js — the two empty-state counts as well as the
+      // live-region match count — is taken inside #beach-list-items only, because these
+      // rows are copies of rows that may also sit in the list below: counting them would
+      // report every match twice and let a saved row suppress the main list's own empty
+      // state. The display pass still covers every .beach-row on the page, which is what
+      // makes the section filter along with the list.
+      // __swimReportSwapList touches only #beach-list-items, #beach-list-empty and
+      // #list-active-query, so the section itself survives every geo and search swap
+      // untouched and re-fetches nothing.
+
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
       //          official: OfficialFlag|null, wqfloor: WqFloorAdvisory|null,
@@ -3680,6 +3746,18 @@ exporting a CSS string); render.js is the sole module the router imports.
   switches restyle the open page. It must be blocking and sit before the theme stylesheet
   links, or a dark-preference visitor sees a light flash. Bare .wa-theme-matter defaults
   light, so no explicit wa-light class is used.
+- Favorites and recently viewed (src/frontend/favoritesScript.js, two inline script
+  constants; no accounts, no cookie, no D1 write): DETAIL_FAVORITE_SCRIPT on the detail
+  page and LIST_FAVORITES_SCRIPT on the list page. State is two localStorage arrays —
+  FAVORITES_KEY "swimreport:favorites" (the saved ids) and FAVORITES_RECENT_KEY
+  "swimreport:recent" (viewed ids, most recent first, capped at FAVORITES_RECENT_MAX = 8,
+  the current beach moved to the head on every detail view). Every read and write is
+  wrapped in try/catch, because a private-mode browser throws on localStorage access
+  rather than returning null, and a stored value that is not an array of strings reads as
+  empty. Both scripts are progressive enhancements and neither is required for a correct
+  page. The key names, the cap and IDS_LIST_LIMIT (src/idsListLimit.js, shared with the
+  route in src/router.js) are interpolated into the script text from those constants, since
+  a script body is text and cannot import.
 - In head, load Web Awesome Pro via the version-pinned CDN kit (WA_KIT_BASE in
   render.js): the matter-theme, native, and utilities stylesheets plus the
   webawesome.loader.js module script.
@@ -3866,6 +3944,15 @@ exporting a CSS string); render.js is the sole module the router imports.
     pathname + search when the referrer parses, is same-origin and has pathname "/", so ?q=
     and ?near= survive the trip back. Both are progressive enhancements: with no JS the
     page keeps a working back link and the copy button alone.
+    The row's third control is the save toggle, <wa-button id="favorite-toggle"
+    class="favorite-toggle" appearance="outlined" size="s" aria-pressed="false"
+    data-beach-id=beach.id hidden> holding a star wa-icon and a span#favorite-label
+    reading "Save". It too ships hidden and DETAIL_FAVORITE_SCRIPT
+    (src/frontend/favoritesScript.js) removes the attribute, so a page without JS never
+    shows a control that cannot work; that script also records the beach in the
+    recently-viewed list on every view. Saved state flips aria-pressed, the label to
+    "Saved" and the icon variant to solid. It is a purely local preference and says
+    nothing about the flag, so it carries no flag color.
   - "At a glance" tiles (section.at-a-glance, directly under the hero): a wa-grid of five
     outlined <wa-card class="glance-tile"> tiles, each an icon, a value, a caption and a
     quiet source line — waves now (estimate.waveHeightFt.toFixed(1) + " ft", the same field
@@ -4330,4 +4417,14 @@ other caveat test uses symbolically.
 - test/router.test.js — asserts handleDetail reads the "waves:" and "wqfloor:" keys and
   renders the advisory callout from the latter (plus routing,
   /api/beaches.geojson served from the map directory in a single KV read with parity against
-  markerFlagColor, its bounded all-unknown degraded branch, and cache-control behavior).
+  markerFlagColor, its bounded all-unknown degraded branch, and cache-control behavior). It
+  also covers the ?ids= list mode: parameter binding behind the flag-worthy gate, the
+  caller's order restored over SQLite's, unknown and malformed ids skipped, the 10-id cap,
+  the CACHEABLE header, the absent data-complete, and the absent last_viewed stamp.
+- test/favorites.test.js — the favorites enhancement's rendered surfaces and script text:
+  the hidden detail-page toggle (exact markup, escaped id, position in the hero share row),
+  the empty hidden "Your beaches" shell, idsMode dropping data-complete and owning its own
+  empty-state copy, the two script constants' localStorage keys, try/catch wrapping, the
+  fetch of only the ids not already on the page and no-"</script" guard, the
+  "swimreport:rowsadded" dispatch that re-applies the row filters to the inserted rows
+  without re-capturing the server empty state, and the counts scoped to #beach-list-items.

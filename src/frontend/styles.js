@@ -230,6 +230,21 @@ const RULES = [
   "}",
   // --- End list polish. ---
 
+  // --- Your beaches: the saved / recently viewed section above the main list. ---
+  // Its rows are the server's own .beach-row markup and the sub-labels take their
+  // quiet color from wa-caption-s, so only the heading size and the stack's
+  // zeroed margins are left to set here.
+  ".your-beaches-heading {",
+  "  margin: 0;",
+  "  font-size: var(--wa-font-size-l);",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+
+  ".your-beaches-label {",
+  "  margin: 0;",
+  "}",
+  // --- End your beaches. ---
+
   ".flag-icon-green { color: var(--wa-color-green-50); }",
   ".flag-icon-yellow { color: var(--wa-color-yellow-70); }",
   ".flag-icon-red { color: var(--wa-color-red-50); }",

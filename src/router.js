@@ -1,6 +1,7 @@
 import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/render.js";
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
+import { IDS_LIST_LIMIT } from "./idsListLimit.js";
 import {
   MAP_DIRECTORY_KEY,
   MAP_DIRECTORY_VERSION,
@@ -16,6 +17,10 @@ const HOME_LIST_LIMIT = 100;
 // 500 of those, then the JS haversine re-sorts them and slices to
 // HOME_LIST_LIMIT. Purely a safety cap on an already-ordered read.
 const HOME_GEO_FETCH_LIMIT = 500;
+
+// The id format discovery mints (src/discovery.js): "osm-" + node|way|relation
+// + "-" + the OSM id. Anything else never reaches a bound parameter.
+const BEACH_ID_PATTERN = /^osm-(node|way|relation)-\d+$/;
 
 // Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
 // Cacheable routes are location-independent and short-lived: 60 s fresh, up to
@@ -60,6 +65,29 @@ export function escapeLike(term) {
     .split("\\").join("\\\\")
     .split("%").join("\\%")
     .split("_").join("\\_");
+}
+
+// The valid, deduped beach ids in a comma-separated ?ids= value, in the order
+// given and capped at IDS_LIST_LIMIT. Pure; exported for tests. Anything that
+// is not a well-formed beach id is dropped, so the caller's list can never
+// reach SQL as anything but a bound parameter.
+export function parseBeachIds(raw) {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return [];
+  }
+  const parts = raw.split(",");
+  const ids = [];
+  for (let i = 0; i < parts.length; i = i + 1) {
+    const id = parts[i].trim();
+    if (!BEACH_ID_PATTERN.test(id) || ids.indexOf(id) !== -1) {
+      continue;
+    }
+    ids.push(id);
+    if (ids.length === IDS_LIST_LIMIT) {
+      break;
+    }
+  }
+  return ids;
 }
 
 // User location for proximity sorting: the "near" query param (lat,lon —
@@ -273,6 +301,68 @@ async function handleHome(env, location, rawQuery, nearParam) {
   return htmlResponse(html, 200, cacheControl);
 }
 
+// GET /?ids=a,b,c — the same list page rendered for exactly those beaches, in
+// the order asked for. It is what the browser-side "Your beaches" section
+// fetches for a visitor's saved and recently viewed ids, so it deliberately
+// ignores q, near and request.cf: the response is fully URL-determined and
+// therefore cacheable, and it holds nothing about the visitor beyond the ids
+// the URL already carries. Unknown and non-flag-worthy ids are skipped
+// silently, and no last_viewed stamp is written — only the two single-beach
+// routes carry the demand signal.
+async function handleIdsList(env, idsParam) {
+  const ids = parseBeachIds(idsParam);
+  const ordered = [];
+  if (ids.length > 0) {
+    const placeholders = ids.map(function (id, index) { return "?" + String(index + 1); });
+    const stmt = env.DB.prepare(
+      "SELECT * FROM beaches WHERE id IN (" + placeholders.join(", ") + ") AND " +
+      FLAG_WORTHY_WATER_SQL
+    );
+    const result = await stmt.bind.apply(stmt, ids).all();
+    const rows = (result && result.results) || [];
+    // SQLite returns an IN-set in whatever order it likes, so the caller's
+    // order is restored here rather than asked of the database.
+    const byId = new Map();
+    for (const row of rows) {
+      byId.set(row.id, row);
+    }
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (row) {
+        ordered.push(row);
+      }
+    }
+  }
+  const entries = [];
+  if (ordered.length > 0) {
+    const flagKeys = ordered.map(function (beach) { return "flag:" + beach.id; });
+    const officialKeys = ordered.map(function (beach) { return "official:" + beach.id; });
+    const maps = await Promise.all([
+      env.FLAGS.get(flagKeys, { type: "json" }),
+      env.FLAGS.get(officialKeys, { type: "json" })
+    ]);
+    for (const beach of ordered) {
+      entries.push({
+        beach: beach,
+        estimate: maps[0].get("flag:" + beach.id) || null,
+        official: maps[1].get("official:" + beach.id) || null,
+        distanceMi: null
+      });
+    }
+  }
+  const html = renderListPage({
+    entries: entries,
+    nowIso: new Date().toISOString(),
+    sortedByProximity: false,
+    location: null,
+    query: "",
+    hasMore: false,
+    near: "",
+    idsMode: true
+  });
+  return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+}
+
 // Nearby cards on the detail page. The planar ORDER BY keeps the D1 read to
 // the NEARBY_FETCH_LIMIT nearest candidates, the JS haversine decides the final
 // order, and NEARBY_LIMIT of them render. NEARBY_MAX_MI drops the far tail so a
@@ -484,6 +574,10 @@ export async function handleRequest(request, env, ctx) {
   }
 
   if (path === "/") {
+    const idsParam = url.searchParams.get("ids");
+    if (idsParam !== null) {
+      return handleIdsList(env, idsParam);
+    }
     return handleHome(
       env,
       resolveUserLocation(request, url),

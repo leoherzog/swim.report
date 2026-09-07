@@ -27,6 +27,18 @@
 // own copy; switching it off hands ownership back. Without JS the switch is
 // inert and every row shows. A swap replaces every row, so
 // "swimreport:listswap" re-runs the pass.
+//
+// Two events re-run it, and they are not interchangeable. "swimreport:listswap"
+// means fresh server markup replaced the list, so the server's empty-state copy
+// is re-captured before the pass. "swimreport:rowsadded" means rows were merely
+// appended elsewhere on the page (the "Your beaches" section), where re-reading
+// the empty state would capture whatever this script last wrote into it.
+//
+// Both filter passes cover every .beach-row on the page, so the section filters
+// with the list, but every count is taken inside #beach-list-items: the section
+// holds copies of rows that may also sit in the list below, and counting them
+// would report matches twice and let a saved row suppress the main list's own
+// empty state.
 
 const SCRIPT_LINES = [
   "(function () {",
@@ -84,9 +96,12 @@ const SCRIPT_LINES = [
   "    emptyState.style.display = serverDisplay;",
   "  };",
   // Both filters resolve to one display write per row: two passes would let the
-  // next keystroke clobber the green filter's result.
+  // next keystroke clobber the green filter's result. Every row on the page is
+  // filtered; only rows in the main list are counted, since the empty state the
+  // counts drive belongs to that list alone.
   "  const filterRows = function () {",
   "    const rows = document.querySelectorAll('.beach-row');",
+  "    const mainList = document.getElementById('beach-list-items');",
   "    const term = input.value.trim().toLowerCase();",
   "    let visibleCount = 0;",
   "    let termCount = 0;",
@@ -96,6 +111,9 @@ const SCRIPT_LINES = [
   "      const matchesFlag = !greenOnly || row.getAttribute('data-flag') === 'green';",
   "      const matches = matchesTerm && matchesFlag;",
   "      row.style.display = matches ? '' : 'none';",
+  "      if (!mainList || !mainList.contains(row)) {",
+  "        return;",
+  "      }",
   "      if (matchesTerm) {",
   "        termCount = termCount + 1;",
   "      }",
@@ -137,6 +155,14 @@ const SCRIPT_LINES = [
   "    captureServerEmptyState();",
   "    filterRows();",
   "  });",
+  // Rows appended outside the main list carry no fresh server markup with them,
+  // so the pass re-runs over them but the capture must not: re-reading the empty
+  // state here would latch whatever updateEmptyState last wrote — the green
+  // filter's own copy — as the server's, and it would then reappear above a full
+  // list the moment the filter is switched off.
+  "  document.addEventListener('swimreport:rowsadded', function () {",
+  "    filterRows();",
+  "  });",
   // Debounced full-table search. The display url (replaceState, shareable) is
   // built from the current URL's params; the fetch url additionally carries a
   // "near" so the response is cacheable, because resolveUserLocation
@@ -156,9 +182,14 @@ const SCRIPT_LINES = [
   "      return;",
   "    }",
   // Rows the green filter hid are on the page but not on screen, so the count
-  // reads the display the filter pass wrote rather than the row total.
+  // reads the display the filter pass wrote rather than the row total. It counts
+  // the main list alone: the "Your beaches" section holds copies of rows that
+  // may also be in the list below, and counting both would report every match
+  // twice.
   "    let count = 0;",
-  "    document.querySelectorAll('.beach-row').forEach(function (row) {",
+  "    const countList = document.getElementById('beach-list-items');",
+  "    const countRows = countList ? countList.querySelectorAll('.beach-row') : [];",
+  "    countRows.forEach(function (row) {",
   "      if (row.style.display !== 'none') {",
   "        count = count + 1;",
   "      }",

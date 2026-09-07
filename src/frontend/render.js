@@ -5,6 +5,7 @@ import { PAGE_STYLES } from "./styles.js";
 import { LIST_SEARCH_SCRIPT } from "./searchScript.js";
 import { LIST_SWAP_SCRIPT } from "./listSwapScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
+import { LIST_FAVORITES_SCRIPT, DETAIL_FAVORITE_SCRIPT } from "./favoritesScript.js";
 import { buildListMapScript } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
@@ -817,6 +818,37 @@ function renderHomeMap(near, location) {
     "</section>";
 }
 
+// Empty, hidden shell for the visitor's saved and recently viewed beaches,
+// filled in the browser by LIST_FAVORITES_SCRIPT from localStorage plus one
+// "/?ids=" fetch. The server renders no rows here and knows nothing about the
+// visitor: with no script, no stored ids or a failed fetch the section simply
+// stays hidden. The two sub-labels ship hidden and are revealed only when both
+// groups have rows.
+function renderYourBeaches() {
+  return "<section id=\"your-beaches\" class=\"your-beaches wa-stack wa-gap-s\" " +
+    "aria-labelledby=\"your-beaches-heading\" hidden>" +
+    "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your beaches</h2>" +
+    "<p id=\"your-beaches-saved-label\" class=\"your-beaches-label wa-caption-s\" hidden>Saved</p>" +
+    "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
+    "<p id=\"your-beaches-recent-label\" class=\"your-beaches-label wa-caption-s\" hidden>Recently viewed</p>" +
+    "<ul id=\"your-beaches-recent\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
+    "</section>";
+}
+
+// The empty-state copy for a list with no rows. Each of the three cases is a
+// different claim, and the honest one matters: an ids page names ids, a
+// q-filtered page names the search, and only the bare listing may say the
+// database is empty.
+function listEmptyMessage(idsMode, hasEntries, query) {
+  if (idsMode) {
+    return "No beaches match those ids.";
+  }
+  if (hasEntries || query.length > 0) {
+    return "No beaches match your search.";
+  }
+  return "No beaches found yet. Check back soon.";
+}
+
 export function renderListPage(data) {
   const entries = (data && Array.isArray(data.entries)) ? data.entries : [];
   const rowsHtml = entries.map(renderBeachRow).join("\n");
@@ -836,12 +868,14 @@ export function renderListPage(data) {
   // both; the page only names the origin the labels are measured from.
   const sortedByProximity = !!(data && data.sortedByProximity);
   const preciseLocation = !!(data && data.preciseLocation);
+  // The ?ids= mode renders one caller-chosen slice of the table, so it may not
+  // assert data-complete however few rows it holds.
+  const idsMode = !!(data && data.idsMode);
 
   // A q-filtered page with zero rows is a search miss, not an empty database, so
-  // it gets the no-match copy just like the client-side filter miss.
-  const emptyMessage = (hasEntries || query.length > 0)
-    ? "No beaches match your search."
-    : "No beaches found yet. Check back soon.";
+  // it gets the no-match copy just like the client-side filter miss, and an ids
+  // page with zero rows is an unrecognized id list rather than either.
+  const emptyMessage = listEmptyMessage(idsMode, hasEntries, query);
   const emptyStyle = hasEntries ? " style=\"display: none;\"" : "";
   const searchAllHtml = offerSearchAll ?
     ("<wa-button class=\"search-all-btn\" type=\"submit\" form=\"beach-search-form\" " +
@@ -914,7 +948,7 @@ export function renderListPage(data) {
   // flag-worthy table, so the local filter is exhaustive. Only the default
   // no-query listing can assert it, because a q-filtered page's rows are query
   // matches rather than the full table.
-  const listComplete = !hasMore && query.length === 0;
+  const listComplete = !hasMore && query.length === 0 && !idsMode;
   const completeAttr = listComplete ? " data-complete=\"1\"" : "";
   const listHtml = "<section class=\"beach-list-section\">" +
     "<ul class=\"beach-list wa-list-plain wa-stack wa-gap-xs\" id=\"beach-list-items\"" + completeAttr + ">" + rowsHtml + "</ul>" +
@@ -925,11 +959,12 @@ export function renderListPage(data) {
     "</section>";
 
   const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + controlsHtml +
-    geoLiveHtml + listHtml;
+    geoLiveHtml + renderYourBeaches() + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
     "<script>" + LIST_SWAP_SCRIPT + "</script>" +
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
     "<script>" + LIST_GEO_SCRIPT + "</script>" +
+    "<script>" + LIST_FAVORITES_SCRIPT + "</script>" +
     "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +
     "<script>" + buildListMapScript(MAPLIBRE_JS) + "</script>";
 
@@ -1556,6 +1591,18 @@ export function renderDetailPage(data) {
     ("<p class=\"hero-verdict\">" + escapeHtml(verdictText) + "</p>") : "";
   const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(beach.id);
 
+  // Save toggle for the visitor's own list, in the hero's share row beside the
+  // copy and share controls. It ships hidden and DETAIL_FAVORITE_SCRIPT reveals
+  // it, so a page without JS never shows a control that cannot work. The state
+  // lives only in the visitor's browser; nothing about it reaches the server,
+  // and it says nothing about the flag, so it carries no flag color.
+  const favoriteHtml = "<wa-button id=\"favorite-toggle\" class=\"favorite-toggle\" " +
+    "appearance=\"outlined\" size=\"s\" aria-pressed=\"false\" data-beach-id=\"" +
+    escapeHtml(String(beach.id)) + "\" hidden>" +
+    "<wa-icon id=\"favorite-icon\" slot=\"start\" name=\"star\" variant=\"regular\"></wa-icon>" +
+    "<span id=\"favorite-label\">Save</span>" +
+    "</wa-button>";
+
   // The hero carries the beach's identity and nothing but the display flag,
   // washed in that flag's own color (data-flag drives the color-mix in
   // styles.js, so no color literal reaches the markup). The verdicts themselves
@@ -1584,6 +1631,7 @@ export function renderDetailPage(data) {
     "copy-label=\"Copy link\" success-label=\"Link copied\"></wa-copy-button>" +
     "<wa-button id=\"hero-share\" class=\"hero-share\" appearance=\"outlined\" size=\"s\" hidden>" +
     "<wa-icon slot=\"start\" name=\"share-nodes\"></wa-icon>Share</wa-button>" +
+    favoriteHtml +
     "</div>" +
     "</section>";
 
@@ -1637,7 +1685,8 @@ export function renderDetailPage(data) {
     : ("<script>" + WAVE_TICKS_SCRIPT + "</script>");
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
-    "<script>" + DETAIL_HERO_SCRIPT + "</script>" + ticksScriptHtml;
+    "<script>" + DETAIL_HERO_SCRIPT + "</script>" +
+    "<script>" + DETAIL_FAVORITE_SCRIPT + "</script>" + ticksScriptHtml;
   // The share card takes titleColor, so the picture, the title flag and the map
   // marker are the one displayFlagColor decision.
   return renderDocument(title, bodyHtml, {
