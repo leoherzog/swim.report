@@ -147,10 +147,16 @@ The detail page opens with a **flag hero**: the beach name behind its flag icon,
 label, and the ESTIMATE badge — or the OFFICIAL badge when the scraped record is what
 supplied the displayed color — over a background washed 12% in that flag's own color. The
 hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
-button. Directly under it, four **at a glance** tiles summarize the waves now, the water
-temperature, the rip-current risk and the count of active alerts; a tile with nothing to
-show says "No data" rather than inventing a number. The full official and estimate cards
-follow unchanged.
+button. Directly under it, five **at a glance** tiles summarize the waves now, the water
+temperature, the rip-current risk, the count of active alerts and the next sunrise or
+sunset; a tile with nothing to show says "No data" rather than inventing a number. The full
+official and estimate cards follow unchanged.
+
+The sun tile is computed in the Worker from the beach's coordinates (`src/frontend/sun.js`,
+the NOAA solar position algorithm, no upstream call), and shown on the viewer's own clock by
+`<wa-format-date>`. Until that component upgrades, the served `<time>` element shows the same
+instant in UTC, because a beach's longitude fixes its solar day but not the clock posted
+there. Inside the polar circles the tile says the sun neither rises nor sets today.
 
 Under the flag's label the hero carries a one-sentence **plain-language verdict** built from
 the same estimate the flag card explains — "Calm water, no alerts.", "Beach Hazards Statement

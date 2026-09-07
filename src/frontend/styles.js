@@ -335,8 +335,8 @@ const RULES = [
   "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
-  // At-a-glance tiles: four small readings in the same responsive grid shape the
-  // nearby cards use, at a narrower column so all four fit a phone in two rows.
+  // At-a-glance tiles: five small readings in the same responsive grid shape the
+  // nearby cards use, at a narrower column so two fit a phone on one row.
   ".glance-grid {",
   "  --min-column-size: 9rem;",
   "}",

@@ -579,6 +579,12 @@ remains partnership-gated.
   scale problem without the Worker ever touching R2. Such an artifact **must** be generated from
   D1, post-classification truth, and never from the OSM layers, or the map would show beaches
   the pipeline rejected as inland.
+- **Sun tile: the served time is UTC, not the beach's clock.** The same missing per-beach
+  timezone column shows here: `src/frontend/sun.js` picks the solar day from longitude, which
+  is up to two hours from the clock posted at the beach, so the `<time>` element under
+  `<wa-format-date>` names UTC and only the component's upgrade shows a local time. A
+  timezone column on `beaches`, stamped by the offline batch from a boundary layer, would let
+  the server render the beach's own clock and would fix the wave ticks in the same move.
 
 ## Explicitly deferred by PLAN.md (not gaps, just out of scope for this pass)
 

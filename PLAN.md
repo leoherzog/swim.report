@@ -3866,14 +3866,27 @@ exporting a CSS string); render.js is the sole module the router imports.
     pathname + search when the referrer parses, is same-origin and has pathname "/", so ?q=
     and ?near= survive the trip back. Both are progressive enhancements: with no JS the
     page keeps a working back link and the copy button alone.
-  - "At a glance" tiles (section.at-a-glance, directly under the hero): a wa-grid of four
+  - "At a glance" tiles (section.at-a-glance, directly under the hero): a wa-grid of five
     outlined <wa-card class="glance-tile"> tiles, each an icon, a value, a caption and a
     quiet source line — waves now (estimate.waveHeightFt.toFixed(1) + " ft", the same field
     the wave strip's now stat reads, sourced by the ESTIMATE badge); water temperature (the
     WaterTemp reading with the station provenance and tooltip of section 1); rip current
     risk (estimate.ripCurrentRisk as HIGH/MODERATE/LOW, "Not forecast" when null, sourced
-    "NWS surf zone forecast"); and active alerts (estimate.alertDetails.length with the
-    first entry's event name).
+    "NWS surf zone forecast"); active alerts (estimate.alertDetails.length with the
+    first entry's event name); and the next sun event.
+    The sun tile is computed, not stored: src/frontend/sun.js (pure NOAA solar position,
+    no Date.now and no upstream) takes the BeachRow's lat/lon plus nowIso and returns the
+    next sunrise and sunset as whole-minute ISO strings, choosing the beach's solar day by
+    a longitude offset (lon / 15 hours) rather than a timezone lookup. The caption is
+    "Sunset" or "Sunrise" for whichever comes first; the value is a <wa-format-date
+    date=iso hour="numeric" minute="numeric"> wrapping a <time datetime=iso> whose text is
+    the instant in UTC ("01:26 UTC"). The component renders the viewer's own clock and
+    renders nothing until it upgrades, so that light-DOM child is the served answer; it
+    names UTC because the longitude offset fixes only the solar day and sits up to two
+    hours from the clock posted at the beach. Non-finite coordinates and the polar day or
+    night both render the "No data" tile — the polar case saying "The sun neither rises nor
+    sets here today" on its source line. The tile is display-only: it never reaches
+    src/rules.js, the estimate or the seal.
     A missing value renders "No data" in quiet text — never a blank tile and never a
     placeholder number — and "None active" renders in the same quiet weight, since only a
     real reading earns the loud value type. The alerts tile says "Alerts not checked for
@@ -4293,8 +4306,14 @@ other caveat test uses symbolically.
   keyword including the double-red collapse and the gray unknown, the ESTIMATE/OFFICIAL
   badge across fresh and aged official records, the untouched flag cards below, the back
   link and share controls, DETAIL_HERO_SCRIPT's referrer and navigator.share guards, the
-  four "at a glance" tiles with present, missing and never-checkable data, the shared
-  section headings, and the webcam-before-nearby stack order.
+  five "at a glance" tiles with present, missing and never-checkable data, the shared
+  section headings, and the webcam-before-nearby stack order. The sun tile is covered
+  there too: the wa-format-date/UTC-fallback markup, the sunrise-versus-sunset caption,
+  and the "No data" tile for missing coordinates and for the polar day.
+- test/sun.test.js — src/frontend/sun.js against published sunrise/sunset times for
+  Holland MI (solstice and equinox) and Sydney within three minutes, the roll to
+  tomorrow's event once today's has passed, whole-minute truncation, the polar day and
+  night nulls, the null-coordinate and unparseable-now guards, and utcClockLabel.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
   wave_updated; runFlagRecompute reads "waveinput:" for wave height and wind fallback,
   degrading to unknown when absent, rather than fetching; the alertDetails/ripCurrentRisk

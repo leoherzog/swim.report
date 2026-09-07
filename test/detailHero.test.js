@@ -317,10 +317,40 @@ describe("at a glance tiles", () => {
     expect(tileSource(html, "triangle-exclamation")).toBe("Surf &lt;b&gt;Warning&lt;/b&gt;");
   });
 
+  it("shows the next sun event on the viewer's clock, over a UTC fallback", () => {
+    // NOW_ISO is morning at the fixture beach, so sunset is the next event.
+    const html = render({});
+    expect(tile(html, "sun")).toContain(
+      "<span class=\"glance-value wa-font-size-xl wa-font-weight-bold\">" +
+      "<wa-format-date date=\"2026-07-06T01:26:00.000Z\" hour=\"numeric\" minute=\"numeric\">" +
+      "<time datetime=\"2026-07-06T01:26:00.000Z\">01:26 UTC</time></wa-format-date></span>");
+    expect(tile(html, "sun")).toContain(">Sunset</span>");
+    expect(tileSource(html, "sun")).toBe("Calculated from this beach&#39;s coordinates");
+  });
+
+  it("names sunrise when the sunrise is the nearer event", () => {
+    const html = render({ nowIso: "2026-07-05T06:00:00.000Z" });
+    expect(tile(html, "sun")).toContain(
+      "<time datetime=\"2026-07-05T10:12:00.000Z\">10:12 UTC</time>");
+    expect(tile(html, "sun")).toContain(">Sunrise</span>");
+  });
+
+  it("reads No data rather than a 0,0 sun for a beach with no coordinates", () => {
+    const html = render({ beach: beachWith({ lat: null, lon: null }) });
+    expect(tileValue(html, "sun")).toEqual({ text: "No data", quiet: true });
+    expect(tile(html, "sun")).toContain(">Sunrise and sunset</span>");
+  });
+
+  it("says so where the sun neither rises nor sets today", () => {
+    const html = render({ beach: beachWith({ lat: 78.2232, lon: 15.6469 }) });
+    expect(tileValue(html, "sun")).toEqual({ text: "No data", quiet: true });
+    expect(tileSource(html, "sun")).toBe("The sun neither rises nor sets here today");
+  });
+
   it("renders every tile even when the page has no data at all", () => {
     const html = render({});
     const glance = html.slice(html.indexOf("<section class=\"at-a-glance"));
-    expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(4);
+    expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(5);
     // No tile is ever blank, and none of them looks like the official card.
     expect(glance).not.toContain("official-card");
   });

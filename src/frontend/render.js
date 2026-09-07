@@ -12,6 +12,7 @@ import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { SEVERITY_RANK } from "../rules.js";
 import { alertsCheckable } from "../alertsCheckable.js";
 import { verdictSentence } from "./verdict.js";
+import { nextSunEvent, utcClockLabel } from "./sun.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
@@ -1332,22 +1333,60 @@ function renderWqFloorCallout(wqfloor) {
 // "No data" in quiet text — never a blank tile, never a placeholder number.
 // options.quiet renders a present-but-negative answer ("None active") in the
 // same quiet weight, so only a real reading carries the loud value type.
+// options.valueHtml is inserted raw and wins over options.value, for the one
+// reading that is a formatted time rather than text; the caller escapes it.
 function renderGlanceTile(options) {
   const hasValue = typeof options.value === "string" && options.value.length > 0;
-  const valueClass = (hasValue && !options.quiet)
+  const hasValueHtml = typeof options.valueHtml === "string" && options.valueHtml.length > 0;
+  const valueClass = ((hasValue || hasValueHtml) && !options.quiet)
     ? "glance-value wa-font-size-xl wa-font-weight-bold"
     : "glance-value wa-font-size-l wa-color-text-quiet";
+  const valueHtml = hasValueHtml
+    ? options.valueHtml
+    : escapeHtml(hasValue ? options.value : "No data");
   return "<wa-card class=\"glance-tile\" appearance=\"outlined\">" +
     "<div class=\"wa-stack wa-gap-2xs\">" +
     "<wa-icon class=\"glance-icon wa-color-text-quiet\" name=\"" + options.icon + "\"></wa-icon>" +
-    "<span class=\"" + valueClass + "\">" + escapeHtml(hasValue ? options.value : "No data") + "</span>" +
+    "<span class=\"" + valueClass + "\">" + valueHtml + "</span>" +
     "<span class=\"glance-caption wa-caption-s\">" + escapeHtml(options.caption) + "</span>" +
     "<span class=\"glance-source wa-caption-s wa-color-text-quiet\">" + options.sourceHtml + "</span>" +
     "</div>" +
     "</wa-card>";
 }
 
-// The four readings a visitor scans before reading the cards, as small tiles
+// The next sunrise or sunset for this beach, computed from its coordinates and
+// the passed-in now (src/frontend/sun.js) rather than fetched. wa-format-date
+// renders the instant on the viewer's own clock, and renders nothing until the
+// component upgrades, so its light-DOM child is the tile's server-rendered
+// answer. That fallback names UTC: the beach's longitude only fixes its solar
+// day, and is up to two hours from the clock posted at the beach.
+function renderSunTile(beach, nowIso) {
+  const lat = (beach.lat === null || beach.lat === undefined) ? NaN : Number(beach.lat);
+  const lon = (beach.lon === null || beach.lon === undefined) ? NaN : Number(beach.lon);
+  const hasCoords = isFinite(lat) && isFinite(lon);
+  const event = hasCoords ? nextSunEvent(lat, lon, nowIso) : null;
+  if (!event) {
+    return renderGlanceTile({
+      icon: "sun",
+      value: null,
+      caption: "Sunrise and sunset",
+      sourceHtml: escapeHtml(hasCoords
+        ? "The sun neither rises nor sets here today"
+        : "Calculated from this beach's coordinates")
+    });
+  }
+  const iso = escapeHtml(event.iso);
+  return renderGlanceTile({
+    icon: "sun",
+    valueHtml: "<wa-format-date date=\"" + iso + "\" hour=\"numeric\" minute=\"numeric\">" +
+      "<time datetime=\"" + iso + "\">" + escapeHtml(utcClockLabel(event.iso)) + "</time>" +
+      "</wa-format-date>",
+    caption: event.type === "sunset" ? "Sunset" : "Sunrise",
+    sourceHtml: escapeHtml("Calculated from this beach's coordinates")
+  });
+}
+
+// The five readings a visitor scans before reading the cards, as small tiles
 // under the hero. Every one of them is estimated or display-only data — the
 // ESTIMATE badge and the quiet source lines say which for each — so the tiles
 // stay outlined and carry none of the official card's treatment.
@@ -1415,6 +1454,8 @@ function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
     caption: "Active alerts",
     sourceHtml: escapeHtml(alertSource)
   }));
+
+  tiles.push(renderSunTile(beach, nowIso));
 
   return "<section class=\"at-a-glance wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\">" +
     renderSectionHeading("glance-heading", "gauge", "At a glance") +
