@@ -10,6 +10,7 @@ import {
   bandLabelsForWaterClass,
   computeHazardBands,
   waveStripSummary,
+  waveOutlookSentence,
   modelDisplayName,
   orderedModelIds,
   modelNowEntries,
@@ -163,6 +164,20 @@ describe("trimWaveSeries", () => {
     expect(out.totalHours).toBe(24);
     expect(out.hoursFt).toHaveLength(24);
     expect(out.byModel).toEqual({});
+  });
+
+  it("carries the payload start as startIso when nothing has elapsed", () => {
+    expect(trimWaveSeries(wavesWith({}), START).startIso).toBe(START);
+  });
+
+  it("advances startIso by the elapsed hours, so it dates the trimmed hour 0", () => {
+    const out = trimWaveSeries(wavesWith({}), "2026-07-05T02:40:00.000Z");
+    expect(out.totalHours).toBe(22);
+    expect(out.startIso).toBe("2026-07-05T02:00:00.000Z");
+  });
+
+  it("keeps the payload start when a future startIso clamps elapsed to 0", () => {
+    expect(trimWaveSeries(wavesWith({}), "2026-07-04T23:00:00.000Z").startIso).toBe(START);
   });
 });
 
@@ -428,6 +443,65 @@ describe("waveStripSummary", () => {
 
   it("returns an empty string for no runs", () => {
     expect(waveStripSummary([])).toBe("");
+  });
+});
+
+describe("waveOutlookSentence", () => {
+  it("reports a steady series as the leading band holding for the whole window", () => {
+    const runs = [{ band: "green", label: "Under 2 ft", hours: 21 }];
+    expect(waveOutlookSentence(runs)).toBe("Stays under 2 ft for the next 21 hours.");
+  });
+
+  it("keeps the connector for a steady band whose label is not 'Under N ft'", () => {
+    const runs = [{ band: "yellow", label: "2–4 ft", hours: 12 }];
+    expect(waveOutlookSentence(runs)).toBe("Stays at 2–4 ft for the next 12 hours.");
+  });
+
+  it("names the band a rising series rises to, and the hours until it does", () => {
+    const runs = [
+      { band: "green", label: "Under 2 ft", hours: 5 },
+      { band: "yellow", label: "2–4 ft", hours: 3 },
+      { band: "red", label: "4 ft or more", hours: 2 }
+    ];
+    expect(waveOutlookSentence(runs)).toBe("Rises to 2–4 ft in about 5 hours.");
+  });
+
+  it("names the band a falling series drops to", () => {
+    const runs = [
+      { band: "yellow", label: "2–4 ft", hours: 3 },
+      { band: "green", label: "Under 2 ft", hours: 21 }
+    ];
+    expect(waveOutlookSentence(runs)).toBe("Drops under 2 ft in about 3 hours.");
+  });
+
+  it("uses ocean-class labels verbatim, never restated thresholds", () => {
+    const runs = computeWaveRuns([1.0, 1.0, 4.0, 4.0], "ocean");
+    expect(waveOutlookSentence(runs)).toBe("Rises to 3–6 ft in about 2 hours.");
+  });
+
+  it("uses the singular 'hour' for a one-hour lead", () => {
+    const runs = [
+      { band: "green", label: "Under 2 ft", hours: 1 },
+      { band: "red", label: "4 ft or more", hours: 5 }
+    ];
+    expect(waveOutlookSentence(runs)).toBe("Rises to 4 ft or more in about 1 hour.");
+  });
+
+  it("treats a following no-data stretch as no further change, not a direction", () => {
+    const runs = [
+      { band: "green", label: "Under 2 ft", hours: 6 },
+      { band: "no-data", label: "No data", hours: 18 }
+    ];
+    expect(waveOutlookSentence(runs)).toBe("Stays under 2 ft for the next 6 hours.");
+  });
+
+  it("returns an empty string when the series opens on no data, or has no runs", () => {
+    expect(waveOutlookSentence([
+      { band: "no-data", label: "No data", hours: 4 },
+      { band: "green", label: "Under 2 ft", hours: 20 }
+    ])).toBe("");
+    expect(waveOutlookSentence([])).toBe("");
+    expect(waveOutlookSentence(null)).toBe("");
   });
 });
 

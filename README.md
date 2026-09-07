@@ -184,6 +184,14 @@ renders a full-window band, since the SRF product carries no parseable end time.
 carries the same ESTIMATE badge as the estimate card and is omitted for beaches with no wave
 series.
 
+That same badge-carrying line ends with a one-sentence estimated outlook over the strip —
+"Stays under 2 ft for the next 21 hours.", "Rises to 2–4 ft in about 5 hours.", "Drops under 2
+ft in about 3 hours." — using the strip's own band labels, so it is omitted for beaches with no
+series. Below the strip, the hour ticks are rendered as relative offsets ("Now", "+6 h", "+24
+h"), since no per-beach timezone exists; each carries the instant it marks, and a small inline
+script rewrites them to the viewer's own clock and notes that it did. With JavaScript off the
+relative labels stand on their own.
+
 When two or more wave models resolve for a beach, the section also shows each model's current
 reading ("NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft") and a collapsed line chart of the
 per-model 24-hour series. The estimate still derives from the composite first-finite-model

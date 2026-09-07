@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
+import { WAVE_TICKS_SCRIPT } from "../src/frontend/waveTicksScript.js";
 import { NOW_ISO, beachWith } from "./helpers/render.js";
 
 // 24-hour series: 5 green (1 ft), 3 yellow (3 ft), 2 red (5 ft), 14 null.
@@ -564,11 +565,33 @@ describe("wave-forecast hour ticks", () => {
       waves: wavesWith({})
     });
     const row = ticksRow(html);
-    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-start\">Now</span>");
-    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 25%;\">+6 h</span>");
-    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 50%;\">+12 h</span>");
-    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 75%;\">+18 h</span>");
-    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\">+24 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-start\"" +
+      " data-iso=\"2026-07-05T12:00:00.000Z\">Now</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\"" +
+      " data-iso=\"2026-07-05T18:00:00.000Z\" style=\"left: 25%;\">+6 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\"" +
+      " data-iso=\"2026-07-06T00:00:00.000Z\" style=\"left: 50%;\">+12 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\"" +
+      " data-iso=\"2026-07-06T06:00:00.000Z\" style=\"left: 75%;\">+18 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\"" +
+      " data-iso=\"2026-07-06T12:00:00.000Z\">+24 h</span>");
+  });
+
+  it("dates the ticks from the trimmed start, not the payload start", () => {
+    // 18 h elapsed: hour 0 of the trimmed series is nowIso, not the 18:00Z
+    // payload start, so a viewer's clock reads the hours actually ahead.
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({
+        startIso: "2026-07-04T18:00:00.000Z", // NOW_ISO minus 18 h
+        hoursFt: fullHours()
+      })
+    });
+    const row = ticksRow(html);
+    expect(row).toContain("data-iso=\"2026-07-05T12:00:00.000Z\">Now</span>");
+    expect(row).toContain("data-iso=\"2026-07-05T18:00:00.000Z\">+6 h</span>");
+    expect(row).not.toContain("data-iso=\"2026-07-04T18:00:00.000Z\"");
   });
 
   it("hidden from assistive tech and rendered directly after the strip", () => {
@@ -596,7 +619,8 @@ describe("wave-forecast hour ticks", () => {
       })
     });
     const row = ticksRow(html);
-    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\">+6 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\"" +
+      " data-iso=\"2026-07-05T18:00:00.000Z\">+6 h</span>");
     expect(row).toContain("Now</span>");
     // Interior marks are the only inline-styled spans in the row.
     expect(row).not.toContain("style=");
@@ -615,10 +639,126 @@ describe("wave-forecast hour ticks", () => {
     });
     const row = ticksRow(html);
     // 6/12 -> 50%, not the full-window 25%.
-    expect(row).toContain("<span class=\"wave-chart-hour\" style=\"left: 50%;\">+6 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour\"" +
+      " data-iso=\"2026-07-05T18:00:00.000Z\" style=\"left: 50%;\">+6 h</span>");
     // +12 h appears only as the pinned end label, never as an interior mark
     // (12 < 12 is false), so the row carries exactly one inline-styled span.
-    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\">+12 h</span>");
+    expect(row).toContain("<span class=\"wave-chart-hour wave-chart-hour-end\"" +
+      " data-iso=\"2026-07-06T00:00:00.000Z\">+12 h</span>");
     expect(row.split("style=").length - 1).toBe(1);
+  });
+});
+
+// A flat 24-hour series, for the steady cases where only the leading band matters.
+function constHours(v) {
+  const hours = [];
+  for (let i = 0; i < 24; i++) {
+    hours.push(v);
+  }
+  return hours;
+}
+
+describe("wave-forecast outlook sentence", () => {
+  // The framing row the outlook rides on: the now-stat line, which also carries
+  // the ESTIMATE badge, so the sentence can never read as an official forecast.
+  function nowLine(html) {
+    const start = html.indexOf("<p class=\"wave-now");
+    expect(start).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf("</p>", start));
+  }
+
+  it("a steady green series reads 'Stays under 2 ft for the next 24 hours.'", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({ hoursFt: constHours(1.0) })
+    });
+    const line = nowLine(html);
+    expect(line).toContain("<span class=\"wave-outlook wa-caption-s\">" +
+      "Stays under 2 ft for the next 24 hours.</span>");
+    expect(line).toContain(">ESTIMATE</wa-badge>");
+  });
+
+  it("a rising series names the band it rises to and the hours until", () => {
+    // 5 green, then 3 yellow, then 2 red: the first change is the one reported.
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({})
+    });
+    expect(nowLine(html)).toContain("<span class=\"wave-outlook wa-caption-s\">" +
+      "Rises to 2–4 ft in about 5 hours.</span>");
+  });
+
+  it("a falling series reads 'Drops under 2 ft in about 3 hours.'", () => {
+    const hours = [];
+    for (let i = 0; i < 3; i++) { hours.push(3.0); }
+    for (let i = 0; i < 21; i++) { hours.push(1.0); }
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 3.0 }),
+      official: null,
+      waves: wavesWith({ hoursFt: hours })
+    });
+    expect(nowLine(html)).toContain("<span class=\"wave-outlook wa-caption-s\">" +
+      "Drops under 2 ft in about 3 hours.</span>");
+  });
+
+  it("omits the sentence for the buoy case, where there is no series", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 2.6 }),
+      official: null,
+      waves: null
+    });
+    expect(html).toContain("<section class=\"wave-forecast wa-stack");
+    expect(html).not.toContain("wave-outlook");
+  });
+
+  it("rides the badge-only row when there is a series but no now-stat", () => {
+    const html = render({
+      estimate: estimateWith({}), // no waveHeightFt -> no stat line
+      official: null,
+      waves: wavesWith({ hoursFt: constHours(1.0) })
+    });
+    const start = html.indexOf("<div class=\"wa-cluster wa-gap-s\">");
+    expect(start).toBeGreaterThan(-1);
+    const row = html.slice(start, html.indexOf("</div>", start));
+    expect(row).toContain(">ESTIMATE</wa-badge>");
+    expect(row).toContain("Stays under 2 ft for the next 24 hours.");
+  });
+});
+
+describe("wave-forecast local-time tick script", () => {
+  it("ships the relabeller on a detail page carrying a ticks row", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      official: null,
+      waves: wavesWith({ hoursFt: constHours(1.0) })
+    });
+    expect(html).toContain("<script>" + WAVE_TICKS_SCRIPT + "</script>");
+    expect(WAVE_TICKS_SCRIPT).toContain("Times shown in your local time zone");
+    expect(WAVE_TICKS_SCRIPT).toContain(".wave-chart-hour[data-iso]");
+    expect(WAVE_TICKS_SCRIPT).toContain(
+      "new Intl.DateTimeFormat(undefined, { hour: 'numeric' })");
+    // The note explains an aria-hidden row, so it stays out of the a11y tree.
+    expect(WAVE_TICKS_SCRIPT).toContain("note.setAttribute('aria-hidden', 'true')");
+  });
+
+  it("cannot close its own tag", () => {
+    expect(WAVE_TICKS_SCRIPT).not.toContain("</");
+  });
+
+  it("omits the script on the buoy case, where the page has no ticks row", () => {
+    const html = render({
+      estimate: estimateWith({ waveHeightFt: 2.6 }),
+      official: null,
+      waves: null
+    });
+    expect(html).not.toContain("<div class=\"wave-chart-hours\"");
+    expect(html).not.toContain(WAVE_TICKS_SCRIPT);
+  });
+
+  it("omits the script on a page with no wave section at all", () => {
+    const html = render({ estimate: null, official: null, waves: null });
+    expect(html).not.toContain(WAVE_TICKS_SCRIPT);
   });
 });

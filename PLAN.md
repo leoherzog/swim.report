@@ -3923,6 +3923,14 @@ exporting a CSS string); render.js is the sole module the router imports.
     caption and the same ESTIMATE badge as the estimate card, in one wa-cluster <p> with no
     "(estimated)" suffix. Omitted entirely when null or missing — never "0 ft", never a
     placeholder dash. This is what still renders for beaches with no series.
+  - Outlook sentence: waveOutlookSentence(runs) closes that same line as a quiet
+    wa-caption-s span, so the ESTIMATE badge beside it frames the projection too — "Stays
+    under 2 ft for the next 21 hours." when the leading band holds, "Rises to 2–4 ft in
+    about 5 hours." / "Drops under 2 ft in about 3 hours." at the first change of band.
+    Band labels come from the runs, so the water-class thresholds are never restated. A
+    following no-data stretch reads as "no further change known" (the Stays form), a series
+    opening on no data yields "", and with no series the sentence is omitted. When there is
+    no now-stat it rides the badge-only row instead.
   - Hazard lane (between the per-model "now" caption and the strip, rendered only when a
     trimmed series exists, since the lane needs the strip's timeline to position against):
     computeHazardBands(estimate, series.totalHours, nowIso) returns
@@ -3968,7 +3976,8 @@ exporting a CSS string); render.js is the sole module the router imports.
     The returned object also carries byModel: the per-model slices, validated as arrays of
     exactly 24 number|null and trimmed with the same offset; malformed or all-null models
     are dropped and a missing or malformed byModel becomes {}, so byModel problems can never
-    block the main strip.
+    block the main strip. It also carries startIso: waves.startIso advanced by the elapsed
+    hours, so it dates trimmed hour 0 and the hour ticks derive their instants from it.
   - Per-model "now" caption (below the now stat): when >= 2 models have a finite value at
     trimmed hour 0, a quiet wa-caption-s line "NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft"
     (toFixed(1), " · " separator, display-name order); with 0-1 models it is omitted, since
@@ -4007,8 +4016,16 @@ exporting a CSS string); render.js is the sole module the router imports.
     strip never derive from byModel — composite hoursFt only.
   - Hour ticks: an aria-hidden row below the strip — "Now" left, "+6 h"/"+12 h"/"+18 h"
     absolutely positioned at server-computed percentages when below the total, and
-    "+" + total + " h" pinned right. Relative labels are timezone-proof, since no per-beach
-    timezone exists in D1; a browser-local-time upgrade is deferred (TODO.md).
+    "+" + total + " h" pinned right. The relative labels are the rendered truth, since no
+    per-beach timezone exists in D1. Each tick also carries data-iso, the trimmed series
+    startIso advanced by that tick's hour offset (omitted entirely when startIso is
+    unparseable, so a label is never rewritten from a guessed instant), and
+    src/frontend/waveTicksScript.js — embedded after the page shell on a detail page whose
+    rendered wave section contains a ticks row, never on the buoy-only now-stat case —
+    rewrites each tick's text to the viewer's clock with Intl.DateTimeFormat({ hour:
+    "numeric" }) and inserts a quiet wa-caption-s "Times shown in your local time zone" note
+    after the row. The note is aria-hidden like the row it explains, so assistive tech reads
+    the section unchanged, and with JS off the relative labels stand alone.
   - Accessibility and fallback: the strip container's aria-label names the window, every
     segment's aria-label matches its tooltip text, and a visually-hidden <p> (class
     wa-visually-hidden, emitted after the tooltips) carries waveStripSummary(runs), a
@@ -4239,9 +4256,11 @@ other caveat test uses symbolically.
   cross-file assertion that every WAVE_MODEL_IDS entry appears in MODEL_DISPLAY in
   src/frontend/waveStrip.js.
 - test/waveStrip.test.js — pure strip helpers: trimWaveSeries (defensive/trimming incl. byModel
-  validation/trimming), computeWaveRuns (run-length + sum invariant + exact band label/var()
-  strings), waveStripSummary strings, model helpers, buildWaveModelChartConfig shape, and
-  computeHazardBands (positioning/clamping/hour-snapping, missing onset/ends defaults,
+  validation/trimming, plus the startIso that dates trimmed hour 0), computeWaveRuns
+  (run-length + sum invariant + exact band label/var() strings), waveStripSummary strings,
+  waveOutlookSentence (exact steady/rising/falling sentences, ocean-class labels, singular
+  hour, no-data at the head and in the tail), model helpers, buildWaveModelChartConfig shape,
+  and computeHazardBands (positioning/clamping/hour-snapping, missing onset/ends defaults,
   out-of-window/non-precedence drops, exact-repeat dedupe, rip band, malformed→[]).
 - test/verdict.test.js — the pure hero-verdict sentence: one case per rules.js trigger
   (alerts, both floors, rip, wave band under both threshold sets, wind, wq-floor, no-data),
@@ -4260,8 +4279,11 @@ other caveat test uses symbolically.
   visually-hidden prose summary, per-model "now" caption + collapsed comparison disclosure,
   parsing the model chart's slotted JSON config back out (datasets/labels/rounding), the
   no-"</script" guard, fallback text === description, now-stat formatting (ESTIMATE badge on
-  the stat line, under the section heading), the hazard lane (positioned band + tooltip,
-  rip band, no lane for legacy estimates or without a series), the buoy case (stat without strip),
+  the stat line, under the section heading), the outlook sentence (steady/rising/falling
+  exact spans on the badge-carrying line, the badge-only row, omitted without a series), the
+  hour ticks' data-iso instants (dated from the trimmed start, not the payload start) and the
+  WAVE_TICKS_SCRIPT embed gate, the hazard lane (positioned band + tooltip, rip band,
+  no lane for legacy estimates or without a series), the buoy case (stat without strip),
   legacy/absent payload omission, and the stale warning.
 - test/renderWqFloor.test.js — the water-quality advisory callout via renderDetailPage:
   the danger/warning variant per color, the reason/source/updated lines, its place between

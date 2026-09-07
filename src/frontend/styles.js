@@ -458,6 +458,13 @@ const RULES = [
   "  transform: none;",
   "}",
 
+  // Appended by waveTicksScript.js once the ticks read as local clock times, so
+  // it never occupies space on a page that kept the relative labels.
+  ".wave-chart-hours-note {",
+  "  margin: 0;",
+  "  color: var(--wa-color-text-quiet);",
+  "}",
+
   // Quiet plain-appearance disclosure line: tighter body spacing via the
   // documented --spacing custom property, smaller quieter summary via the
   // documented summary part.

@@ -148,10 +148,11 @@ function trimByModel(raw, elapsed) {
 
 // Trim a 24-hour wave series down to the hours from "now" forward.
 // waves: { startIso, hoursFt: [24 x number|null], byModel?: {...}, ... } | null.
-// Returns { hoursFt, totalHours, byModel } or null. Defensive by design: any
-// malformed payload degrades to null (section omitted), never a wrong bar.
-// byModel is always a plain object (possibly empty); malformed byModel never
-// affects hoursFt/totalHours.
+// Returns { hoursFt, totalHours, byModel, startIso } or null, where startIso is
+// the instant the trimmed hour 0 describes (the payload start advanced by the
+// elapsed hours). Defensive by design: any malformed payload degrades to null
+// (section omitted), never a wrong bar. byModel is always a plain object
+// (possibly empty); malformed byModel never affects hoursFt/totalHours.
 export function trimWaveSeries(waves, nowIso) {
   if (waves === null || typeof waves !== "object") {
     return null;
@@ -183,7 +184,8 @@ export function trimWaveSeries(waves, nowIso) {
   return {
     hoursFt: sliced,
     totalHours: sliced.length,
-    byModel: trimByModel(waves.byModel, elapsed)
+    byModel: trimByModel(waves.byModel, elapsed),
+    startIso: new Date(startMs + elapsed * 3600000).toISOString()
   };
 }
 
@@ -359,6 +361,44 @@ export function waveStripSummary(runs) {
     }
   }
   return parts.join(", ") + ".";
+}
+
+// Severity order of the real bands, for deciding whether the next band is a
+// rise or a drop. "no-data" is deliberately absent: an unknown stretch is never
+// a direction.
+const BAND_RANK = { "green": 0, "yellow": 1, "red": 2 };
+
+// Fit a band label into a sentence. A "Under N ft" label already carries its
+// own preposition, so it takes none; every other label takes the connector.
+function bandPhrase(label, connector) {
+  if (label.indexOf("Under ") === 0) {
+    return lowerFirst(label);
+  }
+  return connector + " " + label;
+}
+
+// One-sentence outlook over the run-length-encoded series, e.g.
+// "Stays under 2 ft for the next 21 hours." / "Rises to 2–4 ft in about 5
+// hours." / "Drops under 2 ft in about 3 hours." The band labels come from the
+// runs, so the thresholds are never restated here. Returns "" when there are no
+// runs or the series opens on a no-data stretch, since neither states a
+// present condition to project from; a following no-data stretch reads as "no
+// further change known" rather than a direction.
+export function waveOutlookSentence(runs) {
+  const list = Array.isArray(runs) ? runs : [];
+  if (list.length === 0 || list[0].band === "no-data") {
+    return "";
+  }
+  const first = list[0];
+  const hours = first.hours;
+  const next = list.length > 1 ? list[1] : null;
+  if (next === null || next.band === "no-data") {
+    return "Stays " + bandPhrase(first.label, "at") + " for the next " +
+      hours + " " + hourWord(hours) + ".";
+  }
+  const verb = BAND_RANK[next.band] > BAND_RANK[first.band] ? "Rises" : "Drops";
+  return verb + " " + bandPhrase(next.label, "to") + " in about " +
+    hours + " " + hourWord(hours) + ".";
 }
 
 // Defensively read the two fields the model helpers consume from a trimmed

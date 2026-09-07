@@ -560,11 +560,6 @@ remains partnership-gated.
 
 ## Frontend
 
-- **Wave-forecast strip: hour ticks are relative, not local time.** The detail page's 24 h
-  strip labels its ticks "Now / +6 h / … / +N h" because D1 has no per-beach timezone column and
-  the series is UTC-indexed. A progressive-enhancement inline script (pattern of
-  `src/frontend/searchScript.js`) could rewrite the ticks to the viewer's browser-local clock
-  with a "times shown in your local time" note.
 - **Wave-forecast strip: no hover tooltips.** Chart.js tooltip callbacks are functions, which
   the slotted-JSON config cannot encode, and a slotted config shadows the element's `config`
   property, so the two cannot mix. If per-hour hover values are wanted: move the JSON to an

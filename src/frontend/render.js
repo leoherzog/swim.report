@@ -8,6 +8,7 @@ import { LIST_GEO_SCRIPT } from "./geoScript.js";
 import { buildListMapScript } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
+import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { SEVERITY_RANK } from "../rules.js";
 import { alertsCheckable } from "../alertsCheckable.js";
 import { verdictSentence } from "./verdict.js";
@@ -16,6 +17,7 @@ import {
   computeWaveRuns,
   computeHazardBands,
   waveStripSummary,
+  waveOutlookSentence,
   modelNowCaption,
   orderedModelIds,
   buildWaveModelChartConfig,
@@ -1050,23 +1052,45 @@ function renderWebcam(beach) {
   return lines.join("\n");
 }
 
+// Rendered marker for the tick row, matched by the detail page to decide
+// whether to ship the relabelling script. Kept beside the renderer that emits
+// it so the two cannot drift apart.
+const WAVE_TICKS_ROW_MARKER = "<div class=\"wave-chart-hours\"";
+
+// The data-iso attribute a tick carries so waveTicksScript.js can relabel it in
+// the viewer's own clock: the trimmed series start advanced by the tick's hour
+// offset. An unparseable start emits no attribute, leaving the relative label
+// as the only claim rather than one rewritten from a guessed instant.
+function tickIsoAttr(startMs, hourOffset) {
+  if (Number.isNaN(startMs)) {
+    return "";
+  }
+  return " data-iso=\"" +
+    escapeHtml(new Date(startMs + hourOffset * 3600000).toISOString()) + "\"";
+}
+
 // Quiet hour-tick row under the strip, with interior marks positioned by a
-// server-computed left percentage. aria-hidden, since the strip's aria-label and
-// summary already convey the timeline.
-function renderWaveHourTicks(totalHours) {
+// server-computed left percentage. The relative labels are the rendered truth,
+// since D1 carries no per-beach timezone; data-iso is what the browser upgrades
+// them from. aria-hidden, since the strip's aria-label and summary already
+// convey the timeline.
+function renderWaveHourTicks(totalHours, startIso) {
+  const startMs = Date.parse(startIso);
   const parts = [];
   parts.push("<div class=\"wave-chart-hours\" aria-hidden=\"true\">");
-  parts.push("<span class=\"wave-chart-hour wave-chart-hour-start\">Now</span>");
+  parts.push("<span class=\"wave-chart-hour wave-chart-hour-start\"" +
+    tickIsoAttr(startMs, 0) + ">Now</span>");
   const marks = [6, 12, 18];
   for (let i = 0; i < marks.length; i++) {
     const mark = marks[i];
     if (mark < totalHours) {
       const pct = (mark / totalHours) * 100;
-      parts.push("<span class=\"wave-chart-hour\" style=\"left: " + pct + "%;\">+" +
-        mark + " h</span>");
+      parts.push("<span class=\"wave-chart-hour\"" + tickIsoAttr(startMs, mark) +
+        " style=\"left: " + pct + "%;\">+" + mark + " h</span>");
     }
   }
-  parts.push("<span class=\"wave-chart-hour wave-chart-hour-end\">+" + totalHours + " h</span>");
+  parts.push("<span class=\"wave-chart-hour wave-chart-hour-end\"" +
+    tickIsoAttr(startMs, totalHours) + ">+" + totalHours + " h</span>");
   parts.push("</div>");
   return parts.join("");
 }
@@ -1119,25 +1143,33 @@ function renderWaveStrip(runs, totalHours, summaryText) {
 // pieces of the wave forecast. Returned as named parts (not pre-joined) so the
 // caller can interleave the model-comparison chart in the correct slot; hasNow
 // gates whether the whole section renders. Pure.
+//
+// The outlook sentence rides the same line as the now-stat, or the badge-only
+// row that stands in for it, so the ESTIMATE framing always covers it.
 function renderWaveStripParts(estimate, series, nowIso, wavesUpdated, waterClass) {
+  const runs = series ? computeWaveRuns(series.hoursFt, waterClass) : [];
+  const outlook = waveOutlookSentence(runs);
+  const outlookHtml = outlook
+    ? (" <span class=\"wave-outlook wa-caption-s\">" + escapeHtml(outlook) + "</span>")
+    : "";
+
   const hasNow = !!estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt);
   const nowStat = hasNow
     ? ("<p class=\"wave-now wa-cluster wa-gap-s\"><span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">" +
         estimate.waveHeightFt.toFixed(1) + " ft</span> " +
         "<span class=\"wave-now-label wa-caption-s\">waves now</span> " +
-        renderEstimateBadge() + "</p>")
+        renderEstimateBadge() + outlookHtml + "</p>")
     : "";
 
   let chartBlock = "";
   let staleHtml = "";
   let modelNowHtml = "";
   if (series) {
-    const runs = computeWaveRuns(series.hoursFt, waterClass);
     const summaryText = waveStripSummary(runs);
     const totalHours = series.totalHours;
     const chartHtml = renderWaveStrip(runs, totalHours, summaryText);
-    chartBlock = chartHtml + "\n" + renderWaveHourTicks(totalHours);
+    chartBlock = chartHtml + "\n" + renderWaveHourTicks(totalHours, series.startIso);
     if (isStale(nowIso, wavesUpdated, WAVE_STALE_MS)) {
       staleHtml = renderStaleWarning(wavesUpdated);
     }
@@ -1154,6 +1186,7 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated, waterClass
   return {
     hasNow: hasNow,
     nowStat: nowStat,
+    outlookHtml: outlookHtml,
     modelNowHtml: modelNowHtml,
     chartBlock: chartBlock,
     staleHtml: staleHtml
@@ -1235,7 +1268,8 @@ function renderWaveForecast(estimate, waves, nowIso, waterClass) {
   } else {
     // With no now-stat the ESTIMATE badge normally riding the stat line still
     // has to mark the section as estimated; that framing is a product invariant.
-    lines.push("<div class=\"wa-cluster wa-gap-s\">" + renderEstimateBadge() + "</div>");
+    lines.push("<div class=\"wa-cluster wa-gap-s\">" + renderEstimateBadge() +
+      strip.outlookHtml + "</div>");
   }
   if (strip.modelNowHtml) {
     lines.push(strip.modelNowHtml);
@@ -1555,8 +1589,14 @@ export function renderDetailPage(data) {
   const mainHtml = heroHtml + glanceHtml + renderFlagLegend() +
     "<div class=\"detail-stack wa-stack wa-gap-l\">" + stackParts.join("\n") + "</div>";
 
+  // The tick relabeller ships only when there are ticks to relabel: the wave
+  // section also renders as a bare now-stat (the buoy case), which has no strip.
+  const ticksScriptHtml = waveForecastHtml.indexOf(WAVE_TICKS_ROW_MARKER) === -1
+    ? ""
+    : ("<script>" + WAVE_TICKS_SCRIPT + "</script>");
+
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
-    "<script>" + DETAIL_HERO_SCRIPT + "</script>";
+    "<script>" + DETAIL_HERO_SCRIPT + "</script>" + ticksScriptHtml;
   // The share card takes titleColor, so the picture, the title flag and the map
   // marker are the one displayFlagColor decision.
   return renderDocument(title, bodyHtml, {
