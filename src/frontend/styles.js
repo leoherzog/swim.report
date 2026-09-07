@@ -296,6 +296,16 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
+  // Directions action sharing the coordinates line, quiet so it never competes
+  // with the flag chip.
+  ".directions-link {",
+  "  display: inline-flex;",
+  "  align-items: center;",
+  "  gap: var(--wa-space-2xs);",
+  "  color: var(--wa-color-text-quiet);",
+  "  text-decoration: none;",
+  "}",
+
   // Station, distance and observation age under the water-temperature tile's
   // reading: quieter than the reading itself.
   ".water-temp-src {",
@@ -583,6 +593,16 @@ const RULES = [
   ".nearby-card-subtitle,",
   ".nearby-card-distance {",
   "  color: var(--wa-color-text-quiet);",
+  "}",
+
+  // Quiet directions action, a sibling of the card link rather than part of it.
+  ".nearby-card-directions {",
+  "  display: inline-flex;",
+  "  align-items: center;",
+  "  gap: var(--wa-space-2xs);",
+  "  margin-block-start: var(--wa-space-xs);",
+  "  color: var(--wa-color-text-quiet);",
+  "  text-decoration: none;",
   "}",
 
   // Homepage map: MapLibre collapses to 0px and renders blank without an

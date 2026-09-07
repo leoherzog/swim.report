@@ -148,10 +148,12 @@ The detail page opens with a **flag hero**: the beach name behind its flag icon,
 label, and the ESTIMATE badge — or the OFFICIAL badge when the scraped record is what
 supplied the displayed color — over a background washed 12% in that flag's own color. The
 hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
-button. Directly under it, five **at a glance** tiles summarize the waves now, the water
-temperature, the rip-current risk, the count of active alerts and the next sunrise or
-sunset; a tile with nothing to show says "No data" rather than inventing a number. The full
-official and estimate cards follow unchanged.
+button. Its coordinates line links the beach on OpenStreetMap and offers a **Directions**
+link to Google Maps directions for those coordinates; the Directions link is omitted for a
+beach with no stored coordinates. Directly under it, five **at a glance** tiles summarize
+the waves now, the water temperature, the rip-current risk, the count of active alerts and
+the next sunrise or sunset; a tile with nothing to show says "No data" rather than inventing
+a number. The full official and estimate cards follow unchanged.
 
 The sun tile is computed in the Worker from the beach's coordinates (`src/frontend/sun.js`,
 the NOAA solar position algorithm, no upstream call), and shown on the viewer's own clock by
@@ -175,8 +177,8 @@ below.
 
 Last on the detail page, after the wave map and the webcam, come up to three **nearby
 beaches** as cards: the nearest flag-worthy rows within 50 mi, each with the same estimate
-chip and OFFICIAL badge a list row carries, its distance, and a link. The section is omitted
-when nothing lies within range.
+chip and OFFICIAL badge a list row carries, its distance, a link, and its own Directions
+link. The section is omitted when nothing lies within range.
 
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from the
 estimate's structured `waveHeightFt`) plus a horizontal strip of the next up-to-24 hours of

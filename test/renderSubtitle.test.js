@@ -1,10 +1,11 @@
 // test/renderSubtitle.test.js
 // Covers the detail-page header composition (src/frontend/render.js), exercised
 // through renderDetailPage: the park-first beach name in .beach-subtitle, the
-// coordinates line, and the NDBC water-temperature reading in its "at a glance"
-// tile, whose source line and tooltip state the same station and distance. The
-// temp is display-only, never a flag input, and is shown only when fresh; the
-// coordinates line carries the coordinates alone.
+// coordinates line with the Directions link that closes it, and the NDBC
+// water-temperature reading in its "at a glance" tile, whose source line and
+// tooltip state the same station and distance. The temp is display-only, never
+// a flag input, and is shown only when fresh; the coordinates line carries the
+// coordinates and the Directions link alone.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
@@ -52,7 +53,8 @@ function subtitleText(html) {
 }
 
 // Everything the coordinates line carries after the OpenStreetMap link, as raw
-// HTML. "" for the current line, which carries the coordinates alone.
+// HTML, so an addition to the line has to be spelled out rather than slipping
+// past. "" for a beach with no coordinates to offer directions to.
 function metaTail(html) {
   const m = html.match(/<p class="beach-meta wa-caption-s"><a class="coords-link"[^>]*>[\s\S]*?<\/a>([\s\S]*?)<\/p>/);
   return m ? m[1] : null;
@@ -81,8 +83,15 @@ function tempSource(html) {
   return m ? m[1] : null;
 }
 
+// The Directions anchor the coordinates line always ends with for a beach that
+// has coordinates (beachWith: 42.775, -86.211).
+const DIRECTIONS = " • <a class=\"directions-link\"" +
+  " href=\"https://www.google.com/maps/dir/?api=1&amp;destination=42.77500,-86.21100\"" +
+  " rel=\"noopener noreferrer\" target=\"_blank\">" +
+  "<wa-icon name=\"diamond-turn-right\"></wa-icon> Directions</a>";
+
 describe("beach header composition (renderDetailPage)", function () {
-  it("keeps the subtitle to the beach name and the coordinates line to the coordinates", function () {
+  it("keeps the subtitle to the beach name and the temp off the coordinates line", function () {
     // Distinct park + beach name -> subtitle is the beach's own name.
     const html = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
@@ -91,7 +100,7 @@ describe("beach header composition (renderDetailPage)", function () {
     expect(subtitleText(html)).toBe("Ottawa Beach");
     // A fresh reading exists, and none of it is on this line: it belongs to the
     // tile, which is the only place the station is named.
-    expect(metaTail(html)).toBe("");
+    expect(metaTail(html)).toBe(DIRECTIONS);
     expect(html.indexOf("°F Water")).toBe(-1);
     expect(tempSource(html)).toContain("Muskegon, MI");
   });
@@ -100,7 +109,32 @@ describe("beach header composition (renderDetailPage)", function () {
     const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, null);
     expect(subtitleText(html)).toBe(null);
     expect(html.indexOf("class=\"beach-subtitle\"")).toBe(-1);
-    expect(metaTail(html)).toBe("");
+    expect(metaTail(html)).toBe(DIRECTIONS);
+  });
+});
+
+describe("directions link on the coordinates line (renderDetailPage)", function () {
+  it("links to Google Maps directions at 5 decimals, escaped, beside the OpenStreetMap link", function () {
+    const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, null);
+    expect(html).toContain("<a class=\"directions-link\"" +
+      " href=\"https://www.google.com/maps/dir/?api=1&amp;destination=42.77500,-86.21100\"" +
+      " rel=\"noopener noreferrer\" target=\"_blank\">" +
+      "<wa-icon name=\"diamond-turn-right\"></wa-icon> Directions</a>");
+    // The OpenStreetMap link stays; the directions link is additive.
+    expect(html).toContain("<a class=\"coords-link\" href=\"" +
+      "https://www.openstreetmap.org/?mlat=42.7750&amp;mlon=-86.2110#map=15/42.7750/-86.2110\"");
+  });
+
+  it("renders no directions link when a coordinate is missing", function () {
+    // Number(null) is 0, so a coordinate-less row must never route to 0,0.
+    const missing = detailHtml({ lat: null, lon: null }, null);
+    expect(missing).not.toContain("<a class=\"directions-link\"");
+    expect(missing).not.toContain("maps/dir");
+    expect(metaTail(missing)).toBe("");
+    const undef = detailHtml({ lat: undefined, lon: -86.211 }, null);
+    expect(undef).not.toContain("<a class=\"directions-link\"");
+    const unparseable = detailHtml({ lat: "not-a-number", lon: -86.211 }, null);
+    expect(unparseable).not.toContain("<a class=\"directions-link\"");
   });
 });
 
