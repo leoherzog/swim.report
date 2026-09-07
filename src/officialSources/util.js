@@ -166,6 +166,25 @@ export function perBeachResult(sites, source, updated) {
 
 export const DEFAULT_SITE_RADIUS_MI = 1.5;
 
+// Pure. Does any names[] entry of one site appear in the beach's
+// ((park_name || "") + " " + name) haystack, lowercased? A site's names[] are the
+// source's own statement of which beach names ARE that site, so this predicate
+// serves both resolveSiteForBeach's name pass and the registry's reportedFor
+// decision, which must not call a name-matched beach a neighbor.
+export function siteNamesMatchBeach(beach, site) {
+  if (!site || !Array.isArray(site.names)) {
+    return false;
+  }
+  const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
+  for (const name of site.names) {
+    if (typeof name === "string" && name.length > 0 &&
+        haystack.indexOf(name.toLowerCase()) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Pure. BeachRow + sites[] -> site | null.
 // Pass 1 (names win over proximity): first site, in array order, with any
 // names[] entry contained as a substring of
@@ -180,15 +199,9 @@ export function resolveSiteForBeach(beach, sites) {
   if (!Array.isArray(sites)) {
     return null;
   }
-  const haystack = ((beach.park_name || "") + " " + beach.name).toLowerCase();
   for (const site of sites) {
-    if (Array.isArray(site.names)) {
-      for (const name of site.names) {
-        if (typeof name === "string" && name.length > 0 &&
-            haystack.indexOf(name.toLowerCase()) !== -1) {
-          return site;
-        }
-      }
+    if (siteNamesMatchBeach(beach, site)) {
+      return site;
     }
   }
   let best = null;

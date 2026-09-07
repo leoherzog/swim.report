@@ -1,11 +1,17 @@
 // test/officialSourcesUtil.test.js
 // Direct unit tests for the shared official-source scraper helpers in
 // src/officialSources/util.js: the fetchText error-isolation contract
-// ("null on ANY failure, never throw") every scraper relies on, and the
-// ageDays staleness math backing the scrapers' freshness gates.
+// ("null on ANY failure, never throw") every scraper relies on, the ageDays
+// staleness math backing the scrapers' freshness gates, and the shared
+// siteNamesMatchBeach predicate.
 // No network access — fetchText runs against a stubbed globalThis.fetch.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchText, ageDays, MS_PER_DAY } from "../src/officialSources/util.js";
+import {
+  fetchText,
+  ageDays,
+  MS_PER_DAY,
+  siteNamesMatchBeach
+} from "../src/officialSources/util.js";
 import { installFetch } from "./helpers/fetch.js";
 
 const URL = "https://example.test/flags";
@@ -124,5 +130,39 @@ describe("ageDays", function () {
 
   it("returns a negative age for a future timestamp", function () {
     expect(ageDays(NOW_MS, NOW_MS + MS_PER_DAY)).toBe(-1);
+  });
+});
+
+// The name pass of resolveSiteForBeach, shared with the registry's reportedFor
+// decision: a beach the curated names[] claim is the report site itself, never a
+// neighbor borrowing its flag.
+describe("siteNamesMatchBeach", function () {
+  const SITE = { siteId: "mears", names: ["mears state park", "charles mears"] };
+
+  it("matches a names[] substring of the beach name", function () {
+    expect(siteNamesMatchBeach({ name: "Charles Mears State Park Beach" }, SITE))
+      .toBe(true);
+  });
+
+  it("matches against park_name too", function () {
+    expect(siteNamesMatchBeach(
+      { name: "Beach", park_name: "Charles Mears State Park" }, SITE)).toBe(true);
+  });
+
+  it("is case-insensitive on both sides", function () {
+    expect(siteNamesMatchBeach({ name: "CHARLES MEARS state park" },
+      { names: ["Charles Mears"] })).toBe(true);
+  });
+
+  it("is false for an unrelated beach", function () {
+    expect(siteNamesMatchBeach({ name: "Grand Haven City Beach" }, SITE)).toBe(false);
+  });
+
+  it("is false for a missing site, a non-array names[] and a non-string entry", function () {
+    expect(siteNamesMatchBeach({ name: "Mears State Park" }, null)).toBe(false);
+    expect(siteNamesMatchBeach({ name: "Mears State Park" }, { names: "mears" }))
+      .toBe(false);
+    expect(siteNamesMatchBeach({ name: "Mears State Park" }, { names: [42, ""] }))
+      .toBe(false);
   });
 });

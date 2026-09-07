@@ -7,6 +7,7 @@ import {
   TOWER_BEACH_URL,
   TOWER_BEACH_SITE_ID
 } from "../src/officialSources/winnetkaTowerBeach.js";
+import { scrapeOfficialFlagFromResult } from "../src/officialSources/index.js";
 import { installFetch } from "./helpers/fetch.js";
 import { makeBeach } from "./helpers/beach.js";
 
@@ -204,6 +205,59 @@ describe("winnetkaTowerBeach.matches", function () {
   it("does not match a beach far outside Winnetka", function () {
     const beach = makeBeach({ name: "Some Other Beach", lat: 44.8, lon: -83.3 });
     expect(winnetkaTowerBeach.matches(beach)).toBe(false);
+  });
+});
+
+// matches() falls through to a bbox covering the whole Winnetka lakefront, and
+// the single site carries coordinates, so a neighboring park-district beach
+// resolves to Tower Road Beach by proximity and is shown its posted flag. The
+// card must name whose flag it is.
+describe("winnetkaTowerBeach transferred readings", function () {
+  const RESULT_SOURCE = TOWER_BEACH_URL;
+
+  function towerResult() {
+    const site = parseTowerBeachStatus(openPage(), NOW_ISO);
+    return {
+      perBeach: true, sites: [site], source: RESULT_SOURCE,
+      sources: [RESULT_SOURCE], updated: NOW_ISO
+    };
+  }
+
+  it("declares reportSiteName on the open site", function () {
+    expect(parseTowerBeachStatus(openPage(), NOW_ISO).reportSiteName)
+      .toBe("Tower Road Beach");
+  });
+
+  it("declares reportSiteName on the hazard-closure site", function () {
+    expect(parseTowerBeachStatus(closedHazard(), NOW_ISO).reportSiteName)
+      .toBe("Tower Road Beach");
+  });
+
+  it("labels a neighboring Winnetka beach with reportedFor", function () {
+    // Elder Lane Beach is a Winnetka Park District beach ~0.6 mi south of the
+    // Tower Road pole: inside the bbox, named by no site substring, so it
+    // resolves by proximity and reads Tower Road's posted status.
+    const beach = makeBeach({
+      id: "osm-elder-lane", name: "Elder Lane Beach", park_name: null,
+      lat: 42.1078, lon: -87.7397
+    });
+    expect(winnetkaTowerBeach.matches(beach)).toBe(true);
+    const flag = scrapeOfficialFlagFromResult(beach, winnetkaTowerBeach, towerResult());
+    expect(flag).not.toBe(null);
+    expect(flag.color).toBe("green");
+    expect(flag.reportedFor.name).toBe("Tower Road Beach");
+    // Measured, not guessed: both the beach and the site carry coordinates.
+    expect(flag.reportedFor.distanceMi).toBeCloseTo(0.62, 1);
+  });
+
+  it("does not label Tower Road Beach itself", function () {
+    const beach = makeBeach({
+      id: "osm-tower-road", name: "Tower Road Beach", park_name: null,
+      lat: 42.115585, lon: -87.733837
+    });
+    const flag = scrapeOfficialFlagFromResult(beach, winnetkaTowerBeach, towerResult());
+    expect(flag).not.toBe(null);
+    expect("reportedFor" in flag).toBe(false);
   });
 });
 

@@ -249,6 +249,11 @@ export function parseOmrBeachReport(text, nowIso) {
       siteId: def.siteId,
       color: color,
       reason: "Official flag reported by " + OMR_LABEL + " for " + def.label,
+      // The report site's own name. A beach whose display name differs from it is
+      // reading a neighboring site's posted flag, which the card must say out
+      // loud; scrapeOfficialFlagFromResult makes that comparison, because
+      // scrape() never sees a beach.
+      reportSiteName: def.label,
       names: def.names,
       lat: def.lat,
       lon: def.lon,

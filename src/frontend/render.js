@@ -326,17 +326,43 @@ function renderFlagRow(color, reason) {
     "</div>";
 }
 
+// The quiet provenance line for an official reading posted at a different site
+// (OfficialFlag.reportedFor, PLAN.md section 1), so a card whose reason names
+// another beach explains itself. Returns "" unless reportedFor is an object with
+// a non-empty name; the distance is appended only when the record carries a
+// finite one, never inferred.
+function renderReportedFor(reportedFor) {
+  if (!reportedFor || typeof reportedFor !== "object") {
+    return "";
+  }
+  const name = typeof reportedFor.name === "string" ? reportedFor.name.trim() : "";
+  if (name.length === 0) {
+    return "";
+  }
+  const miles = typeof reportedFor.distanceMi === "number" &&
+    isFinite(reportedFor.distanceMi)
+    ? formatMiles(reportedFor.distanceMi)
+    : "";
+  // formatMiles already hedges ("~2 mi", "<1 mi"), so the sentence adds no
+  // second hedge of its own.
+  const text = "Reported for " + name +
+    (miles ? ", " + miles + " away" : "");
+  return "<p class=\"reported-for wa-caption-s\">" + escapeHtml(text) + "</p>";
+}
+
 // Shared flag-card skeleton used by both the official and the estimate card so
 // their layouts stay identical: badge in the header (left), source labels in
 // header-actions (top right), flag row + stale warning in the body, "Updated"
 // in the footer. The with-* attributes track slotted content per the wa-card
 // SSR contract.
 //
-// Two optional options tune the body callout, and only renderOfficialCard ever
-// passes them; the estimate card always gets the plain 2 h behaviour:
-//   staleMs     — this source's own staleness horizon; absent means STALE_MS.
-//   readingNote — copy for the neutral note shown between the 2 h default and
-//                 that horizon.
+// Three optional options tune the body, and only renderOfficialCard ever passes
+// them; the estimate card always gets the plain 2 h behaviour:
+//   staleMs          — this source's own staleness horizon; absent means STALE_MS.
+//   readingNote      — copy for the neutral note shown between the 2 h default
+//                      and that horizon.
+//   reportedForHtml  — the provenance line for a reading posted at another site,
+//                      shown under the flag row and above any callout.
 // The two callouts are mutually exclusive and the warning always wins: a card
 // that is genuinely stale must never also carry a reassuring note beside it.
 function renderFlagCard(options) {
@@ -351,6 +377,9 @@ function renderFlagCard(options) {
     lines.push("<div slot=\"header-actions\">" + options.sourcesHtml + "</div>");
   }
   lines.push(renderFlagRow(options.color, options.reason));
+  if (options.reportedForHtml) {
+    lines.push(options.reportedForHtml);
+  }
   if (options.updated) {
     // A source-declared horizon replaces the default outright; anything else
     // falls back to STALE_MS.
@@ -404,6 +433,7 @@ function renderOfficialCard(official, nowIso) {
     // 2 h default.
     staleMs: official.staleMs,
     readingNote: official.readingNote,
+    reportedForHtml: renderReportedFor(official.reportedFor),
     nowIso: nowIso
   });
 }

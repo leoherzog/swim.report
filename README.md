@@ -342,8 +342,9 @@ classification (offline)](#discovery-and-classification-offline)).
   KV-backed health monitoring, and writes `flag:` and `official:` keys at a 25200 second TTL
   through a bounded-concurrency write pool (`KV_WRITE_CONCURRENCY`, `src/pool.js`) — the two
   share a TTL so an estimate can never outlive the posted flag it is weighed against. A
-  scraper's optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs` and
-  `readingNote` ride along as display-side hints, not TTLs. `waveinput:` keys expire on an
+  scraper's optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs`
+  and `readingNote`, plus the resolver's `reportedFor`, ride along as display-side hints, not
+  TTLs. `waveinput:` keys expire on an
   absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
   required, and a missing key just means the estimate falls back to wind or `unknown`. As its
   last step it rebuilds the map directory `GET /api/beaches.geojson` serves, from KV truth
@@ -617,11 +618,11 @@ returns the first scraper whose `matches(beach)` is true:
 
 | Scraper (id) | Source | Color semantics |
 |---|---|---|
-| South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version") | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data |
+| South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version") | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data. A beach naming no pole resolves to the nearest one and carries `reportedFor`, so the card names the pole it borrowed |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion, never an inferred green |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red; records >36 h old dropped; a beach reports green only when its own Surf row is fresh, so a green resting solely on a water-quality row is no data rather than a false green |
-| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note |
-| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs` |
+| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
+| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
 | PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only |
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | Zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
 
@@ -716,6 +717,7 @@ nothing to report must never return null, or it would raise a false alert.
            // (b) multi-site, each matched beach resolving to at most one site:
            //   { perBeach: true, sites: [{ siteId, color, reason,
            //     names: ["lowercase substrings"], lat, lon, radiusMi,
+           //     reportSiteName /* optional; see "Transferred readings" */,
            //     updated /* optional ISO; overrides result updated */ }],
            //     source: url, sources: [url], updated: nowIso }
            // Return null ONLY on genuine failure (fetch failed, page
@@ -736,14 +738,44 @@ nothing to report must never return null, or it would raise a false alert.
    flag — the correct outcome, not an error. Sites without a confirmed color must be omitted
    from `sites`. Build the shape-(b) object with `perBeachResult(sites, source, updated)`.
 
+   **Transferred readings (`reportSiteName`).** A shape-(b) site that is a real reporting
+   location whose flag also serves nearby beaches declares `reportSiteName`, the site's own
+   display name. When it is neither the resolved beach's display name (`park_name || name`)
+   nor claimed by that site's own `names[]`, `scrapeOfficialFlagFromResult` attaches
+   `reportedFor: { name, distanceMi }` to the record and the detail page's official card adds
+   a quiet "Reported for Grand Haven State Park, ~1 mi away" line, so a visitor at Grand Haven
+   City Beach is never shown a neighboring park's posted flag as their own. The `names[]` test
+   is what keeps a beach that IS the report site quiet when the source qualifies its label
+   ("Mears State Park (Pentwater)" for Charles Mears State Park), so every line the site
+   resolver can produce comes from its proximity fallback. `distanceMi` is the real haversine
+   distance when both the beach and the site carry coordinates and `null` otherwise — a
+   distance is never invented.
+
+   Declare it on every site of a source whose sites are real reporting locations that also
+   serve nearby beaches. The test is whether a beach the scraper `matches()` can resolve to a
+   site it is not named after: a coordinate-bearing site plus a `matches()` wider than that
+   site's own name means the proximity fallback will hand some neighbor the site's posted flag.
+   `nws-omr-grr`, `south-haven-mi` and `winnetka-tower-beach` all qualify. South Haven
+   publishes nine flag poles along one shoreline, claims the whole city by bbox, and resolves a
+   beach naming no pole to the nearest one within 1.5 mi. Winnetka posts one pole, Tower Road
+   Beach, but `matches()` falls through to a bbox covering the neighboring Winnetka Park
+   District beaches, each of which lands inside the site's default 1.5 mi radius.
+
+   Sources whose sites carry no coordinates — Chicago Park District, Metroparks — have no
+   proximity fallback at all, so a bbox-matched beach that no site names resolves to `null` and
+   there is never a neighbor to disclose. Area-wide sources must not declare it: Presque Isle
+   posts one park-wide advisory, and the NWS marine beach forecast's sites are whole zones
+   whose centroids are not measurement points, so any distance would be invented.
+
    Keep parsing logic in separate, pure, exported functions (see `parseSouthHavenCsv` in
    `src/officialSources/southHaven.js`) so they can be unit tested with fixture strings and no
    network access. `scrape(nowIso)` receives its timestamp — never call `Date.now()`.
 
    **Shared helpers in `src/officialSources/util.js`** to reuse: `fetchText` (cron-side fetch
    to text or `null`; for JSON use `fetchJson` from `src/clients/http.js`), `perBeachResult`,
-   `resolveSiteForBeach` / `DEFAULT_SITE_RADIUS_MI`, `ageDays` / `MS_PER_DAY`, `FLAG_SEVERITY`,
-   `decodeCellText`, `extractTableRowsRaw`, `containsAny` (exact, no case folding) and
+   `resolveSiteForBeach` / `siteNamesMatchBeach` / `DEFAULT_SITE_RADIUS_MI`, `ageDays` /
+   `MS_PER_DAY`, `FLAG_SEVERITY`, `decodeCellText`, `extractTableRowsRaw`,
+   `containsAny` (exact, no case folding) and
    `matchesAnyAlias` (lowercases only the haystack, because every curated alias array here is
    already lowercase). **Caution:** `decodeCellText` is deliberately the *conservative*
    table-cell chain. A scraper that strips full-page HTML into a bounded window which **gates a

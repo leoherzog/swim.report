@@ -52,6 +52,10 @@ export const TOWER_BEACH_URL =
 const TOWER_BEACH_LABEL = "Winnetka Park District";
 
 export const TOWER_BEACH_SITE_ID = "tower-road-beach";
+// The posted status belongs to this one pole. matches() also claims any beach
+// inside the bbox, and those resolve here by proximity, so the site declares
+// its own name for the transferred-reading line (PLAN.md section 6).
+const TOWER_BEACH_SITE_LABEL = "Tower Road Beach";
 const TOWER_BEACH_NAMES = ["tower road"];
 const TOWER_BEACH_LAT = 42.115585;
 const TOWER_BEACH_LON = -87.733837;
@@ -143,9 +147,10 @@ export function parseTowerBeachUpdated(text, nowIso) {
 }
 
 // Pure. Raw page text (any encoding of markup, defensively regex-matched) +
-// nowIso -> a single site object ({siteId, color, reason, names, lat, lon,
-// updated}) or null. Never throws. A markup change, unrecognized status word,
-// or unrecognized closure reason all degrade to null (never a wrong color).
+// nowIso -> a single site object ({siteId, color, reason, reportSiteName,
+// names, lat, lon, updated}) or null. Never throws. A markup change, an
+// unrecognized status word, or an unrecognized closure reason all degrade to
+// null (never a wrong color).
 export function parseTowerBeachStatus(text, nowIso) {
   if (typeof text !== "string" || text.length === 0) {
     return null;
@@ -169,6 +174,7 @@ export function parseTowerBeachStatus(text, nowIso) {
       siteId: TOWER_BEACH_SITE_ID,
       color: "green",
       reason: "Official status reported by " + TOWER_BEACH_LABEL + ": Open",
+      reportSiteName: TOWER_BEACH_SITE_LABEL,
       names: TOWER_BEACH_NAMES,
       lat: TOWER_BEACH_LAT,
       lon: TOWER_BEACH_LON,
@@ -196,6 +202,7 @@ export function parseTowerBeachStatus(text, nowIso) {
       color: "red",
       reason: "Official status reported by " + TOWER_BEACH_LABEL +
         ": Closed - " + reasonRaw,
+      reportSiteName: TOWER_BEACH_SITE_LABEL,
       names: TOWER_BEACH_NAMES,
       lat: TOWER_BEACH_LAT,
       lon: TOWER_BEACH_LON,

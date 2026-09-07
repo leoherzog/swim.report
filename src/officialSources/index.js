@@ -9,7 +9,12 @@
 //       resolved to at most one site via resolveSiteForBeach; beaches that
 //       resolve to no site get no OfficialFlag (null).
 
-import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
+import {
+  resolveSiteForBeach,
+  siteNamesMatchBeach,
+  DEFAULT_SITE_RADIUS_MI
+} from "./util.js";
+import { distanceMi } from "../geo.js";
 import { southHaven } from "./southHaven.js";
 import { metroparks } from "./metroparks.js";
 import { chicagoParkDistrict } from "./chicagoParkDistrict.js";
@@ -59,6 +64,47 @@ export function findScraper(beach) {
 // scrapers can reuse it without importing this registry; re-exported here for
 // the cron and tests.
 export { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI };
+
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+// Pure. BeachRow + resolved site -> { name, distanceMi } | null. Non-null only
+// when the site declares a reportSiteName that is neither the beach's display
+// name (park_name || name, matching render.js) nor claimed by the site's own
+// names[], which is exactly the case where the card's reason names somewhere
+// else. The names[] test is what keeps a beach that IS the report site from
+// reading as transferred when the source qualifies its label ("Mears State Park
+// (Pentwater)" for Charles Mears State Park). distanceMi is the real haversine
+// distance when both the beach and the site carry finite coordinates, and null
+// otherwise — a transfer distance is never inferred from an unlocated point.
+// Exported for tests: resolveSiteForBeach's proximity pass needs finite
+// coordinates on both sides and its name pass is suppressed here, so the
+// null-distance guard cannot be reached through scrapeOfficialFlagFromResult
+// and is only exercisable directly.
+export function reportedForSite(beach, site) {
+  const reportSiteName = typeof site.reportSiteName === "string"
+    ? site.reportSiteName.trim()
+    : "";
+  if (reportSiteName.length === 0) {
+    return null;
+  }
+  const displayName = String((beach.park_name || beach.name) || "").trim();
+  if (displayName.toLowerCase() === reportSiteName.toLowerCase()) {
+    return null;
+  }
+  if (siteNamesMatchBeach(beach, site)) {
+    return null;
+  }
+  const located = isFiniteNumber(beach.lat) && isFiniteNumber(beach.lon) &&
+    isFiniteNumber(site.lat) && isFiniteNumber(site.lon);
+  return {
+    name: reportSiteName,
+    distanceMi: located
+      ? distanceMi(beach.lat, beach.lon, site.lat, site.lon)
+      : null
+  };
+}
 
 // Pure (no fetch). Resolves an already-fetched scrape result for ONE beach.
 // Handles both result shapes and returns a complete OfficialFlag with beachId
@@ -133,6 +179,12 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       if (readingNote !== null) {
         record.readingNote = readingNote;
       }
+      // Same attach-after-the-literal rule: a beach reading a neighboring site's
+      // posted flag carries the provenance, everyone else carries no key at all.
+      const reportedFor = reportedForSite(beach, site);
+      if (reportedFor !== null) {
+        record.reportedFor = reportedFor;
+      }
       return record;
     }
     if (OFFICIAL_COLORS.indexOf(result.color) === -1) {
@@ -162,6 +214,11 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
     } else {
       delete flag.readingNote;
     }
+    // A single-color source reports one reading for every beach it matches, so
+    // there is no neighboring site to name. Deleted for the same reason: this
+    // branch spreads the result, and a result-supplied reportedFor would reach
+    // KV and the public /api/flag response unvalidated.
+    delete flag.reportedFor;
     return flag;
   } catch (err) {
     console.log(

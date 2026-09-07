@@ -13,6 +13,7 @@ import {
   scrapers,
   findScraper,
   resolveSiteForBeach,
+  reportedForSite,
   scrapeOfficialFlagFromResult,
   scrapeOfficialFlag
 } from "../src/officialSources/index.js";
@@ -397,6 +398,55 @@ describe("Van Buren State Park name trap (wrong-beach guard)", function() {
   });
 });
 
+// South Haven posts nine poles along one shoreline and claims the whole city by
+// bbox, so a beach naming no pole resolves to the nearest one within 1.5 mi and
+// reads a neighbor's flag. Each emitted site therefore carries reportSiteName.
+describe("southHaven transferred readings", function() {
+  const FEED = [
+    "Flag #3 Packard Park Beach is Yellow",
+    "Flag #13 Brown Stairs (Van Buren St.) is Green",
+    "Flag #14 Blue Stairs (Kids Corner) is Green"
+  ];
+
+  function southHavenFlag(beach) {
+    const sites = parseSouthHavenCsv(southHavenCsv(FEED));
+    return scrapeOfficialFlagFromResult(beach, southHaven, multiSiteResult(sites));
+  }
+
+  it("stamps every emitted site with the pole's own label", function() {
+    const sites = parseSouthHavenCsv(southHavenCsv(FEED));
+    expect(findSite(sites, "packard-park-beach").reportSiteName).toBe("Packard Park Beach");
+    expect(findSite(sites, "brown-stairs").reportSiteName)
+      .toBe("Brown Stairs (Van Buren St.)");
+  });
+
+  it("names the pole a proximity-resolved beach is borrowing, with a measured distance", function() {
+    // The Van Buren St. stairway beach names no pole and sits ~0.05 mi from the
+    // Brown Stairs pole, so its official card must say whose flag it is showing.
+    const beach = makeBeach({
+      id: "osm-van-buren-st", name: "Van Buren Street Beach",
+      lat: 42.3975, lon: -86.2890
+    });
+    const flag = southHavenFlag(beach);
+    expect(flag.color).toBe("green");
+    expect(flag.reportedFor.name).toBe("Brown Stairs (Van Buren St.)");
+    expect(flag.reportedFor.distanceMi).toBeGreaterThan(0);
+    expect(flag.reportedFor.distanceMi).toBeLessThan(0.2);
+  });
+
+  it("says nothing for a beach the pole's own names[] claim", function() {
+    // "Packard Park" is the Packard Park Beach pole under a shorter display
+    // name, not a neighbor borrowing its flag.
+    const beach = makeBeach({
+      id: "osm-packard", name: "Packard Park Beach", park_name: "Packard Park",
+      lat: 42.4118, lon: -86.2769
+    });
+    const flag = southHavenFlag(beach);
+    expect(flag.color).toBe("yellow");
+    expect("reportedFor" in flag).toBe(false);
+  });
+});
+
 const V2_BEACH = makeBeach({
   id: "osm-node-99",
   name: "Oval Beach",
@@ -712,6 +762,148 @@ describe("scrapeOfficialFlagFromResult: staleMs / readingNote contract", functio
       multiSiteResult([{ siteId: "oval", color: "purple", reason: "r", names: ["oval beach"] }])
     );
     expect(flag).toBe(null);
+  });
+});
+
+// The optional transferred-reading contract. A shape-(b) site may declare
+// reportSiteName; when it is neither the beach's display name (park_name ||
+// name) nor claimed by the site's own names[], the record carries reportedFor
+// { name, distanceMi } so the official card can say whose reading it is showing.
+// Every transfer the resolver can produce therefore comes out of its proximity
+// pass, where both points are located and the distance is measured; the null
+// distance the shape allows guards an unlocated point and is reachable only by
+// calling reportedForSite directly, which the last block here does.
+describe("scrapeOfficialFlagFromResult: reportedFor contract", function() {
+  const FAKE = {
+    id: "fake-v2",
+    label: "Fake Flag Program",
+    url: "https://example.gov/flags"
+  };
+
+  // Claimed by no site substring, so it reaches the site by proximity — the
+  // shape of a beach reading a neighboring site's posted flag.
+  const NEIGHBOR_BEACH = makeBeach({
+    id: "osm-node-100",
+    name: "City Beach",
+    lat: 42.4,
+    lon: -86.28
+  });
+
+  function siteFlag(beach, site) {
+    return scrapeOfficialFlagFromResult(beach, FAKE, multiSiteResult([
+      Object.assign({ siteId: "oval", color: "green", reason: "Oval flag is green",
+        names: ["oval beach"] }, site)
+    ]));
+  }
+
+  it("names the report site and measures the distance when both are located", function() {
+    // NEIGHBOR_BEACH is at 42.4, -86.28; the site sits 0.02 deg (~1.38 mi) north.
+    const flag = siteFlag(NEIGHBOR_BEACH, {
+      reportSiteName: "Oval Beach State Park", lat: 42.42, lon: -86.28
+    });
+    expect(flag.reportedFor.name).toBe("Oval Beach State Park");
+    expect(flag.reportedFor.distanceMi).toBeCloseTo(1.38, 2);
+  });
+
+  it("omits the key when the report site is the beach's own display name", function() {
+    const flag = siteFlag(V2_BEACH, {
+      reportSiteName: "Oval Beach", lat: 42.42, lon: -86.28
+    });
+    expect("reportedFor" in flag).toBe(false);
+  });
+
+  it("omits the key when the site's own names[] claim this beach", function() {
+    // A source that qualifies its label ("Mears State Park (Pentwater)") must
+    // never make the beach that IS the report site read as a transfer from a
+    // few hundred feet away.
+    const flag = siteFlag(V2_BEACH, {
+      reportSiteName: "Oval Beach (Saugatuck)", lat: 42.4001, lon: -86.28
+    });
+    expect("reportedFor" in flag).toBe(false);
+  });
+
+  it("compares against park_name, not name, when the beach sits in a park", function() {
+    // Every park beach would otherwise read as transferred, since its own name
+    // is not what the page displays.
+    const beach = makeBeach({
+      id: "osm-node-99", name: "North Beach", park_name: "Oval Beach State Park",
+      lat: 42.4, lon: -86.28
+    });
+    const flag = siteFlag(beach, { reportSiteName: "Oval Beach State Park" });
+    expect("reportedFor" in flag).toBe(false);
+  });
+
+  it("omits the key for a site that declares no reportSiteName", function() {
+    const flag = siteFlag(NEIGHBOR_BEACH, { lat: 42.42, lon: -86.28 });
+    expect("reportedFor" in flag).toBe(false);
+    expect(Object.keys(flag).indexOf("reportedFor")).toBe(-1);
+  });
+
+  it("omits the key for an empty or non-string reportSiteName", function() {
+    const located = { lat: 42.42, lon: -86.28 };
+    expect("reportedFor" in siteFlag(NEIGHBOR_BEACH,
+      Object.assign({ reportSiteName: "  " }, located))).toBe(false);
+    expect("reportedFor" in siteFlag(NEIGHBOR_BEACH,
+      Object.assign({ reportSiteName: 42 }, located))).toBe(false);
+  });
+
+  it("strips a result-carried reportedFor on the single-color branch", function() {
+    // That branch spreads the whole scrape result, and a single-color source
+    // reports one reading for every beach it matches: there is no neighboring
+    // site to name, so an unvalidated value must not reach KV.
+    const result = singleColorResultFixture({
+      reportedFor: { name: "Somewhere Else", distanceMi: 900 }
+    });
+    const flag = scrapeOfficialFlagFromResult(V2_BEACH, FAKE, result);
+    expect("reportedFor" in flag).toBe(false);
+    // The result itself is never mutated.
+    expect(result.reportedFor.name).toBe("Somewhere Else");
+  });
+
+  function singleColorResultFixture(extra) {
+    return Object.assign({
+      color: "red",
+      reason: "Official flag reported by Fake Flag Program",
+      official: true,
+      scraperId: "fake-v2",
+      source: "https://example.gov/flags",
+      sources: ["https://example.gov/flags"],
+      updated: "2026-07-05T12:00:00.000Z"
+    }, extra || {});
+  }
+});
+
+// The distanceMi: null guard. resolveSiteForBeach's proximity pass needs finite
+// coordinates on both sides and its name pass is suppressed by
+// siteNamesMatchBeach, so no site the registry can resolve reaches this branch;
+// it is exercised directly, because the contract permits an unlocated site and
+// a distance must never be invented for one.
+describe("reportedForSite: unlocated points", function() {
+  const BEACH = makeBeach({
+    id: "osm-node-101", name: "City Beach", lat: 42.4, lon: -86.28
+  });
+  const SITE = { siteId: "oval", color: "green", names: ["oval beach"],
+    reportSiteName: "Oval Beach State Park" };
+
+  it("names the site with a null distance when the site carries no coordinates", function() {
+    expect(reportedForSite(BEACH, SITE)).toEqual({
+      name: "Oval Beach State Park", distanceMi: null
+    });
+  });
+
+  it("names the site with a null distance when the beach is unlocated", function() {
+    const unlocated = makeBeach({
+      id: "osm-node-102", name: "City Beach", lat: null, lon: null
+    });
+    const located = Object.assign({ lat: 42.42, lon: -86.28 }, SITE);
+    expect(reportedForSite(unlocated, located)).toEqual({
+      name: "Oval Beach State Park", distanceMi: null
+    });
+  });
+
+  it("rejects a non-finite coordinate rather than emitting NaN", function() {
+    const site = Object.assign({ lat: NaN, lon: -86.28 }, SITE);
+    expect(reportedForSite(BEACH, site).distanceMi).toBe(null);
   });
 });
 

@@ -297,6 +297,11 @@ export function parseSouthHavenCsv(text, nowIso) {
       siteId: def.siteId,
       color: worst,
       reason: "Official flag reported by City of South Haven Beach Flag Program for " + def.label,
+      // The pole's own name. matches() claims the whole South Haven shoreline
+      // and any beach naming no pole resolves to the nearest one within 1.5 mi,
+      // so a beach reading a neighboring pole's flag must say whose it is
+      // (PLAN.md section 6, "Transferred readings").
+      reportSiteName: def.label,
       names: def.names,
       lat: def.lat,
       lon: def.lon

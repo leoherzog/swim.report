@@ -180,6 +180,22 @@ accepts legacy bare-string entries, rendered as their hostname with "www." strip
                                      // staleMs; the renderer appends a
                                      // <wa-relative-time> and a "." after it, so it must
                                      // read naturally as "... 11 hours ago."
+      "reportedFor": { "name": "Grand Haven State Park",
+                       "distanceMi": 1.1093174085230862 }
+                                     // Optional. Present only when this beach reads a
+                                     // posted flag the source reports for a DIFFERENT
+                                     // site: scrapeOfficialFlagFromResult (section 6)
+                                     // attaches it when the resolved site's
+                                     // reportSiteName is neither the beach's display
+                                     // name (park_name || name) nor claimed by that
+                                     // site's own names[]. name is the report site's
+                                     // name; distanceMi is the unrounded haversine
+                                     // distance in miles when both the beach and the
+                                     // site carry finite coordinates, else null — never
+                                     // inferred; the renderer does the rounding.
+                                     // Omitted entirely otherwise, never written as
+                                     // null. The frontend renders it as the official
+                                     // card's "Reported for ..." line (section 9).
     }
 
 ### WaveSeries (KV value under "waves:" + beachId)
@@ -601,7 +617,8 @@ Binding name: FLAGS (single namespace for both key families).
   persists in KV between fetches. No registered scraper declares one; the hook is a retained
   extension point. See section 7 step 8. Independently of the TTL, the written record may
   carry the scraper's optional `staleMs` / `readingNote` (section 1) — a per-source staleness
-  horizon and a neutral point-in-time note for the frontend (section 9). The two knobs are
+  horizon and a neutral point-in-time note for the frontend (section 9) — and, for a beach
+  resolved to a report site of another name, `reportedFor` (section 1). The two knobs are
   orthogonal: `officialTtlSeconds` governs how long the KV value lives, `staleMs` how the
   renderer judges the reading's age. nws-omr-grr (30 h) and winnetka-tower-beach (72 h)
   declare `staleMs`; only nws-omr-grr declares a `readingNote` (section 6).
@@ -1798,11 +1815,18 @@ Date.now(), no ambient clock.
 
     export const DEFAULT_SITE_RADIUS_MI = 1.5;
 
+    export function siteNamesMatchBeach(beach, site)
+      // Pure. Does any names[] entry of ONE site appear in
+      // ((beach.park_name || "") + " " + beach.name).toLowerCase()? A site's names[] are
+      // the source's own statement of which beach names ARE that site, so this predicate
+      // is both resolveSiteForBeach's name pass and how index.js decides a resolved beach
+      // is NOT reading a neighbor's flag (reportSiteName, section 6). Non-array names[]
+      // or a missing site -> false.
+
     export function resolveSiteForBeach(beach, sites)
       // Pure. BeachRow + sites[] -> site | null.
-      // Pass 1, name match wins over proximity: the first site, in array order, with any
-      // names[] entry contained as a substring of
-      // ((beach.park_name || "") + " " + beach.name).toLowerCase().
+      // Pass 1, name match wins over proximity: the first site, in array order, for which
+      // siteNamesMatchBeach is true.
       // Pass 2: the nearest site with numeric lat/lon whose distanceMi to the beach is
       // <= its radiusMi (default DEFAULT_SITE_RADIUS_MI = 1.5). Else null.
       // It lives here rather than in index.js so scrapers whose matches() is this same
@@ -1810,7 +1834,9 @@ Date.now(), no ambient clock.
 
 ### src/officialSources/index.js
 
-    import { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } from "./util.js";
+    import { resolveSiteForBeach, siteNamesMatchBeach, DEFAULT_SITE_RADIUS_MI }
+      from "./util.js";
+    import { distanceMi } from "../geo.js";
     import { southHaven } from "./southHaven.js";
     // ...one import per registered scraper module (see the registry list below)
 
@@ -1836,8 +1862,16 @@ Date.now(), no ambient clock.
     export { resolveSiteForBeach, DEFAULT_SITE_RADIUS_MI } // from ./util.js (above)
       // Both live in ./util.js so scrapers can reuse the name-or-proximity rule
       // without importing this registry. distanceMi is not re-exported here —
-      // index.js does not import src/geo.js at all; consumers import it from
-      // src/geo.js directly (src/router.js does re-export it).
+      // index.js imports it from src/geo.js for reportedForSite only; consumers
+      // import it from src/geo.js directly (src/router.js does re-export it).
+
+    export function reportedForSite(beach, site)
+      // Pure. BeachRow + a resolved site -> OfficialFlag.reportedFor (section 1) | null,
+      // per the reportSiteName rule in section 6. Exported for tests: the resolver's
+      // proximity pass demands finite coordinates on both sides and its name pass is
+      // suppressed here, so every reportedFor the registry can emit carries a measured
+      // distance and the distanceMi: null guard is only reachable by calling this
+      // directly. Kept as a guard because the contract permits an unlocated site.
 
     export function scrapeOfficialFlagFromResult(beach, scraper, result)
       // Pure (no fetch) -> OfficialFlag | null. Resolves an already-fetched scrape result
@@ -1920,6 +1954,9 @@ Date.now(), no ambient clock.
       //         names: ["south beach", ...],  // optional lowercase substrings
       //         lat, lon,                     // optional site coordinates
       //         radiusMi,                     // optional, default 1.5
+      //         reportSiteName,               // optional display name of the site the
+      //                                       // source reports (e.g. "Grand Haven
+      //                                       // State Park")
       //         updated }                     // optional ISO string; overrides
       //                                       // the result-level updated
       //     ],
@@ -1928,6 +1965,22 @@ Date.now(), no ambient clock.
       //   be resolved. Sites the source reports without a usable color (unmonitored,
       //   "no flag", unparseable) are omitted from sites — a beach that resolves to no
       //   site gets no official flag.
+      //   reportSiteName is how a beach learns it is reading a neighbor's flag: when it
+      //   is neither the resolved beach's display name (park_name || name) nor claimed
+      //   by that site's own names[] (siteNamesMatchBeach, section 5),
+      //   scrapeOfficialFlagFromResult attaches OfficialFlag.reportedFor (section 1)
+      //   with that name and, when both the beach and the site carry finite lat/lon,
+      //   the haversine distance in miles; otherwise distanceMi is null. The names[]
+      //   test is what keeps a beach that IS the report site from reading as
+      //   transferred when the source qualifies its label ("Mears State Park
+      //   (Pentwater)" for Charles Mears State Park), so every transfer the resolver
+      //   can produce comes out of its proximity pass. Declare it on every site of a
+      //   source whose sites are real reporting locations that also serve nearby
+      //   beaches — nws-omr-grr, south-haven-mi and winnetka-tower-beach do, each
+      //   pairing a located site with a matches() wider than that site's own name —
+      //   and never on a whole-zone or park-wide advisory, where the site is an area
+      //   and any distance would be invented. A source whose sites carry no
+      //   coordinates has no proximity pass and so no transfer to disclose.
       //   updated honesty: real-time sources use nowIso; periodic sources (weekly
       //   reports, advisory issue dates) stamp the source's own report or sample
       //   timestamp — result level when the whole page shares one date, per-site when
@@ -2064,7 +2117,10 @@ src/wqFloor registry below.
   (e.coli / bacteria / water quality / advisory) -> null, since that is the separate
   wqFloor axis; any other closure or unrecognized markup -> null. The water-quality check
   runs first so an ambiguous "advisory" fails safe to null. Tight name-within-bbox
-  matches(); register ahead of any broad regional scraper.
+  matches(); register ahead of any broad regional scraper. That bbox claims the
+  neighboring Winnetka Park District beaches too, and the single located site resolves
+  them by proximity, so it declares reportSiteName "Tower Road Beach" (section 6) and
+  those beaches are told whose posted status they are reading.
   updated = the source page's own "Last updated at M/D/YY h:mm am|pm" stamp
   (parseTowerBeachUpdated, falling back to nowIso when unparseable), which rainoutline
   writes when a staffer posts a status change; nothing advances it automatically. It
@@ -2371,8 +2427,9 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    persists between infrequent fetches; default 25200, matching the estimate's TTL so the
    record never expires ahead of the estimate it is weighed against (section 3). No
    registered scraper declares officialTtlSeconds, so this resolves to the default. The record also carries
-   the scraper's validated staleMs / readingNote when declared (copied by
-   scrapeOfficialFlagFromResult, section 6) — a display-side horizon, orthogonal to
+   the scraper's validated staleMs / readingNote when declared, and reportedFor when the
+   beach resolved to a report site of another name (both copied by
+   scrapeOfficialFlagFromResult, section 6) — display-side fields, orthogonal to
    expirationTtl. This cron rewrites the official record every hour no matter how slowly
    the upstream publishes, which is why the display horizon is needed: the record is fresh,
    the reading may not be. A null scrape result, or a beach that resolves to no site, means
@@ -3600,7 +3657,12 @@ exporting a CSS string); render.js is the sole module the router imports.
   separate card with a heavy border, an "OFFICIAL" badge with a circle-check Font Awesome
   icon, the source hostname ("www." stripped) linking to the scraped page, and its own
   updated time. The official card appears above the estimate card; when official is null no
-  official card renders.
+  official card renders. When the record carries reportedFor (section 1) with a non-empty
+  name, the card body also carries a quiet caption line under the flag row reading
+  "Reported for <name>", plus ", <formatMiles(distanceMi)> away" when distanceMi is finite
+  (formatMiles already hedges as "~2 mi" / "<1 mi", so the sentence adds no second hedge of
+  its own) — so a reading transferred from a neighboring report site never reads as this
+  beach's own posted flag. Escaped, and absent when reportedFor is missing or malformed.
 - Both cards share one skeleton (renderFlagCard): badge in slot="header", source labels in
   slot="header-actions" (official: hostname hyperlinked to the scraped page, the one source
   that links out; estimate: small filled-neutral pill wa-badges, deliberately unlike the
@@ -3608,9 +3670,10 @@ exporting a CSS string); render.js is the sole module the router imports.
   official, and never hyperlinked to the upstream data), a flag row plus at most one age
   callout — stale warning or reading note, never both — in the body, and an "Updated
   <wa-relative-time date=updated sync>" in slot="footer". Distinction comes from card
-  class, appearance and badge, never from layout. renderFlagCard takes the optional staleMs
-  and readingNote, passed through by renderOfficialCard; renderEstimateCard passes neither,
-  so the estimate card keeps the default its own hourly cadence was calibrated to.
+  class, appearance and badge, never from layout. renderFlagCard takes the optional staleMs,
+  readingNote and reportedForHtml, all three passed through by renderOfficialCard;
+  renderEstimateCard passes none, so the estimate card keeps the default its own hourly
+  cadence was calibrated to and can never show a report-site line.
 - Stale-data warning: the age threshold is STALE_MS = 7200000 (2 h) by default,
   overridable per official record by its optional staleMs (section 1); the estimate card
   always uses the default. Let limit = typeof x.staleMs === "number" ? x.staleMs : STALE_MS.
@@ -3932,7 +3995,15 @@ ripCurrentRisk output echoes.
   most-severe rollup, piers ignored, unknown/HTML/empty→null, all-gray→[]);
   extractSouthHavenCsvUrl; southHaven.matches; findScraper; resolveSiteForBeach /
   scrapeOfficialFlagFromResult (name beats proximity, array-order, radius default, invalid
-  color→null, no site→null).
+  color→null, no site→null); the staleMs/readingNote contract; the reportedFor contract
+  (measured distance for a proximity-resolved beach, same-display-name, names[]-claimed and
+  no-reportSiteName omission, park_name compared not name, single-color branch stripping a
+  result-carried value, and reportedForSite called directly for the distanceMi: null guard
+  the resolver cannot reach); and South Haven's poles carrying reportSiteName, with a
+  borrowed and a self-named beach.
+- test/renderOfficialCard.test.js — the official card's "Reported for ..." line via
+  renderDetailPage: with and without a distance, absent and malformed records, escaping,
+  order under the flag row, and never on the estimate card.
 - test/metroparks.test.js, test/chicagoParkDistrict.test.js — each exercises its scraper's
   pure parse functions against inline fixtures, including ambiguous and unknown-status rows
   being omitted, plus matches() with matching and non-matching BeachRow fixtures.

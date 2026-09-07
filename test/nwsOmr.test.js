@@ -297,6 +297,50 @@ describe("nwsOmr end-to-end resolution", function () {
     expect(flag.readingNote).toBe(
       "Morning reading — conditions may have changed since it was posted"
     );
+    // The park this beach displays as IS the report site, so the record carries
+    // no transfer provenance — the key is absent, not undefined-valued.
+    expect("reportedFor" in flag).toBe(false);
+  });
+
+  it("labels a beach served by a neighboring site's row with reportedFor", function () {
+    // Grand Haven City Beach sits just north of the state park the product
+    // reports, so the card's reason names somewhere else and must say so.
+    const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
+    const result = {
+      perBeach: true, sites: sites, source: OMR_URL, sources: [OMR_URL], updated: ISSUANCE
+    };
+    const beach = makeBeach({
+      id: "osm-grand-haven-city", name: "Grand Haven City Beach",
+      park_name: null, lat: 43.0700, lon: -86.2490
+    });
+    const flag = scrapeOfficialFlagFromResult(beach, nwsOmr, result);
+    expect(flag).not.toBe(null);
+    expect(flag.color).toBe("red");
+    expect(flag.reason).toBe(
+      "Official flag reported by " + OMR_LABEL + " for Grand Haven State Park"
+    );
+    expect(flag.reportedFor.name).toBe("Grand Haven State Park");
+    // ~1.1 mi due north of the site centroid (43.0540, -86.2490), measured, not
+    // guessed: both the beach and the curated site carry coordinates.
+    expect(flag.reportedFor.distanceMi).toBeCloseTo(1.11, 1);
+  });
+
+  it("does not label the report site itself when the product qualifies its label", function () {
+    // The product writes "Mears State Park (Pentwater)" for the beach displayed
+    // as Charles Mears State Park: the site's own names[] claim it, so it is
+    // reading its own posted flag and must not be told it came from next door.
+    const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
+    const result = {
+      perBeach: true, sites: sites, source: OMR_URL, sources: [OMR_URL], updated: ISSUANCE
+    };
+    const beach = makeBeach({
+      id: "osm-charles-mears", name: "Charles Mears State Park Beach",
+      park_name: "Charles Mears State Park", lat: 43.7831, lon: -86.4431
+    });
+    const flag = scrapeOfficialFlagFromResult(beach, nwsOmr, result);
+    expect(flag).not.toBe(null);
+    expect(flag.color).toBe("yellow");
+    expect("reportedFor" in flag).toBe(false);
   });
 
   it("a beach ~1.7 mi from a centroid (no name match) both matches AND resolves to that site", function () {
