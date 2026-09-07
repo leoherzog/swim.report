@@ -152,6 +152,16 @@ temperature, the rip-current risk and the count of active alerts; a tile with no
 show says "No data" rather than inventing a number. The full official and estimate cards
 follow unchanged.
 
+Under the flag's label the hero carries a one-sentence **plain-language verdict** built from
+the same estimate the flag card explains — "Calm water, no alerts.", "Beach Hazards Statement
+in effect; high rip current risk." A sentence names a flag color only when it also says who
+decided it, so a posted flag reads "Water closed by the posted flag." while an estimate names
+its signals instead, and a beach with nothing usable reads "No data yet for this beach."
+After the at-a-glance tiles, a collapsed **What the flags mean** disclosure gives one line per
+color — green, yellow, red, double red and unknown — and says that estimated flags are
+computed here from forecasts and alerts, official flags are posted at the beach, and posted
+flags and lifeguards always win.
+
 When a water-quality advisory stands for the beach, a **water-quality callout** renders
 directly under the estimate card, between it and the wave forecast — see the raise-only floor
 below.

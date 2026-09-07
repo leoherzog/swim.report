@@ -3822,11 +3822,12 @@ exporting a CSS string); render.js is the sole module the router imports.
   (displayFlagColor) plus the display name; an optional beach-name subtitle; the display
   flag's FLAG_LABELS text with the ESTIMATE badge beside it, or the OFFICIAL badge when the
   official record is what supplied that color — fresh at the 2 h default, or aged and still
-  more severe than the estimate, since displayFlagColor's weighing is raise-only; a lat/lon
-  meta line linking to OpenStreetMap; and the share row. The badge follows the record the
-  color came from, never freshness alone, so the hero can neither call an estimate official
-  nor credit the estimate with a color it did not produce. The flag label text below the
-  title is what names the color, so the title flag icon is decorative there. The stack
+  more severe than the estimate, since displayFlagColor's weighing is raise-only; a
+  plain-language verdict line under that label (p.hero-verdict); a lat/lon meta line linking
+  to OpenStreetMap; and the share row. The badge follows the record the color came from,
+  never freshness alone, so the hero can neither call an estimate official nor credit the
+  estimate with a color it did not produce. The flag label text below the title is what
+  names the color, so the title flag icon is decorative there. The stack
   zero-margins its children, so .beach-title/.beach-subtitle carry no margins. The hero's
   background is
   color-mix(in oklab, <the display flag's palette token> 12%, var(--wa-color-surface-default)),
@@ -3834,6 +3835,28 @@ exporting a CSS string); render.js is the sole module the router imports.
   red or the gray unknown — so no color literal reaches the markup and the wash follows the
   surface token into wa-dark. The hero is a heading, not a third flag card: the two cards
   below keep the full verdicts and are never merged into it.
+  - Verdict line: one sentence from verdictSentence(estimate, official, displayIsOfficial,
+    waterClass) in src/frontend/verdict.js — pure, plain text out, escaped by the caller. It
+    takes the same displayIsOfficial the hero badge takes, so the sentence and the badge can
+    never disagree about which record decided the color. A sentence names a flag color only
+    alongside who decided it: the official branch always says the flag is posted ("Water
+    closed by the posted flag."), and the estimated branch names no color at all, only its
+    signals ("Calm water, no alerts." / "Beach Hazards Statement in effect; high rip current
+    risk."). The deciding trigger leads the sentence and the remaining echoed signals follow
+    it; an estimated double-red closes with "stay out of the water". For an alert-decided
+    color the alert named is the first one present in ALERT_PRECEDENCE, ECCC_ALERT_PRECEDENCE,
+    NWS_FLOOR_PRECEDENCE then ECCC_FLOOR_PRECEDENCE — the order rules.js itself decides in,
+    never alertDetails[0], which is upstream feed order. Wave wording comes from
+    waveColorForHeight plus bandLabelsForWaterClass, so no threshold is restated. An
+    event-led red or double-red keeps only the follower clauses whose own color reaches red
+    by SEVERITY_RANK: the wave grids model wind waves alone, so a sub-threshold height or a
+    LOW rip risk beside a tsunami, hurricane or surge warning would read as reassurance
+    against the hazard the sentence explains. "no alerts" is claimed only when alertDetails
+    is present and empty, the estimateInputs seal (section 1) reports alertsResolved true,
+    and the reason carries no ALERTS_UNAVAILABLE_CAVEAT — an empty echo alone cannot tell a
+    clear check from a failed national fetch. A missing estimate, an unknown color and an
+    unusable official color all read "No data yet for this beach."; a legacy payload with no
+    trigger and no echoed signals returns "" and the line is omitted entirely.
   - Share row: a <wa-copy-button> whose value is the absolute canonical URL (SITE_ORIGIN
     plus "/beach/" + encodeURIComponent(beach.id), a constant so the renderer stays pure)
     with copy-label "Copy link", plus a Share <wa-button> that ships with the hidden
@@ -3861,11 +3884,18 @@ exporting a CSS string); render.js is the sole module the router imports.
     ALERTS_UNAVAILABLE_CAVEAT and the same sentence twice on one page reads as a bug. The
     tiles are informational and estimated: outlined cards only, never the official card's
     treatment.
-  Then the detail stack, answer first and exploration second: official card (if any) →
-  estimate card → water-quality advisory callout (if any) → wave forecast section → wave map
-  section → nearby-webcam section (if any) → nearby beaches (if any), so the lazy-loading
-  embeds follow the verdict and forecast and the links away from the beach come last. The
-  advisory callout is the "wqfloor:" record (section 1) rendered as a wa-callout — warning
+  - Flag legend: a collapsed wa-details (class flag-legend, summary "What the flags mean",
+    appearance plain, icon-placement start) directly after the at-a-glance tiles, once per
+    page. One li per color — green, yellow, red, double red, unknown — each with its flag
+    icon and the site's own words, plus a note that estimated flags are computed here from
+    forecasts and alerts, official flags are posted at the beach, and posted flags and
+    lifeguards always win. Static copy, so nothing in it is escaped.
+  Then the collapsed flag legend, then the detail stack, answer first and exploration
+  second: official card (if any) → estimate card → water-quality advisory callout (if any) →
+  wave forecast section → wave map section → nearby-webcam section (if any) → nearby beaches
+  (if any), so the lazy-loading embeds follow the verdict and forecast and the links away
+  from the beach come last. The advisory callout is the "wqfloor:" record (section 1)
+  rendered as a wa-callout — warning
   for yellow, danger for red, a "Water quality advisory" heading, the reason, the source as
   plain text and an "Updated <wa-relative-time>" line. It reads as context beside the
   estimate that already folded it in, so it carries neither the OFFICIAL badge nor the
@@ -4213,6 +4243,18 @@ other caveat test uses symbolically.
   strings), waveStripSummary strings, model helpers, buildWaveModelChartConfig shape, and
   computeHazardBands (positioning/clamping/hour-snapping, missing onset/ends defaults,
   out-of-window/non-precedence drops, exact-repeat dedupe, rip band, malformed→[]).
+- test/verdict.test.js — the pure hero-verdict sentence: one case per rules.js trigger
+  (alerts, both floors, rip, wave band under both threshold sets, wind, wq-floor, no-data),
+  the alert clause's precedence ordering (the deciding alert leads, never the feed's first),
+  joining/counting/dedupe, the "no alerts" guards (caveat, unresolved fetch, sealless
+  payload), the clauses an event-led red or double-red drops and the ones it keeps,
+  estimated double-red, the posted-flag branch for every color, and the honest fallbacks for
+  a null, unknown or legacy estimate.
+- test/detailVerdict.test.js — the same line and the flag legend through renderDetailPage:
+  placement between the hero flag label and the coordinates line, fresh-official vs
+  aged-official-that-agrees crediting, escaping of an upstream alert name, omission for a
+  legacy estimate, and the legend's exact markup, per-color lines and once-per-page
+  placement between the tiles and the detail stack.
 - test/renderWaveForecast.test.js — the rendered section via renderDetailPage: detail-stack
   order, proportional flex-grow segments + exact per-segment tooltip/aria-label texts,
   visually-hidden prose summary, per-model "now" caption + collapsed comparison disclosure,

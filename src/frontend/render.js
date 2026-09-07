@@ -10,6 +10,7 @@ import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { SEVERITY_RANK } from "../rules.js";
 import { alertsCheckable } from "../alertsCheckable.js";
+import { verdictSentence } from "./verdict.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
@@ -1387,6 +1388,35 @@ function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
     "</section>";
 }
 
+// The five flag colors in the site's own words, collapsed by default so the
+// page still leads with this beach's own answer. Static copy, so nothing here
+// needs escaping. Each line says who decides that color, since the hero verdict
+// names no color on its own.
+function renderFlagLegend() {
+  const entries = [
+    { color: "green", label: "Green", text: "Calm water. Normal swimming conditions." },
+    { color: "yellow", label: "Yellow", text: "Moderate surf or currents. Swim with care." },
+    { color: "red", label: "Red", text: "Dangerous surf or currents. Swimming is discouraged." },
+    { color: "double-red", label: "Double red", text: "The water is closed. Stay out." },
+    { color: "unknown", label: "Unknown", text: "No usable data right now. A gray flag is never a guess." }
+  ];
+  const lines = [];
+  lines.push("<wa-details class=\"flag-legend\" summary=\"What the flags mean\" " +
+    "appearance=\"plain\" icon-placement=\"start\">");
+  lines.push("<ul class=\"flag-legend-list wa-stack wa-gap-xs\">");
+  for (const entry of entries) {
+    lines.push("<li class=\"wa-flank wa-gap-s\">" +
+      renderFlagIcon(entry.color, "wa-font-size-l") +
+      "<span><strong>" + entry.label + "</strong> — " + entry.text + "</span></li>");
+  }
+  lines.push("</ul>");
+  lines.push("<p class=\"flag-legend-note\">Estimated flags are computed here from " +
+    "forecasts and alerts. Official flags are the ones posted at the beach. " +
+    "Posted flags and lifeguards always win.</p>");
+  lines.push("</wa-details>");
+  return lines.join("\n");
+}
+
 export function renderDetailPage(data) {
   const beach = data.beach;
   const estimate = data.estimate;
@@ -1440,6 +1470,15 @@ export function renderDetailPage(data) {
   const displayIsOfficial = !!official &&
     (!isStale(nowIso, official.updated, STALE_MS) || titleColor !== estimateColor);
   const heroBadgeHtml = displayIsOfficial ? renderOfficialBadge(null) : renderEstimateBadge();
+
+  // One plain-language sentence under the flag label, derived from the same
+  // estimate the label came from. Empty for an estimate with nothing to say (a
+  // legacy payload with no trigger and no echoed signals), which renders no
+  // line at all.
+  const verdictText = verdictSentence(estimate, official, displayIsOfficial,
+    typeof beach.water_class === "string" ? beach.water_class : null);
+  const verdictHtml = verdictText ?
+    ("<p class=\"hero-verdict\">" + escapeHtml(verdictText) + "</p>") : "";
   const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(beach.id);
 
   // The hero carries the beach's identity and nothing but the display flag,
@@ -1463,6 +1502,7 @@ export function renderDetailPage(data) {
     escapeHtml(FLAG_LABELS[normalizeColor(titleColor)]) + "</span>" +
     heroBadgeHtml +
     "</p>" +
+    verdictHtml +
     metaHtml +
     "<div class=\"hero-actions wa-cluster wa-gap-xs\">" +
     "<wa-copy-button class=\"hero-copy\" value=\"" + escapeHtml(canonicalUrl) + "\" " +
@@ -1512,7 +1552,7 @@ export function renderDetailPage(data) {
     stackParts.push(nearbyHtml);
   }
 
-  const mainHtml = heroHtml + glanceHtml +
+  const mainHtml = heroHtml + glanceHtml + renderFlagLegend() +
     "<div class=\"detail-stack wa-stack wa-gap-l\">" + stackParts.join("\n") + "</div>";
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +

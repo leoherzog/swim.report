@@ -315,6 +315,13 @@ const RULES = [
   "  align-items: center;",
   "}",
 
+  // Plain-language verdict under the flag label: the hero's answer in one
+  // sentence, so it reads louder than the quiet coordinates line below it.
+  ".hero-verdict {",
+  "  font-size: var(--wa-font-size-l);",
+  "  color: var(--wa-color-text-normal);",
+  "}",
+
   ".hero-actions {",
   "  align-items: center;",
   "}",
@@ -346,6 +353,25 @@ const RULES = [
   "  font-weight: var(--wa-font-weight-semibold);",
   "}",
   // --- end detail hero + at-a-glance tiles -----------------------------------
+
+  // --- flag legend -----------------------------------------------------------
+  // Collapsed legend under the at-a-glance tiles. The list drops its markers so
+  // each line starts on its own flag icon.
+  ".flag-legend {",
+  "  font-size: var(--wa-font-size-s);",
+  "}",
+
+  ".flag-legend-list {",
+  "  list-style: none;",
+  "  padding-inline-start: 0;",
+  "  margin-block: 0;",
+  "}",
+
+  ".flag-legend-note {",
+  "  color: var(--wa-color-text-quiet);",
+  "  margin-block-end: 0;",
+  "}",
+  // --- end flag legend -------------------------------------------------------
 
   // Longhands on purpose: a border SHORTHAND on the wa-card host would reset
   // border-style and stomp the theme's --wa-panel-border-style; the card's own
