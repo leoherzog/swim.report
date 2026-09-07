@@ -569,6 +569,52 @@ function waterTempLabel(waterTemp, nowIso) {
   return null;
 }
 
+// The id the water-temperature tooltip anchors to; one detail page carries at
+// most one water-temperature reading.
+const WATER_TEMP_TOOLTIP_ID = "water-temp";
+
+// Kilometres to miles, mirroring MI_PER_KM in src/geo.js (private there).
+// Station distances arrive in km and every rendered distance is miles.
+const KM_TO_MILES = 3958.8 / 6371;
+
+// Provenance beside the water temperature: which station read it, how far away
+// that station sits, and how old the observation is. The caption and its tooltip
+// state the same station and distance; the age renders live through
+// <wa-relative-time>, so no time string is formatted here. A record with no
+// station name and no usable distance yields the age alone, with no tooltip.
+function waterTempProvenance(waterTemp) {
+  const station = waterTemp && waterTemp.station && typeof waterTemp.station === "object"
+    ? waterTemp.station : null;
+  const name = station && typeof station.name === "string" ? station.name : "";
+  const km = station ? station.distanceKm : null;
+  const miles = typeof km === "number" && isFinite(km) ? formatMiles(km * KM_TO_MILES) : "";
+  const facts = [];
+  if (name) {
+    facts.push(name);
+  }
+  if (miles) {
+    facts.push(miles);
+  }
+  const idAttr = facts.length > 0 ? (" id=\"" + WATER_TEMP_TOOLTIP_ID + "\"") : "";
+  const lead = facts.length > 0 ? (facts.join(" · ") + " · ") : "";
+  const caption = "<span class=\"water-temp-src\"" + idAttr + ">" + escapeHtml(lead) +
+    "<wa-relative-time date=\"" + escapeHtml(waterTemp.observedIso) +
+    "\" sync></wa-relative-time></span>";
+  if (facts.length === 0) {
+    return caption;
+  }
+  let text = "Water temperature measured ";
+  if (name && miles) {
+    text += "at " + name + ", " + miles + " away";
+  } else if (name) {
+    text += "at " + name;
+  } else {
+    text += miles + " away";
+  }
+  return caption + "<wa-tooltip for=\"" + WATER_TEMP_TOOLTIP_ID + "\">" +
+    escapeHtml(text) + "</wa-tooltip>";
+}
+
 // Rough distance label for a row, e.g. "<1 mi" or "~12 mi". Distances come
 // from IP-level geolocation, so anything more precise would be false accuracy.
 function formatMiles(distance) {
@@ -1109,12 +1155,15 @@ export function renderDetailPage(data) {
     ("<p class=\"beach-subtitle\">" + escapeHtml(subtitle) + "</p>") : "";
 
   // Coordinates link out to OpenStreetMap (consistent with the footer's OSM
-  // attribution), demoted to caption size. A fresh NDBC water temp shares the
-  // line ("43.7842, -86.4400 • 71°F Water") so it never sits as a lone subtitle.
+  // attribution), demoted to caption size. A fresh NDBC water temp shares the line
+  // ("43.7842, -86.4400 • 71°F Water Muskegon, MI · ~3 mi · 1 hour ago") so it never
+  // sits as a lone subtitle, and its station carries the reading's provenance.
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
   const temp = waterTempLabel(waterTemp, nowIso);
-  const tempHtml = temp ? (" • " + escapeHtml(temp)) : "";
+  const tempHtml = temp
+    ? (" • " + escapeHtml(temp) + " " + waterTempProvenance(waterTemp))
+    : "";
   const metaHtml = "<p class=\"beach-meta wa-caption-s\"><a class=\"coords-link\" href=\"" +
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a>" +

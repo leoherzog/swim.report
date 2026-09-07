@@ -229,6 +229,12 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
+  // Station, distance and observation age beside the water temperature: quieter
+  // than the reading itself, and inline so the coordinates line stays one line.
+  ".water-temp-src {",
+  "  color: var(--wa-color-text-quiet);",
+  "}",
+
   // The parent .beach-identity (wa-stack wa-gap-l) zero-margins its children, so
   // the title needs no rule of its own.
   ".beach-subtitle {",

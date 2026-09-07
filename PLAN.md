@@ -310,9 +310,20 @@ cap is tight because a temperature is displayed as a precise number next to the 
 both cross-lake attribution (Erie's central basin is ~57 km wide) and summer upwelling (the
 thermal front sits 5-15 km offshore) bound how far a reading may travel. Read by
 handleDetail and passed to renderDetailPage, which appends a fresh reading to the
-coordinates line .beach-meta ("42.7742, -86.2115 • 72°F Water") only when tempF is finite and observedIso is
-within WATER_TEMP_STALE_MS (12 h) of now. It never feeds src/rules.js: it colors no flag and
-does not bump RULES_VERSION. Written only when the station fetch and parse produced a valid
+coordinates line .beach-meta ("42.7742, -86.2115 • 72°F Water Muskegon, MI · ~3 mi ·
+<wa-relative-time date=observedIso sync>") only when tempF is finite and observedIso is
+within WATER_TEMP_STALE_MS (12 h) of now. The reading may come from a station up to 25 km
+away and up to 12 h old, so the fragment carries its provenance in a quiet
+span.water-temp-src: station.name, station.distanceKm rendered in miles through the shared
+formatMiles ("~3 mi", "<1 mi"), and the observation age as <wa-relative-time
+date=observedIso sync> — the observation's own time, never updated, and never a time string
+formatted in the renderer. A wa-tooltip anchored to that span (id "water-temp") states the
+same two facts as a sentence ("Water temperature measured at Muskegon, MI, ~3 mi away"), so
+the tooltip and the visible caption can never disagree. A record whose station is missing or
+carries an empty name or a non-finite distanceKm still shows the temperature, dropping only
+the missing part; with neither name nor distance the caption is the age alone and no tooltip
+is emitted. It never feeds src/rules.js: it colors no flag and does not bump
+RULES_VERSION. Written only when the station fetch and parse produced a valid
 recent reading; a null (winter gap, all-"MM", stale, 404) writes nothing, so the old key
 expires on its own and the coordinates line omits the temp fragment. It is the only KV family the
 Worker writes on the wave side, and is independent of the offline wave cycle in every
@@ -3726,7 +3737,8 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Detail page, in order: a beach-identity block (div.beach-identity, a tight wa-stack
   wa-gap-2xs nested in the main stack) holding the back link; an h1 title with a colorized
   flag icon on the left (displayFlagColor) plus the display name; an optional beach-name
-  subtitle; and a lat/lon meta line linking to OpenStreetMap. The nested stack zero-margins
+  subtitle; and a lat/lon meta line linking to OpenStreetMap, carrying a fresh water
+  temperature and its station provenance (section 1). The nested stack zero-margins
   its children, so .beach-title/.beach-subtitle carry no margins. Then the detail stack,
   answer first and exploration second: official card (if any) → estimate card →
   water-quality advisory callout (if any) → wave forecast section → wave map section →
