@@ -257,20 +257,24 @@ describe("wave-forecast section", () => {
     expect(html).not.toContain("Stale data — last updated");
   });
 
-  it("puts the ESTIMATE badge on the now-stat line, with no section heading", () => {
+  it("puts the ESTIMATE badge on the now-stat line, under the section heading", () => {
     const html = render({
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       official: null,
       waves: wavesWith({})
     });
-    // The badge rides the "waves now" stat line (the former "Wave forecast"
-    // h2 heading row is gone).
+    // The badge rides the "waves now" stat line and stays there: the heading
+    // names the section, it does not carry the estimated framing.
     const nowStart = html.indexOf("<p class=\"wave-now");
     expect(nowStart).toBeGreaterThan(-1);
     const nowLine = html.slice(nowStart, html.indexOf("</p>", nowStart));
     expect(nowLine).toContain("waves now");
     expect(nowLine).toContain(">ESTIMATE</wa-badge>");
-    expect(html).not.toContain("wave-forecast-heading");
+    const headingIdx = html.indexOf("<h2 id=\"wave-forecast-heading\"");
+    expect(headingIdx).toBeGreaterThan(-1);
+    expect(headingIdx).toBeLessThan(nowStart);
+    expect(html).toContain("<wa-icon name=\"chart-line\"></wa-icon>Wave forecast</h2>");
+    expect(html).toContain("aria-labelledby=\"wave-forecast-heading\"");
   });
 
   it("legacy estimate without a now-stat still carries the ESTIMATE badge in the section", () => {

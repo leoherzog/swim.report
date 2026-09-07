@@ -10,7 +10,8 @@ import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
 import { NOW_ISO, beachWith } from "./helpers/render.js";
 
-const HEADING = "<h2 id=\"webcam-heading\" class=\"nearby-heading\">Nearby webcam</h2>";
+const HEADING = "<h2 id=\"webcam-heading\" class=\"section-heading wa-cluster wa-gap-xs\">" +
+  "<wa-icon name=\"video\"></wa-icon>Nearby webcam</h2>";
 const NOTE = "<p class=\"webcam-note wa-caption-s\">This camera is near this beach " +
   "and may not show the beach itself.</p>";
 
@@ -30,11 +31,11 @@ describe("nearby-webcam section", () => {
       webcam_title: "South Pier Cam",
       webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1595253287/day"
     });
-    // the section is labelled by its own heading, at the same level and class as
-    // the "Nearby beaches" heading
-    expect(html).toContain(
-      "<section class=\"webcam-section wa-stack wa-gap-s\" aria-labelledby=\"webcam-heading\">");
-    expect(html).toContain(HEADING);
+    // the section is labeled by the shared detail-page heading, which keeps the
+    // cam honestly described as nearby rather than as this beach's own view
+    expect(html).toContain("aria-labelledby=\"webcam-heading\"");
+    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"section-heading wa-cluster wa-gap-xs\">");
+    expect(html).toContain("<wa-icon name=\"video\"></wa-icon>Nearby webcam</h2>");
     // same plain-iframe wrapper as the wave map, so the player's own controls
     // work and the title reaches the frame as its accessible name
     expect(html).toContain("<iframe class=\"webcam-frame\"");

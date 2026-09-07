@@ -1,10 +1,10 @@
 // test/renderSubtitle.test.js
 // Covers the detail-page header composition (src/frontend/render.js), exercised
-// through renderDetailPage: the park-first beach name in .beach-subtitle, and an
-// optional NDBC water-temperature fragment on the coordinates line with its
-// station, distance and observation age ("43.7842, -86.4400 • 72°F Water
-// Muskegon, MI · ~3 mi · <wa-relative-time>"). The temp is display-only, never a
-// flag input, and is shown only when fresh.
+// through renderDetailPage: the park-first beach name in .beach-subtitle, the
+// coordinates line, and the NDBC water-temperature reading in its "at a glance"
+// tile, whose source line and tooltip state the same station and distance. The
+// temp is display-only, never a flag input, and is shown only when fresh; the
+// coordinates line carries the coordinates alone.
 
 import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
@@ -52,134 +52,48 @@ function subtitleText(html) {
 }
 
 // Everything the coordinates line carries after the OpenStreetMap link, as raw
-// HTML: the temperature fragment, its provenance caption and its tooltip. "" when
-// the line carries only the coordinates.
+// HTML. "" for the current line, which carries the coordinates alone.
 function metaTail(html) {
   const m = html.match(/<p class="beach-meta wa-caption-s"><a class="coords-link"[^>]*>[\s\S]*?<\/a>([\s\S]*?)<\/p>/);
   return m ? m[1] : null;
 }
 
-// The plain-text temperature fragment alone, without the provenance markup that
-// follows it.
-function tempText(html) {
-  const tail = metaTail(html);
-  return tail === null ? null : tail.split("<")[0].replace(/\s+$/, "");
+// The water-temperature tile's markup, from its icon to the end of its card.
+function tempTile(html) {
+  const start = html.indexOf("name=\"temperature-half\"");
+  if (start === -1) {
+    return null;
+  }
+  return html.slice(start, html.indexOf("</wa-card>", start));
+}
+
+// The tile's value line: the reading, or "No data" when there is none.
+function tempValue(html) {
+  const tile = tempTile(html);
+  const m = tile ? tile.match(/<span class="glance-value[^"]*">([^<]*)<\/span>/) : null;
+  return m ? m[1] : null;
+}
+
+// The tile's quiet source line, with the relative-time element left intact.
+function tempSource(html) {
+  const tile = tempTile(html);
+  const m = tile ? tile.match(/<span class="glance-source[^"]*">(.*?)<\/span><\/div>/) : null;
+  return m ? m[1] : null;
 }
 
 describe("beach header composition (renderDetailPage)", function () {
-  it("keeps the subtitle to the beach name and puts the temp on the coordinates line", function () {
+  it("keeps the subtitle to the beach name and the coordinates line to the coordinates", function () {
     // Distinct park + beach name -> subtitle is the beach's own name.
     const html = detailHtml(
       { park_name: "Holland State Park", name: "Ottawa Beach" },
       waterTempWith({})
     );
     expect(subtitleText(html)).toBe("Ottawa Beach");
-    expect(metaTail(html)).toBe(
-      " • 72°F Water " +
-      "<span class=\"water-temp-src\" id=\"water-temp\">Muskegon, MI · ~3 mi · " +
-      relativeTime(OBSERVED_ISO) + "</span>" +
-      "<wa-tooltip for=\"water-temp\">Water temperature measured at Muskegon, MI, " +
-      "~3 mi away</wa-tooltip>"
-    );
-  });
-
-  it("rounds a fractional tempF to the nearest whole degree", function () {
-    // parseNdbcWaterTempF always yields a fractional tempF (e.g. 24.6 C -> 76.28 F),
-    // so the label must round it — 72.6 F -> "73°F Water", never "72.6°F Water".
-    const html = detailHtml(
-      { park_name: "Holland State Park", name: "Ottawa Beach" },
-      waterTempWith({ tempF: 72.6 })
-    );
-    expect(tempText(html)).toBe(" • 73°F Water");
-  });
-
-  it("renders the temp on the coordinates line with no subtitle when there is no park", function () {
-    // park_name null -> subtitleName is null, so no subtitle paragraph at all.
-    const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, waterTempWith({}));
-    expect(subtitleText(html)).toBe(null);
-    expect(tempText(html)).toBe(" • 72°F Water");
-    expect(html.indexOf("Muskegon, MI · ~3 mi")).toBeGreaterThan(-1);
-  });
-
-  it("renders the coordinates alone when there is no water temp", function () {
-    const html = detailHtml(
-      { park_name: "Holland State Park", name: "Ottawa Beach" },
-      null
-    );
-    expect(subtitleText(html)).toBe("Ottawa Beach");
-    expect(metaTail(html)).toBe("");
-  });
-
-  it("omits a stale water temp and its provenance", function () {
-    // observedIso 24 h before NOW_ISO -> older than WATER_TEMP_STALE_MS (12 h).
-    const html = detailHtml(
-      { park_name: "Holland State Park", name: "Ottawa Beach" },
-      waterTempWith({ observedIso: "2026-07-04T12:00:00.000Z" })
-    );
+    // A fresh reading exists, and none of it is on this line: it belongs to the
+    // tile, which is the only place the station is named.
     expect(metaTail(html)).toBe("");
     expect(html.indexOf("°F Water")).toBe(-1);
-    expect(html.indexOf("id=\"water-temp\"")).toBe(-1);
-    expect(html.indexOf("Muskegon, MI")).toBe(-1);
-  });
-
-  it("omits the temp when observedIso is missing or unparseable", function () {
-    const missing = detailHtml(
-      { park_name: "Holland State Park", name: "Ottawa Beach" },
-      waterTempWith({ observedIso: undefined })
-    );
-    expect(metaTail(missing)).toBe("");
-    const bad = detailHtml(
-      { park_name: "Holland State Park", name: "Ottawa Beach" },
-      waterTempWith({ observedIso: "not-a-date" })
-    );
-    expect(metaTail(bad)).toBe("");
-  });
-
-  it("keeps the temp and the age when the record carries no station", function () {
-    // A record missing its station still reports the reading; only the station
-    // half of the provenance drops, and with it the tooltip it would anchor.
-    const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, waterTempWith({ station: null }));
-    expect(metaTail(html)).toBe(
-      " • 72°F Water <span class=\"water-temp-src\">" + relativeTime(OBSERVED_ISO) + "</span>"
-    );
-    expect(html.indexOf("wa-tooltip for=\"water-temp\"")).toBe(-1);
-  });
-
-  it("keeps the station name when distanceKm is not a finite number", function () {
-    const html = detailHtml(
-      { park_name: null, name: "Ottawa Beach" },
-      waterTempWith({ station: { id: "45161", name: "Muskegon, MI", distanceKm: null } })
-    );
-    expect(metaTail(html)).toBe(
-      " • 72°F Water " +
-      "<span class=\"water-temp-src\" id=\"water-temp\">Muskegon, MI · " +
-      relativeTime(OBSERVED_ISO) + "</span>" +
-      "<wa-tooltip for=\"water-temp\">Water temperature measured at Muskegon, " +
-      "MI</wa-tooltip>"
-    );
-  });
-
-  it("renders a sub-mile station distance the way list rows do", function () {
-    const html = detailHtml(
-      { park_name: null, name: "Ottawa Beach" },
-      waterTempWith({ station: { id: "45161", name: "", distanceKm: 0.8 } })
-    );
-    expect(metaTail(html)).toBe(
-      " • 72°F Water " +
-      "<span class=\"water-temp-src\" id=\"water-temp\">&lt;1 mi · " +
-      relativeTime(OBSERVED_ISO) + "</span>" +
-      "<wa-tooltip for=\"water-temp\">Water temperature measured &lt;1 mi away</wa-tooltip>"
-    );
-  });
-
-  it("escapes a station name in both the caption and the tooltip", function () {
-    const html = detailHtml(
-      { park_name: null, name: "Ottawa Beach" },
-      waterTempWith({ station: { id: "45029", name: "St. Joseph's <MI>", distanceKm: 5.0 } })
-    );
-    expect(html.indexOf("St. Joseph&#39;s &lt;MI&gt; · ~3 mi")).toBeGreaterThan(-1);
-    expect(html.indexOf("measured at St. Joseph&#39;s &lt;MI&gt;, ~3 mi away")).toBeGreaterThan(-1);
-    expect(html.indexOf("St. Joseph's")).toBe(-1);
+    expect(tempSource(html)).toContain("Muskegon, MI");
   });
 
   it("renders no subtitle paragraph when the beach has no distinct name", function () {
@@ -187,5 +101,94 @@ describe("beach header composition (renderDetailPage)", function () {
     expect(subtitleText(html)).toBe(null);
     expect(html.indexOf("class=\"beach-subtitle\"")).toBe(-1);
     expect(metaTail(html)).toBe("");
+  });
+});
+
+describe("water-temperature tile (renderDetailPage)", function () {
+  it("shows the reading with its station, distance and observation age", function () {
+    const html = detailHtml(
+      { park_name: "Holland State Park", name: "Ottawa Beach" },
+      waterTempWith({})
+    );
+    expect(tempValue(html)).toBe("72°F");
+    expect(tempTile(html)).toContain(">Water temperature</span>");
+    // 5.0 km -> ~3 mi; the age rides a live <wa-relative-time>, never a
+    // server-computed phrase. The tooltip states the same station and distance
+    // as the visible source line, so the two can never disagree.
+    expect(tempSource(html)).toBe(
+      "<span class=\"water-temp-src\" id=\"water-temp\">Muskegon, MI · ~3 mi · " +
+      relativeTime(OBSERVED_ISO) + "</span>" +
+      "<wa-tooltip for=\"water-temp\">Water temperature measured at Muskegon, MI, " +
+      "~3 mi away</wa-tooltip>");
+  });
+
+  it("rounds a fractional tempF to the nearest whole degree", function () {
+    // parseNdbcWaterTempF always yields a fractional tempF (e.g. 24.6 C -> 76.28 F),
+    // so the tile must round it — 72.6 F -> "73°F", never "72.6°F".
+    const html = detailHtml({}, waterTempWith({ tempF: 72.6 }));
+    expect(tempValue(html)).toBe("73°F");
+  });
+
+  it("reads No data when there is no water temp at all", function () {
+    const html = detailHtml({}, null);
+    expect(tempValue(html)).toBe("No data");
+    expect(tempSource(html)).toBe("Nearest NDBC station");
+  });
+
+  it("reads No data for a stale reading", function () {
+    // observedIso 24 h before NOW_ISO -> older than WATER_TEMP_STALE_MS (12 h).
+    const html = detailHtml({}, waterTempWith({ observedIso: "2026-07-04T12:00:00.000Z" }));
+    expect(tempValue(html)).toBe("No data");
+    expect(html.indexOf("72°F")).toBe(-1);
+  });
+
+  it("reads No data when observedIso is missing or unparseable", function () {
+    expect(tempValue(detailHtml({}, waterTempWith({ observedIso: undefined })))).toBe("No data");
+    expect(tempValue(detailHtml({}, waterTempWith({ observedIso: "not-a-date" })))).toBe("No data");
+  });
+
+  it("reads No data for a non-finite tempF", function () {
+    expect(tempValue(detailHtml({}, waterTempWith({ tempF: null })))).toBe("No data");
+    expect(tempValue(detailHtml({}, waterTempWith({ tempF: Number.NaN })))).toBe("No data");
+  });
+
+  it("names only what it knows when the station block is partial", function () {
+    const noName = detailHtml({}, waterTempWith({ station: { id: "45161", distanceKm: 5.0 } }));
+    expect(tempValue(noName)).toBe("72°F");
+    expect(tempSource(noName)).toBe(
+      "<span class=\"water-temp-src\" id=\"water-temp\">~3 mi · " +
+      relativeTime(OBSERVED_ISO) + "</span>" +
+      "<wa-tooltip for=\"water-temp\">Water temperature measured ~3 mi away</wa-tooltip>");
+
+    const noDistance = detailHtml({}, waterTempWith({ station: { id: "45161", name: "Muskegon, MI" } }));
+    expect(tempSource(noDistance)).toBe(
+      "<span class=\"water-temp-src\" id=\"water-temp\">Muskegon, MI · " +
+      relativeTime(OBSERVED_ISO) + "</span>" +
+      "<wa-tooltip for=\"water-temp\">Water temperature measured at Muskegon, MI</wa-tooltip>");
+
+    // With neither fact left there is nothing for a tooltip to restate, so the
+    // age stands alone and no tooltip is emitted.
+    const noStation = detailHtml({}, waterTempWith({ station: null }));
+    expect(tempValue(noStation)).toBe("72°F");
+    expect(tempSource(noStation)).toBe(
+      "<span class=\"water-temp-src\">" + relativeTime(OBSERVED_ISO) + "</span>");
+    expect(noStation.indexOf("wa-tooltip for=\"water-temp\"")).toBe(-1);
+  });
+
+  it("escapes a station name carrying markup", function () {
+    const html = detailHtml({}, waterTempWith({
+      station: { id: "x", name: "Bay <script>alert(1)", distanceKm: 5.0 }
+    }));
+    // Escaped in both the source line and the sentence the tooltip repeats.
+    expect(tempSource(html)).toContain("Bay &lt;script&gt;alert(1) · ~3 mi ·");
+    expect(tempSource(html)).toContain("measured at Bay &lt;script&gt;alert(1), ~3 mi away");
+    expect(html).not.toContain("<script>alert(1)");
+  });
+
+  it("keeps a sub-mile station honest with the <1 mi label", function () {
+    const html = detailHtml({}, waterTempWith({
+      station: { id: "45161", name: "Muskegon, MI", distanceKm: 1.2 }
+    }));
+    expect(tempSource(html)).toContain("Muskegon, MI · &lt;1 mi ·");
   });
 });

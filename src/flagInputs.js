@@ -19,6 +19,7 @@
 // would otherwise carry a stale caveat beside a live alert or the wrong wave
 // thresholds.
 
+import { alertsCheckable } from "./alertsCheckable.js";
 import { ecccAlertsForPoint, ECCC_ALERTS_INFO_URL } from "./clients/eccc.js";
 import { ecccMarineAlertsForPoint, ECCC_MARINE_INFO_URL } from "./clients/ecccMarine.js";
 
@@ -125,10 +126,7 @@ export function buildEstimateInputs(beach, alertPart, signals) {
     beachId: beach.id,
     alerts: alertHalf.alerts,
     alertDetails: alertHalf.alertDetails,
-    // A land zone or an ECCC region. marine_zone alone is not enough: it matches
-    // marine warnings but none of the land products the caveat is about, so a
-    // beach whose only zone is marine still reads "alerts are not checked here yet".
-    alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false,
+    alertsCheckable: alertsCheckable(beach),
     // Selects the step 3 wave thresholds; null and every non-ocean class share
     // the default set.
     waterClass: typeof beach.water_class === "string" ? beach.water_class : null,

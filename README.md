@@ -143,13 +143,23 @@ confirmed-inland beaches: they are absent from the list and search, and a detail
 returns `404`. Only ocean and Great Lakes rows, plus still-unclassified rows during backfill,
 are shown.
 
+The detail page opens with a **flag hero**: the beach name behind its flag icon, the flag's
+label, and the ESTIMATE badge — or the OFFICIAL badge when the scraped record is what
+supplied the displayed color — over a background washed 12% in that flag's own color. The
+hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
+button. Directly under it, four **at a glance** tiles summarize the waves now, the water
+temperature, the rip-current risk and the count of active alerts; a tile with nothing to
+show says "No data" rather than inventing a number. The full official and estimate cards
+follow unchanged.
+
 When a water-quality advisory stands for the beach, a **water-quality callout** renders
 directly under the estimate card, between it and the wave forecast — see the raise-only floor
 below.
 
-Below the wave map the detail page lists up to three **nearby beaches** as cards: the nearest
-flag-worthy rows within 50 mi, each with the same estimate chip and OFFICIAL badge a list row
-carries, its distance, and a link. The section is omitted when nothing lies within range.
+Last on the detail page, after the wave map and the webcam, come up to three **nearby
+beaches** as cards: the nearest flag-worthy rows within 50 mi, each with the same estimate
+chip and OFFICIAL badge a list row carries, its distance, and a link. The section is omitted
+when nothing lies within range.
 
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from the
 estimate's structured `waveHeightFt`) plus a horizontal strip of the next up-to-24 hours of
@@ -393,16 +403,16 @@ classification (offline)](#discovery-and-classification-offline)).
   the WTMP water temperature from the nearest station able to serve that reading (see "Water
   temperature stations"), deduped by station id so each file is fetched once and fanned to
   every beach sharing it, written at a 7 h TTL. The reading is **display-only**: the detail
-  page appends it to the coordinates line when fresh, with the station, its distance in miles
-  and a live observation age ("42.7742, -86.2115 • 72°F Water Muskegon, MI · ~3 mi · 1 hour
-  ago"), but it never feeds `src/rules.js` and cannot change a flag color. A beach whose
-  fetch merely failed is left untouched so its last-good KV survives. The run is bounded
-  against the 900 s ceiling: no new upstream work starts after T+480 s, and the write pool
-  yields at T+840 s instead of being killed. It rotates on its **own** `wave_updated` cursor
-  (migration 0012), stamped incrementally so a run that yields early persists everything it
-  finished. The two crons must not share a cursor: `runFlagRecompute` rewrites
-  `recompute_updated` to one timestamp for its whole run, which flattens the column, collapses
-  a second cron's rotation to `id ASC`, and starves a fixed tail of the table.
+  page shows it in the water-temperature tile when fresh, with the station, its distance in
+  miles and a live observation age ("72°F", sourced "Muskegon, MI · ~3 mi · 1 hour ago"), but
+  it never feeds `src/rules.js` and cannot change a flag color. A beach whose fetch merely
+  failed is left untouched so its last-good KV survives. The run is bounded against the 900 s
+  ceiling: no new upstream work starts after T+480 s, and the write pool yields at T+840 s
+  instead of being killed. It rotates on its **own** `wave_updated` cursor (migration 0012),
+  stamped incrementally so a run that yields early persists everything it finished. The two
+  crons must not share a cursor: `runFlagRecompute` rewrites `recompute_updated` to one
+  timestamp for its whole run, which flattens the column, collapses a second cron's rotation
+  to `id ASC`, and starves a fixed tail of the table.
 - `17 3,9,15,21 * * *` (4x daily) — `runNwsEnrichment`: beaches with `nws_zone` NULL get their
   NWS forecast zone and gridpoint URL from api.weather.gov/points, 400 selected per run and as
   many walked as fit a 780 s wall-clock deadline (about 1,300 spaced requests). A
@@ -471,7 +481,7 @@ NDBC's `realtime2` endpoint, selected with `nearestWaterTempStation(lat, lon)`:
 
 | Capability | Constant | Stations | Cap | Consumer |
 | --- | --- | --- | --- | --- |
-| Water temperature | `CAP_WATER_TEMP` | 72 | `NDBC_WATER_TEMP_MAX_DISTANCE_KM` = 25 km | detail-page coordinates line, named with its distance and age — display only |
+| Water temperature | `CAP_WATER_TEMP` | 72 | `NDBC_WATER_TEMP_MAX_DISTANCE_KM` = 25 km | detail-page water-temperature tile, named with its distance and age — display only |
 
 Station admission is on a water-temperature criterion, not a wave one. That distinction is
 load-bearing: a wave criterion ("reports standard-met WVHT") would exclude the entire NOAA

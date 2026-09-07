@@ -794,14 +794,16 @@ describe("renderDetailPage nearby section placement", () => {
     { beach: { id: "n-2", name: "South Beach", lat: 42.64, lon: -86.21 }, estimate: null, official: null, distanceMi: 1.3 }
   ];
 
-  it("sits below the wave map and above the webcam", () => {
+  it("sits last, below the wave map and the webcam", () => {
     const html = renderDetailPage({ beach: base, estimate: null, official: null, nearby: nearby, nowIso: "2026-07-05T12:00:00.000Z" });
     const map = html.indexOf("<section class=\"wave-map\"");
     const near = html.indexOf("<section class=\"nearby");
     const cam = html.indexOf("<section class=\"webcam");
     expect(map).toBeGreaterThan(-1);
-    expect(near).toBeGreaterThan(map);
-    expect(cam).toBeGreaterThan(near);
+    // A live picture of the beach outranks links away from it, so the webcam
+    // comes first and the nearby cards close the page.
+    expect(cam).toBeGreaterThan(map);
+    expect(near).toBeGreaterThan(cam);
     expect(html).toContain("aria-labelledby=\"nearby-heading\"");
   });
 
@@ -1615,17 +1617,26 @@ describe("double-red presentation", () => {
     expect(row).not.toContain("water closed");
   });
 
-  it("labels the standalone detail-title icon pair with role=img", () => {
+  it("leaves the detail-title icon pair decorative beside the hero's own label", () => {
+    // The hero prints the full label under the title, so naming the icon pair
+    // as well would read the color out twice.
     const html = detailPage(null, doubleRedOfficial);
     const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
-    expect(h1).toContain("role=\"img\" aria-label=\"Double red flags\"");
     expect(h1).toContain("flag-icon-red");
+    expect(h1).not.toContain("aria-label");
+    expect(html).toContain(">DOUBLE RED — water closed</span>");
   });
 });
 
 describe("detail-page title flag precedence", () => {
   function titleOf(html) {
     return sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
+  }
+
+  // The hero's flag label is what names the display color in text; the title
+  // icon only tints it.
+  function heroLabelOf(html) {
+    return sliceBetween(html, "<span class=\"hero-flag-label", "</span>");
   }
 
   it("prefers the official color over the estimate", () => {
@@ -1635,20 +1646,21 @@ describe("detail-page title flag precedence", () => {
     );
     const h1 = titleOf(html);
     expect(h1).toContain("flag-icon-red");
-    expect(h1).toContain("label=\"Red flag\"");
+    expect(heroLabelOf(html)).toContain("RED");
     expect(h1).not.toContain("flag-icon-green");
   });
 
   it("uses the estimate color when no official flag exists", () => {
-    const h1 = titleOf(detailPage({ color: "yellow", reason: "waves", sources: [] }));
-    expect(h1).toContain("flag-icon-yellow");
-    expect(h1).toContain("label=\"Yellow flag\"");
+    const html = detailPage({ color: "yellow", reason: "waves", sources: [] });
+    expect(titleOf(html)).toContain("flag-icon-yellow");
+    expect(heroLabelOf(html)).toContain("YELLOW");
   });
 
   it("renders gray unknown (never green) when both are null", () => {
-    const h1 = titleOf(detailPage(null, null));
+    const html = detailPage(null, null);
+    const h1 = titleOf(html);
     expect(h1).toContain("flag-icon-unknown");
-    expect(h1).toContain("label=\"Flag status unknown\"");
+    expect(heroLabelOf(html)).toContain("UNKNOWN");
     expect(h1).not.toContain("flag-icon-green");
   });
 });
@@ -1681,12 +1693,14 @@ describe("detail-page title flag: raise-only over an aged official reading", () 
   }
 
   it("raises an aged official yellow to a fresher estimate's red", () => {
-    const h1 = titleOf(detailPage(
+    const html = detailPage(
       { color: "red", reason: "Active NWS alert: Beach Hazards Statement", sources: [] },
       official("yellow", AGED)
-    ));
+    );
+    const h1 = titleOf(html);
     expect(h1).toContain("flag-icon-red");
-    expect(h1).toContain("label=\"Red flag\"");
+    // The estimate supplied that red, so the hero credits the estimate for it.
+    expect(html).toContain("<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">RED</span>");
     expect(h1).not.toContain("flag-icon-yellow");
   });
 

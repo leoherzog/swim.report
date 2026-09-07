@@ -229,18 +229,85 @@ const RULES = [
   "  text-decoration: none;",
   "}",
 
-  // Station, distance and observation age beside the water temperature: quieter
-  // than the reading itself, and inline so the coordinates line stays one line.
+  // Station, distance and observation age under the water-temperature tile's
+  // reading: quieter than the reading itself.
   ".water-temp-src {",
   "  color: var(--wa-color-text-quiet);",
   "}",
 
-  // The parent .beach-identity (wa-stack wa-gap-l) zero-margins its children, so
+  // The parent .detail-hero (wa-stack wa-gap-s) zero-margins its children, so
   // the title needs no rule of its own.
   ".beach-subtitle {",
   "  color: var(--wa-color-text-quiet);",
   "  font-size: var(--wa-font-size-l);",
   "}",
+
+  // --- detail hero + at-a-glance tiles ---------------------------------------
+  // The hero is washed in the display flag's own color at 12%, mixed into the
+  // surface token so the tint follows light and dark without a second palette.
+  // The keyword comes from a data-flag attribute rather than an inline style, so
+  // no color literal ever reaches the markup. Unknown washes gray: honest
+  // absence, never a green default.
+  ".detail-hero {",
+  "  padding: var(--wa-space-l);",
+  "  border-radius: var(--wa-border-radius-l);",
+  "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
+  "  background: var(--wa-color-surface-default);",
+  "}",
+
+  ".detail-hero[data-flag='green'] {",
+  "  background: color-mix(in oklab, var(--wa-color-green-50) 12%, var(--wa-color-surface-default));",
+  "}",
+
+  ".detail-hero[data-flag='yellow'] {",
+  "  background: color-mix(in oklab, var(--wa-color-yellow-70) 12%, var(--wa-color-surface-default));",
+  "}",
+
+  ".detail-hero[data-flag='red'] {",
+  "  background: color-mix(in oklab, var(--wa-color-red-50) 12%, var(--wa-color-surface-default));",
+  "}",
+
+  ".detail-hero[data-flag='unknown'] {",
+  "  background: color-mix(in oklab, var(--wa-color-gray-50) 12%, var(--wa-color-surface-default));",
+  "}",
+
+  // The flag label reads as the hero's second line, so it aligns with the badge
+  // beside it rather than sitting on the text baseline of a paragraph.
+  ".hero-flag {",
+  "  align-items: center;",
+  "}",
+
+  ".hero-actions {",
+  "  align-items: center;",
+  "}",
+
+  // Shared heading for every detail-page section below the hero, sized between
+  // the h1 and body text so the sections read as parts of one page.
+  ".section-heading {",
+  "  margin: 0;",
+  "  align-items: center;",
+  "  font-size: var(--wa-font-size-l);",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+
+  // At-a-glance tiles: four small readings in the same responsive grid shape the
+  // nearby cards use, at a narrower column so all four fit a phone in two rows.
+  ".glance-grid {",
+  "  --min-column-size: 9rem;",
+  "}",
+
+  ".glance-tile {",
+  "  --spacing: var(--wa-space-m);",
+  "}",
+
+  ".glance-icon {",
+  "  font-size: var(--wa-font-size-l);",
+  "}",
+
+  ".glance-caption {",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+  // --- end detail hero + at-a-glance tiles -----------------------------------
 
   // Longhands on purpose: a border SHORTHAND on the wa-card host would reset
   // border-style and stomp the theme's --wa-panel-border-style; the card's own
@@ -362,13 +429,8 @@ const RULES = [
 
   // Nearby cards: the whole card is one link, so the anchor fills the body and
   // carries the text color; the grid wraps at a card width that keeps a name,
-  // chip and distance readable in one column on a phone.
-  ".nearby-heading {",
-  "  margin: 0;",
-  "  font-size: var(--wa-font-size-l);",
-  "  font-weight: var(--wa-font-weight-semibold);",
-  "}",
-
+  // chip and distance readable in one column on a phone. The section's heading
+  // is the shared .section-heading.
   ".nearby-grid {",
   "  --min-column-size: 12rem;",
   "}",

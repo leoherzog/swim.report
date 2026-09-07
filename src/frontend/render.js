@@ -7,7 +7,9 @@ import { LIST_SWAP_SCRIPT } from "./listSwapScript.js";
 import { LIST_GEO_SCRIPT } from "./geoScript.js";
 import { buildListMapScript } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
+import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { SEVERITY_RANK } from "../rules.js";
+import { alertsCheckable } from "../alertsCheckable.js";
 import {
   trimWaveSeries,
   computeWaveRuns,
@@ -25,10 +27,15 @@ import {
 // cycle publishes on its own slower cadence.
 const STALE_MS = 7200000;
 const WAVE_STALE_MS = 28800000;
-// The subtitle's NDBC water-temperature fragment is shown only when the reading
-// is this fresh; matches the parser window (NDBC_WATER_TEMP_MAX_OBS_AGE_MS) —
-// water temp is slow-moving, so a several-hour-old reading is still faithful.
+// The water-temperature tile shows a reading only when it is this fresh;
+// matches the parser window (NDBC_WATER_TEMP_MAX_OBS_AGE_MS) — water temp is
+// slow-moving, so a several-hour-old reading is still faithful.
 const WATER_TEMP_STALE_MS = 43200000; // 12 h — matches the parser window; water temp is slow-moving
+
+// The canonical origin, so the canonical link, the share meta and the detail
+// page's share controls can hand out an absolute URL without the renderer
+// reading the request.
+const SITE_ORIGIN = "https://swim.report";
 
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
@@ -55,10 +62,6 @@ const WA_THEME_OVERRIDES = ":root {" +
   " --wa-font-family-longform: Rockwell, 'Rockwell Nova', 'DejaVu Serif', 'Sitka Small', serif;" +
   " }";
 
-// Absolute origin for the canonical and share links. A renderer is pure, so the
-// origin is a constant here rather than anything read off the request.
-const SITE_ORIGIN = "https://swim.report";
-
 // One 1200x630 share card per display color, committed under public/ and built
 // by scripts/build-brand-assets.js. The cards carry the flag graphic and no
 // text, so the estimated-or-official wording lives only in the title and
@@ -83,16 +86,6 @@ const FLAG_LABELS = {
   "red": "RED",
   "double-red": "DOUBLE RED — water closed",
   "unknown": "UNKNOWN"
-};
-
-// Screen-reader label for the title flag icon only — the cards' and rows'
-// icons sit next to visible GREEN/YELLOW/... text and stay decorative.
-const FLAG_ICON_LABELS = {
-  "green": "Green flag",
-  "yellow": "Yellow flag",
-  "red": "Red flag",
-  "double-red": "Double red flags",
-  "unknown": "Flag status unknown"
 };
 
 export function escapeHtml(str) {
@@ -669,19 +662,19 @@ function subtitleName(beach) {
   return null;
 }
 
-// The detail page's water-temperature fragment ("72°F Water"), rendered on the
-// coordinates line. Pure — nowIso is passed in; no fetch, no Date. The reading is
-// display-only and never touches the flag color. Returns the fragment only when
-// waterTemp is a non-null object with a finite tempF and its observedIso parses to
-// within WATER_TEMP_STALE_MS of nowIso; a missing or unparseable observedIso yields
-// null rather than a stale value.
+// The detail page's water-temperature reading ("72°F"), rendered as the value of
+// the "at a glance" tile. Pure — nowIso is passed in; no fetch, no Date. The
+// reading is display-only and never touches the flag color. Returns the reading
+// only when waterTemp is a non-null object with a finite tempF and its
+// observedIso parses to within WATER_TEMP_STALE_MS of nowIso; a missing or
+// unparseable observedIso yields null rather than a stale value.
 function waterTempLabel(waterTemp, nowIso) {
   if (waterTemp && typeof waterTemp === "object" &&
       typeof waterTemp.tempF === "number" && isFinite(waterTemp.tempF) &&
       !isStale(nowIso, waterTemp.observedIso, WATER_TEMP_STALE_MS) &&
       typeof waterTemp.observedIso === "string" &&
       !Number.isNaN(Date.parse(waterTemp.observedIso))) {
-    return String(Math.round(waterTemp.tempF)) + "°F Water";
+    return String(Math.round(waterTemp.tempF)) + "°F";
   }
   return null;
 }
@@ -694,8 +687,8 @@ const WATER_TEMP_TOOLTIP_ID = "water-temp";
 // Station distances arrive in km and every rendered distance is miles.
 const KM_TO_MILES = 3958.8 / 6371;
 
-// Provenance beside the water temperature: which station read it, how far away
-// that station sits, and how old the observation is. The caption and its tooltip
+// Provenance under the water temperature: which station read it, how far away
+// that station sits, and how old the observation is. The source line and its tooltip
 // state the same station and distance; the age renders live through
 // <wa-relative-time>, so no time string is formatted here. A record with no
 // station name and no usable distance yields the age alone, with no tooltip.
@@ -751,6 +744,14 @@ function span(cls, text) {
     return "";
   }
   return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>";
+}
+
+// The one heading shape every detail-page section below the hero uses: a
+// leading decorative icon and a shared class, so the page reads as a sequence of
+// named parts. The id is what each section's aria-labelledby points at.
+function renderSectionHeading(id, iconName, text) {
+  return "<h2 id=\"" + id + "\" class=\"section-heading wa-cluster wa-gap-xs\">" +
+    "<wa-icon name=\"" + iconName + "\"></wa-icon>" + escapeHtml(text) + "</h2>";
 }
 
 function renderBeachRow(entry) {
@@ -926,7 +927,7 @@ function renderWaveMap(beach) {
     "</section>";
 }
 
-// Nearby beaches, below the wave map: one card per entry in a responsive
+// Nearby beaches, last in the detail stack: one card per entry in a responsive
 // wa-grid. Each card is one link carrying the same estimate chip and OFFICIAL
 // badge a list row does, so the estimated/official distinction reads the same
 // on every surface. Entries arrive distance-sorted from the router; an empty
@@ -954,7 +955,7 @@ function renderNearby(nearby) {
   }
   const cards = entries.map(renderNearbyCard).join("\n");
   return "<section class=\"nearby wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">" +
-    "<h2 id=\"nearby-heading\" class=\"nearby-heading\">Nearby beaches</h2>" +
+    renderSectionHeading("nearby-heading", "location-dot", "Nearby beaches") +
     "<div class=\"wa-grid wa-gap-m nearby-grid\">" + cards + "</div>" +
     "</section>";
 }
@@ -987,8 +988,9 @@ function renderWebcam(beach) {
   const detailUrl = isHttpUrl(beach.webcam_detail_url) ? beach.webcam_detail_url : null;
   const frameTitle = title ? title : "Nearby webcam";
   const lines = [];
-  lines.push("<section class=\"webcam-section wa-stack wa-gap-s\" aria-labelledby=\"webcam-heading\">");
-  lines.push("<h2 id=\"webcam-heading\" class=\"nearby-heading\">Nearby webcam</h2>");
+  lines.push("<section class=\"webcam-section wa-stack wa-gap-s\" " +
+    "aria-labelledby=\"webcam-heading\">");
+  lines.push(renderSectionHeading("webcam-heading", "video", "Nearby webcam"));
   lines.push("<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
     "<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
     " title=\"" + escapeHtml(frameTitle) + "\" loading=\"lazy\" allowfullscreen></iframe>" +
@@ -1188,7 +1190,9 @@ function renderWaveForecast(estimate, waves, nowIso, waterClass) {
   }
 
   const lines = [];
-  lines.push("<section class=\"wave-forecast wa-stack wa-gap-s\">");
+  lines.push("<section class=\"wave-forecast wa-stack wa-gap-s\" " +
+    "aria-labelledby=\"wave-forecast-heading\">");
+  lines.push(renderSectionHeading("wave-forecast-heading", "chart-line", "Wave forecast"));
   if (strip.nowStat) {
     lines.push(strip.nowStat);
   } else {
@@ -1252,6 +1256,101 @@ function renderWqFloorCallout(wqfloor) {
   return html + "</wa-callout>";
 }
 
+// One "at a glance" tile: a quiet icon, the reading, its caption, and a quiet
+// source line saying where the reading comes from. A tile with no reading says
+// "No data" in quiet text — never a blank tile, never a placeholder number.
+// options.quiet renders a present-but-negative answer ("None active") in the
+// same quiet weight, so only a real reading carries the loud value type.
+function renderGlanceTile(options) {
+  const hasValue = typeof options.value === "string" && options.value.length > 0;
+  const valueClass = (hasValue && !options.quiet)
+    ? "glance-value wa-font-size-xl wa-font-weight-bold"
+    : "glance-value wa-font-size-l wa-color-text-quiet";
+  return "<wa-card class=\"glance-tile\" appearance=\"outlined\">" +
+    "<div class=\"wa-stack wa-gap-2xs\">" +
+    "<wa-icon class=\"glance-icon wa-color-text-quiet\" name=\"" + options.icon + "\"></wa-icon>" +
+    "<span class=\"" + valueClass + "\">" + escapeHtml(hasValue ? options.value : "No data") + "</span>" +
+    "<span class=\"glance-caption wa-caption-s\">" + escapeHtml(options.caption) + "</span>" +
+    "<span class=\"glance-source wa-caption-s wa-color-text-quiet\">" + options.sourceHtml + "</span>" +
+    "</div>" +
+    "</wa-card>";
+}
+
+// The four readings a visitor scans before reading the cards, as small tiles
+// under the hero. Every one of them is estimated or display-only data — the
+// ESTIMATE badge and the quiet source lines say which for each — so the tiles
+// stay outlined and carry none of the official card's treatment.
+//
+// alertsCheckable is not on the estimate and is deliberately not in the seal
+// (src/flagInputs.js), so the tile reads it from the beach row through the same
+// shared predicate the cron uses. The tile's caveat wording is its own: the
+// estimate's reason already carries ALERTS_UNAVAILABLE_CAVEAT, and the same
+// sentence twice on one page reads as a bug.
+function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
+  const tiles = [];
+
+  const hasWave = !!estimate && typeof estimate.waveHeightFt === "number" &&
+    isFinite(estimate.waveHeightFt);
+  tiles.push(renderGlanceTile({
+    icon: "water",
+    value: hasWave ? (estimate.waveHeightFt.toFixed(1) + " ft") : null,
+    caption: "Waves now",
+    sourceHtml: renderEstimateBadge()
+  }));
+
+  // The reading's station, distance and age are the tile's source line, tooltip
+  // included, so a temperature read up to 25 km away always says so.
+  const tempLabel = waterTempLabel(waterTemp, nowIso);
+  tiles.push(renderGlanceTile({
+    icon: "temperature-half",
+    value: tempLabel,
+    caption: "Water temperature",
+    sourceHtml: tempLabel ? waterTempProvenance(waterTemp) : "Nearest NDBC station"
+  }));
+
+  const risk = estimate ? estimate.ripCurrentRisk : null;
+  const hasRisk = risk === "HIGH" || risk === "MODERATE" || risk === "LOW";
+  tiles.push(renderGlanceTile({
+    icon: "person-drowning",
+    value: hasRisk ? risk : "Not forecast",
+    quiet: !hasRisk,
+    caption: "Rip current risk",
+    sourceHtml: "NWS surf zone forecast"
+  }));
+
+  const details = (estimate && Array.isArray(estimate.alertDetails)) ? estimate.alertDetails : null;
+  const alertCount = details ? details.length : 0;
+  const checkable = alertsCheckable(beach);
+  let alertValue = null;
+  let alertQuiet = true;
+  let alertSource = "NWS and ECCC alerts";
+  if (alertCount > 0) {
+    alertValue = String(alertCount);
+    alertQuiet = false;
+    const first = details[0];
+    alertSource = (first && typeof first.event === "string" && first.event.length > 0)
+      ? first.event : alertSource;
+  } else if (!checkable) {
+    // Never "None active" here: the cron could not look this beach's alerts up,
+    // which is not the same answer as having looked and found none.
+    alertSource = "Alerts not checked for this beach yet";
+  } else if (details) {
+    alertValue = "None active";
+  }
+  tiles.push(renderGlanceTile({
+    icon: "triangle-exclamation",
+    value: alertValue,
+    quiet: alertQuiet,
+    caption: "Active alerts",
+    sourceHtml: escapeHtml(alertSource)
+  }));
+
+  return "<section class=\"at-a-glance wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\">" +
+    renderSectionHeading("glance-heading", "gauge", "At a glance") +
+    "<div class=\"wa-grid wa-gap-m glance-grid\">" + tiles.join("\n") + "</div>" +
+    "</section>";
+}
+
 export function renderDetailPage(data) {
   const beach = data.beach;
   const estimate = data.estimate;
@@ -1261,8 +1360,8 @@ export function renderDetailPage(data) {
   // wave forecast section omits itself.
   const waves = (data.waves === undefined || data.waves === null) ? null : data.waves;
   // NDBC water-temperature reading, display-only and never a flag input. Absent
-  // until the water-temperature cron writes it, so default to null; the
-  // subtitle omits the temp fragment when it is null or stale.
+  // until the water-temperature cron writes it, so default to null; the tile
+  // reads "No data" when it is null or stale.
   const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
   // Active water-quality advisory written by the hourly cron. Absent means no
   // advisory stands, never a clean reading.
@@ -1274,10 +1373,11 @@ export function renderDetailPage(data) {
   const lon = Number(beach.lon).toFixed(4);
 
   // Title flag mirrors the best current reading; displayFlagColor holds the
-  // rule. Null-safe: no flag data renders gray.
+  // rule. Null-safe: no flag data renders gray. Decorative, like every other
+  // flag icon: the hero prints the same color as FLAG_LABELS text right below
+  // it, so an accessible name here would only read the color out twice.
   const titleColor = displayFlagColor(estimate, official, nowIso);
-  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null,
-    FLAG_ICON_LABELS[normalizeColor(titleColor)]);
+  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null, null);
 
   // The park-first beach name, only when it differs from the title. The guard
   // keeps the <p> off the page when there is none.
@@ -1286,32 +1386,57 @@ export function renderDetailPage(data) {
     ("<p class=\"beach-subtitle\">" + escapeHtml(subtitle) + "</p>") : "";
 
   // Coordinates link out to OpenStreetMap (consistent with the footer's OSM
-  // attribution), demoted to caption size. A fresh NDBC water temp shares the line
-  // ("43.7842, -86.4400 • 71°F Water Muskegon, MI · ~3 mi · 1 hour ago") so it never
-  // sits as a lone subtitle, and its station carries the reading's provenance.
+  // attribution), demoted to caption size. The water temperature is a tile
+  // under the hero, not a fragment of this line.
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
-  const temp = waterTempLabel(waterTemp, nowIso);
-  const tempHtml = temp
-    ? (" • " + escapeHtml(temp) + " " + waterTempProvenance(waterTemp))
-    : "";
   const metaHtml = "<p class=\"beach-meta wa-caption-s\"><a class=\"coords-link\" href=\"" +
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
-    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a>" +
-    tempHtml + "</p>";
+    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
-  // The identity block sits in its own tight nested stack so the outer
-  // app-main stack's wa-gap-l separates the whole header from the cards below.
-  // A stack zero-margins its children, so the title and subtitle carry no
+  // The badge names the record the displayed color came from, never freshness
+  // alone. A fresh official record decides outright; an aged one still decides
+  // whenever it is the more severe of the two, because displayFlagColor's
+  // weighing is raise-only, and labeling that color ESTIMATE would credit the
+  // estimate with a color it never produced. Same two badge builders as the
+  // cards, so the official/estimated distinction cannot drift.
+  const estimateColor = normalizeColor(estimate ? estimate.color : null);
+  const displayIsOfficial = !!official &&
+    (!isStale(nowIso, official.updated, STALE_MS) || titleColor !== estimateColor);
+  const heroBadgeHtml = displayIsOfficial ? renderOfficialBadge(null) : renderEstimateBadge();
+  const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(beach.id);
+
+  // The hero carries the beach's identity and nothing but the display flag,
+  // washed in that flag's own color (data-flag drives the color-mix in
+  // styles.js, so no color literal reaches the markup). The verdicts themselves
+  // stay in the two cards below: this is a heading, not a third flag card.
+  //
+  // The stack zero-margins its children, so the title and subtitle carry no
   // margins of their own. wa-flex-nowrap keeps the flag icon and beach name on
   // one flex line, so a long name wraps beside the icon rather than below it.
-  const headerBlock = "<div class=\"beach-identity wa-stack wa-gap-l\">" +
+  // The back link renders href="/" and stays correct with no JS; the hero
+  // script upgrades it to the listing the visitor actually came from.
+  const heroHtml = "<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
+    collapseFlagColor(titleColor) + "\">" +
     "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
+    "<p class=\"hero-flag wa-cluster wa-gap-s\">" +
+    "<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">" +
+    escapeHtml(FLAG_LABELS[normalizeColor(titleColor)]) + "</span>" +
+    heroBadgeHtml +
+    "</p>" +
     metaHtml +
-    "</div>";
+    "<div class=\"hero-actions wa-cluster wa-gap-xs\">" +
+    "<wa-copy-button class=\"hero-copy\" value=\"" + escapeHtml(canonicalUrl) + "\" " +
+    "copy-label=\"Copy link\" success-label=\"Link copied\"></wa-copy-button>" +
+    "<wa-button id=\"hero-share\" class=\"hero-share\" appearance=\"outlined\" size=\"s\" hidden>" +
+    "<wa-icon slot=\"start\" name=\"share-nodes\"></wa-icon>Share</wa-button>" +
+    "</div>" +
+    "</section>";
+
+  const glanceHtml = renderAtAGlance(beach, estimate, waterTemp, nowIso);
 
   const officialHtml = renderOfficialCard(official, nowIso);
   const estimateHtml = renderEstimateCard(estimate, nowIso);
@@ -1339,19 +1464,23 @@ export function renderDetailPage(data) {
   if (waveMapHtml) {
     stackParts.push(waveMapHtml);
   }
-  const nearbyHtml = renderNearby(nearby);
-  if (nearbyHtml) {
-    stackParts.push(nearbyHtml);
-  }
+  // The webcam precedes the nearby beaches: a live picture of the water nearby
+  // is the most engaging thing on the page, and links away from this beach
+  // belong last.
   const webcamHtml = renderWebcam(beach);
   if (webcamHtml) {
     stackParts.push(webcamHtml);
   }
+  const nearbyHtml = renderNearby(nearby);
+  if (nearbyHtml) {
+    stackParts.push(nearbyHtml);
+  }
 
-  const mainHtml = headerBlock +
+  const mainHtml = heroHtml + glanceHtml +
     "<div class=\"detail-stack wa-stack wa-gap-l\">" + stackParts.join("\n") + "</div>";
 
-  const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter());
+  const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
+    "<script>" + DETAIL_HERO_SCRIPT + "</script>";
   // The share card takes titleColor, so the picture, the title flag and the map
   // marker are the one displayFlagColor decision.
   return renderDocument(title, bodyHtml, {

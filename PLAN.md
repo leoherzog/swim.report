@@ -145,7 +145,10 @@ because JSON.stringify emits null for NaN and Infinity alike) rather than by dis
 alertsCheckable and waterClass are deliberately NOT sealed: recomputing them from D1 columns
 both crons hold is cheaper and strictly more correct, since a beach enriched or reclassified
 between runs would otherwise carry a stale caveat beside a live alert or the wrong wave
-thresholds. MAP_DIRECTORY_SQL selects water_class for that reason.
+thresholds. alertsCheckable is one exported predicate, alertsCheckable(beach) in
+src/alertsCheckable.js, which the detail page's alerts tile reads too, so the cron's caveat
+and the tile's can never disagree about one beach. MAP_DIRECTORY_SQL selects water_class for
+that reason.
 
 Source entries are { label, url } objects: label is short display text (wave labels name
 the grid that supplied the reading, mapped by waveSourceLabel in src/waveModels.js); url is
@@ -309,24 +312,24 @@ the NDBC_WATER_TEMP_MAX_OBS_AGE_MS = 12 h window and the sanity band, else null)
 cap is tight because a temperature is displayed as a precise number next to the beach name:
 both cross-lake attribution (Erie's central basin is ~57 km wide) and summer upwelling (the
 thermal front sits 5-15 km offshore) bound how far a reading may travel. Read by
-handleDetail and passed to renderDetailPage, which appends a fresh reading to the
-coordinates line .beach-meta ("42.7742, -86.2115 • 72°F Water Muskegon, MI · ~3 mi ·
-<wa-relative-time date=observedIso sync>") only when tempF is finite and observedIso is
-within WATER_TEMP_STALE_MS (12 h) of now. The reading may come from a station up to 25 km
-away and up to 12 h old, so the fragment carries its provenance in a quiet
-span.water-temp-src: station.name, station.distanceKm rendered in miles through the shared
-formatMiles ("~3 mi", "<1 mi"), and the observation age as <wa-relative-time
-date=observedIso sync> — the observation's own time, never updated, and never a time string
-formatted in the renderer. A wa-tooltip anchored to that span (id "water-temp") states the
-same two facts as a sentence ("Water temperature measured at Muskegon, MI, ~3 mi away"), so
-the tooltip and the visible caption can never disagree. A record whose station is missing or
-carries an empty name or a non-finite distanceKm still shows the temperature, dropping only
-the missing part; with neither name nor distance the caption is the age alone and no tooltip
-is emitted. It never feeds src/rules.js: it colors no flag and does not bump
-RULES_VERSION. Written only when the station fetch and parse produced a valid
-recent reading; a null (winter gap, all-"MM", stale, 404) writes nothing, so the old key
-expires on its own and the coordinates line omits the temp fragment. It is the only KV family the
-Worker writes on the wave side, and is independent of the offline wave cycle in every
+handleDetail and passed to renderDetailPage, which renders a fresh reading as the
+water-temperature "at a glance" tile ("72°F") only when tempF is finite and observedIso is
+within WATER_TEMP_STALE_MS (12 h) of now; anything else renders the tile's quiet "No data".
+The reading may come from a station up to 25 km away and up to 12 h old, so the tile's
+source line carries its provenance in a quiet span.water-temp-src: station.name,
+station.distanceKm rendered in miles through the shared formatMiles ("~3 mi", "<1 mi"), and
+the observation age as <wa-relative-time date=observedIso sync> — the observation's own time,
+never updated, and never a time string formatted in the renderer. A wa-tooltip anchored to
+that span (id "water-temp") states the same two facts as a sentence ("Water temperature
+measured at Muskegon, MI, ~3 mi away"), so the tooltip and the visible source line can never
+disagree. A record whose station is missing or carries an empty name or a non-finite
+distanceKm still shows the temperature, dropping only the missing part; with neither name
+nor distance the source line is the age alone and no tooltip is emitted. It never feeds
+src/rules.js: it colors no flag and does not bump RULES_VERSION. Written only when the
+station fetch and parse produced a valid recent reading; a null (winter gap, all-"MM",
+stale, 404) writes nothing, so the old key expires on its own and the water-temperature tile
+reads "No data". It is the only KV family the Worker writes on the wave side, and is
+independent of the offline wave cycle in every
 respect: a different upstream, a per-station observedIso time basis rather than one
 cycle-wide valid time, and no path into a flag color.
 
@@ -654,8 +657,8 @@ Binding name: FLAGS (single namespace for both key families).
 - Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly
   water-temperature cron with { expirationTtl: 25200 }, only when the beach's nearest
   CAP_WATER_TEMP station within 25 km produced a valid recent reading. Read only by the
-  detail route and passed to renderDetailPage as the .beach-meta temp fragment.
-  Display-only — never feeds src/rules.js. Absent key → the coordinates line omits the fragment.
+  detail route and passed to renderDetailPage as the water-temperature tile's reading.
+  Display-only — never feeds src/rules.js. Absent key → the tile reads "No data".
   Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential per-beach
   await env.FLAGS.put (section 7, "Run budgets and write pools").
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
@@ -1321,7 +1324,7 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
 The water-temperature half of the NDBC client, and the only module under
 src/waveSources/ — a directory name that predates the wave lane's removal. Read by
 runWaterTempRefresh (section 7) and nothing else. Display-only: its output reaches the
-detail page's .beach-meta coordinates line and never src/rules.js.
+detail page's water-temperature tile and never src/rules.js.
 
     export const NDBC_WATER_TEMP_MAX_DISTANCE_KM  // 25 km cap on station attribution
     export const NDBC_WATER_TEMP_MAX_OBS_AGE_MS   // 12 h freshness window
@@ -3406,7 +3409,7 @@ Routing table (method GET only; anything else → 405):
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. KV: one bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — two KV reads per page regardless of row count. HOME_LIST_LIMIT (100) is load-bearing, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
-| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp: + wqfloor:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT id,name,park_name,lat,lon,water_class,water_class_attempts FROM beaches WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), then one bulk flag: get and one bulk official: get for those ids | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards below the wave map, section omitted when empty); 404 HTML if no row |
+| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp: + wqfloor:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT id,name,park_name,lat,lon,water_class,water_class_attempts FROM beaches WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), then one bulk flag: get and one bulk official: get for those ids | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE KV read: env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" }), resolved by mapDirectoryFeatures(directory, nowIso) — which calls markerFlagColor(estimate, official, nowIso) per entry, the section-9 displayFlagColor rule with double-red collapsed to red, from the ingredients the cron stored (section 1, MapDirectory). No D1 read at all on this path. When the key is absent, unparseable or version-mismatched the DEGRADED branch runs instead: D1 SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] ORDER BY id LIMIT 5000 (MAP_DEGRADED_MAX_FEATURES — a dead builder must not turn every colo's 60 s revalidation into an unbounded full-table scan), every feature's flag the literal "unknown", zero KV reads, and one console.log naming the feature count. There is deliberately no fallback to a per-beach bulk read: that is a silent cliff that keeps the map working while the builder has been dead for days, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped in both branches, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the directory's build instant, or null on the degraded branch), ["degraded": true on that branch,] "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt and degraded are top-level GeoJSON foreign members (RFC 7946 section 6.1), so a dead builder is visible to anyone hitting the endpoint instead of a silent cliff. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
@@ -3774,33 +3777,78 @@ exporting a CSS string); render.js is the sole module the router imports.
   never presented as an official flag status. The list row chip likewise stays the estimate
   color plus a colorless OFFICIAL badge; only the title flag and the marker take the
   display color.
-- Detail page, in order: a beach-identity block (div.beach-identity, a tight wa-stack
-  wa-gap-2xs nested in the main stack) holding the back link; an h1 title with a colorized
-  flag icon on the left (displayFlagColor) plus the display name; an optional beach-name
-  subtitle; and a lat/lon meta line linking to OpenStreetMap, carrying a fresh water
-  temperature and its station provenance (section 1). The nested stack zero-margins
-  its children, so .beach-title/.beach-subtitle carry no margins. Then the detail stack,
-  answer first and exploration second: official card (if any) → estimate card →
-  water-quality advisory callout (if any) → wave forecast section → wave map section →
-  nearby-webcam section (if any), so the lazy-loading embeds follow the verdict and
-  forecast. The advisory callout is the "wqfloor:" record (section 1) rendered as a
-  wa-callout — warning for yellow, danger for red, a "Water quality advisory" heading, the
-  reason, the source as plain text and an "Updated <wa-relative-time>" line. It reads as
-  context beside the estimate that already folded it in, so it carries neither the OFFICIAL
-  badge nor the official-card border, and an absent, malformed or unknown-color record
-  renders nothing. The estimate card body shows the
-  flag row (color name plus full reason) only; its sources render as the pill badges in
+- Detail page, in order: the flag hero (section.detail-hero, a wa-stack wa-gap-s in the
+  main stack) holding the back link; an h1 title with a colorized flag icon on the left
+  (displayFlagColor) plus the display name; an optional beach-name subtitle; the display
+  flag's FLAG_LABELS text with the ESTIMATE badge beside it, or the OFFICIAL badge when the
+  official record is what supplied that color — fresh at the 2 h default, or aged and still
+  more severe than the estimate, since displayFlagColor's weighing is raise-only; a lat/lon
+  meta line linking to OpenStreetMap; and the share row. The badge follows the record the
+  color came from, never freshness alone, so the hero can neither call an estimate official
+  nor credit the estimate with a color it did not produce. The flag label text below the
+  title is what names the color, so the title flag icon is decorative there. The stack
+  zero-margins its children, so .beach-title/.beach-subtitle carry no margins. The hero's
+  background is
+  color-mix(in oklab, <the display flag's palette token> 12%, var(--wa-color-surface-default)),
+  selected by a data-flag attribute carrying collapseFlagColor's keyword — green, yellow,
+  red or the gray unknown — so no color literal reaches the markup and the wash follows the
+  surface token into wa-dark. The hero is a heading, not a third flag card: the two cards
+  below keep the full verdicts and are never merged into it.
+  - Share row: a <wa-copy-button> whose value is the absolute canonical URL (SITE_ORIGIN
+    plus "/beach/" + encodeURIComponent(beach.id), a constant so the renderer stays pure)
+    with copy-label "Copy link", plus a Share <wa-button> that ships with the hidden
+    attribute. DETAIL_HERO_SCRIPT (src/frontend/backLinkScript.js), inlined after the page
+    shell, toggles share.hidden false and wires navigator.share({ title, url }) only where
+    that API exists, and rewrites the back link's href from "/" to document.referrer's
+    pathname + search when the referrer parses, is same-origin and has pathname "/", so ?q=
+    and ?near= survive the trip back. Both are progressive enhancements: with no JS the
+    page keeps a working back link and the copy button alone.
+  - "At a glance" tiles (section.at-a-glance, directly under the hero): a wa-grid of four
+    outlined <wa-card class="glance-tile"> tiles, each an icon, a value, a caption and a
+    quiet source line — waves now (estimate.waveHeightFt.toFixed(1) + " ft", the same field
+    the wave strip's now stat reads, sourced by the ESTIMATE badge); water temperature (the
+    WaterTemp reading with the station provenance and tooltip of section 1); rip current
+    risk (estimate.ripCurrentRisk as HIGH/MODERATE/LOW, "Not forecast" when null, sourced
+    "NWS surf zone forecast"); and active alerts (estimate.alertDetails.length with the
+    first entry's event name).
+    A missing value renders "No data" in quiet text — never a blank tile and never a
+    placeholder number — and "None active" renders in the same quiet weight, since only a
+    real reading earns the loud value type. The alerts tile says "Alerts not checked for
+    this beach yet" instead of "None active" whenever the count is zero and
+    alertsCheckable(beach) is false (src/alertsCheckable.js, the same predicate
+    buildEstimateInputs calls, which deliberately does not seal its answer); the wording
+    is the tile's own, because the estimate's reason already carries
+    ALERTS_UNAVAILABLE_CAVEAT and the same sentence twice on one page reads as a bug. The
+    tiles are informational and estimated: outlined cards only, never the official card's
+    treatment.
+  Then the detail stack, answer first and exploration second: official card (if any) →
+  estimate card → water-quality advisory callout (if any) → wave forecast section → wave map
+  section → nearby-webcam section (if any) → nearby beaches (if any), so the lazy-loading
+  embeds follow the verdict and forecast and the links away from the beach come last. The
+  advisory callout is the "wqfloor:" record (section 1) rendered as a wa-callout — warning
+  for yellow, danger for red, a "Water quality advisory" heading, the reason, the source as
+  plain text and an "Updated <wa-relative-time>" line. It reads as context beside the
+  estimate that already folded it in, so it carries neither the OFFICIAL badge nor the
+  official-card border, and an absent, malformed or unknown-color record renders nothing.
+  The estimate card body shows the flag row (color name plus full reason) only; its sources
+  render as the pill badges in
   slot="header-actions" with the ESTIMATE badge in slot="header", and the "Updated
   <wa-relative-time date=estimate.updated sync>" line renders in slot="footer". Both are
   omitted, with their with-* attributes, when there is no estimate.
+- Section headings: every detail-page section below the hero is labeled by the shared
+  renderSectionHeading(id, iconName, text) — an <h2 class="section-heading wa-cluster
+  wa-gap-xs"> with a leading decorative wa-icon, pointed at by the section's
+  aria-labelledby. The four are "At a glance" (gauge), "Wave forecast" (chart-line),
+  "Nearby webcam" (video) and "Nearby beaches" (location-dot).
 - Wave forecast section (detail page only, between the estimate card and the wave map
   section; helpers in src/frontend/waveStrip.js, pure, importing waveColorForHeight /
   waveThresholdsForWaterClass / alertColorForEvent / ripRiskColor from src/rules.js — the
   per-water-class wave thresholds, the band labels built from them, and the alert/rip color
   mappings are never restated in the frontend; computeWaveRuns takes the beach's water_class):
-  - No section heading. The ESTIMATE badge rides the "now" stat line instead; when the stat
-    is absent (a legacy payload without waveHeightFt) a badge-only wa-cluster row still
-    renders, so the section always carries the estimated framing.
+  - The "Wave forecast" section heading names the section and nothing more: the ESTIMATE
+    badge stays on the "now" stat line, and when the stat is absent (a legacy payload
+    without waveHeightFt) a badge-only wa-cluster row still renders, so the section always
+    carries the estimated framing from its own content rather than its heading.
   - "Now" stat: estimate.waveHeightFt as toFixed(1) + " ft" with a quiet "waves now"
     caption and the same ESTIMATE badge as the estimate card, in one wa-cluster <p> with no
     "(estimated)" suffix. Omitted entirely when null or missing — never "0 ft", never a
@@ -3915,15 +3963,17 @@ exporting a CSS string); render.js is the sole module the router imports.
   centered on the beach (lat/lon to 3 decimals), with no caption, since the embed carries
   Windy's own branding. Omitted when the beach has no finite lat/lon. The iframe is fetched
   by the browser; the request path still reads only D1 and KV.
-- Nearby-webcam section (detail page only): rendered last in the detail stack when
-  beach.webcam_player_url is a non-empty string, and nothing otherwise, including
-  pre-migration rows where the webcam fields are undefined. Embeds the Windy player URL in a
+- Nearby-webcam section (detail page only): rendered after the wave map and before the
+  nearby beaches — a live picture of the beach is the most engaging element on the page, so
+  it precedes the links away from it — when beach.webcam_player_url is a non-empty string,
+  and nothing otherwise, including pre-migration rows where the webcam fields are
+  undefined. Embeds the Windy player URL in a
   plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> wrapped in the same
   framed-embed container as the wave map, its title attribute the webcam title or "Nearby
   webcam" when untitled, 16:9 responsive, fetched by the browser. The section is
   <section class="webcam-section wa-stack wa-gap-s" aria-labelledby="webcam-heading">
-  and opens with <h2 id="webcam-heading" class="nearby-heading">Nearby webcam</h2>,
-  the same level and class as the "Nearby beaches" heading. Under the frame, an optional
+  and opens with the shared renderSectionHeading("webcam-heading", "video", "Nearby
+  webcam"), the same level and class as every other detail-page section heading. Under the frame, an optional
   p.webcam-caption shows beach.webcam_title when non-empty, plus a "View on Windy" anchor
   (rel="noopener noreferrer", target="_blank") to beaches.webcam_detail_url whenever that
   column holds an absolute http(s) URL; a null, empty, relative or non-http(s) value emits
@@ -4128,13 +4178,19 @@ other caveat test uses symbolically.
   visually-hidden prose summary, per-model "now" caption + collapsed comparison disclosure,
   parsing the model chart's slotted JSON config back out (datasets/labels/rounding), the
   no-"</script" guard, fallback text === description, now-stat formatting (ESTIMATE badge on
-  the stat line, no section heading), the hazard lane (positioned band + tooltip, rip band,
-  no lane for legacy estimates or without a series), the buoy case (stat without strip),
+  the stat line, under the section heading), the hazard lane (positioned band + tooltip,
+  rip band, no lane for legacy estimates or without a series), the buoy case (stat without strip),
   legacy/absent payload omission, and the stale warning.
 - test/renderWqFloor.test.js — the water-quality advisory callout via renderDetailPage:
   the danger/warning variant per color, the reason/source/updated lines, its place between
   the estimate card and the wave forecast, escaping, the absence of any official marking,
   and the empty string for absent, malformed and unknown-color records.
+- test/detailHero.test.js — the detail-page hero via renderDetailPage: the per-color wash
+  keyword including the double-red collapse and the gray unknown, the ESTIMATE/OFFICIAL
+  badge across fresh and aged official records, the untouched flag cards below, the back
+  link and share controls, DETAIL_HERO_SCRIPT's referrer and navigator.share guards, the
+  four "at a glance" tiles with present, missing and never-checkable data, the shared
+  section headings, and the webcam-before-nearby stack order.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
   wave_updated; runFlagRecompute reads "waveinput:" for wave height and wind fallback,
   degrading to unknown when absent, rather than fetching; the alertDetails/ripCurrentRisk
