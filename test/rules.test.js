@@ -933,7 +933,7 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
     const result = estimateFlag(baseInputs({}));
     expect(result.color).toBe("unknown");
     expect(result.reason).toBe(
-      "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models"
+      "No wave or weather data is available for this beach yet"
     );
   });
 
@@ -941,7 +941,7 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
     const result = estimateFlag(baseInputs({ alerts: [] }));
     expect(result.color).toBe("unknown");
     expect(result.reason).toBe(
-      "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models"
+      "No wave or weather data is available for this beach yet"
     );
   });
 
@@ -957,6 +957,10 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
   it("bumped RULES_VERSION for the water-class wave thresholds", function () {
     expect(RULES_VERSION).toBe("1.7.0");
+  });
+
+  it("pins the caveat wording, which every other caveat test uses symbolically", function () {
+    expect(ALERTS_UNAVAILABLE_CAVEAT).toBe("weather alerts are not checked here yet");
   });
 
   it("wave-only green with alertsCheckable false appends the caveat", function () {
@@ -989,7 +993,7 @@ describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", functio
     expect(result.color).toBe("unknown");
     expect(result.trigger).toBe("no-data");
     expect(result.reason).toBe(
-      "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models (" +
+      "No wave or weather data is available for this beach yet (" +
       ALERTS_UNAVAILABLE_CAVEAT + ")"
     );
   });

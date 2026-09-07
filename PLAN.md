@@ -683,7 +683,7 @@ Pure module. No fetch, no Date, no env. Exports:
 
     export const RULES_VERSION = "1.7.0";
 
-    export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
+    export const ALERTS_UNAVAILABLE_CAVEAT = "weather alerts are not checked here yet";
       // Appended to the reason (see the caveat rule after step 5) when the cron
       // reports alerts were not checkable for this beach (neither nws_zone nor
       // eccc_zone resolved yet).
@@ -926,7 +926,7 @@ is never mutated.
    - If ripCurrentRisk === "LOW" (and steps 3–4 had no data) → "green",
      reason: "NWS surf zone forecast rip current risk: LOW; no wave or wind data available"
    - Otherwise → "unknown",
-     reason: "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models"
+     reason: "No wave or weather data is available for this beach yet"
    Note: alerts === [] (successful fetch, zero alerts) does not count as usable data on its
    own; with everything else null the result is "unknown". That reason string is reproduced
    here verbatim because it is pinned in test/rules.test.js.
@@ -966,8 +966,8 @@ is never mutated.
 When inputs.alertsCheckable === false and the deciding trigger is not "nws-alert",
 "eccc-alert", "nws-floor", or "eccc-floor", append " (" + ALERTS_UNAVAILABLE_CAVEAT + ")"
 to the final reason, e.g.
-"Estimated wave height 1.0 ft (below 2 ft) (Weather alerts not yet available for this
-beach)". This distinguishes "alerts checked, none active" from "alerts never checkable"
+"Estimated wave height 1.0 ft (below 2 ft) (weather alerts are not checked here
+yet)". This distinguishes "alerts checked, none active" from "alerts never checkable"
 so a wave/wind/no-data estimate can never present as alert-verified. Skipped when an
 alert itself decided the color (contradictory input) and when alertsCheckable is
 true or null. Colors, triggers, thresholds, precedence and sources are unaffected.
@@ -3943,8 +3943,9 @@ heat and air-quality events are ignored and fall through to waves; a recognized 
 wins over a recognized ECCC event; an ECCC alert beats wave height; an ECCC-alert-decided
 color suppresses the alertsCheckable caveat; alertColorForEvent maps both namespaces
 (Title Case "Wind Warning" is not an ECCC match); alertAuthorityForEvent → "NWS" /
-"Environment Canada" / null. rules.test.js also covers ripRiskColor and the alertDetails /
-ripCurrentRisk output echoes.
+"Environment Canada" / null. rules.test.js also covers ripRiskColor, the alertDetails /
+ripCurrentRisk output echoes, and the exact ALERTS_UNAVAILABLE_CAVEAT wording every
+other caveat test uses symbolically.
 
 ### Other test files (one-line inventory)
 

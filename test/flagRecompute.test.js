@@ -1,9 +1,9 @@
 // Cron input-assembly test for runFlagRecompute (via the scheduled handler):
 // verifies the alertsCheckable wiring — a beach with neither nws_zone nor
 // eccc_zone (not yet enriched for either authority) must get an estimate
-// whose reason carries the explicit "Weather alerts not yet available for
-// this beach" caveat, while an enriched beach whose alerts fetch merely
-// failed this run must not.
+// whose reason carries the explicit "weather alerts are not checked here yet"
+// caveat, while an enriched beach whose alerts fetch merely failed this run
+// must not.
 // The network is stubbed to fail entirely, so every client returns null and
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -156,7 +156,7 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     expect(estimate.color).toBe("unknown");
     expect(estimate.official).toBe(false);
     expect(estimate.reason).toBe(
-      "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models (" +
+      "No wave or weather data is available for this beach yet (" +
       ALERTS_UNAVAILABLE_CAVEAT + ")"
     );
   });
@@ -177,7 +177,7 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     const estimate = JSON.parse(put.value);
     expect(estimate.color).toBe("unknown");
     expect(estimate.reason).toBe(
-      "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models"
+      "No wave or weather data is available for this beach yet"
     );
     expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
   });

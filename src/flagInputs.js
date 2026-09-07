@@ -127,7 +127,7 @@ export function buildEstimateInputs(beach, alertPart, signals) {
     alertDetails: alertHalf.alertDetails,
     // A land zone or an ECCC region. marine_zone alone is not enough: it matches
     // marine warnings but none of the land products the caveat is about, so a
-    // beach whose only zone is marine still reads "alerts not yet available".
+    // beach whose only zone is marine still reads "alerts are not checked here yet".
     alertsCheckable: (beach.nws_zone || beach.eccc_zone) ? true : false,
     // Selects the step 3 wave thresholds; null and every non-ocean class share
     // the default set.

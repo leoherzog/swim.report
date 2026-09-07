@@ -759,8 +759,8 @@ async function runFlagRecompute(env) {
         // sealFromSignals are handed the SAME object. buildEstimateInputs also
         // recomputes alertsCheckable, which distinguishes "alerts checked, none
         // active" (alerts === []) from "alerts not checkable" (neither nws_zone
-        // nor eccc_zone resolved); when false, estimateFlag appends a "Weather
-        // alerts not yet available for this beach" caveat so a wave-only green is
+        // nor eccc_zone resolved); when false, estimateFlag appends a "weather
+        // alerts are not checked here yet" caveat so a wave-only green is
         // never presentable as alert-verified. A transient alerts-fetch failure
         // for an enriched beach stays alertsCheckable true.
         const signals = {
@@ -1604,7 +1604,7 @@ const ECCC_ATTEMPTS_BUMP_SQL = "UPDATE beaches SET eccc_attempts = eccc_attempts
 // NWS point enrichment (own cron, 4x daily): beaches with nws_zone NULL get
 // their forecast zone and gridpoint URL from api.weather.gov/points. A beach
 // without nws_zone skips rules steps 1-2 (alerts, SRF rip risk) and carries an
-// explicit "NWS alerts not yet available for this beach" caveat, so draining this
+// explicit "weather alerts are not checked here yet" caveat, so draining this
 // queue fast is a safety property, not just throughput. Ordering is fewest failed
 // attempts first, then last_viewed, then RANDOM(): ordering by id instead drains
 // every osm-node-* row before any osm-way-* row, leaving way-based beaches blind

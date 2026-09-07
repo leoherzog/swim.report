@@ -19,7 +19,7 @@ export const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-
 // not checkable for this beach. Distinguishes "alerts checked, none active" from
 // "alerts never checked", so a wave-only green can never present itself as
 // alert-verified.
-export const ALERTS_UNAVAILABLE_CAVEAT = "Weather alerts not yet available for this beach";
+export const ALERTS_UNAVAILABLE_CAVEAT = "weather alerts are not checked here yet";
 
 // NWS alerts that short-circuit the estimate at step 1, in precedence order:
 // tsunami and tropical-cyclone products, beach-hazard products, life-threatening
@@ -362,7 +362,7 @@ export function estimateFlag(inputs) {
       trigger = "rip-current-low";
     } else {
       color = "unknown";
-      reason = "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models";
+      reason = "No wave or weather data is available for this beach yet";
       trigger = "no-data";
     }
   }

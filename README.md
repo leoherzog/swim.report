@@ -220,7 +220,7 @@ raising a lower result but never downgrading a higher color.
 | 3 | Wave height | NOAA wave-model HTSGW (m converted to ft, `m * 3.28084`), thresholds by `water_class` | Great Lakes and every non-ocean class: >= 4 ft / >= 2 ft / < 2 ft non-null. `ocean`: >= 6 ft / >= 3 ft / < 3 ft (provisional, uncalibrated) | red / yellow / green | "Estimated wave height X.X ft (at or above R ft \| at or above Y ft \| below Y ft)" with the deciding threshold quoted |
 | 4 | Wind (fallback only when wave height is null) | NOAA wave-model WIND (m/s converted to mph, `m/s * 2.2369362920544`); gusts are always null | sustained >= 25 mph or gust >= 35 mph / sustained >= 15 mph or gust >= 25 mph / below both | red / yellow / green | "No wave data; wind S mph sustained, G mph gusts (at or above 25 mph sustained or 35 mph gust threshold \| at or above 15 mph sustained or 25 mph gust threshold \| below advisory thresholds)" |
 | 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
-| 5 | Terminal fallback | no usable data anywhere | — | unknown | "No usable data from NWS alerts, surf zone forecast, or NOAA wave and wind models" |
+| 5 | Terminal fallback | no usable data anywhere | — | unknown | "No wave or weather data is available for this beach yet" |
 | 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Hurricane, Tropical Storm, Storm Surge, Tsunami, Tornado, Severe Thunderstorm, High Wind, Hurricane Force Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
 | 6b | ECCC marine yellow floor (Canadian beaches) | `marineweather-realtime` collection | Event = "strong wind warning" or "marine weather advisory", **and** the decided color is green/unknown | yellow | "Active Environment Canada alert: <event>" |
 | 7 | Water-quality advisory floor (raise-only) | `src/wqFloor/` registry (E. coli / bacteria / HAB advisories) | An active advisory whose floor color (yellow or red) **outranks** the color steps 1–6b decided | yellow or red | "Water-quality advisory (<source>): <detail>" |
@@ -267,7 +267,7 @@ Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
 - An empty alerts array — a successful fetch with zero active alerts — is not by itself usable
   data. With everything else null the result is still `unknown`, not `green`.
 - A beach not yet enriched for either authority carries a caveat appended to its `reason`:
-  ` (Weather alerts not yet available for this beach)`. It adds no color and no table row; it
+  ` (weather alerts are not checked here yet)`. It adds no color and no table row; it
   only distinguishes "alerts checked, none active" from "alerts never checked", so a wave-only
   estimate is never presentable as alert-verified. It is omitted once the beach is enriched.
 
