@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Swim Report">
+<rect width="64" height="64" rx="14" fill="#2e5b89"/>
+<path d="M0 48 C 10 42, 22 55, 32 49 S 54 42, 64 48 L64 64 L0 64 Z" fill="#02345b"/>
+<rect x="19.2" y="8.96" width="3.2" height="42.24" rx="1.6" fill="#ffffff"/>
+<polygon points="22.4,8.96 47.36,17.28 22.4,25.6" fill="#ffffff"/>
+</svg>

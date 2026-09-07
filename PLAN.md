@@ -3410,6 +3410,7 @@ Routing table (method GET only; anything else → 405):
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE KV read: env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" }), resolved by mapDirectoryFeatures(directory, nowIso) — which calls markerFlagColor(estimate, official, nowIso) per entry, the section-9 displayFlagColor rule with double-red collapsed to red, from the ingredients the cron stored (section 1, MapDirectory). No D1 read at all on this path. When the key is absent, unparseable or version-mismatched the DEGRADED branch runs instead: D1 SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] ORDER BY id LIMIT 5000 (MAP_DEGRADED_MAX_FEATURES — a dead builder must not turn every colo's 60 s revalidation into an unbounded full-table scan), every feature's flag the literal "unknown", zero KV reads, and one console.log naming the feature count. There is deliberately no fallback to a per-beach bulk read: that is a silent cliff that keeps the map working while the builder has been dead for days, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped in both branches, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the directory's build instant, or null on the degraded branch), ["degraded": true on that branch,] "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt and degraded are top-level GeoJSON foreign members (RFC 7946 section 6.1), so a dead builder is visible to anyone hitting the endpoint instead of a silent cliff. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
+| GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
 
 - /api/beaches.geojson: no query params are read — the response is the entire flag-worthy
@@ -3460,6 +3461,12 @@ Routing table (method GET only; anything else → 405):
   single-beach routes do.
 - The router never fetches upstream. It imports only src/frontend/render.js and uses env.DB
   and env.FLAGS. The last_viewed UPDATE is its only write.
+- Static assets: the brand files under public/ (favicon, apple-touch icon, the two manifest
+  icons, manifest.webmanifest, and the five share cards under og/) are served by Workers
+  static assets, matched before the Worker runs. There is deliberately no assets binding, so
+  no module in src/ can read one; not_found_handling stays at its default, so every path
+  that matches no asset still reaches handleRequest, which keeps owning "/" and every 404.
+  Regenerate the files with node scripts/build-brand-assets.js and commit them.
 
 ### wrangler.toml
 
@@ -3479,6 +3486,9 @@ Routing table (method GET only; anything else → 405):
 
     [cache]
     enabled = true
+
+    [assets]
+    directory = "public"
 
     [triggers]
     crons = ["7 * * * *", "3-53/10 * * * *", "15 */6 * * *", "17 3,9,15,21 * * *", "29 4,10,16,22 * * *", "31 9 * * *"]
@@ -3636,6 +3646,36 @@ exporting a CSS string); render.js is the sole module the router imports.
   render.js): the matter-theme, native, and utilities stylesheets plus the
   webawesome.loader.js module script.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
+- Site identity, on every page including the error page: <link rel="icon"
+  type="image/svg+xml" href="/favicon.svg">, <link rel="apple-touch-icon" sizes="180x180"
+  href="/apple-touch-icon.png">, <link rel="manifest" href="/manifest.webmanifest">, and two
+  <meta name="theme-color"> tags carrying the matter surface colors, media-queried light
+  (#ffffff) and dark (#121214). A meta tag takes no CSS var, so those two hexes are the
+  token values copied in literally. All four files are static assets (section 8).
+- renderDocument(title, bodyHtml, meta) takes an optional meta of
+  { title, description, path, flagColor }. With one it emits, between the <title> and the
+  identity tags: <meta name="description">, <link rel="canonical" href=SITE_ORIGIN + path>,
+  the Open Graph set (og:type "website", og:site_name "Swim Report", og:title,
+  og:description, og:url, og:image, og:image:width 1200, og:image:height 630, og:image:alt)
+  and the Twitter set (twitter:card "summary_large_image", twitter:title,
+  twitter:description, twitter:image). SITE_ORIGIN ("https://swim.report") is a constant:
+  the renderer is pure and never reads the request. renderErrorPage passes NO meta — a 404
+  claims no canonical URL and offers no share card — and still gets the identity tags.
+- og:image is one of five committed 1200x630 PNGs, /og/<color>.png, one per
+  displayFlagColor value (green, yellow, red, double-red as two stacked flags, unknown).
+  They carry the flag graphic on a wave background and NO text, so the estimated-or-official
+  wording lives only in the title and description and can never disagree with the picture.
+- The list page canonicalizes to SITE_ORIGIN + "/" whatever the ?q= or ?near= params are,
+  since those are a filtered or geolocated view of the same page. Its description is the
+  one-sentence site description and its card is the gray unknown flag: the index reports no
+  one beach's color and must not imply one.
+- The detail page canonicalizes to "/beach/" + encodeURIComponent(beach.id) and takes both
+  its card and its description wording from displayFlagColor, the same rule as the title
+  flag. detailMetaDescription(beach, estimate, official, nowIso) reads
+  "<display name>: estimated YELLOW flag right now, 2.4 ft waves." — "official <COLOR>"
+  only when a non-stale official record is deciding that color (the displayFlagColor gate),
+  "flag status unknown right now" when there is no color, and the wave clause omitted
+  entirely rather than invented when estimate.waveHeightFt is not finite.
 - Disclaimer in the footer of every page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
   The footer is one horizontally centered block (<p class="footer-lines">, three <small>

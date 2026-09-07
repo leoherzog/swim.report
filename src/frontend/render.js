@@ -55,6 +55,28 @@ const WA_THEME_OVERRIDES = ":root {" +
   " --wa-font-family-longform: Rockwell, 'Rockwell Nova', 'DejaVu Serif', 'Sitka Small', serif;" +
   " }";
 
+// Absolute origin for the canonical and share links. A renderer is pure, so the
+// origin is a constant here rather than anything read off the request.
+const SITE_ORIGIN = "https://swim.report";
+
+// One 1200x630 share card per display color, committed under public/ and built
+// by scripts/build-brand-assets.js. The cards carry the flag graphic and no
+// text, so the estimated-or-official wording lives only in the title and
+// description and can never disagree with the image.
+const OG_IMAGE_BASE = SITE_ORIGIN + "/og/";
+const OG_IMAGE_WIDTH = "1200";
+const OG_IMAGE_HEIGHT = "630";
+
+// Surface colors as literal hex, the one place the theme cannot reach: a
+// theme-color meta takes no CSS var. Matter's light surface is white and its
+// dark surface is neutral-05.
+const THEME_COLOR_LIGHT = "#ffffff";
+const THEME_COLOR_DARK = "#121214";
+
+// The list page's own description; the detail pages build theirs per beach.
+const SITE_DESCRIPTION = "Estimated beach hazard flags for Great Lakes and " +
+  "ocean-coast beaches across the United States and Canada.";
+
 const FLAG_LABELS = {
   "green": "GREEN",
   "yellow": "YELLOW",
@@ -168,6 +190,46 @@ export function displayFlagColor(estimate, official, nowIso) {
 // feature's `flag` property from the same color rule the UI flags use.
 export function markerFlagColor(estimate, official, nowIso) {
   return collapseFlagColor(displayFlagColor(estimate, official, nowIso));
+}
+
+// Flag wording for a meta description. FLAG_LABELS carries the UI's longer
+// double-red phrasing, which does not read as a noun phrase mid-sentence.
+const META_FLAG_WORDS = {
+  "green": "GREEN",
+  "yellow": "YELLOW",
+  "red": "RED",
+  "double-red": "DOUBLE RED"
+};
+
+// Alt text for each share card, describing the picture and nothing else: the
+// flag status itself is stated in the title and description, which are the only
+// place the estimated-or-official distinction can be made honestly.
+const OG_IMAGE_ALT = {
+  "green": "A green beach flag flying over a wave",
+  "yellow": "A yellow beach flag flying over a wave",
+  "red": "A red beach flag flying over a wave",
+  "double-red": "Two red beach flags flying over a wave",
+  "unknown": "A gray beach flag flying over a wave"
+};
+
+// A detail page's meta description, and the one place the shared link's wording
+// is decided. It reads the same displayFlagColor the title flag uses, and says
+// "official" only when a scraped record is deciding that color — the same gate
+// displayFlagColor applies, a non-stale official record. Everything else reads
+// "estimated", and no color at all reads "flag status unknown". The wave clause
+// is omitted rather than invented when the estimate carries no finite height.
+function detailMetaDescription(beach, estimate, official, nowIso) {
+  const color = displayFlagColor(estimate, official, nowIso);
+  const officialDecides = !!official && !isStale(nowIso, official.updated, STALE_MS);
+  const phrase = (color === "unknown")
+    ? "flag status unknown right now"
+    : ((officialDecides ? "official " : "estimated ") + META_FLAG_WORDS[color] +
+      " flag right now");
+  const waves = (estimate && typeof estimate.waveHeightFt === "number" &&
+    isFinite(estimate.waveHeightFt))
+    ? (", " + estimate.waveHeightFt.toFixed(1) + " ft waves")
+    : "";
+  return displayName(beach) + ": " + phrase + waves + ".";
 }
 
 function isUrlLike(value) {
@@ -507,7 +569,55 @@ function renderPageShell(headerHtml, mainHtml, footerHtml) {
   return lines.join("\n");
 }
 
-function renderDocument(title, bodyHtml) {
+// Site identity, on every page including the error page: the flag-on-wave mark,
+// the installable manifest, and the two surface colors a browser paints its
+// chrome with. All four files are static assets under public/, so nothing here
+// is a request-path read.
+const HEAD_IDENTITY_TAGS = [
+  "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">",
+  "<link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/apple-touch-icon.png\">",
+  "<link rel=\"manifest\" href=\"/manifest.webmanifest\">",
+  "<meta name=\"theme-color\" media=\"(prefers-color-scheme: light)\" content=\"" +
+    THEME_COLOR_LIGHT + "\">",
+  "<meta name=\"theme-color\" media=\"(prefers-color-scheme: dark)\" content=\"" +
+    THEME_COLOR_DARK + "\">"
+];
+
+// Description, canonical URL and share cards for one page, from a meta object of
+// { title, description, path, flagColor }. Returns no lines at all when meta is
+// absent, which is how the error page opts out: a 404 must never claim a
+// canonical URL or offer itself as a share card.
+function renderShareMeta(meta) {
+  if (!meta) {
+    return [];
+  }
+  const title = escapeHtml(meta.title);
+  const description = escapeHtml(meta.description);
+  const canonical = escapeHtml(SITE_ORIGIN + meta.path);
+  const color = normalizeColor(meta.flagColor);
+  const image = escapeHtml(OG_IMAGE_BASE + color + ".png");
+  return [
+    "<meta name=\"description\" content=\"" + description + "\">",
+    "<link rel=\"canonical\" href=\"" + canonical + "\">",
+    "<meta property=\"og:type\" content=\"website\">",
+    "<meta property=\"og:site_name\" content=\"Swim Report\">",
+    "<meta property=\"og:title\" content=\"" + title + "\">",
+    "<meta property=\"og:description\" content=\"" + description + "\">",
+    "<meta property=\"og:url\" content=\"" + canonical + "\">",
+    "<meta property=\"og:image\" content=\"" + image + "\">",
+    "<meta property=\"og:image:width\" content=\"" + OG_IMAGE_WIDTH + "\">",
+    "<meta property=\"og:image:height\" content=\"" + OG_IMAGE_HEIGHT + "\">",
+    "<meta property=\"og:image:alt\" content=\"" + escapeHtml(OG_IMAGE_ALT[color]) + "\">",
+    "<meta name=\"twitter:card\" content=\"summary_large_image\">",
+    "<meta name=\"twitter:title\" content=\"" + title + "\">",
+    "<meta name=\"twitter:description\" content=\"" + description + "\">",
+    "<meta name=\"twitter:image\" content=\"" + image + "\">"
+  ];
+}
+
+// meta is optional: a page that passes none still gets the site identity tags,
+// and no description, canonical or share card.
+function renderDocument(title, bodyHtml, meta) {
   const lines = [];
   lines.push("<!doctype html>");
   lines.push("<html lang=\"en\" class=\"wa-theme-matter wa-palette-mild wa-cloak\" data-fa-kit-code=\"ddd41b2d81\">");
@@ -518,6 +628,13 @@ function renderDocument(title, bodyHtml) {
   // before the theme stylesheets below paint (see colorSchemeScript.js).
   lines.push("<script>" + COLOR_SCHEME_SCRIPT + "</script>");
   lines.push("<title>" + escapeHtml(title) + "</title>");
+  const metaLines = renderShareMeta(meta);
+  for (let i = 0; i < metaLines.length; i = i + 1) {
+    lines.push(metaLines[i]);
+  }
+  for (let i = 0; i < HEAD_IDENTITY_TAGS.length; i = i + 1) {
+    lines.push(HEAD_IDENTITY_TAGS[i]);
+  }
   lines.push("<link rel=\"stylesheet\" href=\"" + WA_KIT_BASE + "/styles/themes/matter.css\">");
   lines.push("<link rel=\"stylesheet\" href=\"" + WA_KIT_BASE + "/styles/native.css\">");
   lines.push("<link rel=\"stylesheet\" href=\"" + WA_KIT_BASE + "/styles/utilities.css\">");
@@ -775,7 +892,16 @@ export function renderListPage(data) {
     "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +
     "<script>" + buildListMapScript(MAPLIBRE_JS) + "</script>";
 
-  return renderDocument("Swim Report", bodyHtml);
+  // The canonical is the bare "/" whatever the q or near params are: those are a
+  // filtered or geolocated view of the same page, not pages of their own. The
+  // share card is the gray unknown flag, because the index reports no one
+  // beach's color and must not imply one.
+  return renderDocument("Swim Report", bodyHtml, {
+    title: "Swim Report",
+    description: SITE_DESCRIPTION,
+    path: "/",
+    flagColor: "unknown"
+  });
 }
 
 // Windy.com wave-overlay embed centered on the beach. Loaded by the browser
@@ -1226,7 +1352,14 @@ export function renderDetailPage(data) {
     "<div class=\"detail-stack wa-stack wa-gap-l\">" + stackParts.join("\n") + "</div>";
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter());
-  return renderDocument(title, bodyHtml);
+  // The share card takes titleColor, so the picture, the title flag and the map
+  // marker are the one displayFlagColor decision.
+  return renderDocument(title, bodyHtml, {
+    title: title,
+    description: detailMetaDescription(beach, estimate, official, nowIso),
+    path: "/beach/" + encodeURIComponent(beach.id),
+    flagColor: titleColor
+  });
 }
 
 export function renderErrorPage(data) {
@@ -1246,5 +1379,7 @@ export function renderErrorPage(data) {
     "</wa-callout>";
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter());
+  // No meta: an error page keeps the site's icon and theme colors but claims no
+  // canonical URL and offers no share card.
   return renderDocument("Swim Report — " + String(status), bodyHtml);
 }
