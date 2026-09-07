@@ -91,22 +91,30 @@ describe("mergeBeachRows", () => {
     expect(hamlin.parkName).toBe("Ludington State Park — Hamlin Lake");
   });
 
-  it("skips a secondary whose suffix collides with a sibling already kept", () => {
-    // Two secondaries both due north of the primary would both derive
-    // "North Beach"; only the first is kept, the colliding one is skipped.
+  it("numbers a secondary whose suffix collides with a sibling already kept", () => {
+    // Three secondaries due north of the primary all derive "North Beach"; the
+    // first keeps the plain label and the later ones are numbered in scan
+    // order, so a long seashore keeps every beach on the map.
     const merged = mergeBeachRows([], [
       { osmType: "way", osmId: 10, name: null, lat: 43.96, lon: -86.51,
         areaDeg2: 0.0006, parkName: "Ludington State Park", parkKey: "relation/123" },
       { osmType: "way", osmId: 11, name: null, lat: 43.98, lon: -86.51,
         areaDeg2: 0.0004, parkName: "Ludington State Park", parkKey: "relation/123" },
       { osmType: "way", osmId: 14, name: null, lat: 44.00, lon: -86.51,
-        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123" }
+        areaDeg2: 0.0002, parkName: "Ludington State Park", parkKey: "relation/123" },
+      { osmType: "way", osmId: 15, name: null, lat: 44.02, lon: -86.51,
+        areaDeg2: 0.0001, parkName: "Ludington State Park", parkKey: "relation/123" }
     ]);
-    expect(merged.rows.length).toBe(2);
-    expect(merged.skippedUnnamed).toBe(1);
+    expect(merged.rows.length).toBe(4);
+    expect(merged.skippedUnnamed).toBe(0);
     expect(merged.rows.find(function (r) { return r.id === "osm-way-11"; }).name)
       .toBe("Ludington State Park — North Beach");
-    expect(merged.rows.find(function (r) { return r.id === "osm-way-14"; })).toBe(undefined);
+    const second = merged.rows.find(function (r) { return r.id === "osm-way-14"; });
+    expect(second.name).toBe("Ludington State Park — North Beach 2");
+    // The unnamed-origin invariant holds for numbered rows too.
+    expect(second.parkName).toBe("Ludington State Park — North Beach 2");
+    expect(merged.rows.find(function (r) { return r.id === "osm-way-15"; }).name)
+      .toBe("Ludington State Park — North Beach 3");
   });
 
   it("keeps same-named parks distinct via parkKey", () => {

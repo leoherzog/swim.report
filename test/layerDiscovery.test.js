@@ -495,8 +495,9 @@ describe("discoverFromLayers: park membership is polygon-only and intersection-b
 
 describe("discoverFromLayers: park NAMING uses the wider parksName tier", () => {
   it("lets a named park way present only in parks-line donate its name", () => {
-    // Membership comes from the big polygon; the smaller line-only park wins
-    // the association because association is smallest-overlapping-bbox.
+    // Membership comes from the big polygon; a line-mapped park contains no
+    // vertices, so association falls back to the smallest overlapping bbox
+    // and the line-only park wins.
     const regionalForest = polyFeature("parks-polygon", "way", 731,
       { leisure: "park", name: "Regional Forest" }, box(43.29, -86.41, 43.31, -86.39));
     const shorelineTrail = lineFeature("parks-line", "way", 732,

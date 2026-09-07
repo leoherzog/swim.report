@@ -652,10 +652,9 @@ export function discoverFromLayers(layers) {
     // Step 5. Association over the naming tier. Candidates come from the
     // envelope grid queried by the beach's unpadded bbox, which is exactly what
     // associateParkForBeach's own boundsOverlap tests, returned in ascending
-    // original index order, so the smallest-area-then-first-seen tie-break
-    // resolves bit-identically to a full-list scan. Envelope overlap and not
-    // centre-containment: shoreline beach polygons commonly bulge lakeward past
-    // the park boundary, pulling their centre outside the park bbox.
+    // original index order, so every first-seen tie-break resolves
+    // bit-identically to a full-list scan. Containment and the umbrella cap
+    // are decided inside associateParkForBeach from the records' geometry.
     const candidateIdx = queryGridByBounds(parksNameGrid, beach.bounds);
     const candidateParks = [];
     for (let c = 0; c < candidateIdx.length; c++) {

@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import {
   isPondBeach,
   associateParkForBeach,
+  bboxAreaDeg2,
   pondWaterSeeds,
   WATER_MIN_AREA_DEG2,
   POND_TEST_MAX_BEACH_AREA_DEG2,
@@ -113,6 +114,100 @@ describe("associateParkForBeach", () => {
   it("returns null when nothing overlaps", () => {
     const beach = { bounds: { minLat: 10, minLon: 10, maxLat: 11, maxLon: 11 } };
     expect(associateParkForBeach(beach, parks)).toBe(null);
+  });
+});
+
+describe("associateParkForBeach: containment over bbox size", () => {
+  // Polygon park records with real rings, so containment can be counted.
+  function rect(minLat, minLon, maxLat, maxLon) {
+    return {
+      bounds: { minLat: minLat, minLon: minLon, maxLat: maxLat, maxLon: maxLon },
+      geometry: { type: "Polygon", coordinates: [[
+        [minLon, minLat], [maxLon, minLat], [maxLon, maxLat], [minLon, maxLat], [minLon, minLat]
+      ]] }
+    };
+  }
+  function park(osmId, name, r, extra) {
+    return Object.assign({
+      osmType: "way", osmId: osmId, name: name, bounds: r.bounds,
+      areaDeg2: bboxAreaDeg2(r.bounds), geometry: r.geometry, protectedAreaOnly: false
+    }, extra || {});
+  }
+  // A beach record shaped like beachRecord's output: probe vertices along a
+  // shoreline strip from (lat0, lon) to (lat1, lon).
+  function beachStrip(lat0, lat1, lon, count) {
+    const vertices = [];
+    for (let i = 0; i < count; i++) {
+      vertices.push({ lat: lat0 + (lat1 - lat0) * i / (count - 1), lon: lon });
+    }
+    const bounds = { minLat: Math.min(lat0, lat1), minLon: lon - 0.0005, maxLat: Math.max(lat0, lat1), maxLon: lon + 0.0005 };
+    return { bounds: bounds, areaDeg2: bboxAreaDeg2(bounds), vertices: vertices };
+  }
+
+  it("names by the park that contains the beach, not the smallest bbox that brushes it", () => {
+    // The Pentwater shape (way 1339227522): a tiny park at the beach's south tip
+    // brushes its bbox and used to win on size; the state park holds most of
+    // the vertices.
+    const statePark = park(544228744, "Charles Mears State Park", rect(43.7815, -86.4421, 43.7871, -86.4333));
+    const tinyPark = park(544228745, "Channel Lane Park", rect(43.7811, -86.4405, 43.7818, -86.4396));
+    const beach = beachStrip(43.7814, 43.7869, -86.4400, 33);
+    expect(associateParkForBeach(beach, [tinyPark, statePark]).name).toBe("Charles Mears State Park");
+    expect(associateParkForBeach(beach, [statePark, tinyPark]).name).toBe("Charles Mears State Park");
+  });
+
+  it("sets an umbrella area aside when a smaller park overlaps", () => {
+    // A marine sanctuary spanning the whole coast contains every vertex; the
+    // beach's own park contains half of them and still wins.
+    const sanctuary = park(1, "Coastwide Marine Sanctuary", rect(40, -90, 47, -80), { protectedAreaOnly: true });
+    const cityPark = park(2, "Doran Regional Park", rect(43.79, -86.44, 43.80, -86.43));
+    const beach = beachStrip(43.785, 43.799, -86.435, 20);
+    expect(associateParkForBeach(beach, [sanctuary, cityPark]).name).toBe("Doran Regional Park");
+    // Alone, the umbrella still names the beach: an umbrella name beats none.
+    expect(associateParkForBeach(beach, [sanctuary]).name).toBe("Coastwide Marine Sanctuary");
+  });
+
+  it("prefers a leisure park over a protected-area-only boundary when both contain the beach", () => {
+    const birdSanctuary = park(1, "Harbour Migratory Bird Sanctuary", rect(48.40, -123.40, 48.42, -123.36), { protectedAreaOnly: true });
+    const cityPark = park(2, "Beacon Hill Park", rect(48.405, -123.375, 48.415, -123.365));
+    // The sanctuary holds every vertex, the park holds 6 of 10: both clear the
+    // floor, and the sanctuary's smaller-than-1000x bbox keeps it in the field.
+    const beach = beachStrip(48.402, 48.411, -123.370, 10);
+    expect(associateParkForBeach(beach, [birdSanctuary, cityPark]).name).toBe("Beacon Hill Park");
+  });
+
+  it("keeps a nested specific park over a containing one when both hold the beach", () => {
+    const forest = park(1, "County Forest", rect(43.0, -86.1, 43.1, -86.0));
+    const nested = park(2, "Little Cove Park", rect(43.04, -86.06, 43.06, -86.04));
+    const beach = beachStrip(43.045, 43.055, -86.05, 12);
+    expect(associateParkForBeach(beach, [forest, nested]).name).toBe("Little Cove Park");
+  });
+
+  it("ignores a park holding a single vertex or under a quarter of the best count", () => {
+    const statePark = park(1, "State Park", rect(43.0, -86.1, 43.1, -86.0));
+    const sliver = park(2, "Corner Park", rect(43.0995, -86.051, 43.1005, -86.049));
+    // 40 vertices: 39 in the state park, the last one on the boundary shared
+    // with the corner park, which is the smaller bbox.
+    const beach = beachStrip(43.05, 43.1, -86.05, 40);
+    expect(associateParkForBeach(beach, [sliver, statePark]).name).toBe("State Park");
+  });
+
+  it("falls back to the smallest bbox when no park contains two vertices", () => {
+    // Line-mapped and offset parks: containment says nothing, so the original
+    // rule decides.
+    const big = park(1, "Big Park", rect(43.0, -86.1, 43.1, -86.0), { geometry: { type: "LineString", coordinates: [] } });
+    const small = park(2, "Small Park", rect(43.04, -86.06, 43.06, -86.04), { geometry: { type: "LineString", coordinates: [] } });
+    const beach = beachStrip(43.045, 43.055, -86.05, 12);
+    expect(associateParkForBeach(beach, [big, small]).name).toBe("Small Park");
+  });
+
+  it("names a bare node beach by the smallest bbox", () => {
+    // A node has one probe vertex and no bbox area, so neither the umbrella
+    // cap nor the containment floor can apply.
+    const sanctuary = park(1, "Marine Sanctuary", rect(24, -82, 26, -80), { protectedAreaOnly: true });
+    const refuge = park(2, "Heron Refuge", rect(24.6, -81.6, 24.8, -81.4));
+    const bounds = { minLat: 24.7, minLon: -81.5, maxLat: 24.7, maxLon: -81.5 };
+    const beach = { bounds: bounds, areaDeg2: 0, vertices: [{ lat: 24.7, lon: -81.5 }] };
+    expect(associateParkForBeach(beach, [sanctuary, refuge]).name).toBe("Heron Refuge");
   });
 });
 
@@ -577,13 +672,19 @@ describe("parkRecord", () => {
     const feature = parkFeature({ leisure: "park", name: "Holland State Park" });
     const record = parkRecord(feature);
     expect(Object.keys(record).sort()).toEqual([
-      "areaDeg2", "bounds", "geometry", "name", "osmId", "osmType"
+      "areaDeg2", "bounds", "geometry", "name", "osmId", "osmType", "protectedAreaOnly"
     ]);
     expect(record.name).toBe("Holland State Park");
+    expect(record.protectedAreaOnly).toBe(false);
     expect(record.areaDeg2).toBeCloseTo(0.04, 12);
     // Geometry is retained by reference: membership needs the actual rings,
     // not the envelope.
     expect(record.geometry).toBe(feature.geometry);
+  });
+
+  it("marks a boundary=protected_area with no leisure tag as protectedAreaOnly", () => {
+    expect(parkRecord(parkFeature({ boundary: "protected_area", name: "Sanctuary" })).protectedAreaOnly).toBe(true);
+    expect(parkRecord(parkFeature({ boundary: "protected_area", leisure: "nature_reserve", name: "Reserve" })).protectedAreaOnly).toBe(false);
   });
 
   it("accepts all three park tag alternatives", () => {

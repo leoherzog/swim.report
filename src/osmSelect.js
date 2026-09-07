@@ -15,6 +15,8 @@
 // silently move every boundary. Comments quote km²/m² equivalents at Michigan
 // latitudes for legibility only.
 
+import { pointInGeometry } from "./geo.js";
+
 // A beach whose own bbox is at least this large is never pond-tested and never
 // seeds the pond-water gather. 1e-3 deg² ≈ 8.7 km² at Michigan latitudes, 200x
 // the WATER_MIN_AREA_DEG2 pond threshold, so a beach this size cannot plausibly
@@ -137,22 +139,112 @@ export function isPondBeach(beach, waters) {
   return sawWater;
 }
 
-// Returns the smallest-bbox park whose bounding box overlaps the beach's
-// bounding box, or null when none overlaps.
-//
-// Association is by bbox overlap, not center-in-bbox: shoreline beach polygons
-// commonly bulge lakeward past the park boundary, pulling their center outside
-// the park bbox. Smallest overlapping park bbox wins so a nested specific park
-// beats a containing forest or protected area; ties go to the first-seen park,
-// so the caller's scan order over the park list is part of the contract.
-export function associateParkForBeach(beach, parks) {
+// A naming candidate whose bbox exceeds this multiple of the beach's own bbox
+// is an umbrella area (a marine sanctuary, national forest, recreation area)
+// and competes only when no smaller candidate overlaps. Such polygons contain
+// vertices of every beach along their coast, so without this cap they outvote
+// the small park a beach actually sits in.
+export const PARK_UMBRELLA_BBOX_RATIO = 1000;
+
+// A candidate qualifies on containment only with at least this many beach probe
+// vertices inside its polygon and at least this fraction of the best
+// candidate's count. The vertex minimum keeps one stray vertex from qualifying
+// a park that merely touches the beach; the fraction keeps a long beach that
+// straddles two real parks from being named by the one holding a sliver of it.
+export const PARK_CONTAINMENT_MIN_VERTICES = 2;
+export const PARK_CONTAINMENT_MIN_FRACTION = 0.25;
+
+function isPolygonGeometry(geometry) {
+  return geometry !== null && typeof geometry === "object" &&
+    (geometry.type === "Polygon" || geometry.type === "MultiPolygon");
+}
+
+function containedVertexCount(park, vertices) {
+  if (!isPolygonGeometry(park.geometry)) {
+    return 0;
+  }
+  let count = 0;
+  for (let i = 0; i < vertices.length; i++) {
+    if (pointInGeometry(park.geometry, vertices[i].lat, vertices[i].lon)) {
+      count = count + 1;
+    }
+  }
+  return count;
+}
+
+// First-seen smallest bbox: ties go to the earlier park, so the caller's scan
+// order over the park list is part of the contract.
+function smallestPark(parks) {
   let best = null;
   for (let i = 0; i < parks.length; i++) {
-    const park = parks[i];
-    if (boundsOverlap(beach.bounds, park.bounds)) {
-      if (best === null || park.areaDeg2 < best.areaDeg2) {
-        best = park;
+    if (best === null || parks[i].areaDeg2 < best.areaDeg2) {
+      best = parks[i];
+    }
+  }
+  return best;
+}
+
+// Returns the park that donates its name to the beach, or null when no park
+// bbox overlaps the beach bbox.
+//
+// Candidacy is bbox overlap, not centre containment: shoreline beach polygons
+// commonly bulge lakeward past the park boundary. Among the overlapping parks:
+//   1. parks whose bbox exceeds PARK_UMBRELLA_BBOX_RATIO times the beach bbox
+//      are set aside unless nothing else overlaps;
+//   2. parks holding at least PARK_CONTAINMENT_MIN_VERTICES probe vertices and
+//      PARK_CONTAINMENT_MIN_FRACTION of the best count qualify; among them a
+//      leisure=park or nature_reserve beats a protected-area-only boundary,
+//      then the smallest bbox wins, so a nested specific park still beats a
+//      containing forest;
+//   3. when no park qualifies on containment, the smallest bbox wins.
+// A beach with no vertices (a bare bounds record) resolves through step 3.
+export function associateParkForBeach(beach, parks) {
+  const overlapping = [];
+  for (let i = 0; i < parks.length; i++) {
+    if (boundsOverlap(beach.bounds, parks[i].bounds)) {
+      overlapping.push(parks[i]);
+    }
+  }
+  if (overlapping.length === 0) {
+    return null;
+  }
+  const beachArea = typeof beach.areaDeg2 === "number" ? beach.areaDeg2 : bboxAreaDeg2(beach.bounds);
+  let field = overlapping;
+  if (beachArea > 0) {
+    const cap = beachArea * PARK_UMBRELLA_BBOX_RATIO;
+    const fitted = [];
+    for (let i = 0; i < overlapping.length; i++) {
+      if (overlapping[i].areaDeg2 <= cap) {
+        fitted.push(overlapping[i]);
       }
+    }
+    if (fitted.length > 0) {
+      field = fitted;
+    }
+  }
+  const vertices = Array.isArray(beach.vertices) ? beach.vertices : [];
+  const inside = [];
+  let maxInside = 0;
+  for (let i = 0; i < field.length; i++) {
+    inside.push(containedVertexCount(field[i], vertices));
+    if (inside[i] > maxInside) {
+      maxInside = inside[i];
+    }
+  }
+  if (maxInside < PARK_CONTAINMENT_MIN_VERTICES) {
+    return smallestPark(field);
+  }
+  const floor = Math.max(PARK_CONTAINMENT_MIN_VERTICES, PARK_CONTAINMENT_MIN_FRACTION * maxInside);
+  let best = null;
+  let bestRank = 0;
+  for (let i = 0; i < field.length; i++) {
+    if (inside[i] < floor) {
+      continue;
+    }
+    const rank = field[i].protectedAreaOnly === true ? 1 : 0;
+    if (best === null || rank < bestRank || (rank === bestRank && field[i].areaDeg2 < best.areaDeg2)) {
+      best = field[i];
+      bestRank = rank;
     }
   }
   return best;
@@ -363,10 +455,9 @@ export function beachRecord(feature) {
 // beaches inside it. Returns null unless both conditions hold — an unnamed park
 // has nothing to donate, and a named non-park polygon is not a park.
 //
-// geometry is retained because membership needs the actual rings, not the
-// envelope: park bboxes overlap wildly along a coastline and envelope-only
-// membership would admit beaches into parks they are nowhere near. The naming
-// tier passes envelope-only records and ignores this field.
+// geometry is retained because membership and containment-based naming need
+// the actual rings, not the envelope: park bboxes overlap wildly along a
+// coastline. A record without polygon geometry still names by bbox.
 export function parkRecord(feature) {
   if (!hasUsableBounds(feature.bounds)) {
     return null;
@@ -382,6 +473,10 @@ export function parkRecord(feature) {
     name: tags.name,
     bounds: bounds,
     areaDeg2: bboxAreaDeg2(bounds),
+    // A boundary=protected_area with no leisure tag is a designation (a marine
+    // sanctuary, a bird sanctuary, a military reservation), not a place a
+    // swimmer names a beach after; association ranks it below a leisure park.
+    protectedAreaOnly: tags.leisure !== "park" && tags.leisure !== "nature_reserve",
     geometry: feature.geometry
   };
 }

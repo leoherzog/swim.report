@@ -41,8 +41,8 @@ function compassDirection(fromLat, fromLon, toLat, toLon) {
 //       src/osmSelect.js from the element's loc_name tag;
 //   (b) a compass-direction label relative to the primary beach, but only when
 //       the two are clearly separated (>= COMPASS_MIN_SEPARATION_KM);
-//   (c) null — no meaningful distinction is derivable, so the caller keeps the
-//       largest only (previous behavior).
+//   (c) null — the two are too close to be distinct beaches, so the caller
+//       keeps the largest only.
 // Never returns a label that implies official signage — (b) yields plain
 // wayfinding like "East Beach", not an official beach name.
 function deriveUnnamedSuffix(beach, primary) {
@@ -82,12 +82,12 @@ function addUnnamedParkRow(byId, beach, displayName) {
 // - unnamed beaches are kept only when a park was associated. The LARGEST (by
 //   bounding-box area) unnamed beach per park keeps the park's name as
 //   its display name (its id and name derivation are unchanged — existing KV
-//   flags key off beach id). Each ADDITIONAL unnamed beach is kept only when
-//   deriveUnnamedSuffix produces a distinct, human-meaningful label; that row's
-//   display name (and park_name) becomes "<Park> — <suffix>" so no two rows are
-//   indistinguishable. Beaches with no derivable distinction — or one that
-//   collides with a sibling already kept — fall back to skipped (counted in
-//   skippedUnnamed), preserving the previous largest-only behavior.
+//   flags key off beach id). Each ADDITIONAL unnamed beach is kept when
+//   deriveUnnamedSuffix produces a label; that row's display name (and
+//   park_name) becomes "<Park> — <suffix>", with " 2", " 3", … appended in scan
+//   order when a sibling already holds the label. A beach with no derivable
+//   label sits within COMPASS_MIN_SEPARATION_KM of the primary and is skipped
+//   (counted in skippedUnnamed) as a split polygon of the same beach.
 // Returns { rows: [{ id, name, lat, lon, osmId, parkName }], skippedUnnamed }.
 export function mergeBeachRows(namedRows, parkBeaches) {
   const byId = new Map();
@@ -155,12 +155,16 @@ export function mergeBeachRows(namedRows, parkBeaches) {
         skippedUnnamed = skippedUnnamed + 1;
         continue;
       }
-      const displayName = primary.parkName + " — " + suffix;
+      let displayName = primary.parkName + " — " + suffix;
       if (usedNames.has(displayName)) {
-        // Another sibling already claimed this exact label (e.g. two beaches in
-        // the same compass direction) — keeping both would be indistinguishable.
-        skippedUnnamed = skippedUnnamed + 1;
-        continue;
+        // Another sibling already claimed this label (a long seashore has more
+        // beaches than compass points), so number the later ones in scan order
+        // rather than dropping real beaches from the map.
+        let n = 2;
+        while (usedNames.has(displayName + " " + String(n))) {
+          n = n + 1;
+        }
+        displayName = displayName + " " + String(n);
       }
       usedNames.add(displayName);
       addUnnamedParkRow(byId, beach, displayName);

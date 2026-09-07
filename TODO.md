@@ -136,16 +136,18 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   safety asymmetry before reaching for a mean: averaging dilutes whichever model saw the hazard
   — a 4.5 ft plus 2.5 ft disagreement averages to yellow, not red — so any derivation change
   must ride a `RULES_VERSION`-style bump to keep calibration cohorts comparable.
-- **Secondary unnamed park beaches need a derivable label to survive.** `mergeBeachRows` keeps
-  a park's largest unnamed beach under the bare park name, and additional unnamed beaches only
-  when `deriveUnnamedSuffix` finds a distinguishing label (the element's own `loc_name` tag,
-  else a compass direction at ≥0.2 km separation); indistinguishable or coincident polygons drop
-  and are logged `skipped_unnamed`. Follow-up: merge their geometries, or derive richer locality
-  labels.
-- **Park association is bbox-overlap, not polygon containment.** Each beach associates to the
-  smallest park whose bounding box overlaps the beach's. An L-shaped or diagonal park could
-  claim an adjacent beach. Verified accurate on the pilot region's state parks; revisit if wrong
-  pairings show up.
+- **Unnamed park beaches within 0.2 km of their park's primary beach drop.** `mergeBeachRows`
+  treats a secondary with no derivable compass label as a split polygon of the primary and logs
+  it `skipped_unnamed`. Follow-up: merge their geometries, or derive richer locality labels.
+- **Numbered sibling labels shift when OSM gains a beach.** A park's colliding compass labels are
+  numbered in `(osmType, osmId)` scan order, so a new lower-id beach in the same direction
+  renumbers its later siblings' display names. Ids and KV flags are unaffected.
+- **A long beach way spanning several real parks gets one name.** Association picks a single
+  park per beach element, so a multi-kilometre `natural=beach` way crossing several named state
+  beaches is named by whichever holds the most vertices. The fix is upstream way-splitting.
+- **Marine designations can still win the name.** A marine sanctuary or underwater preserve
+  under the 1000× umbrella cap that also carries `leisure=nature_reserve` competes as a land
+  park. Revisit if such names show up where a small land park also contains the beach.
 - **Only named beaches and parks are discoverable — by design.** Every discovery path requires
   a name somewhere: the first pass takes only named `natural=beach` / `leisure=beach_resort`
   elements, and park containment only rescues unnamed beaches inside a **named** park polygon.

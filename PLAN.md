@@ -1481,8 +1481,14 @@ so.
       // sliver, i.e. the beach must be dropped from discovery.
 
     export function associateParkForBeach(beach, parks)
-      // Pure. Beach -> park name, with the smallest-enclosing-park rule and a first-seen
-      // tie-break on equal area.
+      // Pure. Beach -> park, among parks whose bbox overlaps the beach bbox. Parks over
+      // PARK_UMBRELLA_BBOX_RATIO (1000) times the beach bbox are set aside unless nothing
+      // else overlaps. A park qualifies on containment with at least
+      // PARK_CONTAINMENT_MIN_VERTICES (2) probe vertices inside its polygon and
+      // PARK_CONTAINMENT_MIN_FRACTION (0.25) of the best count; among qualifiers a
+      // leisure=park / nature_reserve outranks a protected-area-only boundary, then the
+      // smallest bbox wins. With no qualifier the smallest bbox wins. Every tie is
+      // first-seen, so the caller's scan order is part of the contract.
 
     export function sortLayerFeatures(features)
       // Pure, total order by (osmType, osmId). FlatGeobuf stores features in Hilbert
@@ -2870,13 +2876,14 @@ budget and no circuit breaker, because there is no upstream to be flaky:
      unnamed beach per park ELEMENT (parkKey, so two same-named parks in different
      towns stay distinct) is the "primary" and keeps the bare park name as its
      display name (id/name derivation unchanged so existing KV flags stay keyed);
-   - each additional unnamed beach in the same park is kept only when
-     deriveUnnamedSuffix(beach, primary) yields a distinct, human-meaningful label —
-     beach.locality (the loc_name tag from the beaches layer), else a compass direction
-     relative to the primary when they are at least COMPASS_MIN_SEPARATION_KM (0.2) km
-     apart; that row's display name and park_name both become "<Park> — <suffix>". A beach
-     with no derivable distinction, or one whose label collides with a sibling already
-     kept, is skipped and counted in skippedUnnamed;
+   - each additional unnamed beach in the same park is kept when
+     deriveUnnamedSuffix(beach, primary) yields a label — beach.locality (the loc_name tag
+     from the beaches layer), else a compass direction relative to the primary when they
+     are at least COMPASS_MIN_SEPARATION_KM (0.2) km apart; that row's display name and
+     park_name both become "<Park> — <suffix>", with " 2", " 3", … appended in scan order
+     when a sibling already holds the label. A beach closer than that to the primary has
+     no derivable label, is treated as a split polygon of the same beach, and is skipped
+     and counted in skippedUnnamed;
    - unnamed-origin invariant, relied on by the reconciliation pass below and by render's
      park-name-first treatment: every unnamed-origin row has name === park_name, whether
      the bare park name or park-name-plus-suffix;
