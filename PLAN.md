@@ -3408,7 +3408,7 @@ Routing table (method GET only; anything else → 405):
 
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
-| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. KV: one bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — two KV reads per page regardless of row count. HOME_LIST_LIMIT (100) is load-bearing, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
+| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. KV: one bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — two KV reads per page regardless of row count. HOME_LIST_LIMIT (100) is load-bearing, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located, plus preciseLocation — true only for an explicit near param, i.e. a browser fix rather than the request.cf IP estimate, and wording only; data also carries query, hasMore, near — section 9) |
 | GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp: + wqfloor:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT id,name,park_name,lat,lon,water_class,water_class_attempts FROM beaches WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), then one bulk flag: get and one bulk official: get for those ids | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE KV read: env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" }), resolved by mapDirectoryFeatures(directory, nowIso) — which calls markerFlagColor(estimate, official, nowIso) per entry, the section-9 displayFlagColor rule with double-red collapsed to red, from the ingredients the cron stored (section 1, MapDirectory). No D1 read at all on this path. When the key is absent, unparseable or version-mismatched the DEGRADED branch runs instead: D1 SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] ORDER BY id LIMIT 5000 (MAP_DEGRADED_MAX_FEATURES — a dead builder must not turn every colo's 60 s revalidation into an unbounded full-table scan), every feature's flag the literal "unknown", zero KV reads, and one console.log naming the feature count. There is deliberately no fallback to a per-beach bulk read: that is a silent cliff that keeps the map working while the builder has been dead for days, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped in both branches, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the directory's build instant, or null on the degraded branch), ["degraded": true on that branch,] "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt and degraded are top-level GeoJSON foreign members (RFC 7946 section 6.1), so a dead builder is visible to anyone hitting the endpoint instead of a silent cliff. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
@@ -3525,6 +3525,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                       distanceMi: number|null } ],
       //          nowIso: "2026-07-04T15:05:00.000Z",
       //          sortedByProximity: boolean (optional),
+      //          preciseLocation: boolean (optional — the location came from an
+      //                 explicit near param, i.e. a browser fix, rather than the
+      //                 request.cf IP estimate; wording only, never the sort),
       //          query: string (optional — the active ?q=, echoed into the search
       //                 input value and an "Showing results for …/Clear search" line),
       //          hasMore: boolean (optional — more beaches exist server-side than were
@@ -3534,12 +3537,36 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                 input so proximity sorting survives a search submit) }
       // -> full HTML document string.
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite or
-      // null renders nothing. sortedByProximity is accepted but renders no visible
-      // note — the per-row distance labels carry the proximity signal. The search box
-      // is a GET form (id="beach-search-form", action="/", input name="q") that submits
-      // server-side while the inline script filters rendered rows; a q-filtered page
-      // with zero rows shows "No beaches match your search.", not the empty-database
-      // copy.
+      // null renders nothing. sortedByProximity names the origin those labels are
+      // measured from rather than restating the sort: it renders
+      // <p id="list-origin" class="list-origin wa-caption-s wa-color-text-quiet">
+      // holding "Distances from your location" when preciseLocation is true and
+      // "Distances from your approximate location" otherwise. The container is always
+      // present and empty on an alphabetical list (styles.js hides an empty one), so
+      // geoScript.js can write the precise wording into it after a granted fix.
+      // __swimReportSwapList deliberately does not carry this line — see the geo-swap
+      // paragraph below. The search box is a GET form (id="beach-search-form",
+      // action="/", input name="q") that submits server-side while the inline script
+      // filters rendered rows; a q-filtered page with zero rows shows "No beaches match
+      // your search.", not the empty-database copy.
+      // Both the origin line and the green-only control live in one
+      // <div class="list-controls"> between the active-query line and the live region,
+      // origin on the start edge and <div class="list-filter"><wa-switch
+      // id="green-only-filter" size="s">Estimated green only</wa-switch></div> pushed to
+      // the end. The label names the estimate because data-flag is the row's estimate
+      // chip, never a scraped official. The filter block is rendered only when the page
+      // has rows, so an empty list carries no control over nothing. The filter is purely
+      // client-side — the server always renders every row, so with JS off the switch is
+      // inert and nothing is hidden. searchScript.js applies it and the search term in
+      // one pass, one display write per row, reading each row's data-flag keyword; its
+      // state persists under the single localStorage key "swimreport:green-only" with
+      // both the read and the write in try/catch, and a restored "1" runs the pass at
+      // load, since a wa-switch fires "change" only on real interaction. While the switch
+      // is on it owns #beach-list-empty, showing "No estimated-green beaches match your
+      // search." when it has hidden every row the term matched, and restores the server's
+      // own copy and visibility when switched off. A term that matched no row at all
+      // leaves the server's copy standing, so the filter never takes the blame for a
+      // plain search miss.
       // The page embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a browser-side
       // geolocation upgrade: on load, when the URL has no "near" param, it calls
       // navigator.geolocation.getCurrentPosition and on success fetch()es the same list
@@ -3551,9 +3578,17 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // script holds it by reference), the .clear-search href, a hidden "near" input
       // appended to #beach-search-form, and the #home-map data-center /
       // data-center-precise attributes (the #home-map node itself is never replaced, so
-      // the MapLibre instance stays alive). It then rewrites the URL via
-      // history.replaceState and dispatches a "swimreport:nearupdate" CustomEvent on
-      // document so the map script re-centers, and announces the reorder into the
+      // the MapLibre instance stays alive). #list-origin is not swapped: the live search
+      // fetches with the map's baked-in IP center as "near" purely for cacheability, so
+      // a swapped-in origin line would claim a precision the visitor never granted —
+      // geoScript.js sets it to "Distances from your location" itself, after its own
+      // genuinely precise fix. The green-only control is not swapped either; it is
+      // browser state. __swimReportSwapList dispatches a "swimreport:listswap"
+      // CustomEvent on document after every successful swap, because the replaced rows
+      // lose the inline display the client filters wrote and searchScript.js has to
+      // re-apply both of them. It then rewrites the URL via history.replaceState and
+      // dispatches a "swimreport:nearupdate" CustomEvent on document so the map script
+      // re-centers, and announces the reorder into the
       // #geo-live-region aria-live element (rendered empty, class wa-visually-hidden,
       // role=status, aria-live=polite, before the list section; if the pinned CDN is
       // unreachable that string becomes visible, the same accepted exposure as the
@@ -3751,7 +3786,12 @@ exporting a CSS string); render.js is the sole module the router imports.
   matches either.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
   the display name, optional subtitle, the estimated flag chip, and an OFFICIAL badge when
-  official is non-null.
+  official is non-null. The <li> also carries data-flag, the row's chip color through
+  collapseFlagColor (green|yellow|red|unknown, double-red -> red), which drives both the
+  3px flag-colored inline-start border in styles.js and the client-side green-only filter.
+  It mirrors the chip beside it, not markerFlagColor, so border and chip can never
+  disagree; unknown renders gray rather than being omitted. class="beach-row" stays the
+  first attribute and never gains a color class.
 - Display color (displayFlagColor in render.js) — the one rule behind both the detail
   page's h1 title flag and the map/list marker keyword (markerFlagColor), so the two can
   never disagree about one beach. displayFlagColor(estimate, official, nowIso) -> one of

@@ -1865,6 +1865,26 @@ describe("search script <-> rendered markup id contract", () => {
     expect(LIST_SEARCH_SCRIPT).toContain("data-complete");
     expect(LIST_SEARCH_SCRIPT).toContain("fetchUrl");
     expect(LIST_SEARCH_SCRIPT).toContain("bakedCenter");
+    // The green-only filter: one persistence key, both accesses guarded, the
+    // switch's id, the row attribute it reads, and the swap hook that re-applies
+    // it after every row replacement.
+    expect(LIST_SEARCH_SCRIPT).toContain("'swimreport:green-only'");
+    expect(LIST_SEARCH_SCRIPT).toContain("window.localStorage.getItem(GREEN_ONLY_KEY)");
+    expect(LIST_SEARCH_SCRIPT).toContain("window.localStorage.setItem(GREEN_ONLY_KEY");
+    expect(LIST_SEARCH_SCRIPT).toContain("getElementById('green-only-filter')");
+    expect(LIST_SEARCH_SCRIPT).toContain("getAttribute('data-flag') === 'green'");
+    expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('swimreport:listswap'");
+    expect(LIST_SEARCH_SCRIPT).toContain("No estimated-green beaches match your search.");
+    // A restored state must be applied at load: wa-switch fires "change" only on a
+    // real click or keypress, so without this the switch would read on above a
+    // list still showing every red, yellow and unknown row.
+    expect(LIST_SEARCH_SCRIPT).toContain("greenSwitch.checked = true;\n      filterRows();");
+    // The filter owns the empty state only when the term itself matched rows, so a
+    // plain search miss keeps the server's copy.
+    expect(LIST_SEARCH_SCRIPT).toContain("greenOnly && visibleCount === 0 && termCount > 0");
+    // The live region counts what is on screen, not the rows the filter hid.
+    expect(LIST_SEARCH_SCRIPT).toContain("row.style.display !== 'none'");
+    expect(LIST_SEARCH_SCRIPT).not.toContain("querySelectorAll('.beach-row').length");
 
     const html = renderListPage({
       entries: [{ beach: OVAL, estimate: null, official: null, distanceMi: null }],
@@ -1886,6 +1906,19 @@ describe("shared list-swap helper contract", () => {
     expect(LIST_SWAP_SCRIPT).toContain("getElementById('list-active-query')");
   });
 
+  it("announces every successful list replacement so the client filters re-apply", () => {
+    // The helper replaces #beach-list-items wholesale, so every row loses the
+    // inline display the search and green-only filters wrote.
+    expect(LIST_SWAP_SCRIPT).toContain("new CustomEvent('swimreport:listswap')");
+    // The origin line is deliberately left alone: the live search fetches with
+    // the map's IP-derived center as "near", so carrying that response's line
+    // over would claim a precision the visitor never granted. geoScript.js sets
+    // it after its own genuinely precise fix.
+    expect(LIST_SWAP_SCRIPT).not.toContain("list-origin");
+    expect(LIST_GEO_SCRIPT).toContain("getElementById('list-origin')");
+    expect(LIST_GEO_SCRIPT).toContain("Distances from your location");
+  });
+
   it("has both the geo upgrade and the live search delegate to the shared helper", () => {
     expect(LIST_GEO_SCRIPT).toContain("__swimReportSwapList");
     expect(LIST_SEARCH_SCRIPT).toContain("__swimReportSwapList");
@@ -1901,5 +1934,143 @@ describe("shared list-swap helper contract", () => {
     expect(swapAt).toBeGreaterThan(-1);
     expect(searchCallAt).toBeGreaterThan(-1);
     expect(swapAt).toBeLessThan(searchCallAt);
+  });
+});
+
+describe("renderListPage color-coded rows", () => {
+  function entryWith(color) {
+    return {
+      beach: { id: "b-" + String(color), name: "Beach " + String(color), lat: 42, lon: -86 },
+      estimate: color === null ? null : { color: color, reason: "r", official: false, updated: NOW_ISO },
+      official: null,
+      distanceMi: null
+    };
+  }
+
+  function firstRow(html) {
+    const start = html.indexOf("<li class=\"beach-row\" data-flag=\"");
+    expect(start).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf("</li>", start));
+  }
+
+  it("stamps each row with its chip's collapsed flag keyword", () => {
+    const cases = [
+      [entryWith("green"), "green"],
+      [entryWith("yellow"), "yellow"],
+      [entryWith("red"), "red"],
+      // double-red shares the red tint, exactly as collapseFlagColor decides.
+      [entryWith("double-red"), "red"],
+      // No estimate is an honest gray, never an omitted attribute.
+      [entryWith(null), "unknown"]
+    ];
+    for (const pair of cases) {
+      const row = firstRow(renderListPage({ entries: [pair[0]], nowIso: NOW_ISO }));
+      expect(row).toContain("data-flag=\"" + pair[1] + "\"");
+      // class="beach-row" stays the first attribute and gains no color class.
+      expect(row.indexOf("<li class=\"beach-row\" data-flag=")).toBe(0);
+    }
+  });
+
+  it("carries one border rule per flag keyword, from the flag color tokens", () => {
+    expect(PAGE_STYLES).toContain(".beach-row .beach-row-link {");
+    expect(PAGE_STYLES).toContain("border-inline-start-width: 3px;");
+    expect(PAGE_STYLES).toContain(
+      ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--wa-color-green-50); }");
+    expect(PAGE_STYLES).toContain(
+      ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--wa-color-yellow-70); }");
+    expect(PAGE_STYLES).toContain(
+      ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--wa-color-red-50); }");
+    expect(PAGE_STYLES).toContain(
+      ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--wa-color-gray-50); }");
+  });
+});
+
+describe("renderListPage green-only filter and distance origin", () => {
+  const ROW = { beach: OVAL, estimate: null, official: null, distanceMi: 3.2 };
+
+  it("renders the green-only switch above the list, inert without JS", () => {
+    const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
+    expect(html).toContain("<div class=\"list-filter\">");
+    // The label names the estimate: data-flag mirrors the row's estimate chip and
+    // never a scraped official color.
+    expect(html).toContain(
+      "<wa-switch id=\"green-only-filter\" size=\"s\">Estimated green only</wa-switch>");
+    // The control sits above the list, and the server never pre-filters: the row
+    // renders whether or not the switch would hide it.
+    expect(html.indexOf("class=\"list-filter\"")).toBeLessThan(html.indexOf("id=\"beach-list-items\""));
+    expect(html).toContain("data-flag=\"unknown\"");
+  });
+
+  it("omits the switch when the page has no rows to filter", () => {
+    // The switch markup is gone; searchScript.js still carries the id as a
+    // string constant, so the assertion names the element, not the id.
+    const empty = renderListPage({ entries: [], nowIso: NOW_ISO });
+    expect(empty).not.toContain("<wa-switch id=\"green-only-filter\"");
+    expect(empty).not.toContain("class=\"list-filter\"");
+    // The origin container still ships, and the controls row collapses when it
+    // holds nothing but an empty one.
+    expect(empty).toContain("<p id=\"list-origin\"");
+    expect(PAGE_STYLES).toContain(
+      ".list-controls:not(:has(.list-filter)):has(.list-origin:empty) {");
+    // A search miss is equally rowless, so it gets no filter over nothing either.
+    const miss = renderListPage({ entries: [], nowIso: NOW_ISO, query: "zzz" });
+    expect(miss).not.toContain("<wa-switch id=\"green-only-filter\"");
+    expect(miss).toContain("No beaches match your search.");
+  });
+
+  it("names a precise origin for a browser fix", () => {
+    const html = renderListPage({
+      entries: [ROW],
+      nowIso: NOW_ISO,
+      sortedByProximity: true,
+      preciseLocation: true,
+      near: "42.658,-86.211"
+    });
+    expect(html).toContain(
+      "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\">" +
+      "Distances from your location</p>");
+    expect(html).not.toContain("approximate location");
+  });
+
+  it("names an approximate origin for the IP estimate", () => {
+    const html = renderListPage({
+      entries: [ROW],
+      nowIso: NOW_ISO,
+      sortedByProximity: true
+    });
+    expect(html).toContain(
+      "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\">" +
+      "Distances from your approximate location</p>");
+  });
+
+  it("says nothing about an origin when the list is not proximity-sorted", () => {
+    const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
+    // Scope to the rendered line: geoScript.js legitimately carries the precise
+    // wording as a string constant, so a bare substring check would be vacuous.
+    const originStart = html.indexOf("<p id=\"list-origin\"");
+    expect(originStart).toBeGreaterThan(-1);
+    expect(html.slice(originStart, html.indexOf("</p>", originStart)))
+      .not.toContain("Distances from your");
+    // The empty container still ships, because geoScript.js writes the precise
+    // wording into it after a granted fix on a page that started alphabetical.
+    expect(html).toContain(
+      "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\"></p>");
+    expect(PAGE_STYLES).toContain(".list-origin:empty {");
+  });
+
+  it("derives the precise flag from an explicit near param in the router", async () => {
+    const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
+    const { env } = makeEnv(rows, nullFlags());
+    const precise = await handleRequest(homeRequest("?near=42.6,-86.2"), env);
+    expect(await precise.text()).toContain("Distances from your location</p>");
+    // The same coordinates from request.cf are the IP estimate, not a fix.
+    const { env: env2 } = makeEnv(rows, nullFlags());
+    const ipRequest = {
+      method: "GET",
+      url: "https://swim.report/",
+      cf: { latitude: "42.6", longitude: "-86.2" }
+    };
+    expect(await (await handleRequest(ipRequest, env2)).text())
+      .toContain("Distances from your approximate location</p>");
   });
 });

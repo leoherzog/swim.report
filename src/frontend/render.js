@@ -769,8 +769,13 @@ function renderBeachRow(entry) {
   const distanceHtml = span("beach-row-distance wa-caption-s", milesLabel);
   const subtitle = subtitleName(beach);
   const subtitleHtml = span("beach-row-subtitle", subtitle);
+  // data-flag is the row's chip color as a keyword, read by the client-side
+  // green-only filter and by the flag-colored inline-start border in styles.js.
+  // It mirrors the chip beside it (the estimate), so border and chip can never
+  // disagree; unknown is a visible gray keyword, never omitted.
+  const flagKeyword = collapseFlagColor(estimate ? estimate.color : null);
   const lines = [];
-  lines.push("<li class=\"beach-row\" data-name=\"" + dataName + "\">");
+  lines.push("<li class=\"beach-row\" data-flag=\"" + flagKeyword + "\" data-name=\"" + dataName + "\">");
   lines.push("<a class=\"beach-row-link\" href=\"" + escapeHtml(href) + "\">");
   lines.push("<span class=\"beach-row-name\">" + escapeHtml(displayName(beach)) + distanceHtml +
     subtitleHtml + "</span>");
@@ -822,6 +827,11 @@ export function renderListPage(data) {
   const location = data && data.location ? data.location : null;
   const hasMore = !!(data && data.hasMore);
   const offerSearchAll = hasMore && query.length === 0;
+  // Whether the rows were sorted by distance at all, and whether that distance
+  // came from a browser fix rather than the IP estimate. The router decides
+  // both; the page only names the origin the labels are measured from.
+  const sortedByProximity = !!(data && data.sortedByProximity);
+  const preciseLocation = !!(data && data.preciseLocation);
 
   // A q-filtered page with zero rows is a search miss, not an empty database, so
   // it gets the no-match copy just like the client-side filter miss.
@@ -864,6 +874,31 @@ export function renderListPage(data) {
       "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
   const activeQueryHtml = "<div id=\"list-active-query\">" + activeQueryInner + "</div>";
 
+  // The distance labels are meaningless without an origin, so a proximity-sorted
+  // list names one. The container is always rendered and empty when the list is
+  // alphabetical (styles.js hides an empty one), because geoScript.js writes the
+  // precise wording into it after a granted fix on a page that started coarse.
+  // __swimReportSwapList deliberately does not carry this line: the live search
+  // fetches with the map's baked-in IP center as "near" purely for cacheability,
+  // so a search response would otherwise claim a precision it does not have.
+  const originText = sortedByProximity
+    ? (preciseLocation ? "Distances from your location" : "Distances from your approximate location")
+    : "";
+  const originHtml = "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\">" +
+    escapeHtml(originText) + "</p>";
+
+  // Client-side green-only filter. With no JS the switch is inert and every row
+  // stays visible, which is why the server never renders a filtered list. The
+  // label names the estimate, because the color it filters on is the row's
+  // estimate chip and never a scraped official flag. A list with no rows offers
+  // nothing to filter, so the switch is omitted rather than left over nothing.
+  const filterHtml = hasEntries ? ("<div class=\"list-filter\">" +
+    "<wa-switch id=\"green-only-filter\" size=\"s\">Estimated green only</wa-switch>" +
+    "</div>") : "";
+  // One row: the origin on the start edge, the switch pushed to the end edge so
+  // it still sits there when the origin line is empty and hidden.
+  const controlsHtml = "<div class=\"list-controls\">" + originHtml + filterHtml + "</div>";
+
   // Polite live region for the geolocation upgrade: geoScript.js swaps the list
   // in place with no navigation, so the reorder would otherwise be invisible to
   // screen-reader users. The script fills it after a successful swap.
@@ -885,7 +920,8 @@ export function renderListPage(data) {
     "</p>" +
     "</section>";
 
-  const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + geoLiveHtml + listHtml;
+  const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + controlsHtml +
+    geoLiveHtml + listHtml;
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
     "<script>" + LIST_SWAP_SCRIPT + "</script>" +
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +

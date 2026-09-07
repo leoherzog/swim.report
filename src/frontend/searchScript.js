@@ -18,6 +18,15 @@
 // JS a submit is intercepted to flush the pending search in place, and when
 // fetch/AbortController are unavailable the script degrades to the local-only
 // filter, which then owns the empty state itself.
+//
+// The same pass applies the "Estimated green only" switch, whose state persists
+// in one localStorage key and is applied once at load, because a wa-switch fires
+// "change" only on real interaction and a restored state would otherwise show a
+// switch reading on above an unfiltered list. It hides rows the server rendered
+// and cannot know about, so while it is on it owns the empty state and shows its
+// own copy; switching it off hands ownership back. Without JS the switch is
+// inert and every row shows. A swap replaces every row, so
+// "swimreport:listswap" re-runs the pass.
 
 const SCRIPT_LINES = [
   "(function () {",
@@ -29,24 +38,105 @@ const SCRIPT_LINES = [
   "    return;",
   "  }",
   "  const hasFetch = typeof fetch !== 'undefined' && typeof AbortController !== 'undefined';",
-  // The full-table server search owns the empty state when it is available, so
-  // this only hides non-matching rows; without fetch it toggles the empty state.
+  // Green-only filter state. One localStorage key, both reads and writes in
+  // try/catch because private mode throws on access rather than returning null.
+  "  const GREEN_ONLY_KEY = 'swimreport:green-only';",
+  "  const GREEN_EMPTY_MESSAGE = 'No estimated-green beaches match your search.';",
+  "  const greenSwitch = document.getElementById('green-only-filter');",
+  "  let greenOnly = false;",
+  // The server's own empty-state copy and visibility, re-captured after every
+  // swap so the green filter can hand ownership back when it is switched off.
+  "  let serverMessage = null;",
+  "  let serverDisplay = '';",
+  "  const captureServerEmptyState = function () {",
+  "    if (!emptyState) {",
+  "      return;",
+  "    }",
+  "    const messageEl = emptyState.querySelector('.empty-state-message');",
+  "    serverMessage = messageEl ? messageEl.textContent : null;",
+  "    serverDisplay = emptyState.style.display;",
+  "  };",
+  "  captureServerEmptyState();",
+  // The server owns the empty state whenever a term can match rows it never
+  // rendered. The green filter hides rows the server did render and knows
+  // nothing about, so while it is on it owns the empty state itself — but only
+  // when the term itself matched something, or the filter would take the blame
+  // for a plain search miss.
+  "  const updateEmptyState = function (visibleCount, termCount) {",
+  "    if (!emptyState) {",
+  "      return;",
+  "    }",
+  "    const messageEl = emptyState.querySelector('.empty-state-message');",
+  "    if (greenOnly && visibleCount === 0 && termCount > 0) {",
+  "      if (messageEl) {",
+  "        messageEl.textContent = GREEN_EMPTY_MESSAGE;",
+  "      }",
+  "      emptyState.style.display = '';",
+  "      return;",
+  "    }",
+  "    if (messageEl && serverMessage !== null) {",
+  "      messageEl.textContent = serverMessage;",
+  "    }",
+  "    if (greenOnly || !hasFetch) {",
+  "      emptyState.style.display = visibleCount === 0 ? '' : 'none';",
+  "      return;",
+  "    }",
+  "    emptyState.style.display = serverDisplay;",
+  "  };",
+  // Both filters resolve to one display write per row: two passes would let the
+  // next keystroke clobber the green filter's result.
   "  const filterRows = function () {",
   "    const rows = document.querySelectorAll('.beach-row');",
   "    const term = input.value.trim().toLowerCase();",
   "    let visibleCount = 0;",
+  "    let termCount = 0;",
   "    rows.forEach(function (row) {",
   "      const name = row.getAttribute('data-name') || '';",
-  "      const matches = term.length === 0 || name.indexOf(term) !== -1;",
+  "      const matchesTerm = term.length === 0 || name.indexOf(term) !== -1;",
+  "      const matchesFlag = !greenOnly || row.getAttribute('data-flag') === 'green';",
+  "      const matches = matchesTerm && matchesFlag;",
   "      row.style.display = matches ? '' : 'none';",
+  "      if (matchesTerm) {",
+  "        termCount = termCount + 1;",
+  "      }",
   "      if (matches) {",
   "        visibleCount = visibleCount + 1;",
   "      }",
   "    });",
-  "    if (emptyState && !hasFetch) {",
-  "      emptyState.style.display = visibleCount === 0 ? '' : 'none';",
-  "    }",
+  "    updateEmptyState(visibleCount, termCount);",
   "  };",
+  "  if (greenSwitch) {",
+  "    let stored = null;",
+  "    try {",
+  "      stored = window.localStorage.getItem(GREEN_ONLY_KEY);",
+  "    } catch (err) {",
+  "      stored = null;",
+  "    }",
+  // A restored state has to be applied here: wa-switch dispatches "change" only
+  // from a real click or keypress, never from this programmatic write, so
+  // without the pass the switch would read on above an unfiltered list until the
+  // next keystroke or toggle.
+  "    if (stored === '1') {",
+  "      greenOnly = true;",
+  "      greenSwitch.checked = true;",
+  "      filterRows();",
+  "    }",
+  "    greenSwitch.addEventListener('change', function (event) {",
+  "      greenOnly = !!(event.target && event.target.checked);",
+  "      try {",
+  "        window.localStorage.setItem(GREEN_ONLY_KEY, greenOnly ? '1' : '0');",
+  "      } catch (err) {",
+  "        console.log('green-only filter not persisted: ' + err.message);",
+  "      }",
+  "      filterRows();",
+  "    });",
+  "  }",
+  // A swap replaces every row, so both filters have to be re-applied to the new
+  // markup and the server's fresh empty-state copy re-captured first.
+  "  document.addEventListener('swimreport:listswap', function () {",
+  "    captureServerEmptyState();",
+  "    filterRows();",
+  "  });",
   // Debounced full-table search. The display url (replaceState, shareable) is
   // built from the current URL's params; the fetch url additionally carries a
   // "near" so the response is cacheable, because resolveUserLocation
@@ -65,7 +155,14 @@ const SCRIPT_LINES = [
   "    if (!live) {",
   "      return;",
   "    }",
-  "    const count = document.querySelectorAll('.beach-row').length;",
+  // Rows the green filter hid are on the page but not on screen, so the count
+  // reads the display the filter pass wrote rather than the row total.
+  "    let count = 0;",
+  "    document.querySelectorAll('.beach-row').forEach(function (row) {",
+  "      if (row.style.display !== 'none') {",
+  "        count = count + 1;",
+  "      }",
+  "    });",
   "    if (!term) {",
   "      live.textContent = '';",
   "    } else {",

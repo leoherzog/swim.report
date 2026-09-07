@@ -192,6 +192,44 @@ const RULES = [
   "  padding: var(--wa-space-xl);",
   "}",
 
+  // --- List polish: the color-coded feed and the controls above it. ---
+  // The row's inline-start border carries its flag color so the list scans as a
+  // feed rather than a wall of names. It reads from data-flag, the same keyword
+  // the row's chip renders, and every keyword has a rule so unknown shows an
+  // honest gray instead of nothing.
+  ".beach-row .beach-row-link {",
+  "  border-inline-start-width: 3px;",
+  "}",
+  ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--wa-color-green-50); }",
+  ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--wa-color-yellow-70); }",
+  ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--wa-color-red-50); }",
+  ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--wa-color-gray-50); }",
+
+  // The origin line is always in the markup so geoScript.js can write a precise
+  // wording into it; empty means the list is alphabetical and there is nothing
+  // to say.
+  ".list-origin:empty {",
+  "  display: none;",
+  "}",
+
+  // With nothing to say and nothing to filter the row still sits in the page
+  // stack, where a zero-height child would leave a full gap of white space.
+  ".list-controls:not(:has(.list-filter)):has(.list-origin:empty) {",
+  "  display: none;",
+  "}",
+
+  ".list-controls {",
+  "  display: flex;",
+  "  flex-wrap: wrap;",
+  "  align-items: center;",
+  "  gap: var(--wa-space-s);",
+  "}",
+
+  ".list-filter {",
+  "  margin-inline-start: auto;",
+  "}",
+  // --- End list polish. ---
+
   ".flag-icon-green { color: var(--wa-color-green-50); }",
   ".flag-icon-yellow { color: var(--wa-color-yellow-70); }",
   ".flag-icon-red { color: var(--wa-color-red-50); }",

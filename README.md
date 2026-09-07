@@ -180,8 +180,11 @@ per-model 24-hour series. The estimate still derives from the composite first-fi
 series; `byModel` is stored for transparency and future calibration, not for averaging.
 
 When Cloudflare's IP-derived geolocation is available (`request.cf`), the beach list is sorted
-by approximate distance to the visitor and each row shows a rough mileage label; the page says
-so explicitly. Without geolocation the list falls back to alphabetical order.
+by approximate distance to the visitor and each row shows a rough mileage label. A quiet line
+above the list names the origin those labels are measured from: "Distances from your
+approximate location" for the IP estimate, and "Distances from your location" once the browser
+supplies a real fix. Without geolocation the list falls back to alphabetical order and the line
+is absent.
 `GET /?near=lat,lon` overrides the detected location, useful in local dev where `request.cf`
 has no coordinates; an invalid value falls back to alphabetical. Nothing about the visitor's
 location is stored. The located list really is the nearest beaches no matter where the visitor
@@ -195,6 +198,13 @@ escaped so the term matches literally. Results are capped at 100 rows and combin
 `near=`: when a location resolves, matches are filtered first and then distance-sorted. Empty
 or whitespace-only `q` is ignored. The on-page search box submits this as a `GET` form while
 also filtering the rendered rows client-side as you type.
+
+Each list row carries a flag-colored border on its leading edge, matching its estimate chip, so
+the list scans as a color-coded feed; unknown rows show gray. An **Estimated green only** switch
+above the list hides every row whose estimate is not green. It is browser-side and works over the
+rendered rows alone, so it means green among the beaches on this page, not across the whole
+table. It combines with the search term in one pass, and remembers its position between visits,
+re-applying it as the page loads; with JavaScript off it is inert and every row shows.
 
 **The staleness warning.** When a flag card's `updated` time is older than its staleness
 horizon, the card carries a visible warning callout reading "Stale data — last updated
