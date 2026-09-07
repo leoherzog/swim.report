@@ -100,6 +100,20 @@ const RULES = [
   "  }",
   "}",
 
+  // Native cross-document view transitions between the list and a detail page.
+  // The detail hero owns beach-title and beach-flag statically; a list row or a
+  // nearby card takes both names over at click time (rowTransitionScript.js),
+  // because a view-transition-name has to be unique within a document.
+  "@media (prefers-reduced-motion: no-preference) {",
+  "  @view-transition {",
+  "    navigation: auto;",
+  "  }",
+  "  ::view-transition-group(beach-title),",
+  "  ::view-transition-group(beach-flag) {",
+  "    animation-duration: 260ms;",
+  "  }",
+  "}",
+
   ".app-header {",
   "  padding-inline: var(--wa-space-xl);",
   "}",
@@ -437,16 +451,44 @@ const RULES = [
   // A short Dark Sky-style strip: a flex row of proportional colored segments
   // (each segment's flex/background is a per-instance inline value).
   ".wave-strip {",
+  "  position: relative;",
   "  display: flex;",
   "  height: var(--wa-space-3xl);",
   "  border-radius: var(--wa-border-radius-m);",
   "  overflow: hidden;",
   "}",
 
+  // A hairline marker on the strip's left edge: the timeline starts at the
+  // current hour, so "now" is an edge rather than a point inside the strip.
+  ".wave-strip::after {",
+  "  content: \"\";",
+  "  position: absolute;",
+  "  inset-block: 0;",
+  "  inset-inline-start: 0;",
+  "  width: var(--wa-border-width-m);",
+  "  background: var(--wa-color-neutral-fill-loud);",
+  "  pointer-events: none;",
+  "}",
+
   // Draw the focus ring inset so overflow: hidden cannot clip it.
   ".wave-strip-seg:focus-visible {",
   "  outline: var(--wa-focus-ring);",
   "  outline-offset: calc(-1 * var(--wa-focus-ring-width));",
+  "}",
+
+  // Fill-in on load: each run scales out from the now edge, staggered by its
+  // index (--i, set inline per segment in renderWaveStrip). Decoration only —
+  // the strip is complete and correctly colored with the animation skipped.
+  "@media (prefers-reduced-motion: no-preference) {",
+  "  .wave-strip-seg {",
+  "    transform-origin: left center;",
+  "    animation: wave-strip-fill 320ms ease-out backwards;",
+  "    animation-delay: calc(var(--i, 0) * 70ms);",
+  "  }",
+  "  @keyframes wave-strip-fill {",
+  "    from { transform: scaleX(0); }",
+  "    to { transform: scaleX(1); }",
+  "  }",
   "}",
 
   ".wave-chart-hours {",
@@ -549,6 +591,22 @@ const RULES = [
   ".home-map {",
   "  height: 20rem;",
   "  overflow: hidden;",
+  "}",
+
+  // Placeholder inside the mount until MapLibre's load event removes it, so the
+  // map area is a shaped surface rather than a blank framed box while tiles
+  // arrive. The host already fills its parent, so only the indicator's default
+  // pill radius has to become the mount's own.
+  ".home-map-skeleton::part(indicator) {",
+  "  border-radius: var(--wa-border-radius-m);",
+  "}",
+
+  // The sheen animates by default, so it takes the same opposite-polarity guard
+  // the background swells use.
+  "@media (prefers-reduced-motion: reduce) {",
+  "  .home-map-skeleton::part(indicator) {",
+  "    animation: none;",
+  "  }",
   "}",
 
   // The error page's status heading is slotted (light DOM) into a <wa-callout>,

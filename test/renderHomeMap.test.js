@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 import { renderListPage } from "../src/frontend/render.js";
+import { PAGE_STYLES } from "../src/frontend/styles.js";
 
 function makeBeach(overrides) {
   return Object.assign({
@@ -37,6 +38,32 @@ describe("renderListPage home map", () => {
     // A section aria-label would advertise a map that is hidden from assistive
     // tech, so there must not be one.
     expect(html).not.toContain("aria-label=\"Map of nearby beaches");
+  });
+
+  it("fills the mount with a skeleton until the map loads", () => {
+    const html = renderListPage({ entries: [{ beach: makeBeach(), estimate: null, official: null, distanceMi: null }] });
+    expect(html).toContain("<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton>");
+    // Inside the mount, so it inherits the aria-hidden subtree and needs no
+    // label of its own; MapLibre appends its canvas alongside it.
+    expect(html).toContain("tabindex=\"-1\">" +
+      "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton></div>");
+    // The indicator's default pill radius is squared off to the mount's, and
+    // its always-on sheen stops for a reduced-motion visitor.
+    expect(PAGE_STYLES).toContain(".home-map-skeleton::part(indicator) {");
+    expect(PAGE_STYLES).toContain("  border-radius: var(--wa-border-radius-m);");
+    expect(PAGE_STYLES).toContain("@media (prefers-reduced-motion: reduce) {\n" +
+      "  .home-map-skeleton::part(indicator) {\n    animation: none;\n  }\n}");
+  });
+
+  it("removes the skeleton on load and on every path that ends with no map", () => {
+    const html = renderListPage({ entries: [] });
+    expect(html).toContain("const skeleton = container.querySelector('wa-skeleton');");
+    // On the map's load event, in the construction catch, on the map 'error'
+    // event, and when the MapLibre module import fails.
+    expect(html).toContain("map.on('load', function () {\n      clearSkeleton();");
+    expect(html).toContain("} catch (e) {\n      clearSkeleton();\n      return;");
+    expect(html).toContain("map.on('error', function (e) {\n      clearSkeleton();");
+    expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap).catch(clearSkeleton);");
   });
 
   it("embeds no per-beach marker JSON", () => {

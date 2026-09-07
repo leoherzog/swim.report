@@ -141,7 +141,8 @@ Server-rendered HTML pages: a beach list and a beach detail page, built entirely
 KV data (see the frontend contract in `src/frontend/render.js`). Both exclude
 confirmed-inland beaches: they are absent from the list and search, and a detail page for one
 returns `404`. Only ocean and Great Lakes rows, plus still-unclassified rows during backfill,
-are shown.
+are shown. The list page's map area holds a skeleton placeholder until the map's `load` event
+fires, so it is never a blank framed box while tiles arrive.
 
 The detail page opens with a **flag hero**: the beach name behind its flag icon, the flag's
 label, and the ESTIMATE badge — or the OFFICIAL badge when the scraped record is what
@@ -197,6 +198,13 @@ series. Below the strip, the hour ticks are rendered as relative offsets ("Now",
 h"), since no per-beach timezone exists; each carries the instant it marks, and a small inline
 script rewrites them to the viewer's own clock and notes that it did. With JavaScript off the
 relative labels stand on their own.
+
+The strip starts at the current hour, marked by a hairline on its left edge, and fills in from
+there on load, one segment at a time. Navigating between the list and a detail page morphs the
+row (or a nearby-beach card) into the detail hero through a native cross-document view
+transition. Both are decoration: they run only under `prefers-reduced-motion: no-preference`,
+need no library, and every page is complete and correct without them. No flag icon ever
+animates — a moving flag would imply live wind.
 
 When two or more wave models resolve for a beach, the section also shows each model's current
 reading ("NOAA Great Lakes 2.6 ft · NOAA GFS 2.4 ft") and a collapsed line chart of the

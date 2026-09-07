@@ -10,6 +10,7 @@ import { buildListMapScript } from "./mapScript.js";
 import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
+import { ROW_TRANSITION_SCRIPT } from "./rowTransitionScript.js";
 import { SEVERITY_RANK } from "../rules.js";
 import { alertsCheckable } from "../alertsCheckable.js";
 import { verdictSentence } from "./verdict.js";
@@ -286,22 +287,29 @@ function renderReadingNote(note, updatedIso) {
 // labelText (optional): accessible name for a standalone icon (the detail-page
 // title). Without it the icon renders decorative (aria-hidden), which is right
 // wherever visible flag text sits next to it.
-function renderFlagIcon(color, sizeClass, slotName, labelText) {
+// transitionName (optional): the view-transition-name this icon carries as the
+// morph target of a list row's flag chip. It names one element per document, so
+// only the detail-page title passes it.
+function renderFlagIcon(color, sizeClass, slotName, labelText, transitionName) {
   const normalized = normalizeColor(color);
   const colorClass = flagIconColorClass(color);
   const iconClass = sizeClass + " " + colorClass;
   const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
+  const transitionAttr = transitionName
+    ? (" style=\"view-transition-name: " + escapeHtml(transitionName) + ";\"")
+    : "";
   if (normalized === "double-red") {
     const labelAttrs = labelText
       ? (" role=\"img\" aria-label=\"" + escapeHtml(labelText) + "\"")
       : "";
-    return "<span" + slotAttr + labelAttrs + " class=\"wa-cluster wa-gap-3xs\">" +
+    return "<span" + slotAttr + labelAttrs + transitionAttr + " class=\"wa-cluster wa-gap-3xs\">" +
       "<wa-icon name=\"flag\" class=\"" + iconClass + "\"></wa-icon>" +
       "<wa-icon name=\"flag\" class=\"" + iconClass + "\"></wa-icon>" +
       "</span>";
   }
   const labelAttr = labelText ? (" label=\"" + escapeHtml(labelText) + "\"") : "";
-  return "<wa-icon" + slotAttr + labelAttr + " name=\"flag\" class=\"" + iconClass + "\"></wa-icon>";
+  return "<wa-icon" + slotAttr + labelAttr + transitionAttr +
+    " name=\"flag\" class=\"" + iconClass + "\"></wa-icon>";
 }
 
 function renderFlagChip(estimate) {
@@ -811,10 +819,14 @@ function renderHomeMap(near, location) {
        " data-center-precise=\"" + (near ? "1" : "0") + "\"")
     : "";
   // aria-hidden plus tabindex="-1" keep the visual-only map out of
-  // assistive-tech and the keyboard tab order.
+  // assistive-tech and the keyboard tab order. The skeleton stands in until
+  // mapScript.js removes it on the map's load event; MapLibre appends its canvas
+  // to the mount rather than clearing it, so the two never collide.
   return "<section class=\"home-map-section\">" +
     "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\" " +
-    "aria-hidden=\"true\" tabindex=\"-1\"" + centerAttrs + "></div>" +
+    "aria-hidden=\"true\" tabindex=\"-1\"" + centerAttrs + ">" +
+    "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton>" +
+    "</div>" +
     "</section>";
 }
 
@@ -965,6 +977,7 @@ export function renderListPage(data) {
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
     "<script>" + LIST_GEO_SCRIPT + "</script>" +
     "<script>" + LIST_FAVORITES_SCRIPT + "</script>" +
+    "<script>" + ROW_TRANSITION_SCRIPT + "</script>" +
     "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +
     "<script>" + buildListMapScript(MAPLIBRE_JS) + "</script>";
 
@@ -1163,10 +1176,11 @@ function renderWaveStrip(runs, totalHours, summaryText) {
     const text = run.band === "no-data"
       ? ("No wave data — " + range)
       : (run.label + " waves (estimated) — " + range);
+    // --i is the segment's index, the stagger step for the fill-in animation.
     segs.push("<div class=\"wave-strip-seg\" id=\"" + id + "\" role=\"listitem\"" +
       " tabindex=\"0\" aria-label=\"" + escapeHtml(text) + "\"" +
       " style=\"flex: " + run.hours + " " + run.hours + " 0%; background: " +
-      run.tokenVar + ";\"></div>");
+      run.tokenVar + "; --i: " + i + ";\"></div>");
     tips.push("<wa-tooltip for=\"" + id + "\">" + escapeHtml(text) + "</wa-tooltip>");
   }
   return "<div class=\"wave-strip\" role=\"list\" aria-label=\"Wave height forecast " +
@@ -1553,7 +1567,8 @@ export function renderDetailPage(data) {
   // flag icon: the hero prints the same color as FLAG_LABELS text right below
   // it, so an accessible name here would only read the color out twice.
   const titleColor = displayFlagColor(estimate, official, nowIso);
-  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null, null);
+  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null, null,
+    "beach-flag");
 
   // The park-first beach name, only when it differs from the title. The guard
   // keeps the <p> off the page when there is none.
@@ -1613,11 +1628,15 @@ export function renderDetailPage(data) {
   // one flex line, so a long name wraps beside the icon rather than below it.
   // The back link renders href="/" and stays correct with no JS; the hero
   // script upgrades it to the listing the visitor actually came from.
+  //
+  // The hero holds the beach-title view-transition-name statically (the flag
+  // icon holds beach-flag): it is the one element per document a list row or a
+  // nearby card morphs into.
   const heroHtml = "<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
     collapseFlagColor(titleColor) + "\">" +
     "<a class=\"back-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
-    "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
+    "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\" style=\"view-transition-name: beach-title;\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
     "<p class=\"hero-flag wa-cluster wa-gap-s\">" +
     "<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">" +
@@ -1686,7 +1705,8 @@ export function renderDetailPage(data) {
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
     "<script>" + DETAIL_HERO_SCRIPT + "</script>" +
-    "<script>" + DETAIL_FAVORITE_SCRIPT + "</script>" + ticksScriptHtml;
+    "<script>" + DETAIL_FAVORITE_SCRIPT + "</script>" +
+    "<script>" + ROW_TRANSITION_SCRIPT + "</script>" + ticksScriptHtml;
   // The share card takes titleColor, so the picture, the title flag and the map
   // marker are the one displayFlagColor decision.
   return renderDocument(title, bodyHtml, {

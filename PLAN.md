@@ -3623,9 +3623,15 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // (no per-beach data — that ships from /api/beaches.geojson):
       // <section class="home-map-section"><div id="home-map"
       // class="home-map framed-embed wa-border-radius-m" aria-hidden="true"
-      // tabindex="-1" data-center="lat,lon"? data-center-precise="1|0"?></div>
+      // tabindex="-1" data-center="lat,lon"? data-center-precise="1|0"?>
+      // <wa-skeleton class="home-map-skeleton" effect="sheen"></wa-skeleton></div>
       // </section>, reusing the shared .framed-embed border and wa-border-radius-m
-      // utility. The map is a purely visual supplement — the search box plus results list
+      // utility. The skeleton fills the mount so the map area is a shaped surface
+      // rather than a blank framed box while tiles arrive; it sits inside the
+      // aria-hidden subtree, so it carries no label, and the map script removes it.
+      // styles.js squares its ::part(indicator) off to wa-border-radius-m, since the
+      // component's own default is a pill.
+      // The map is a purely visual supplement — the search box plus results list
       // is the complete accessible path, covering the full flag-worthy table server-side
       // — so the mount is aria-hidden and out of the tab order, with no landmark
       // aria-label advertising a hidden map. data-center is the router's resolved
@@ -3640,7 +3646,10 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // NavigationControl. The canvas and controls are swept to tabindex -1
       // synchronously right after construction, not on the load event, so the
       // aria-hidden subtree never holds a focusable node even before tiles load or if
-      // they never do. On load it fetches /api/beaches.geojson once and hands the
+      // they never do. The mount's <wa-skeleton> is removed on the map's load event and
+      // on every path that ends with no map — the construction catch, the 'error'
+      // event, and a failed module import — so a sheening placeholder never stands in
+      // for a map that is not coming. On load it fetches /api/beaches.geojson once and hands the
       // FeatureCollection to a native clustered GeoJSON source: neutral count bubbles
       // that expand on click (getClusterExpansionZoom + easeTo) when zoomed out, and
       // individual rasterized fa-flag icons at high zoom, each tinted by its feature
@@ -3761,6 +3770,24 @@ exporting a CSS string); render.js is the sole module the router imports.
 - In head, load Web Awesome Pro via the version-pinned CDN kit (WA_KIT_BASE in
   render.js): the matter-theme, native, and utilities stylesheets plus the
   webawesome.loader.js module script.
+- Motion is native and opt-in: every animation in styles.js sits inside
+  "@media (prefers-reduced-motion: no-preference)", except the background swells and the
+  map skeleton's sheen, which animate by default and are switched off by their own
+  opposite-polarity "reduce" guards. No flag icon animates anywhere — a
+  moving flag would imply live wind. The list page and the detail page share a
+  cross-document view transition, "@view-transition { navigation: auto; }" plus a 260 ms
+  ::view-transition-group(beach-title) / (beach-flag) duration. The detail hero holds both
+  names statically — style="view-transition-name: beach-title" on the h1 and
+  "view-transition-name: beach-flag" on its flag icon (renderFlagIcon's optional
+  transitionName argument, which only the title passes). A name must be unique within a
+  document, so a list row and a nearby card get theirs at click time from
+  ROW_TRANSITION_SCRIPT (src/frontend/rowTransitionScript.js, embedded on both pages): an
+  unmodified primary click on "a.beach-row-link, a.nearby-card-link" releases the previous claim,
+  sets the hero's two names to "none" (a nearby card shares the hero's document, and a
+  duplicate name aborts the transition), and assigns beach-title to the link's
+  .beach-row-name / .nearby-card-name and beach-flag to its first wa-badge, handing them
+  back on pageshow. The script returns immediately without document.startViewTransition or
+  under a reduce preference, and every navigation works unchanged without it.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
 - Site identity, on every page including the error page: <link rel="icon"
   type="image/svg+xml" href="/favicon.svg">, <link rel="apple-touch-icon" sizes="180x180"
@@ -3906,7 +3933,9 @@ exporting a CSS string); render.js is the sole module the router imports.
   never freshness alone, so the hero can neither call an estimate official nor credit the
   estimate with a color it did not produce. The flag label text below the title is what
   names the color, so the title flag icon is decorative there. The stack
-  zero-margins its children, so .beach-title/.beach-subtitle carry no margins. The hero's
+  zero-margins its children, so .beach-title/.beach-subtitle carry no margins. The h1 and
+  its flag icon are the document's two static view-transition-names (beach-title /
+  beach-flag) — see the motion bullet in "Page skeleton". The hero's
   background is
   color-mix(in oklab, <the display flag's palette token> 12%, var(--wa-color-surface-default)),
   selected by a data-flag attribute carrying collapseFlagColor's keyword — green, yellow,
@@ -4061,7 +4090,14 @@ exporting a CSS string); render.js is the sole module the router imports.
     count), sized by flex-grow = run.hours so there is no percentage rounding drift, and
     colored by the run's palette token via an inline style: green var(--wa-color-green-50),
     yellow var(--wa-color-yellow-70), red var(--wa-color-red-50), no-data
-    var(--wa-color-gray-50) — the unknown-flag gray, honest absence, never green.
+    var(--wa-color-gray-50) — the unknown-flag gray, honest absence, never green. That same
+    inline style carries "--i: <index>", the stagger step for the fill-in: under
+    prefers-reduced-motion: no-preference each segment scales in from its left edge
+    (transform-origin, 320 ms, delayed by --i × 70 ms, animation-fill-mode backwards). The
+    strip is complete and correctly colored with the animation skipped. A hairline
+    .wave-strip::after sits on the strip's left edge in var(--wa-color-neutral-fill-loud) —
+    a "now" marker, because the timeline starts at the current hour, and neutral because
+    the four flag colors mean flag condition only.
   - Per-segment tooltips: each segment is focusable (role="listitem" tabindex="0") with a
     sibling <wa-tooltip for=(segment id "wave-seg-" + index)> whose text is always identical
     to that segment's aria-label — the band label plus hour range, e.g. "Under 2 ft waves
@@ -4401,6 +4437,13 @@ other caveat test uses symbolically.
   Holland MI (solstice and equinox) and Sydney within three minutes, the roll to
   tomorrow's event once today's has passed, whole-minute truncation, the polar day and
   night nulls, the null-coordinate and unparseable-now guards, and utcClockLabel.
+- test/viewTransitions.test.js — the native motion layer: the @view-transition opt-in and
+  both ::view-transition-group durations inside the no-preference guard, the hero's two
+  static names (including the double-red pair, named on the wrapper rather than on either
+  icon), that no row or card carries a server-rendered name, the click-time naming script
+  on both pages and its claim/release/feature-gate lines, the per-segment --i stagger
+  index, the fill-in keyframe's placement inside the guard, and the strip's neutral "now"
+  marker.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
   wave_updated; runFlagRecompute reads "waveinput:" for wave height and wind fallback,
   degrading to unknown when absent, rather than fetching; the alertDetails/ripCurrentRisk

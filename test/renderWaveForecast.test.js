@@ -137,10 +137,10 @@ describe("wave-forecast section", () => {
     expect(html).toContain("<div class=\"wave-strip\" role=\"list\" " +
       "aria-label=\"Wave height forecast for the next 24 hours\">");
     expect(html).toContain("id=\"wave-seg-0\"");
-    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-green-50);\"");
-    expect(html).toContain("style=\"flex: 3 3 0%; background: var(--wa-color-yellow-70);\"");
-    expect(html).toContain("style=\"flex: 2 2 0%; background: var(--wa-color-red-50);\"");
-    expect(html).toContain("style=\"flex: 14 14 0%; background: var(--wa-color-gray-50);\"");
+    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-green-50); --i: 0;\"");
+    expect(html).toContain("style=\"flex: 3 3 0%; background: var(--wa-color-yellow-70); --i: 1;\"");
+    expect(html).toContain("style=\"flex: 2 2 0%; background: var(--wa-color-red-50); --i: 2;\"");
+    expect(html).toContain("style=\"flex: 14 14 0%; background: var(--wa-color-gray-50); --i: 3;\"");
     expect(html).toContain("tabindex=\"0\"");
   });
 
@@ -154,9 +154,9 @@ describe("wave-forecast section", () => {
     // The fixture's 3 ft hours are yellow on a lake and yellow on the ocean, but
     // its 5 ft hours are red on a lake and yellow on the ocean, so the yellow
     // run absorbs them: 3 + 2 hours.
-    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-green-50);\"");
-    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-yellow-70);\"");
-    expect(html).not.toContain("var(--wa-color-red-50);\"");
+    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-green-50); --i: 0;\"");
+    expect(html).toContain("style=\"flex: 5 5 0%; background: var(--wa-color-yellow-70); --i: 1;\"");
+    expect(html).not.toContain("background: var(--wa-color-red-50);");
     expect(html).toContain("Under 3 ft waves (estimated) — now through +5 h");
     expect(html).toContain("3–6 ft waves (estimated) — +5 h to +10 h");
   });

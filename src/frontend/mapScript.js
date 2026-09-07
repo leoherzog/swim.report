@@ -34,13 +34,24 @@
 //
 // Everything degrades silently: a failed module import, a missing container, an
 // init throw, a GPU/WebGL2 failure, or a missing, failed or empty GeoJSON fetch
-// simply leaves the page with its server-rendered beach list.
+// simply leaves the page with its server-rendered beach list. The server-rendered
+// <wa-skeleton> inside the mount is removed on the map's load event and on every
+// path that ends with no map, so it never outlives the wait it describes.
 
 const SCRIPT_LINES = [
   "  const container = document.getElementById('home-map');",
   "  if (!container) {",
   "    return;",
   "  }",
+  // The server renders a <wa-skeleton> inside the mount. Every path that ends
+  // with no map clears it too, so a sheening placeholder never stands in for a
+  // map that is not coming.
+  "  const clearSkeleton = function () {",
+  "    const skeleton = container.querySelector('wa-skeleton');",
+  "    if (skeleton) {",
+  "      skeleton.remove();",
+  "    }",
+  "  };",
   // Set by startMap once the MapLibre module namespace has been imported. The
   // helpers below close over both, and none of them runs before startMap.
   "  let maplibre;",
@@ -264,6 +275,7 @@ const SCRIPT_LINES = [
   "        attributionControl: false",
   "      });",
   "    } catch (e) {",
+  "      clearSkeleton();",
   "      return;",
   "    }",
   // MapLibre 6 reports a failed GPU/WebGL2 context through the map's 'error'
@@ -271,6 +283,7 @@ const SCRIPT_LINES = [
   // so the try/catch above does not cover the browser-cannot-render case.
   // Listening keeps that, and any tile/source error, a logged no-op.
   "    map.on('error', function (e) {",
+  "      clearSkeleton();",
   "      console.log('map error: ' + ((e && e.error && e.error.message) || 'unknown'));",
   "    });",
   // The canvas is the only always-present focusable-ish node; keep it out of the
@@ -288,8 +301,10 @@ const SCRIPT_LINES = [
   "      });",
   "    } catch (e) {}",
   "    map.on('load', function () {",
-  // This handler only fetches the beach directory once the style is ready; the
-  // focusable sweep already ran synchronously at construction.
+  // This handler only removes the placeholder and fetches the beach directory
+  // once the style is ready; the focusable sweep already ran synchronously at
+  // construction.
+  "      clearSkeleton();",
   "      if (typeof fetch === 'undefined') { return; }",
   "      addFlagImages().then(function () {",
   "        return fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } });",
@@ -318,7 +333,7 @@ const SCRIPT_LINES = [
   "  });",
   // import() works in a classic script, keeps the failure path silent, and never
   // blocks the parser.
-  "  import(MAPLIBRE_MODULE_URL).then(startMap).catch(function () {});",
+  "  import(MAPLIBRE_MODULE_URL).then(startMap).catch(clearSkeleton);",
   "})();"
 ];
 
