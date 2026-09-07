@@ -600,8 +600,9 @@ describe("renderListPage proximity output", () => {
 
 describe("handleDetail waves: KV read", () => {
   // DB stand-in whose first() always yields the beach row; FLAGS records every
-  // requested key. 'wavesValue' is returned for the "waves:" key (null else).
-  function detailEnv(beach, wavesValue) {
+  // requested key. 'wavesValue' is returned for the "waves:" key and
+  // 'wqfloorValue' for the "wqfloor:" key (null else).
+  function detailEnv(beach, wavesValue, wqfloorValue) {
     const keys = [];
     const db = {
       prepare: function () {
@@ -622,6 +623,9 @@ describe("handleDetail waves: KV read", () => {
         if (key.indexOf("waves:") === 0) {
           return Promise.resolve(wavesValue || null);
         }
+        if (key.indexOf("wqfloor:") === 0) {
+          return Promise.resolve(wqfloorValue || null);
+        }
         return Promise.resolve(null);
       }
     };
@@ -641,6 +645,23 @@ describe("handleDetail waves: KV read", () => {
     expect(keys).toContain("waves:b-1");
     expect(keys).toContain("flag:b-1");
     expect(keys).toContain("official:b-1");
+    expect(keys).toContain("wqfloor:b-1");
+  });
+
+  it("renders the water-quality advisory callout from the wqfloor: value", async () => {
+    const advisory = {
+      beachId: "b-1",
+      color: "red",
+      reason: "beach posted for elevated E. coli",
+      source: "Lake County General Health District Beach Water Quality Program",
+      updated: "2026-07-15T13:00:00.000Z"
+    };
+    const { env } = detailEnv(beach, null, advisory);
+    const res = await handleRequest(detailRequest("b-1"), env);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("<wa-callout class=\"wq-advisory\" variant=\"danger\" size=\"s\">");
+    expect(html).toContain("beach posted for elevated E. coli");
   });
 
   it("still renders 200 when a WaveSeries is present", async () => {

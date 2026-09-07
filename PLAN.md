@@ -319,8 +319,14 @@ Written by the hourly cron with { expirationTtl: 7200 } only when a src/wqFloor 
 resolved an active advisory for the beach; a clean or absent reading writes nothing and the
 key expires naturally, exactly like "official:". This is a raise-only floor baked into the
 estimate (rules.js step 7, official:false), never an official override, and it never feeds
-render.js markerFlagColor / titleColor. The request path reads it to render a distinct
-water-quality callout.
+render.js markerFlagColor / titleColor. handleDetail reads it in the same concurrent read
+set as the flag/official/waves/watertemp keys and passes it to renderDetailPage as
+data.wqfloor, which renders it as a distinct wa-callout (warning for yellow, danger for red)
+directly under the estimate card: a "Water quality advisory" heading, the reason, the source
+as plain text and an "Updated <wa-relative-time>" line, carrying neither the OFFICIAL badge
+nor the official-card border. A record whose color is outside { yellow, red }, whose reason
+is empty or non-string, or which is not a plain object renders nothing. /api/flag does not
+carry it.
 
 ### MapDirectory (KV value under "mapdirectory:v1")
 
@@ -627,7 +633,8 @@ Binding name: FLAGS (single namespace for both key families).
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
   with { expirationTtl: 7200 }, only when a src/wqFloor source resolved an active advisory;
   a clean or absent reading writes nothing and the key expires naturally, like "official:".
-  Read by the request path to render a distinct water-quality callout. Not an official
+  Read by handleDetail alone (never /api/flag) and rendered as a distinct water-quality
+  callout under the estimate card (section 9). Not an official
   override: it is the same advisory the estimate already folded in as a raise-only floor
   (rules.js step 7, official:false), surfaced separately for the UI. Absent key → no active
   advisory, never a "clean" green.
@@ -3331,7 +3338,7 @@ Routing table (method GET only; anything else → 405):
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: SELECT * FROM beaches [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. KV: one bulk get per key family — env.FLAGS.get(["flag:" + id, ...], { type: "json" }) and the matching official: array — two KV reads per page regardless of row count. HOME_LIST_LIMIT (100) is load-bearing, matching KV's 100-key bulk-get cap so one call per family always suffices | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
-| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT id,name,park_name,lat,lon,water_class,water_class_attempts FROM beaches WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), then one bulk flag: get and one bulk official: get for those ids | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards below the wave map, section omitted when empty); 404 HTML if no row |
+| GET /beach/:beachId       | handleDetail   | D1 row by id; KV flag: + official: + waves: + watertemp: + wqfloor:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT id,name,park_name,lat,lon,water_class,water_class_attempts FROM beaches WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), then one bulk flag: get and one bulk official: get for those ids | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards below the wave map, section omitted when empty); 404 HTML if no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE KV read: env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" }), resolved by mapDirectoryFeatures(directory, nowIso) — which calls markerFlagColor(estimate, official, nowIso) per entry, the section-9 displayFlagColor rule with double-red collapsed to red, from the ingredients the cron stored (section 1, MapDirectory). No D1 read at all on this path. When the key is absent, unparseable or version-mismatched the DEGRADED branch runs instead: D1 SELECT id,name,park_name,lat,lon FROM beaches WHERE [flag-worthy gate] ORDER BY id LIMIT 5000 (MAP_DEGRADED_MAX_FEATURES — a dead builder must not turn every colo's 60 s revalidation into an unbounded full-table scan), every feature's flag the literal "unknown", zero KV reads, and one console.log naming the feature count. There is deliberately no fallback to a per-beach bulk read: that is a silent cliff that keeps the map working while the builder has been dead for days, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped in both branches, so no NaN coordinate is emitted. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the directory's build instant, or null on the degraded branch), ["degraded": true on that branch,] "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt and degraded are top-level GeoJSON foreign members (RFC 7946 section 6.1), so a dead builder is visible to anyone hitting the endpoint instead of a silent cliff. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: SELECT id, last_viewed (exists check + stamp throttle); KV flag: + official:; stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
@@ -3528,7 +3535,8 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
-      //          official: OfficialFlag|null, nowIso: string }
+      //          official: OfficialFlag|null, wqfloor: WqFloorAdvisory|null,
+      //          nowIso: string }
       // -> full HTML document string.
 
     export function renderErrorPage(data)
@@ -3657,9 +3665,15 @@ exporting a CSS string); render.js is the sole module the router imports.
   flag icon on the left (displayFlagColor) plus the display name; an optional beach-name
   subtitle; and a lat/lon meta line linking to OpenStreetMap. The nested stack zero-margins
   its children, so .beach-title/.beach-subtitle carry no margins. Then the detail stack,
-  answer first and exploration second: official card (if any) → estimate card → wave
-  forecast section → wave map section → nearby-webcam section (if any), so the
-  lazy-loading embeds follow the verdict and forecast. The estimate card body shows the
+  answer first and exploration second: official card (if any) → estimate card →
+  water-quality advisory callout (if any) → wave forecast section → wave map section →
+  nearby-webcam section (if any), so the lazy-loading embeds follow the verdict and
+  forecast. The advisory callout is the "wqfloor:" record (section 1) rendered as a
+  wa-callout — warning for yellow, danger for red, a "Water quality advisory" heading, the
+  reason, the source as plain text and an "Updated <wa-relative-time>" line. It reads as
+  context beside the estimate that already folded it in, so it carries neither the OFFICIAL
+  badge nor the official-card border, and an absent, malformed or unknown-color record
+  renders nothing. The estimate card body shows the
   flag row (color name plus full reason) only; its sources render as the pill badges in
   slot="header-actions" with the ESTIMATE badge in slot="header", and the "Updated
   <wa-relative-time date=estimate.updated sync>" line renders in slot="footer". Both are
@@ -3987,6 +4001,10 @@ ripCurrentRisk output echoes.
   the stat line, no section heading), the hazard lane (positioned band + tooltip, rip band,
   no lane for legacy estimates or without a series), the buoy case (stat without strip),
   legacy/absent payload omission, and the stale warning.
+- test/renderWqFloor.test.js — the water-quality advisory callout via renderDetailPage:
+  the danger/warning variant per color, the reason/source/updated lines, its place between
+  the estimate card and the wave forecast, escaping, the absence of any official marking,
+  and the empty string for absent, malformed and unknown-color records.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
   wave_updated; runFlagRecompute reads "waveinput:" for wave height and wind fallback,
   degrading to unknown when absent, rather than fetching; the alertDetails/ripCurrentRisk
@@ -4000,6 +4018,7 @@ ripCurrentRisk output echoes.
   a throwing artifact put leaving the run's own counters alone, and the Number.isFinite
   guards refusing a non-finite wave height or wind speed. Its FLAGS stub must answer the
   bulk (array) get form, or every scan read silently sees nothing.
-- test/router.test.js — asserts handleDetail reads the "waves:" key (plus routing,
+- test/router.test.js — asserts handleDetail reads the "waves:" and "wqfloor:" keys and
+  renders the advisory callout from the latter (plus routing,
   /api/beaches.geojson served from the map directory in a single KV read with parity against
   markerFlagColor, its bounded all-unknown degraded branch, and cache-control behavior).

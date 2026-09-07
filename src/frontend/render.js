@@ -1008,6 +1008,43 @@ function renderWaveForecast(estimate, waves, nowIso, waterClass) {
   return lines.join("\n");
 }
 
+// The raise-only water-quality floor the estimate already folded in (rules.js
+// step 7), surfaced beside the estimate card so a bacteria advisory under a
+// wave-height red stays visible. Advisory context only: no OFFICIAL badge and
+// no official-card border, since the record is never a posted flag status.
+// An absent, malformed or unknown-color record renders nothing.
+function renderWqFloorCallout(wqfloor) {
+  if (!wqfloor || typeof wqfloor !== "object" || Array.isArray(wqfloor)) {
+    return "";
+  }
+  const color = wqfloor.color;
+  if (color !== "yellow" && color !== "red") {
+    return "";
+  }
+  const reason = typeof wqfloor.reason === "string" ? wqfloor.reason.trim() : "";
+  if (reason === "") {
+    return "";
+  }
+  // The record's source is a human label, never a URL, so it renders as plain
+  // escaped text with no link.
+  const source = typeof wqfloor.source === "string" ? wqfloor.source.trim() : "";
+  const updated = typeof wqfloor.updated === "string" ? wqfloor.updated.trim() : "";
+  const variant = color === "red" ? "danger" : "warning";
+  let html = "<wa-callout class=\"wq-advisory\" variant=\"" + variant + "\" size=\"s\">" +
+    "<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>" +
+    "<strong>Water quality advisory</strong><br>" +
+    escapeHtml(reason);
+  if (source !== "") {
+    html += "<br><span class=\"wq-advisory-meta wa-caption-s\">Source: " +
+      escapeHtml(source) + "</span>";
+  }
+  if (updated !== "") {
+    html += "<br><span class=\"wq-advisory-meta wa-caption-s\">Updated " +
+      "<wa-relative-time date=\"" + escapeHtml(updated) + "\" sync></wa-relative-time></span>";
+  }
+  return html + "</wa-callout>";
+}
+
 export function renderDetailPage(data) {
   const beach = data.beach;
   const estimate = data.estimate;
@@ -1020,6 +1057,9 @@ export function renderDetailPage(data) {
   // until the water-temperature cron writes it, so default to null; the
   // subtitle omits the temp fragment when it is null or stale.
   const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
+  // Active water-quality advisory written by the hourly cron. Absent means no
+  // advisory stands, never a clean reading.
+  const wqfloor = (data.wqfloor === undefined || data.wqfloor === null) ? null : data.wqfloor;
   // Distance-sorted nearby entries from the router; absent renders no section.
   const nearby = Array.isArray(data.nearby) ? data.nearby : [];
   const title = displayName(beach) + " — Swim Report";
@@ -1074,6 +1114,12 @@ export function renderDetailPage(data) {
     stackParts.push(officialHtml);
   }
   stackParts.push(estimateHtml);
+  // Directly under the estimate it qualifies: the floor is part of that color,
+  // not a competing verdict.
+  const wqFloorHtml = renderWqFloorCallout(wqfloor);
+  if (wqFloorHtml) {
+    stackParts.push(wqFloorHtml);
+  }
   const waveForecastHtml = renderWaveForecast(estimate, waves, nowIso,
     typeof beach.water_class === "string" ? beach.water_class : null);
   if (waveForecastHtml) {

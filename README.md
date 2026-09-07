@@ -131,6 +131,10 @@ confirmed-inland beaches: they are absent from the list and search, and a detail
 returns `404`. Only ocean and Great Lakes rows, plus still-unclassified rows during backfill,
 are shown.
 
+When a water-quality advisory stands for the beach, a **water-quality callout** renders
+directly under the estimate card, between it and the wave forecast — see the raise-only floor
+below.
+
 Below the wave map the detail page lists up to three **nearby beaches** as cards: the nearest
 flag-worthy rows within 50 mi, each with the same estimate chip and OFFICIAL badge a list row
 carries, its distance, and a link. The section is omitted when nothing lies within range.
@@ -639,6 +643,12 @@ can never pull a flag down. It is baked into the estimate (rules step 7, `offici
 it never overrides an official reading and never wins over the map marker, list or detail title
 the way an official hazard flag does. Mechanically it mirrors the NWS/ECCC yellow floors:
 worst-of by severity, applied after the hazard color is decided.
+
+The detail page also renders the standing advisory as its own callout directly under the
+estimate card — yellow renders `warning`, red renders `danger` — carrying the reason, the
+source name as plain text and the reading's own timestamp. It is advisory context beside the
+estimate that already folded it in, never an official flag card, so a bacteria advisory stays
+visible under a wave-height red.
 
 Registered wqFloor sources (most-specific match first; the coarse USGS NowCast bbox is
 consulted last, only for beaches no curated source claims):
