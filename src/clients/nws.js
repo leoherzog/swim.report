@@ -85,10 +85,12 @@ function alertZoneIds(props) {
 // Every active alert nationwide in ONE fetch (the hourly cron calls this once
 // per run regardless of zone count; per-zone filtering happens locally via
 // nwsAlertsForZone). Success ->
-//   { alerts: [{ event, onset, ends, zones: [zone ids] }], sourceUrl,
-//     featureCount, truncated }
+//   { alerts: [{ event, onset, ends, description, instruction, area, sender,
+//                zones: [zone ids] }],
+//     sourceUrl, featureCount, truncated }
 // where onset/ends fall back onset -> effective / ends -> expires (null when
-// the feed omits both) and zones comes from alertZoneIds. Features without an
+// the feed omits both), the four text fields are raw properties passed to
+// matchedAlerts to cap, and zones comes from alertZoneIds. Features without an
 // event name or with zero resolvable zone ids are skipped (a zoneless alert
 // could never match a beach). Failure -> null.
 export async function fetchAllActiveAlerts() {
@@ -113,6 +115,14 @@ export async function fetchAllActiveAlerts() {
       event: event,
       onset: pickIsoString(props.onset, props.effective),
       ends: pickIsoString(props.ends, props.expires),
+      // Free text for the detail page's alert card, capped by matchedAlerts.
+      // properties.headline is deliberately not carried: it restates the event
+      // and the window in the issuing office's local time, which the card
+      // already renders in the reader's.
+      description: props.description,
+      instruction: props.instruction,
+      area: props.areaDesc,
+      sender: props.senderName,
       zones: zones
     });
   }
@@ -149,9 +159,10 @@ export async function fetchActiveAlertCount() {
 
 // Pure, exported for tests — the NWS counterpart of ecccAlertsForPoint.
 // Filters a fetchAllActiveAlerts result's alerts down to those whose zones
-// include zoneId, in the per-zone result shape the rules engine and hazard
-// lane consume: { events: [deduped names], details: [{ event, onset, ends }] }
-// (details deduped only on exact (event, onset, ends) repeats). Malformed
+// include zoneId, in the per-zone result shape the rules engine, hazard lane
+// and detail page consume: { events: [deduped names], details: [{ event, onset,
+// ends, description, instruction, area, sender }] } (details deduped only on
+// exact (event, onset, ends) repeats). Malformed
 // input -> { events: [], details: [] }. The accumulate/dedupe walk lives in
 // ./alertMatch.js; only the zone-membership test is local.
 export function nwsAlertsForZone(alerts, zoneId) {

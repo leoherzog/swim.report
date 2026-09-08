@@ -288,7 +288,12 @@ describe("ecccMarineAlertsForPoint", function () {
     const out = ecccMarineAlertsForPoint(alerts, 42.2, -81.2);
     expect(out.events).toEqual(["gale warning"]);
     expect(out.details.length).toBe(1);
-    expect(out.details[0]).toEqual({ event: "gale warning", onset: "2026-07-22T10:00:00Z", ends: null });
+    expect(out.details[0]).toMatchObject({
+      event: "gale warning",
+      onset: "2026-07-22T10:00:00Z",
+      ends: null,
+      area: "Lake Erie"
+    });
   });
 
   it("matches a LAND point just outside the water zone via nearest-edge fallback", function () {

@@ -98,7 +98,7 @@ function localizedEn(obj) {
 // Pure. Given a raw GeoMet FeatureCollection and nowIso, returns every active
 // marine warning nationwide as a flat alerts array in the same shape as
 // fetchActiveEcccAlerts's entries:
-//   [{ event, onset, ends, geometry, region, value }]
+//   [{ event, onset, ends, area, geometry, region, value }]
 // event is the lowercased event name, onset is properties.lastUpdated falling
 // back to nowIso (marine events carry no per-event onset), ends is null
 // (active/ended is by status), geometry is the zone Polygon, and region/value
@@ -174,6 +174,9 @@ export function parseEcccMarineAlerts(json, nowIso) {
           event: rawName.toLowerCase(),
           onset: onset,
           ends: null,
+          // The zone name the detail page's alert card names as the warning's
+          // area; the collection publishes no per-event text to go with it.
+          area: value !== null ? value : region,
           geometry: geometry,
           region: region,
           value: value
@@ -187,7 +190,7 @@ export function parseEcccMarineAlerts(json, nowIso) {
 // Every active marine warning nationwide in one fetch; the caller
 // matches beaches locally with ecccMarineAlertsForPoint. nowIso is threaded to
 // the pure parser as an onset fallback. Success ->
-//   { alerts: [{ event, onset, ends, geometry, region, value }], sourceUrl }
+//   { alerts: [{ event, onset, ends, area, geometry, region, value }], sourceUrl }
 // Failure -> null. Never throws.
 export async function fetchActiveEcccMarineAlerts(nowIso) {
   const url = ECCC_API_BASE + "/collections/" + ECCC_MARINE_COLLECTION +
@@ -214,7 +217,8 @@ export async function fetchActiveEcccMarineAlerts(nowIso) {
 
 // Pure. Filters a fetchActiveEcccMarineAlerts result down to the alerts whose
 // marine zone covers the beach point, in the same shape as ecccAlertsForPoint:
-//   { events: [deduped event names], details: [{ event, onset, ends }] }
+//   { events: [deduped event names],
+//     details: [{ event, onset, ends, description, instruction, area, sender }] }
 // Marine polygons cover water and beach points sit on land, so this is
 // point-in-polygon first, then a nearest-edge fallback within
 // ECCC_MARINE_MAX_EDGE_KM, so a beach whose centroid sits just inland of its

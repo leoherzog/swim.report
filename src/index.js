@@ -710,7 +710,7 @@ async function runFlagRecompute(env) {
         // buildEstimateInputs can concat them in the same order the payload has
         // always carried and sealFromSignals can store exactly this half.
         const signalSources = [];
-        const alertPart = buildAlertInputs(beach, alertCtx);
+        const alertPart = buildAlertInputs(beach, alertCtx, nowIso);
 
         let ripCurrentRisk = null;
         const wfo = wfoFromGridUrl(beach.nws_grid_url);
@@ -1049,7 +1049,8 @@ async function runFlagRecompute(env) {
 
 // Level-triggered alerts refresh ("3-53/10 * * * *"). NWS alerts are the only
 // event-driven input in the system, so this cron closes the gap between a warning
-// being issued and the flag moving from up to an hour to about ten minutes.
+// being issued, taking effect or ending and the flag moving from up to an hour to
+// about ten minutes.
 //
 // Its upstream cost does not scale with the beach table: four national fetches,
 // matched to beaches locally. Its per-beach cost is paid only for beaches whose
@@ -1249,11 +1250,14 @@ async function runAlertRefresh(env) {
         skipLease = skipLease + 1;
         return;
       }
-      const alertPart = buildAlertInputs(row, alertCtx);
+      const alertPart = buildAlertInputs(row, alertCtx, nowIso);
       // Set inequality selects; estimateFlag decides. Comparing severities here
       // would reimplement ALERT_PRECEDENCE outside rules.js, and a "has any
       // alert" test would miss a zone swapping Small Craft Advisory for Gale
-      // Warning, or losing one of two alerts.
+      // Warning, or losing one of two alerts. Both sides are in-effect sets:
+      // the current one at this run's clock, the standing one at the alertsAt
+      // it was decided at, so an alert whose onset arrived or whose ends passed
+      // since selects the beach exactly as a new issuance does.
       //
       // signals.alertsResolved false is the repair for a failed hourly alert
       // fetch: that run passed alerts null, losing both the short-circuit and the

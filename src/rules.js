@@ -2,7 +2,7 @@
 // No fetch, no Date, no env, no client imports: structured inputs in, a complete
 // FlagEstimate out. This is the only place an estimated flag color is decided.
 
-export const RULES_VERSION = "1.7.0";
+export const RULES_VERSION = "1.8.0";
 
 // Flag color severity ordering. The raise-only water-quality floor (step 7)
 // compares an advisory's floor color against the already-decided color: it may
@@ -189,6 +189,73 @@ export function alertAuthorityForEvent(eventName) {
   return null;
 }
 
+// Whether one alert entry is in effect at the instant atIso: onset at or before
+// it and ends after it. A missing or unparseable onset counts as already in
+// effect and a missing or unparseable ends as open-ended, so a feed that drops a
+// timestamp can only keep an alert, never hide one. An unparseable atIso keeps
+// every alert for the same reason.
+export function alertInEffectAt(entry, atIso) {
+  if (entry === null || typeof entry !== "object") {
+    return false;
+  }
+  const atMs = Date.parse(atIso);
+  if (Number.isNaN(atMs)) {
+    return true;
+  }
+  const onsetMs = Date.parse(entry.onset);
+  if (!Number.isNaN(onsetMs) && onsetMs > atMs) {
+    return false;
+  }
+  const endsMs = Date.parse(entry.ends);
+  if (!Number.isNaN(endsMs) && endsMs <= atMs) {
+    return false;
+  }
+  return true;
+}
+
+// The deduped event names of the alertDetails entries in effect at atIso, in
+// feed order. This is what estimateFlag's alerts input must be built from: an
+// alert published ahead of its onset is a forecast of a hazard, not the hazard,
+// and a Beach Hazards Statement for tomorrow morning must neither short-circuit
+// nor floor today's color. Entries without a string event are skipped.
+export function alertsInEffect(details, atIso) {
+  const names = [];
+  const list = Array.isArray(details) ? details : [];
+  for (let i = 0; i < list.length; i++) {
+    const entry = list[i];
+    if (entry === null || typeof entry !== "object" || typeof entry.event !== "string") {
+      continue;
+    }
+    if (!alertInEffectAt(entry, atIso) || names.indexOf(entry.event) !== -1) {
+      continue;
+    }
+    names.push(entry.event);
+  }
+  return names;
+}
+
+// The echoed alertDetails entries a FlagEstimate's color could have been decided
+// by: those in effect at its alertsAt. A payload without alertsAt predates the
+// onset rule and was decided against every echoed entry, so all of them are
+// returned. [] for a missing or malformed echo.
+export function decidedAlertDetails(estimate) {
+  if (!estimate || typeof estimate !== "object" || !Array.isArray(estimate.alertDetails)) {
+    return [];
+  }
+  const legacy = typeof estimate.alertsAt !== "string";
+  const out = [];
+  for (let i = 0; i < estimate.alertDetails.length; i++) {
+    const entry = estimate.alertDetails[i];
+    if (entry === null || typeof entry !== "object" || typeof entry.event !== "string") {
+      continue;
+    }
+    if (legacy || alertInEffectAt(entry, estimate.alertsAt)) {
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
 // The flag color a rip-current risk level maps to: HIGH -> red, MODERATE ->
 // yellow, anything else (LOW, null, garbage) -> null. Single home of that
 // mapping — estimateFlag step 2 and the frontend's hazard lane both use it.
@@ -236,12 +303,24 @@ export function waveColorForHeight(waveHeightFt, waterClass) {
   return "green";
 }
 
+// A non-empty string, else null — the sanitizer every echoed alertDetails field
+// passes through.
+function nonEmptyStringOrNull(value) {
+  return (typeof value === "string" && value.length > 0) ? value : null;
+}
+
 export function estimateFlag(inputs) {
   const source = inputs || {};
 
   const beachId = source.beachId !== undefined ? source.beachId : null;
   const alerts = source.alerts !== undefined ? source.alerts : null;
   const alertDetails = source.alertDetails !== undefined ? source.alertDetails : null;
+  // The instant the alerts input was evaluated at, echoed unchanged. It is the
+  // instant alertsInEffect filtered against, not necessarily updated: the
+  // alerts refresh keeps the standing updated and evaluates alerts at its own
+  // clock.
+  const alertsAt = (typeof source.alertsAt === "string" && source.alertsAt.length > 0)
+    ? source.alertsAt : null;
   const ripCurrentRisk = source.ripCurrentRisk !== undefined ? source.ripCurrentRisk : null;
   const waveHeightFt = source.waveHeightFt !== undefined ? source.waveHeightFt : null;
   // beaches.water_class, read from D1 by both crons; it selects the step 3
@@ -266,7 +345,10 @@ export function estimateFlag(inputs) {
   let reason = null;
   let trigger = null;
 
-  // Step 1: active NWS alerts, evaluated in ALERT_PRECEDENCE order (not input order).
+  // Step 1: NWS alerts in effect, evaluated in ALERT_PRECEDENCE order (not input
+  // order). alerts carries only the names alertsInEffect kept at alertsAt; a
+  // published alert whose onset has not arrived is echoed in alertDetails but is
+  // not in this list, so it cannot decide a color here or floor one at step 6.
   if (color === null && alerts !== null) {
     for (let i = 0; i < ALERT_PRECEDENCE.length; i++) {
       const eventName = ALERT_PRECEDENCE[i];
@@ -434,11 +516,15 @@ export function estimateFlag(inputs) {
   const echoedWaveHeightFt =
     (typeof waveHeightFt === "number" && isFinite(waveHeightFt)) ? waveHeightFt : null;
 
-  // Echo the structured alert details ({ event, onset, ends }) and the rip-current
-  // risk level whichever branch decided the color, so the UI's hazard lane never
-  // parses the reason string. Sanitized copies: entries without a string event are
-  // dropped, non-string timestamps become null, an unrecognized risk becomes
-  // null.
+  // Echo the structured alert details and the rip-current risk level whichever
+  // branch decided the color, so the UI's hazard lane never parses the reason
+  // string. The echo is the whole matched set, upcoming alerts included, so the
+  // lane can draw a band that starts later; decidedAlertDetails recovers the
+  // in-effect subset from alertsAt. Sanitized copies: entries without a string
+  // event are dropped, non-string timestamps and text become null, an
+  // unrecognized risk becomes null. The four text fields carry the issuing
+  // office's own words to the detail page's alert card and reach no rule here;
+  // matchedAlerts caps their length at the client boundary.
   const echoedAlertDetails = [];
   if (Array.isArray(alertDetails)) {
     for (let i = 0; i < alertDetails.length; i++) {
@@ -448,8 +534,12 @@ export function estimateFlag(inputs) {
       }
       echoedAlertDetails.push({
         event: entry.event,
-        onset: (typeof entry.onset === "string" && entry.onset.length > 0) ? entry.onset : null,
-        ends: (typeof entry.ends === "string" && entry.ends.length > 0) ? entry.ends : null
+        onset: nonEmptyStringOrNull(entry.onset),
+        ends: nonEmptyStringOrNull(entry.ends),
+        description: nonEmptyStringOrNull(entry.description),
+        instruction: nonEmptyStringOrNull(entry.instruction),
+        area: nonEmptyStringOrNull(entry.area),
+        sender: nonEmptyStringOrNull(entry.sender)
       });
     }
   }
@@ -468,6 +558,7 @@ export function estimateFlag(inputs) {
     updated: updated,
     waveHeightFt: echoedWaveHeightFt,
     alertDetails: echoedAlertDetails,
+    alertsAt: alertsAt,
     ripCurrentRisk: echoedRipCurrentRisk
   };
 }

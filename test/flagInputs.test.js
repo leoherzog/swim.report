@@ -65,7 +65,7 @@ describe("flagInputs seal round trip", function () {
   // fails here instead of silently defaulting to null in a fast recompute.
   const SEAL_FIELDS = ["windSpeedMph", "windGustMph", "waterQualityAdvisory", "signalSources"];
   const ECHOED_FIELDS = ["ripCurrentRisk", "waveHeightFt", "updated"];
-  const RECOMPUTED_FIELDS = ["alerts", "alertDetails", "alertsCheckable", "waterClass", "beachId"];
+  const RECOMPUTED_FIELDS = ["alerts", "alertDetails", "alertsAt", "alertsCheckable", "waterClass", "beachId"];
 
   it("covers every estimateFlag input between the seal, the echo and the D1 row", function () {
     // The input names are READ OUT OF src/rules.js, never transcribed: a
@@ -403,6 +403,47 @@ describe("buildAlertInputs branches", function () {
     expect(marinePart.alertSources.length).toBe(1);
   });
 
+  it("keeps an alert whose onset has not arrived out of alerts but in alertDetails", function () {
+    const ctx = {
+      alertsMap: new Map([["MIZ071", {
+        events: ["Beach Hazards Statement", "Gale Warning", "Small Craft Advisory"],
+        details: [
+          { event: "Beach Hazards Statement", onset: "2026-07-16T07:00:00.000Z", ends: "2026-07-16T23:00:00.000Z" },
+          { event: "Gale Warning", onset: "2026-07-15T10:00:00.000Z", ends: "2026-07-15T15:00:00.000Z" },
+          { event: "Small Craft Advisory", onset: "2026-07-15T10:00:00.000Z", ends: null }
+        ],
+        sourceUrl: "land-url"
+      }]])
+    };
+    const part = buildAlertInputs(beachRow({ nws_zone: "MIZ071" }), ctx, UPDATED);
+    // The statement starts tomorrow and the gale ended an hour ago; only the
+    // open-ended advisory is in effect at UPDATED.
+    expect(part.alerts).toEqual(["Small Craft Advisory"]);
+    expect(part.alertDetails.length).toBe(3);
+    expect(part.alertsAt).toBe(UPDATED);
+    expect(part.alertsResolved).toBe(true);
+
+    // The same set an hour into tomorrow's onset: the statement is in effect.
+    const later = buildAlertInputs(beachRow({ nws_zone: "MIZ071" }), ctx, "2026-07-16T08:00:00.000Z");
+    expect(later.alerts).toEqual(["Beach Hazards Statement", "Small Craft Advisory"]);
+  });
+
+  it("applies the onset rule to Canadian beaches too", function () {
+    const geometry = {
+      type: "Polygon",
+      coordinates: [[[-84, 44], [-82, 44], [-82, 46], [-84, 46], [-84, 44]]]
+    };
+    const ctx = {
+      alertsMap: new Map(),
+      ecccAlerts: { alerts: [{ event: "wind warning", onset: "2026-07-16T07:00:00.000Z", ends: null, geometry: geometry }] },
+      ecccMarineAlerts: { alerts: [{ event: "gale warning", onset: "2026-07-15T12:00:00.000Z", ends: null, geometry: geometry }] }
+    };
+    const part = buildAlertInputs(beachRow({ eccc_zone: "Alpena" }), ctx, UPDATED);
+    expect(part.alerts).toEqual(["gale warning"]);
+    expect(part.alertDetails.map(function (d) { return d.event; })).toEqual(["wind warning", "gale warning"]);
+    expect(part.alertsAt).toBe(UPDATED);
+  });
+
   it("resolves nothing for an unenriched beach or a failed fetch", function () {
     const part = buildAlertInputs(beachRow({}), { alertsMap: new Map(), ecccAlerts: null, ecccMarineAlerts: null });
     expect(part.alerts).toBeNull();
@@ -418,6 +459,15 @@ describe("buildAlertInputs branches", function () {
     );
     expect(failed.alerts).toBeNull();
     expect(failed.alertsResolved).toBe(false);
+    expect(failed.alertsAt).toBeNull();
+  });
+
+  it("passes alertsAt into the estimate bundle so rules.js echoes it", function () {
+    const part = buildAlertInputs(beachRow({ nws_zone: "MIZ071" }), landOnly, UPDATED);
+    const bundle = buildEstimateInputs(beachRow({ nws_zone: "MIZ071" }), part, { signalSources: [], updated: UPDATED });
+    expect(bundle.alertsAt).toBe(UPDATED);
+    expect(estimateFlag(bundle).alertsAt).toBe(UPDATED);
+    expect(buildEstimateInputs(beachRow({}), null, { signalSources: [] }).alertsAt).toBeNull();
   });
 });
 
@@ -440,5 +490,26 @@ describe("eventKey and standingAlertEvents", function () {
       .toEqual(["Gale Warning"]);
     expect(standingAlertEvents({})).toEqual([]);
     expect(standingAlertEvents(null)).toEqual([]);
+  });
+
+  it("evaluates the standing set at the instant the standing color was decided", function () {
+    const details = [
+      { event: "Beach Hazards Statement", onset: "2026-07-16T07:00:00.000Z", ends: null },
+      { event: "Gale Warning", onset: "2026-07-15T10:00:00.000Z", ends: "2026-07-15T15:00:00.000Z" },
+      { event: "Small Craft Advisory", onset: null, ends: null }
+    ];
+    // Decided at UPDATED: the statement was still upcoming and the gale had
+    // ended, so neither was in the set the color came from.
+    expect(standingAlertEvents({ alertDetails: details, alertsAt: UPDATED, updated: UPDATED }))
+      .toEqual(["Small Craft Advisory"]);
+    // Decided after the onset: the statement was in effect then, so it stays
+    // in the standing set even though nothing about the details changed.
+    expect(standingAlertEvents({ alertDetails: details, alertsAt: "2026-07-16T08:00:00.000Z", updated: UPDATED }))
+      .toEqual(["Beach Hazards Statement", "Small Craft Advisory"]);
+    // A payload written before alertsAt existed was decided against every
+    // echoed entry, so the refresh compares against all of them and re-selects
+    // a beach a future alert wrongly colored.
+    expect(standingAlertEvents({ alertDetails: details, updated: UPDATED }))
+      .toEqual(["Beach Hazards Statement", "Gale Warning", "Small Craft Advisory"]);
   });
 });

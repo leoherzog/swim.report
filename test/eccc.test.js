@@ -171,6 +171,22 @@ describe("fetchActiveEcccAlerts", function () {
     expect(result.alerts.map(function (a) { return a.event; })).toEqual(["squall warning"]);
   });
 
+  it("carries alert_text_en and feature_name_en as the alert's text and area", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [alertFeature({
+          alert_text_en: "Rain continues through parts of southern Ontario.",
+          feature_name_en: "Windsor - Essex - Chatham-Kent"
+        })]
+      });
+    });
+    const alert = (await fetchActiveEcccAlerts(NOW_ISO)).alerts[0];
+    expect(alert.description).toBe("Rain continues through parts of southern Ontario.");
+    expect(alert.area).toBe("Windsor - Essex - Chatham-Kent");
+    // ECCC folds the call to action into alert_text_en, so there is none to carry.
+    expect(alert.instruction).toBeUndefined();
+  });
+
   it("returns null on HTTP failure and on a thrown fetch, never throws", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.resolve({ ok: false, status: 500 });
@@ -193,7 +209,7 @@ describe("ecccAlertsForPoint", function () {
     ];
     const matched = ecccAlertsForPoint(alerts, 42.0, -82.9);
     expect(matched.events).toEqual(["severe thunderstorm warning"]);
-    expect(matched.details).toEqual([
+    expect(matched.details).toMatchObject([
       { event: "severe thunderstorm warning", onset: "a", ends: "b" }
     ]);
   });

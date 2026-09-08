@@ -175,6 +175,28 @@ describe("fetchAllActiveAlerts feed-integrity fields", function () {
     expect(result.truncated).toBe(false);
   });
 
+  it("carries the alert's own words, and never the headline", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [alertFeature({ props: {
+          description: "* WHAT...High waves expected.",
+          instruction: "Remain out of the water.",
+          areaDesc: "Door; Kewaunee; Manitowoc",
+          senderName: "NWS Green Bay WI",
+          headline: "Beach Hazards Statement issued September 8 at 10:08AM CDT"
+        } })]
+      });
+    });
+    const alert = (await fetchAllActiveAlerts()).alerts[0];
+    expect(alert.description).toBe("* WHAT...High waves expected.");
+    expect(alert.instruction).toBe("Remain out of the water.");
+    expect(alert.area).toBe("Door; Kewaunee; Manitowoc");
+    expect(alert.sender).toBe("NWS Green Bay WI");
+    // The headline restates the event and the window in the issuing office's
+    // local time, which the detail page renders on the reader's clock instead.
+    expect(alert.headline).toBeUndefined();
+  });
+
   it("flags a paginated response as truncated", async function () {
     vi.stubGlobal("fetch", function () {
       return okJson({
@@ -305,7 +327,7 @@ describe("nwsAlertsForZone", function () {
     ];
     const matched = nwsAlertsForZone(alerts, "MIZ071");
     expect(matched.events).toEqual(["High Surf Warning"]);
-    expect(matched.details).toEqual([
+    expect(matched.details).toMatchObject([
       { event: "High Surf Warning", onset: "a", ends: "b" }
     ]);
   });
@@ -320,7 +342,7 @@ describe("nwsAlertsForZone", function () {
     ];
     const matched = nwsAlertsForZone(alerts, "MIZ071");
     expect(matched.events).toEqual(["High Surf Advisory"]);
-    expect(matched.details).toEqual([
+    expect(matched.details).toMatchObject([
       { event: "High Surf Advisory", onset: "a", ends: "b" },
       { event: "High Surf Advisory", onset: "c", ends: "d" }
     ]);
@@ -331,7 +353,7 @@ describe("nwsAlertsForZone", function () {
       { event: "Beach Hazards Statement", onset: 5, ends: undefined, zones: ["MIZ071"] }
     ];
     const matched = nwsAlertsForZone(alerts, "MIZ071");
-    expect(matched.details).toEqual([
+    expect(matched.details).toMatchObject([
       { event: "Beach Hazards Statement", onset: null, ends: null }
     ]);
   });

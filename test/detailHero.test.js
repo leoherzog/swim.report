@@ -273,6 +273,24 @@ describe("at a glance tiles", () => {
     expect(tileSource(html, "triangle-exclamation")).toBe("Beach Hazards Statement");
   });
 
+  it("counts only the alerts in effect at alertsAt and names the upcoming one on the quiet tile", () => {
+    const upcoming = { event: "Beach Hazards Statement", onset: "2026-07-06T11:00:00.000Z", ends: null };
+    const live = { event: "High Surf Advisory", onset: "2026-07-05T06:00:00.000Z", ends: null };
+    const mixed = render({
+      beach: beachWith({ nws_zone: "MIZ037" }),
+      estimate: estimateWith({ alertDetails: [upcoming, live], alertsAt: FRESH })
+    });
+    expect(tileValue(mixed, "triangle-exclamation")).toEqual({ text: "1", quiet: false });
+    expect(tileSource(mixed, "triangle-exclamation")).toBe("High Surf Advisory");
+
+    const onlyUpcoming = render({
+      beach: beachWith({ nws_zone: "MIZ037" }),
+      estimate: estimateWith({ alertDetails: [upcoming], alertsAt: FRESH })
+    });
+    expect(tileValue(onlyUpcoming, "triangle-exclamation")).toEqual({ text: "None active", quiet: true });
+    expect(tileSource(onlyUpcoming, "triangle-exclamation")).toBe("Beach Hazards Statement not yet in effect");
+  });
+
   it("says None active for a checkable beach with an empty alert list", () => {
     const html = render({
       beach: beachWith({ eccc_zone: "Grand Bend" }),

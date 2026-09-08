@@ -12,6 +12,9 @@ import {
   alertColorForEvent,
   alertAuthorityForEvent,
   ripRiskColor,
+  alertInEffectAt,
+  alertsInEffect,
+  decidedAlertDetails,
   estimateFlag
 } from "../src/rules.js";
 import { metersToFeet } from "../src/geo.js";
@@ -955,8 +958,8 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
 });
 
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
-  it("bumped RULES_VERSION for the water-class wave thresholds", function () {
-    expect(RULES_VERSION).toBe("1.7.0");
+  it("bumped RULES_VERSION for the alert onset rule", function () {
+    expect(RULES_VERSION).toBe("1.8.0");
   });
 
   it("pins the caveat wording, which every other caveat test uses symbolically", function () {
@@ -1170,8 +1173,13 @@ describe("estimateFlag - output contract", function () {
   it("echoes sanitized alertDetails on every branch, [] for legacy callers", function () {
     const details = [
       { event: "Beach Hazards Statement",
-        onset: "2026-07-04T10:00:00.000Z", ends: "2026-07-05T02:00:00.000Z" },
-      { event: "Tornado Warning", onset: 42, ends: "" }, // non-string/empty times -> null
+        onset: "2026-07-04T10:00:00.000Z", ends: "2026-07-05T02:00:00.000Z",
+        description: "* WHAT...High waves expected.",
+        instruction: "Remain out of the water.",
+        area: "Door; Kewaunee",
+        sender: "NWS Green Bay WI" },
+      // non-string/empty times and text -> null
+      { event: "Tornado Warning", onset: 42, ends: "", description: 7, area: "" },
       { onset: "2026-07-04T10:00:00.000Z" },             // no event -> dropped
       null,
       "garbage"
@@ -1181,8 +1189,13 @@ describe("estimateFlag - output contract", function () {
     expect(result.trigger).toBe("wave-height");
     expect(result.alertDetails).toEqual([
       { event: "Beach Hazards Statement",
-        onset: "2026-07-04T10:00:00.000Z", ends: "2026-07-05T02:00:00.000Z" },
-      { event: "Tornado Warning", onset: null, ends: null }
+        onset: "2026-07-04T10:00:00.000Z", ends: "2026-07-05T02:00:00.000Z",
+        description: "* WHAT...High waves expected.",
+        instruction: "Remain out of the water.",
+        area: "Door; Kewaunee",
+        sender: "NWS Green Bay WI" },
+      { event: "Tornado Warning", onset: null, ends: null,
+        description: null, instruction: null, area: null, sender: null }
     ]);
     // Legacy caller (no field) and malformed field both echo [].
     expect(estimateFlag(baseInputs({})).alertDetails).toEqual([]);
@@ -1328,5 +1341,90 @@ describe("metersToFeet", function () {
     expect(metersToFeet(0)).toBe(0);
     expect(metersToFeet(null)).toBe(null);
     expect(metersToFeet(undefined)).toBe(null);
+  });
+});
+
+describe("alertInEffectAt / alertsInEffect / decidedAlertDetails", function () {
+  const AT = "2026-07-15T16:00:00.000Z";
+  const upcoming = { event: "Beach Hazards Statement", onset: "2026-07-16T07:00:00.000Z", ends: "2026-07-16T23:00:00.000Z" };
+  const live = { event: "Gale Warning", onset: "2026-07-15T10:00:00.000Z", ends: "2026-07-15T22:00:00.000Z" };
+  const ended = { event: "Small Craft Advisory", onset: "2026-07-15T02:00:00.000Z", ends: "2026-07-15T15:00:00.000Z" };
+  const untimed = { event: "Rip Current Statement", onset: null, ends: null };
+
+  it("keeps an alert only while onset <= at < ends", function () {
+    expect(alertInEffectAt(upcoming, AT)).toBe(false);
+    expect(alertInEffectAt(live, AT)).toBe(true);
+    expect(alertInEffectAt(ended, AT)).toBe(false);
+    // The onset instant itself is in effect; the ends instant is not.
+    expect(alertInEffectAt(live, live.onset)).toBe(true);
+    expect(alertInEffectAt(live, live.ends)).toBe(false);
+    // Offsets parse like Zulu: the same instant written for Eastern time.
+    expect(alertInEffectAt(upcoming, "2026-07-16T03:00:00-04:00")).toBe(true);
+  });
+
+  it("never hides an alert over a timestamp it cannot read", function () {
+    expect(alertInEffectAt(untimed, AT)).toBe(true);
+    expect(alertInEffectAt({ event: "x", onset: "garbage", ends: "garbage" }, AT)).toBe(true);
+    expect(alertInEffectAt(upcoming, null)).toBe(true);
+    expect(alertInEffectAt(upcoming, "not a date")).toBe(true);
+    expect(alertInEffectAt(null, AT)).toBe(false);
+  });
+
+  it("alertsInEffect returns deduped in-effect names in feed order", function () {
+    expect(alertsInEffect([upcoming, live, ended, untimed, live], AT))
+      .toEqual(["Gale Warning", "Rip Current Statement"]);
+    expect(alertsInEffect([upcoming], AT)).toEqual([]);
+    expect(alertsInEffect([upcoming, { onset: AT }, null, 4], null)).toEqual(["Beach Hazards Statement"]);
+    expect(alertsInEffect(null, AT)).toEqual([]);
+  });
+
+  it("a future Beach Hazards Statement built through alertsInEffect cannot color the flag", function () {
+    const details = [upcoming];
+    const result = estimateFlag(baseInputs({
+      alerts: alertsInEffect(details, AT),
+      alertDetails: details,
+      alertsAt: AT,
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("green");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.alertDetails).toMatchObject([upcoming]);
+    expect(result.alertsAt).toBe(AT);
+
+    const later = "2026-07-16T08:00:00.000Z";
+    const afterOnset = estimateFlag(baseInputs({
+      alerts: alertsInEffect(details, later),
+      alertDetails: details,
+      alertsAt: later,
+      waveHeightFt: 1.0
+    }));
+    expect(afterOnset.color).toBe("red");
+    expect(afterOnset.trigger).toBe("nws-alert");
+  });
+
+  it("a future yellow-floor alert cannot floor a green either", function () {
+    const details = [{ event: "Small Craft Advisory", onset: "2026-07-16T07:00:00.000Z", ends: null }];
+    const result = estimateFlag(baseInputs({
+      alerts: alertsInEffect(details, AT),
+      alertDetails: details,
+      alertsAt: AT,
+      waveHeightFt: 1.0
+    }));
+    expect(result.color).toBe("green");
+  });
+
+  it("echoes alertsAt as null when absent or not a string", function () {
+    expect(estimateFlag(baseInputs({})).alertsAt).toBe(null);
+    expect(estimateFlag(baseInputs({ alertsAt: 12 })).alertsAt).toBe(null);
+    expect(estimateFlag(baseInputs({ alertsAt: "" })).alertsAt).toBe(null);
+  });
+
+  it("decidedAlertDetails is the in-effect subset at alertsAt, everything for a legacy payload", function () {
+    const all = [upcoming, live, ended, untimed];
+    expect(decidedAlertDetails({ alertDetails: all, alertsAt: AT })).toEqual([live, untimed]);
+    expect(decidedAlertDetails({ alertDetails: all })).toEqual(all);
+    expect(decidedAlertDetails({ alertDetails: all, alertsAt: null })).toEqual(all);
+    expect(decidedAlertDetails({ alertDetails: "nope", alertsAt: AT })).toEqual([]);
+    expect(decidedAlertDetails(null)).toEqual([]);
   });
 });

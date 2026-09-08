@@ -11,7 +11,7 @@ import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { ROW_TRANSITION_SCRIPT } from "./rowTransitionScript.js";
-import { SEVERITY_RANK } from "../rules.js";
+import { SEVERITY_RANK, decidedAlertDetails, alertInEffectAt } from "../rules.js";
 import { alertsCheckable } from "../alertsCheckable.js";
 import { verdictSentence } from "./verdict.js";
 import { nextSunEvent, utcClockLabel } from "./sun.js";
@@ -418,19 +418,171 @@ function renderReportedFor(reportedFor) {
   return "<p class=\"reported-for wa-caption-s\">" + escapeHtml(text) + "</p>";
 }
 
+const UTC_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// An instant as "Sep 9, 07:00 UTC". It names UTC for the reason renderSunTile's
+// fallback does: only the viewer's browser knows the clock posted at the beach.
+function utcStampLabel(iso) {
+  const clock = utcClockLabel(iso);
+  if (clock === null) {
+    return null;
+  }
+  const at = new Date(Date.parse(iso));
+  return UTC_MONTHS[at.getUTCMonth()] + " " + String(at.getUTCDate()) + ", " + clock;
+}
+
+// One alert timestamp on the viewer's own clock, with the UTC stamp as the
+// light-DOM fallback wa-format-date renders until the component upgrades.
+// "" when the instant is missing or unparseable.
+function renderAlertTime(iso) {
+  const label = utcStampLabel(iso);
+  if (label === null) {
+    return "";
+  }
+  const attr = escapeHtml(iso);
+  return "<wa-format-date date=\"" + attr + "\" month=\"short\" day=\"numeric\" " +
+    "hour=\"numeric\" minute=\"numeric\">" +
+    "<time datetime=\"" + attr + "\">" + escapeHtml(label) + "</time>" +
+    "</wa-format-date>";
+}
+
+// The alert's own window, phrased against whether it has started yet: an alert
+// echoed ahead of its onset says when it starts, so the line never reads as a
+// hazard that is already here. "" when the feed gave neither timestamp.
+function renderAlertWindow(entry, nowIso) {
+  const onsetHtml = renderAlertTime(entry.onset);
+  const endsHtml = renderAlertTime(entry.ends);
+  if (!alertInEffectAt(entry, nowIso) && onsetHtml !== "") {
+    return endsHtml === ""
+      ? ("Starts " + onsetHtml)
+      : ("Starts " + onsetHtml + ", ends " + endsHtml);
+  }
+  if (endsHtml !== "") {
+    return "In effect until " + endsHtml;
+  }
+  return onsetHtml === "" ? "" : "In effect since " + onsetHtml;
+}
+
+// The section form an issuing office writes inside an alert description:
+// "* WHAT...High waves expected.", hard-wrapped to the product's own column
+// width. Bounded label so a stray asterisk in prose cannot swallow a paragraph.
+const ALERT_SECTION = /^\*\s*([A-Z][A-Z0-9 '\/-]{1,40}?)\s*\.\.\.\s*([\s\S]+)$/;
+
+// "ADDITIONAL DETAILS" -> "Additional details".
+function sentenceCase(text) {
+  return text.charAt(0) + text.slice(1).toLowerCase();
+}
+
+// The description as paragraphs. Blank lines separate paragraphs; the single
+// newlines inside one are the product's fixed-width wrapping and collapse to
+// spaces, so the text reflows to the reader's column instead of the office's.
+// A paragraph in the "* WHAT..." section form leads with its label; ECCC's
+// unlabelled prose and anything that does not parse stay plain paragraphs.
+function renderAlertDescription(text) {
+  const blocks = text.split(/\n[ \t]*\n/);
+  const paragraphs = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i].replace(/\s*\n\s*/g, " ").trim();
+    if (block.length === 0) {
+      continue;
+    }
+    const match = ALERT_SECTION.exec(block);
+    if (match) {
+      paragraphs.push("<p><strong>" + escapeHtml(sentenceCase(match[1].trim())) +
+        "</strong> " + escapeHtml(match[2].trim()) + "</p>");
+    } else {
+      paragraphs.push("<p>" + escapeHtml(block) + "</p>");
+    }
+  }
+  return paragraphs.join("");
+}
+
+// One alert as a collapsed disclosure: the event name and its window always
+// visible, the issuing office's own words behind the toggle. An alert the feed
+// carried no text for has nothing to disclose, so it renders as the same header
+// row without a toggle rather than an expander onto an empty panel.
+function renderAlertEntry(entry, nowIso) {
+  const windowHtml = renderAlertWindow(entry, nowIso);
+  const summaryHtml = "<span class=\"alert-detail-event\">" + escapeHtml(entry.event) + "</span>" +
+    (windowHtml === "" ? "" :
+      "<span class=\"alert-detail-window wa-caption-s wa-color-text-quiet\">" +
+      windowHtml + "</span>");
+
+  const body = [];
+  if (typeof entry.description === "string" && entry.description.length > 0) {
+    body.push(renderAlertDescription(entry.description));
+  }
+  if (typeof entry.instruction === "string" && entry.instruction.length > 0) {
+    body.push("<p class=\"alert-detail-instruction wa-flank wa-gap-xs\">" +
+      "<wa-icon name=\"circle-exclamation\"></wa-icon>" +
+      "<span>" + escapeHtml(entry.instruction) + "</span></p>");
+  }
+  const sender = (typeof entry.sender === "string" && entry.sender.length > 0)
+    ? entry.sender : null;
+  const area = (typeof entry.area === "string" && entry.area.length > 0)
+    ? entry.area : null;
+  if (sender !== null || area !== null) {
+    const provenance = sender === null
+      ? ("For " + area)
+      : ("Issued by " + sender + (area === null ? "" : " for " + area));
+    body.push("<p class=\"alert-detail-provenance wa-caption-s\">" +
+      escapeHtml(provenance) + "</p>");
+  }
+
+  if (body.length === 0) {
+    return "<div class=\"alert-detail alert-detail-bare\">" + summaryHtml + "</div>";
+  }
+  return "<wa-details class=\"alert-detail\" appearance=\"plain\" icon-placement=\"start\">" +
+    "<span slot=\"summary\" class=\"alert-detail-summary\">" + summaryHtml + "</span>" +
+    "<div class=\"alert-detail-body wa-stack wa-gap-s\">" + body.join("") + "</div>" +
+    "</wa-details>";
+}
+
+// Every alert the estimate was weighed against, in-effect ones first and feed
+// order within each group, so the alert that chose the color sits above one
+// echoed ahead of its onset. The reason line names an event; this is where a
+// reader finds out what that event actually says. "" when nothing was echoed,
+// which is also every legacy payload written before the text fields shipped.
+function renderAlertDetails(estimate, nowIso) {
+  const details = (estimate && Array.isArray(estimate.alertDetails)) ? estimate.alertDetails : [];
+  const active = [];
+  const upcoming = [];
+  for (let i = 0; i < details.length; i++) {
+    const entry = details[i];
+    if (entry === null || typeof entry !== "object" ||
+        typeof entry.event !== "string" || entry.event.length === 0) {
+      continue;
+    }
+    (alertInEffectAt(entry, nowIso) ? active : upcoming).push(entry);
+  }
+  const ordered = active.concat(upcoming);
+  if (ordered.length === 0) {
+    return "";
+  }
+  const entries = [];
+  for (let i = 0; i < ordered.length; i++) {
+    entries.push(renderAlertEntry(ordered[i], nowIso));
+  }
+  return "<div class=\"alert-details wa-stack wa-gap-2xs\">" + entries.join("\n") + "</div>";
+}
+
 // Shared flag-card skeleton used by both the official and the estimate card so
 // their layouts stay identical: badge in the header (left), source labels in
 // header-actions (top right), flag row + stale warning in the body, "Updated"
 // in the footer. The with-* attributes track slotted content per the wa-card
 // SSR contract.
 //
-// Three optional options tune the body, and only renderOfficialCard ever passes
-// them; the estimate card always gets the plain 2 h behaviour:
+// Four optional options tune the body. Only renderOfficialCard passes the first
+// three, so the estimate card always gets the plain 2 h behaviour; only
+// renderEstimateCard passes the fourth, since no scraper publishes alert text:
 //   staleMs          — this source's own staleness horizon; absent means STALE_MS.
 //   readingNote      — copy for the neutral note shown between the 2 h default
 //                      and that horizon.
 //   reportedForHtml  — the provenance line for a reading posted at another site,
 //                      shown under the flag row and above any callout.
+//   alertDetailsHtml — the per-alert disclosures, below any callout so a stale
+//                      warning is never pushed under an expander.
 // The two callouts are mutually exclusive and the warning always wins: a card
 // that is genuinely stale must never also carry a reassuring note beside it.
 function renderFlagCard(options) {
@@ -458,6 +610,9 @@ function renderFlagCard(options) {
       lines.push(renderReadingNote(options.readingNote, options.updated));
     }
   }
+  if (options.alertDetailsHtml) {
+    lines.push(options.alertDetailsHtml);
+  }
   if (options.updated) {
     lines.push("<div slot=\"footer\" class=\"wa-caption-s\">Updated " +
       "<wa-relative-time date=\"" + escapeHtml(options.updated) +
@@ -477,6 +632,7 @@ function renderEstimateCard(estimate, nowIso) {
     reason: isMissing ? "No estimate available yet" : (estimate.reason || "No data available"),
     sourcesHtml: isMissing ? "" : renderSourceLabels(estimate.sources),
     updated: isMissing ? null : (estimate.updated || null),
+    alertDetailsHtml: isMissing ? "" : renderAlertDetails(estimate, nowIso),
     nowIso: nowIso
   });
 }
@@ -1492,25 +1648,35 @@ function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
     }));
   }
 
+  // Counts only the alerts the color was decided against. An alert echoed
+  // ahead of its onset is named on the quiet tile instead, so the count never
+  // contradicts the flag it sits under.
   const details = (estimate && Array.isArray(estimate.alertDetails)) ? estimate.alertDetails : null;
-  const alertCount = details ? details.length : 0;
-  if (alertCount > 0) {
-    const first = details[0];
-    const alertSource = (first && typeof first.event === "string" && first.event.length > 0)
+  const active = decidedAlertDetails(estimate);
+  if (active.length > 0) {
+    const first = active[0];
+    const alertSource = (typeof first.event === "string" && first.event.length > 0)
       ? first.event : "NWS and ECCC alerts";
     tiles.push(renderGlanceTile({
       icon: "triangle-exclamation",
-      value: String(alertCount),
+      value: String(active.length),
       caption: "Active alerts",
       sourceHtml: escapeHtml(alertSource)
     }));
   } else if (details && alertsCheckable(beach)) {
+    let upcoming = null;
+    for (let i = 0; i < details.length && upcoming === null; i++) {
+      const entry = details[i];
+      if (entry && typeof entry.event === "string" && entry.event.length > 0) {
+        upcoming = entry.event;
+      }
+    }
     tiles.push(renderGlanceTile({
       icon: "triangle-exclamation",
       value: "None active",
       quiet: true,
       caption: "Active alerts",
-      sourceHtml: escapeHtml("NWS and ECCC alerts")
+      sourceHtml: escapeHtml(upcoming === null ? "NWS and ECCC alerts" : upcoming + " not yet in effect")
     }));
   }
 

@@ -43,6 +43,13 @@ describe("pickIsoString", function () {
   });
 });
 
+// The four free-text fields matchedAlerts always emits, null for a fixture whose
+// client attached none.
+function detail(entry) {
+  return Object.assign(
+    { description: null, instruction: null, area: null, sender: null }, entry);
+}
+
 describe("matchedAlerts", function () {
   it("returns accepted entries in input order", function () {
     const alerts = [
@@ -52,12 +59,12 @@ describe("matchedAlerts", function () {
     expect(matchedAlerts(alerts, always)).toEqual({
       events: ["High Surf Advisory", "Rip Current Statement"],
       details: [
-        {
+        detail({
           event: "High Surf Advisory",
           onset: "2026-07-05T10:00:00Z",
           ends: "2026-07-05T22:00:00Z"
-        },
-        { event: "Rip Current Statement", onset: null, ends: "2026-07-05T18:00:00Z" }
+        }),
+        detail({ event: "Rip Current Statement", onset: null, ends: "2026-07-05T18:00:00Z" })
       ]
     });
   });
@@ -73,8 +80,8 @@ describe("matchedAlerts", function () {
     const out = matchedAlerts(alerts, always);
     expect(out.events).toEqual(["Gale Warning"]);
     expect(out.details).toEqual([
-      { event: "Gale Warning", onset: "2026-07-05T10:00:00Z", ends: "2026-07-05T18:00:00Z" },
-      { event: "Gale Warning", onset: "2026-07-05T20:00:00Z", ends: "2026-07-06T04:00:00Z" }
+      detail({ event: "Gale Warning", onset: "2026-07-05T10:00:00Z", ends: "2026-07-05T18:00:00Z" }),
+      detail({ event: "Gale Warning", onset: "2026-07-05T20:00:00Z", ends: "2026-07-06T04:00:00Z" })
     ]);
   });
 
@@ -85,7 +92,7 @@ describe("matchedAlerts", function () {
     ];
     // Both rows normalize to (Wind Advisory, null, null), so they collapse to one.
     expect(matchedAlerts(alerts, always).details).toEqual([
-      { event: "Wind Advisory", onset: null, ends: null }
+      detail({ event: "Wind Advisory", onset: null, ends: null })
     ]);
   });
 
@@ -94,13 +101,13 @@ describe("matchedAlerts", function () {
     // silently drops it from events while details still carries it.
     const out = matchedAlerts([{ event: "constructor" }], always);
     expect(out.events).toEqual(["constructor"]);
-    expect(out.details).toEqual([{ event: "constructor", onset: null, ends: null }]);
+    expect(out.details).toEqual([detail({ event: "constructor", onset: null, ends: null })]);
 
     const proto = matchedAlerts([{ event: "__proto__" }, { event: "toString" }], always);
     expect(proto.events).toEqual(["__proto__", "toString"]);
     expect(proto.details).toEqual([
-      { event: "__proto__", onset: null, ends: null },
-      { event: "toString", onset: null, ends: null }
+      detail({ event: "__proto__", onset: null, ends: null }),
+      detail({ event: "toString", onset: null, ends: null })
     ]);
   });
 
@@ -153,6 +160,64 @@ describe("matchedAlerts", function () {
     expect(a).toEqual(b);
     expect(alerts).toEqual([first, second]);
     expect(first.onset).toBe("2026-07-05T10:00:00Z");
+  });
+
+  it("carries the client's free text through, trimmed", function () {
+    const alerts = [{
+      event: "Beach Hazards Statement",
+      onset: "2026-07-05T10:00:00Z",
+      ends: "2026-07-05T22:00:00Z",
+      description: "  * WHAT...High waves expected.  ",
+      instruction: "Remain out of the water.",
+      area: "Door; Kewaunee",
+      sender: "NWS Green Bay WI"
+    }];
+    expect(matchedAlerts(alerts, always).details).toEqual([{
+      event: "Beach Hazards Statement",
+      onset: "2026-07-05T10:00:00Z",
+      ends: "2026-07-05T22:00:00Z",
+      description: "* WHAT...High waves expected.",
+      instruction: "Remain out of the water.",
+      area: "Door; Kewaunee",
+      sender: "NWS Green Bay WI"
+    }]);
+  });
+
+  it("normalizes a non-string or empty text field to null", function () {
+    const alerts = [{
+      event: "Gale Warning",
+      description: 42,
+      instruction: "   ",
+      area: null,
+      sender: { en: "ECCC" }
+    }];
+    expect(matchedAlerts(alerts, always).details).toEqual([
+      detail({ event: "Gale Warning", onset: null, ends: null })
+    ]);
+  });
+
+  it("caps a runaway description and marks the cut", function () {
+    // The national feed's long tail runs past 8 KB, and one entry per matched
+    // alert rides in every beach's "flag:" value.
+    const long = "x".repeat(9000);
+    const out = matchedAlerts([{ event: "Flood Warning", description: long }], always);
+    const text = out.details[0].description;
+    expect(text.length).toBe(4001);
+    expect(text.endsWith("\u2026")).toBe(true);
+    // The longest description on any event rules.js keys on still passes whole.
+    const hurricane = "y".repeat(3700);
+    expect(matchedAlerts([{ event: "Hurricane Warning", description: hurricane }], always)
+      .details[0].description).toBe(hurricane);
+  });
+
+  it("keeps the first matched entry's text when a triple repeats", function () {
+    const alerts = [
+      { event: "Gale Warning", onset: "a", ends: "b", description: "first" },
+      { event: "Gale Warning", onset: "a", ends: "b", description: "second" }
+    ];
+    const details = matchedAlerts(alerts, always).details;
+    expect(details.length).toBe(1);
+    expect(details[0].description).toBe("first");
   });
 });
 

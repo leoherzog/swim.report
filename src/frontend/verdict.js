@@ -20,7 +20,8 @@ import {
   ALERT_PRECEDENCE,
   ECCC_ALERT_PRECEDENCE,
   NWS_FLOOR_PRECEDENCE,
-  ECCC_FLOOR_PRECEDENCE
+  ECCC_FLOOR_PRECEDENCE,
+  decidedAlertDetails
 } from "../rules.js";
 import { bandLabelsForWaterClass } from "./waveStrip.js";
 
@@ -105,21 +106,48 @@ function orderedAlertEvents(alertDetails) {
   return ordered;
 }
 
-// The active-alert clause, e.g. "Beach Hazards Statement in effect" or "Tsunami
-// Warning and 2 more alerts in effect". "" when nothing was echoed, including
-// legacy payloads.
-function alertClause(alertDetails) {
-  const events = orderedAlertEvents(alertDetails);
+// "X", "X and Y" or "X and N more alerts" over an ordered event list, "" when
+// the list is empty.
+function eventList(events) {
   if (events.length === 0) {
     return "";
   }
   if (events.length === 1) {
-    return events[0] + " in effect";
+    return events[0];
   }
   if (events.length === 2) {
-    return events[0] + " and " + events[1] + " in effect";
+    return events[0] + " and " + events[1];
   }
-  return events[0] + " and " + String(events.length - 1) + " more alerts in effect";
+  return events[0] + " and " + String(events.length - 1) + " more alerts";
+}
+
+// The active-alert clause, e.g. "Beach Hazards Statement in effect" or "Tsunami
+// Warning and 2 more alerts in effect", over the entries the color was decided
+// against (decidedAlertDetails). "" when none was in effect, including legacy
+// payloads with nothing echoed.
+function alertClause(estimate) {
+  const list = eventList(orderedAlertEvents(decidedAlertDetails(estimate)));
+  return list === "" ? "" : list + " in effect";
+}
+
+// The upcoming-alert clause, e.g. "Beach Hazards Statement not yet in effect",
+// over the echoed entries the color was NOT decided against because their
+// onset had not arrived. Named so a reader sees the alert the hazard lane
+// draws without reading it as the reason for the color. "" when none.
+function upcomingClause(estimate) {
+  if (!estimate || !Array.isArray(estimate.alertDetails)) {
+    return "";
+  }
+  const decided = decidedAlertDetails(estimate);
+  const pending = [];
+  for (let i = 0; i < estimate.alertDetails.length; i++) {
+    const entry = estimate.alertDetails[i];
+    if (entry && typeof entry.event === "string" && decided.indexOf(entry) === -1) {
+      pending.push(entry);
+    }
+  }
+  const list = eventList(orderedAlertEvents(pending));
+  return list === "" ? "" : list + " not yet in effect";
 }
 
 // "calm water" below the yellow threshold, otherwise the band's own label as
@@ -190,7 +218,8 @@ export function verdictSentence(estimate, official, displayIsOfficial, waterClas
   }
 
   const trigger = typeof estimate.trigger === "string" ? estimate.trigger : "";
-  const alerts = alertClause(estimate.alertDetails);
+  const alerts = alertClause(estimate);
+  const upcoming = upcomingClause(estimate);
   const rip = RIP_CLAUSES[estimate.ripCurrentRisk] ? RIP_CLAUSES[estimate.ripCurrentRisk] : "";
   const waveBand = waveColorForHeight(
     typeof estimate.waveHeightFt === "number" ? estimate.waveHeightFt : null, waterClass);
@@ -215,7 +244,7 @@ export function verdictSentence(estimate, official, displayIsOfficial, waterClas
     lead = "no wave data, so this estimate is from wind alone";
   }
   if (!lead) {
-    lead = alerts ? alerts : (rip ? rip : waves);
+    lead = alerts ? alerts : (rip ? rip : (waves ? waves : upcoming));
   }
   if (!lead) {
     return "";
@@ -224,6 +253,11 @@ export function verdictSentence(estimate, official, displayIsOfficial, waterClas
   const parts = [lead];
   if (alerts && alerts !== lead) {
     parts.push(alerts);
+  }
+  // An alert that has not started is context, never reassurance, so it follows
+  // an event-led red as readily as any other lead.
+  if (upcoming && upcoming !== lead) {
+    parts.push(upcoming);
   }
   if (rip && rip !== lead && reinforces(ripRiskColor(estimate.ripCurrentRisk), color, leadIsEvent)) {
     parts.push(rip);

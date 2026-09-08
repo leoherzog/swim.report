@@ -98,12 +98,23 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.7.0",
+        "rules_version": "1.8.0",
         "official": false,
         "waveHeightFt": 2.62,
-        "alertDetails": [],
+        "alertDetails": [
+          { "event": "Beach Hazards Statement",
+            "onset": "2026-07-04T22:00:00.000Z",
+            "ends": "2026-07-05T12:00:00.000Z",
+            "description": "* WHAT...High waves and dangerous currents expected. ...",
+            "instruction": "Remain out of the water to avoid hazardous swimming conditions.",
+            "area": "Door; Kewaunee; Manitowoc",
+            "sender": "NWS Green Bay WI" }
+        ],
+        "alertsAt": "2026-07-04T15:00:03.000Z",
         "ripCurrentRisk": null,
         "sources": [
+          { "label": "NWS Alerts",
+            "url": "https://api.weather.gov/alerts/active?zone=WIZ022" },
           { "label": "NOAA GFS Wave Model",
             "url": "https://polar.ncep.noaa.gov/waves/" }
         ],
@@ -111,6 +122,9 @@ Example response:
       },
       "official": null
     }
+
+The statement's onset is still ahead of `alertsAt`, so it is echoed for the detail
+page to show but did not decide the wave-height yellow.
 
 Unknown `beachId` (no matching D1 row) returns `404`. A confirmed-inland beach
 returns `404` too — it is not flag-worthy, so it is treated as not found:
@@ -287,7 +301,7 @@ reads that location, so both are fully determined by the URL.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.7.0`, and the same inputs always return the same output.
+`rules_version` is `1.8.0`, and the same inputs always return the same output.
 
 Precedence is strict: the first matching rule (steps 1–5) wins, top to bottom. Steps 6, 6b and
 7 are raise-only *floors* applied after a color is decided — an NWS severe-weather
@@ -296,7 +310,7 @@ raising a lower result but never downgrading a higher color.
 
 | # | Signal | Source | Condition | Color | Reason |
 |---|--------|--------|-----------|-------|--------|
-| 1 | Active NWS alert | `api.weather.gov/alerts/active` (land matched by `nws_zone`, marine by `marine_zone`) | Event = "Tsunami Warning", "Hurricane Warning", "Storm Surge Warning", "Extreme Wind Warning", "Tornado Warning", "High Surf Warning", marine "Hurricane Force Wind Warning", or marine "Storm Warning" | double-red | "Active NWS alert: &lt;event&gt;" |
+| 1 | NWS alert in effect | `api.weather.gov/alerts/active` (land matched by `nws_zone`, marine by `marine_zone`), onset at or before the run and ends after it | Event = "Tsunami Warning", "Hurricane Warning", "Storm Surge Warning", "Extreme Wind Warning", "Tornado Warning", "High Surf Warning", marine "Hurricane Force Wind Warning", or marine "Storm Warning" | double-red | "Active NWS alert: &lt;event&gt;" |
 | 1 | Active NWS alert | same | Event = "Tropical Storm Warning", "Tsunami Advisory", "Severe Thunderstorm Warning", "Beach Hazards Statement", "High Surf Advisory", "Rip Current Statement", "High Wind Warning", marine "Gale Warning", marine "Special Marine Warning", "Lakeshore Flood Warning", or "Coastal Flood Warning" | red | "Active NWS alert: &lt;event&gt;" |
 | 1b | Active ECCC alert (Canadian beaches) | `api.weather.gc.ca` `weather-alerts` matched by alert-region polygon; `marineweather-realtime` matched by marine-zone polygon | Event = "tornado warning", "storm surge warning", or marine "storm warning" (≥ 48 kt) | double-red | "Active Environment Canada alert: &lt;event&gt;" |
 | 1b | Active ECCC alert | same | Event = "squall warning", "waterspout warning", "severe thunderstorm warning", marine "gale warning" (≥ 34 kt), or "wind warning" | red | "Active Environment Canada alert: &lt;event&gt;" |
@@ -312,6 +326,15 @@ raising a lower result but never downgrading a higher color.
 
 Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
 
+- An alert counts only while it is in effect: its onset at or before the instant the estimate
+  is made and its ends after it (`alertsInEffect` in `src/rules.js`, applied where both crons
+  build their inputs). NWS publishes products such as a Beach Hazards Statement hours ahead
+  of their onset, and until then the product is a forecast of a hazard, not the hazard: it
+  neither short-circuits at step 1 nor floors at step 6, and the same holds for ECCC. It
+  still rides in the estimate's `alertDetails`, so the detail page's hazard lane draws it as
+  a band that starts later, and `alertsAt` records the instant the check was made. A missing
+  or unreadable timestamp keeps the alert rather than hiding it. The ten-minute alerts refresh
+  treats an onset arriving or an ends passing exactly like a new issuance.
 - Alerts are checked in `ALERT_PRECEDENCE` order, not the order they appear in the NWS
   response. **Ordering constraint:** the step-1 loop takes the first matching event regardless
   of color, so the list must place every double-red before every red — otherwise a red could
@@ -360,8 +383,12 @@ Every `FlagEstimate` carries `color`, a human-readable `reason`, `trigger` (the 
 branch that decided the color: `nws-alert`, `eccc-alert`, `rip-current`, `wave-height`, `wind`,
 `rip-current-low`, `no-data`, `nws-floor`, `eccc-floor` or `wq-floor`, which the detail page
 renders as a natural-language explanation), `rules_version`, `official: false`, `sources`
-(`{ label, url }` entries for the data actually used for that beach), and `updated` (ISO 8601
-UTC).
+(`{ label, url }` entries for the data actually used for that beach), `updated` (ISO 8601
+UTC), and the structured echoes `waveHeightFt`, `alertDetails` (every matched alert, upcoming
+ones included, each with the issuing office's own `description`, `instruction`, `area` and
+`sender` where that authority publishes them), `alertsAt` (the instant the alerts were judged
+in effect at) and `ripCurrentRisk`. The alert text is display-only: the detail page shows it
+under the estimate card, and no rule reads it.
 
 ## Local development
 

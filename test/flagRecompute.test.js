@@ -134,6 +134,10 @@ function runWaterTempCron(env) {
 
 describe("runFlagRecompute input assembly - alertsCheckable", function () {
   beforeEach(function () {
+    // The alert fixtures below carry July 2026 onset/ends periods, and only an
+    // alert in effect at the run's clock may decide a color.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -141,6 +145,7 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
 
   afterEach(function () {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("unenriched beach (nws_zone NULL) gets the alerts-unavailable caveat", async function () {
@@ -223,7 +228,7 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     expect(estimate.color).toBe("red");
     expect(estimate.reason).toBe("Active NWS alert: Beach Hazards Statement");
     // The structured echo the detail page's hazard lane consumes.
-    expect(estimate.alertDetails).toEqual([{
+    expect(estimate.alertDetails).toMatchObject([{
       event: "Beach Hazards Statement",
       onset: "2026-07-15T14:00:00Z",
       ends: "2026-07-16T06:00:00Z"
@@ -273,7 +278,7 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     const estimate = JSON.parse(made.kvPuts.get("flag:osm-node-4").value);
     expect(estimate.color).toBe("red");
     expect(estimate.reason).toBe("Active NWS alert: Gale Warning");
-    expect(estimate.alertDetails).toEqual([{
+    expect(estimate.alertDetails).toMatchObject([{
       event: "Gale Warning",
       onset: "2026-07-15T14:00:00Z",
       ends: "2026-07-16T06:00:00Z"
@@ -346,8 +351,8 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
                 properties: {
                   alert_name_en: "severe thunderstorm warning",
                   status_en: "issued",
-                  validity_datetime: "2026-07-18T11:00:00.000Z",
-                  event_end_datetime: "2026-07-18T21:00:00.000Z"
+                  validity_datetime: "2026-07-15T11:00:00.000Z",
+                  event_end_datetime: "2026-07-15T21:00:00.000Z"
                 },
                 geometry: {
                   type: "Polygon",
@@ -379,10 +384,10 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     expect(estimate.color).toBe("red");
     expect(estimate.reason).toBe("Active Environment Canada alert: severe thunderstorm warning");
     expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
-    expect(estimate.alertDetails).toEqual([{
+    expect(estimate.alertDetails).toMatchObject([{
       event: "severe thunderstorm warning",
-      onset: "2026-07-18T11:00:00.000Z",
-      ends: "2026-07-18T21:00:00.000Z"
+      onset: "2026-07-15T11:00:00.000Z",
+      ends: "2026-07-15T21:00:00.000Z"
     }]);
     expect(estimate.sources).toEqual([{
       label: "Environment Canada Alerts",
@@ -2251,7 +2256,7 @@ describe("runFlagRecompute writes the estimateInputs seal", function () {
     // The seal plus the echo reproduce the published color exactly.
     expect(estimateFlag(buildEstimateInputs(
       { id: "osm-node-seal", nws_zone: "MIZ071", marine_zone: null, eccc_zone: null },
-      { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false },
+      { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false, alertsAt: null },
       signals
     ))).toEqual({
       beachId: stored.beachId,
@@ -2264,6 +2269,7 @@ describe("runFlagRecompute writes the estimateInputs seal", function () {
       updated: stored.updated,
       waveHeightFt: stored.waveHeightFt,
       alertDetails: stored.alertDetails,
+      alertsAt: stored.alertsAt,
       ripCurrentRisk: stored.ripCurrentRisk
     });
   });

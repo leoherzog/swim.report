@@ -107,11 +107,29 @@ cross-module interface.
       "alertDetails": [              // structured echo of the per-alert details, NWS or
                                      // ECCC depending on the beach's authority (sanitized:
         { "event": "Beach Hazards Statement",   // entries without a string event dropped,
-          "onset": "2026-07-04T10:00:00.000Z",  // non-string/empty onset/ends -> null).
-          "ends": "2026-07-05T02:00:00.000Z" }  // Always present ([] when none), whichever
-      ],                             // branch decided; feeds the detail page's hazard lane
-                                     // (name + time period above the wave strip). Older KV
-                                     // payloads lack it; renderers treat missing as [].
+          "onset": "2026-07-04T10:00:00.000Z",  // non-string/empty fields -> null).
+          "ends": "2026-07-05T02:00:00.000Z",
+          "description": "* WHAT...High waves...",   // the four text fields are the issuing
+          "instruction": "Remain out of the water.", // office's own words, carried for the
+          "area": "Door; Kewaunee; Manitowoc",       // detail page's alert disclosures and
+          "sender": "NWS Green Bay WI" }             // read by no rule. matchedAlerts caps
+      ],                             // each at the client boundary; no authority publishes
+                                     // all four, so a null is "not published", never
+                                     // "unknown". Always present ([] when none), whichever
+                                     // branch decided. The WHOLE matched set, alerts not
+                                     // yet in effect included, so the detail page's hazard
+                                     // lane can draw a band that starts later. Older KV
+                                     // payloads lack it; renderers treat missing as [], and
+                                     // an entry missing all four text fields renders as a
+                                     // plain row rather than an empty expander.
+      "alertsAt": "2026-07-04T15:00:03.000Z", // the instant the alerts input was judged in
+                                     // effect at (rules.js alertsInEffect): the hourly's
+                                     // run instant, or the refresh's own clock under the
+                                     // standing updated. decidedAlertDetails(estimate) is
+                                     // the alertDetails subset in effect at it, i.e. the
+                                     // entries the color could have come from; null or
+                                     // missing means a pre-onset-rule payload that was
+                                     // decided against every echoed entry.
       "ripCurrentRisk": null,        // structured echo of the SRF rip risk: "HIGH" |
                                      // "MODERATE" | "LOW" | null (unrecognized values -> null).
                                      // Also always present; feeds the hazard lane's rip band.
@@ -858,6 +876,23 @@ Pure module. No fetch, no Date, no env. Exports:
       // and the hazard lane's rip band both derive from it — the single home of that
       // mapping.
 
+    export function alertInEffectAt(entry, atIso)
+      // Pure. true when { event, onset, ends } is in effect at atIso: onset <= at < ends.
+      // A missing or unparseable onset counts as already in effect, a missing or
+      // unparseable ends as open-ended, an unparseable atIso keeps every alert: a
+      // dropped timestamp can only keep an alert, never hide one.
+
+    export function alertsInEffect(details, atIso)
+      // Pure. The deduped event names of the details entries alertInEffectAt keeps, in
+      // feed order. The alerts input to estimateFlag MUST be built through it
+      // (buildAlertInputs does): an alert published ahead of its onset is a forecast of
+      // a hazard, not the hazard, and must neither short-circuit nor floor the color.
+
+    export function decidedAlertDetails(estimate)
+      // Pure. The FlagEstimate's echoed alertDetails entries in effect at its alertsAt —
+      // the ones its color could have been decided by. Every entry for a payload with
+      // no alertsAt (pre-onset-rule, decided against all of them). [] when malformed.
+
     export function estimateFlag(inputs) // -> FlagEstimate (always returns, never throws)
       // The returned FlagEstimate carries waveHeightFt, alertDetails, and
       // ripCurrentRisk (section 1): structured echoes of the inputs, present on every
@@ -871,13 +906,22 @@ Pure module. No fetch, no Date, no env. Exports:
       beachId: "osm-node-123456",       // string
       alerts: ["Rip Current Statement"],// array of alert event-name strings (NWS for
                                         // US beaches, ECCC alert_name_en for Canadian
-                                        // ones — one authority per beach), [] if fetch OK
-                                        // but no alerts, or null if the alerts fetch failed
+                                        // ones — one authority per beach) IN EFFECT at
+                                        // alertsAt, i.e. alertsInEffect(alertDetails,
+                                        // alertsAt); [] if fetch OK but none in effect,
+                                        // or null if the alerts fetch failed
       alertDetails: [                   // per-alert details from nwsAlertsForZone /
-        { event: "Rip Current Statement",  // ecccAlertsForPoint (section 5): onset/ends ISO strings or null.
-          onset: "2026-07-04T10:00:00.000Z",  // Echoed (sanitized) into the output's
-          ends: "2026-07-05T02:00:00.000Z" }  // alertDetails; never affects the color
-      ],                                // decision. null/missing -> echoed as [].
+        { event: "Rip Current Statement",  // ecccAlertsForPoint (section 5): onset/ends ISO
+          onset: "2026-07-04T10:00:00.000Z",  // strings or null, then the four capped text
+          ends: "2026-07-05T02:00:00.000Z",   // fields, each null where the authority
+          description: "* WHAT...",           // publishes none. The whole matched set,
+          instruction: "Stay out of the water.", // upcoming alerts included. Echoed
+          area: "Door; Kewaunee",             // (sanitized) into the output's
+          sender: "NWS Green Bay WI" }        // alertDetails; the text is display-only
+      ],                                // and no field here affects the color decision.
+                                        // null/missing -> echoed as [].
+      alertsAt: "2026-07-04T15:00:03.000Z", // ISO instant alerts was filtered at; echoed
+                                        // unchanged, null when missing or not a string
       alertsCheckable: true,            // true | false | null (missing/undefined -> null):
                                         // true when the cron could look up alerts (the beach
                                         // has an nws_zone, marine_zone or eccc_zone; a
@@ -1020,8 +1064,8 @@ step 5 LOW → "rip-current-low", step 5 otherwise → "no-data",
 step 6 watch/advisory floor → "nws-floor", step 6b ECCC marine floor → "eccc-floor",
 step 7 water-quality floor → "wq-floor"), rules_version: RULES_VERSION, official: false,
 sources: inputs.sources (or []), updated: inputs.updated, plus the structured
-echoes waveHeightFt / alertDetails / ripCurrentRisk (section 1). Two calls with
-the same inputs return deeply-equal objects.
+echoes waveHeightFt / alertDetails / alertsAt / ripCurrentRisk (section 1). Two calls
+with the same inputs return deeply-equal objects.
 
 ## 5. Upstream clients
 
@@ -1153,13 +1197,23 @@ shapes it walks are the clients' wire shapes, not general geography.
 
     export function matchedAlerts(alerts, matches)
       // Pure. Filters an alerts array to the entries the caller's matches(alert)
-      // predicate accepts, in the shape the rules engine and hazard lane consume:
-      //   { events: [deduped event names], details: [{ event, onset, ends }] }
+      // predicate accepts, in the shape the rules engine, hazard lane and detail page
+      // consume:
+      //   { events: [deduped event names],
+      //     details: [{ event, onset, ends, description, instruction, area, sender }] }
       // A non-array `alerts`, or an entry that is not an object with a string .event, is
       // skipped, so malformed input degrades to { events: [], details: [] }. events
       // dedupe on the event name; details dedupe on the exact key
       // event + "|" + String(onset) + "|" + String(ends), onset/ends coerced
-      // typeof-string-else-null.
+      // typeof-string-else-null — so on a repeated triple the FIRST matched entry's text
+      // wins. The four text fields are trimmed copies of whatever the client attached,
+      // null when it attached none, each capped (description 4000, instruction 800,
+      // area 300, sender 120) with a trailing ellipsis. The cap is here, at the one
+      // shared walk, because a "flag:" value holds one entry per matched alert and the
+      // alerts refresh reads every beach's value every ten minutes, so the national
+      // feed's 8 KB long tail would be a cost paid across the whole table. 4000 clears
+      // the longest description on any event rules.js keys on — the Hurricane and
+      // Tropical Storm Warnings — so the cap only bites on events that decide no color.
       // Deliberately does not wrap matches(alert) in a try/catch: the ecccMarine caller
       // keeps its catch inside its own predicate closure, so nws.js and eccc.js
       // propagate a genuine throw rather than silently dropping alerts. Hoisting the
@@ -1186,11 +1240,17 @@ shapes it walks are the clients' wire shapes, not general geography.
     export async function fetchAllActiveAlerts()
       // Every active alert nationwide in one GET of NWS_ACTIVE_ALERTS_URL, once per run
       // regardless of zone count; per-zone filtering happens locally in nwsAlertsForZone.
-      // Success -> { alerts: [{ event, onset, ends, zones: [zone ids] }],
+      // Success -> { alerts: [{ event, onset, ends, description, instruction, area,
+      //                         sender, zones: [zone ids] }],
       //              sourceUrl: NWS_ACTIVE_ALERTS_URL }
       //   event = properties.event; onset falls back properties.onset ->
       //   properties.effective -> null, ends falls back properties.ends ->
-      //   properties.expires -> null (non-empty strings only); zones = the deduped
+      //   properties.expires -> null (non-empty strings only); description, instruction,
+      //   area and sender are raw properties.description / .instruction / .areaDesc /
+      //   .senderName, passed to matchedAlerts to trim and cap. properties.headline is
+      //   deliberately NOT carried: it restates the event and the window in the issuing
+      //   office's local time, which the detail page renders on the reader's clock.
+      //   zones = the deduped
       //   union of properties.geocode.UGC and the last path segment of each
       //   properties.affectedZones URL. Forecast-zone (MIZxxx) and county (MICxxx) UGC
       //   namespaces never collide, and beach.nws_zone is always a forecast zone, so
@@ -1200,8 +1260,9 @@ shapes it walks are the clients' wire shapes, not general geography.
     export function nwsAlertsForZone(alerts, zoneId)
       // Pure, exported for tests. Filters a fetchAllActiveAlerts result down to the
       // alerts whose zones include zoneId, in the shape the rules engine and hazard lane
-      // consume: { events: [deduped names], details: [{ event, onset, ends }] }, details
-      // deduped only on exact (event, onset, ends) repeats. Feeds the FlagEstimate's
+      // consume: { events: [deduped names], details: [{ event, onset, ends, description,
+      // instruction, area, sender }] }, details deduped only on exact
+      // (event, onset, ends) repeats. Feeds the FlagEstimate's
       // alertDetails echo. Malformed input -> { events: [], details: [] }. A matchedAlerts
       // wrapper whose only local logic is the zones.indexOf(zoneId) membership test.
 
@@ -1268,11 +1329,14 @@ fetch and matches beaches locally via pointInGeometry.
       //   with header { "User-Agent": ECCC_USER_AGENT }. 2000 leaves headroom for one
       //   page to always suffice (pygeoapi clamps an over-max limit rather than
       //   erroring); an exactly-full page logs a truncation warning.
-      // Success -> { alerts: [{ event, onset, ends, geometry }], sourceUrl }
+      // Success -> { alerts: [{ event, onset, ends, description, area, geometry }],
+      //              sourceUrl }
       //   event = properties.alert_name_en (GeoMet serves lowercase names); onset =
       //   validity_datetime falling back to publication_datetime; ends =
-      //   event_end_datetime falling back to expiration_datetime; geometry = the
-      //   alert-region Polygon/MultiPolygon. The collection also returns recently-ended
+      //   event_end_datetime falling back to expiration_datetime; description =
+      //   alert_text_en and area = feature_name_en, both passed to matchedAlerts to trim
+      //   and cap; there is no instruction, because ECCC folds the call to action into
+      //   alert_text_en. geometry = the alert-region Polygon/MultiPolygon. The collection also returns recently-ended
       //   alerts and keeps rows briefly past expiry — both are dropped here (status_en
       //   "ended"; parseable expiration_datetime < nowIso). Features without a usable
       //   event name or geometry are skipped.
@@ -1337,10 +1401,12 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
       // (ECCC_USER_AGENT), parsed via parseEcccMarineAlerts. Null on any failure.
 
     export function ecccMarineAlertsForPoint(alerts, lat, lon)
-      // Pure. -> { events: string[], details: [{ event, onset, ends }] } for the marine
-      // zone(s) whose polygon contains (lat, lon), with nearest-edge within
-      // ECCC_MARINE_MAX_EDGE_KM as a fallback for shoreline points just outside the
-      // water polygon. onset = feature lastUpdated; ends = null. A matchedAlerts wrapper
+      // Pure. -> { events: string[], details: [{ event, onset, ends, description,
+      // instruction, area, sender }] } for the marine zone(s) whose polygon contains
+      // (lat, lon), with nearest-edge within ECCC_MARINE_MAX_EDGE_KM as a fallback for
+      // shoreline points just outside the water polygon. onset = feature lastUpdated;
+      // ends = null; area = the zone name (area.value.en, else area.region.en), the only
+      // text this collection publishes per event. A matchedAlerts wrapper
       // that keeps its non-finite lat/lon early return ahead of the walk and its
       // try/catch inside the predicate closure around the containment-or-nearest-edge
       // test, so this is the only alert client that swallows a geometry throw.
@@ -2473,10 +2539,12 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    scrapeWqFloorFromResult -> waterQualityAdvisory (null when clean or absent) and pass it
    into estimateFlag. waveHeightFt, windSpeedMph and windGustMph come from the beach's
    "waveinput:" KV payload (step 5); updated = nowIso.
-   The alert half comes from buildAlertInputs(beach, alertCtx) and the whole bundle from
-   buildEstimateInputs(beach, alertPart, signals) (src/flagInputs.js), the same two functions
-   runAlertRefresh calls, so the two crons cannot drift in how they match a zone, attribute a
-   source or normalize a reading. Call estimateFlag on that bundle, then spread
+   The alert half comes from buildAlertInputs(beach, alertCtx, nowIso) and the whole bundle
+   from buildEstimateInputs(beach, alertPart, signals) (src/flagInputs.js), the same two
+   functions runAlertRefresh calls, so the two crons cannot drift in how they match a zone,
+   attribute a source, normalize a reading or apply the onset rule: alertDetails is the whole
+   matched set, alerts is alertsInEffect(alertDetails, nowIso) and alertsAt is nowIso, so an
+   alert published for tomorrow rides in the echo but cannot decide today's color. Call estimateFlag on that bundle, then spread
    sealFromSignals(signals, alertPart) onto the RESULT as estimateInputs (section 1) — after
    estimateFlag returns, so rules.js sees nothing new — and
    env.FLAGS.put("flag:" + beach.id, JSON.stringify(stored),
@@ -2711,10 +2779,16 @@ whose alert situation actually changed.
    A surviving beach is selected when the alert half failed to resolve this run, when the
    seal records that it failed for the hourly (alertsResolved false — the repair for a failed
    national fetch, whose echoed alertDetails is [] and otherwise indistinguishable from
-   "checked, none active"), or when eventKey(current) !== eventKey(standing). Sets, not order,
-   not timestamps and never severity: comparing severities would reimplement ALERT_PRECEDENCE
-   outside rules.js, and set inequality is what catches a zone swapping Small Craft Advisory
-   for Gale Warning or losing one of two alerts.
+   "checked, none active"), or when eventKey(current) !== eventKey(standing). Both sides are
+   IN-EFFECT sets: current is buildAlertInputs' alerts at this run's clock, standing is
+   standingAlertEvents — decidedAlertDetails at the standing value's alertsAt, or every echoed
+   entry for a pre-alertsAt payload, which was decided against all of them. So an alert whose
+   onset arrived or whose ends passed since the standing decision selects the beach exactly as
+   a new issuance does, while a payload the refresh itself wrote at an onset (alertsAt its own
+   clock, updated still the hourly's) is not re-selected every run. Sets, not order, not
+   timestamps within the set and never severity: comparing severities would reimplement
+   ALERT_PRECEDENCE outside rules.js, and set inequality is what catches a zone swapping Small
+   Craft Advisory for Gale Warning or losing one of two alerts.
    Only the standing COLOR survives into the candidate list, never the parsed standing payload,
    and the list itself is capped at FAST_MAX_BEACHES_PER_RUN. Both keep the scan's streaming
    discipline honest: a nationwide event moves most zones' alert sets at once, and one retained
@@ -3919,9 +3993,11 @@ exporting a CSS string); render.js is the sole module the router imports.
   callout — stale warning or reading note, never both — in the body, and an "Updated
   <wa-relative-time date=updated sync>" in slot="footer". Distinction comes from card
   class, appearance and badge, never from layout. renderFlagCard takes the optional staleMs,
-  readingNote and reportedForHtml, all three passed through by renderOfficialCard;
-  renderEstimateCard passes none, so the estimate card keeps the default its own hourly
-  cadence was calibrated to and can never show a report-site line.
+  readingNote and reportedForHtml, all three passed through by renderOfficialCard alone, so
+  the estimate card keeps the default its own hourly cadence was calibrated to and can never
+  show a report-site line; and the optional alertDetailsHtml, passed by renderEstimateCard
+  alone, since no scraper publishes alert text. alertDetailsHtml renders BELOW the age
+  callout, so a stale warning is never pushed under an expander.
 - Stale-data warning: the age threshold is STALE_MS = 7200000 (2 h) by default,
   overridable per official record by its optional staleMs (section 1); the estimate card
   always uses the default. Let limit = typeof x.staleMs === "number" ? x.staleMs : STALE_MS.
@@ -4013,7 +4089,11 @@ exporting a CSS string); render.js is the sole module the router imports.
     it; an estimated double-red closes with "stay out of the water". For an alert-decided
     color the alert named is the first one present in ALERT_PRECEDENCE, ECCC_ALERT_PRECEDENCE,
     NWS_FLOOR_PRECEDENCE then ECCC_FLOOR_PRECEDENCE — the order rules.js itself decides in,
-    never alertDetails[0], which is upstream feed order. Wave wording comes from
+    never alertDetails[0], which is upstream feed order. "in effect" covers only
+    decidedAlertDetails(estimate); the rest of the echo, alerts published ahead of their
+    onset, gets its own clause right after it, "Beach Hazards Statement not yet in effect",
+    so the page shows the alert the hazard lane draws without offering it as the reason for
+    a color it did not decide. Wave wording comes from
     waveColorForHeight plus bandLabelsForWaterClass, so no threshold is restated. An
     event-led red or double-red keeps only the follower clauses whose own color reaches red
     by SEVERITY_RANK: the wave grids model wind waves alone, so a sub-threshold height or a
@@ -4048,8 +4128,10 @@ exporting a CSS string); render.js is the sole module the router imports.
     the wave strip's now stat reads, sourced by the ESTIMATE badge); water temperature (the
     WaterTemp reading with the station provenance and tooltip of section 1); rip current
     risk (estimate.ripCurrentRisk as HIGH/MODERATE/LOW, sourced "NWS surf zone forecast");
-    active alerts (estimate.alertDetails.length with the first entry's event name); and the
-    next sun event. A reading with no data renders no tile at all, and a beach with no
+    active alerts (decidedAlertDetails(estimate).length with the first in-effect entry's
+    event name; a checkable beach with only upcoming alerts shows the quiet "None active"
+    with the first upcoming event "not yet in effect" as its source line); and the next
+    sun event. A reading with no data renders no tile at all, and a beach with no
     readings renders no section: the row carries only answers, never a placeholder.
     The sun tile is computed, not stored: src/frontend/sun.js (pure NOAA solar position,
     no Date.now and no upstream) takes the BeachRow's lat/lon plus nowIso and returns the
@@ -4086,11 +4168,34 @@ exporting a CSS string); render.js is the sole module the router imports.
   plain text and an "Updated <wa-relative-time>" line. It reads as context beside the
   estimate that already folded it in, so it carries neither the OFFICIAL badge nor the
   official-card border, and an absent, malformed or unknown-color record renders nothing.
-  The estimate card body shows the flag row (color name plus full reason) only; its sources
-  render as the pill badges in
+  The estimate card body shows the flag row (color name plus full reason), then the per-alert
+  disclosures below it; its sources render as the pill badges in
   slot="header-actions" with the ESTIMATE badge in slot="header", and the "Updated
   <wa-relative-time date=estimate.updated sync>" line renders in slot="footer". Both are
   omitted, with their with-* attributes, when there is no estimate.
+- Per-alert disclosures (renderAlertDetails, estimate card only): one row per entry in
+  estimate.alertDetails, the whole echo rather than decidedAlertDetails, ordered in-effect
+  first (alertInEffectAt against nowIso) and feed order within each group, so the alert that
+  chose the color sits above one echoed ahead of its onset. The reason line names an event;
+  this is where a reader finds out what that event says. Each row is a collapsed
+  <wa-details class="alert-detail" appearance="plain" icon-placement="start"> whose slotted
+  summary is the event name plus its window — "In effect until <wa-format-date>" once
+  started, "Starts <wa-format-date>, ends <wa-format-date>" before onset, "In effect since
+  <wa-format-date>" with no ends, and omitted when the feed gave neither timestamp. Every
+  wa-format-date carries a light-DOM "<Mon D>, HH:MM UTC" fallback for the same reason
+  renderSunTile's does: it renders nothing until the component upgrades, and only the
+  viewer's browser knows the clock posted at the beach. The body is the description as
+  paragraphs, then the instruction (icon plus text, weighted above the description it
+  follows), then one quiet provenance line, "Issued by <sender> for <area>" collapsing to
+  either half alone. Description paragraphs split on blank lines and collapse the single
+  newlines inside one to spaces — those are the product's fixed-width wrapping, not breaks
+  the reader should see — and a paragraph in the NWS "* WHAT...text" section form leads with
+  its sentence-cased label in <strong>; anything that does not parse, ECCC's unlabelled
+  alert_text_en included, stays a plain paragraph. An entry carrying none of the four text
+  fields (every "flag:" value written before they shipped) renders as
+  <div class="alert-detail alert-detail-bare"> — the same header row without a toggle —
+  rather than an expander onto an empty panel. All upstream text is escaped. "" when the
+  echo is missing or empty.
 - Section headings: every detail-page section below the hero is labeled by the shared
   renderSectionHeading(id, iconName, text) — an <h2 class="section-heading wa-cluster
   wa-gap-xs"> with a leading decorative wa-icon, pointed at by the section's
@@ -4332,13 +4437,17 @@ wins over a recognized ECCC event; an ECCC alert beats wave height; an ECCC-aler
 color suppresses the alertsCheckable caveat; alertColorForEvent maps both namespaces
 (Title Case "Wind Warning" is not an ECCC match); alertAuthorityForEvent → "NWS" /
 "Environment Canada" / null. rules.test.js also covers ripRiskColor, the alertDetails /
-ripCurrentRisk output echoes, and the exact ALERTS_UNAVAILABLE_CAVEAT wording every
-other caveat test uses symbolically.
+alertsAt / ripCurrentRisk output echoes, alertInEffectAt / alertsInEffect /
+decidedAlertDetails (onset and ends boundaries, unreadable timestamps keep the alert, a
+future Beach Hazards Statement or Small Craft Advisory built through alertsInEffect leaves
+a wave green alone), and the exact ALERTS_UNAVAILABLE_CAVEAT wording every other caveat
+test uses symbolically.
 
 ### Other test files (one-line inventory)
 
 - test/eccc.test.js — pointInGeometry (interior/exterior/hole/MultiPolygon/malformed→false);
-  fetchActiveEcccAlerts with stubbed fetch (mapping, drops ended/expired, limit=2000, no
+  fetchActiveEcccAlerts with stubbed fetch (mapping including alert_text_en/feature_name_en
+  as description/area with no instruction, drops ended/expired, limit=2000, no
   bbox, ECCC_USER_AGENT header, null on failure); ecccAlertsForPoint (containment, dedupe,
   malformed→empty); fetchEcccForecastZones (one items request with geometry, limit=2000,
   ECCC_USER_AGENT, keeps only NAME+geometry features, null on failure); ecccZoneNameForPoint
@@ -4414,9 +4523,16 @@ other caveat test uses symbolically.
   JSON.stringify emits null for NaN and Infinity alike. Plus a coverage assertion against a
   literal field list, so adding an input to rules.js without adding it to the seal fails here;
   signalsFromStanding's four rejections; buildEstimateInputs' normalizations and
-  alertsCheckable; and buildAlertInputs parity with the pre-refactor hourly branches.
+  alertsCheckable; buildAlertInputs parity with the pre-refactor hourly branches, its
+  onset rule (an upcoming or ended alert stays in alertDetails and out of alerts, for both
+  authorities) and alertsAt; and standingAlertEvents at alertsAt versus the every-entry
+  reading of a pre-alertsAt payload.
 - test/alertRefresh.test.js — runAlertRefresh through the scheduled handler: the level
-  trigger (gain, clear, swap, partial loss, equal sets, alertsResolved false), every guard
+  trigger (gain, clear, swap, partial loss, equal sets, alertsResolved false, an alert
+  published ahead of its onset not raising, the same alert raising once its onset arrives
+  with the feed unchanged and not re-selecting on the next run, a standing alert walking
+  down once its ends passes, a pre-alertsAt payload a future alert colored walking down),
+  every guard
   asserting the standing value is untouched — including a standing value D1's
   recompute_updated shows the hourly has already superseded — the degraded-feed matrix
   (national fetch null, count null, short parse, a full feed that parsed to nothing,
@@ -4460,6 +4576,9 @@ other caveat test uses symbolically.
   out-of-window/non-precedence drops, exact-repeat dedupe, rip band, malformed→[]).
 - test/verdict.test.js — the pure hero-verdict sentence: one case per rules.js trigger
   (alerts, both floors, rip, wave band under both threshold sets, wind, wq-floor, no-data),
+  the "not yet in effect" clause for alerts echoed ahead of their onset (alone, beside an
+  in-effect alert, behind an event-led red, counted past two, and every entry in effect for
+  a payload without alertsAt),
   the alert clause's precedence ordering (the deciding alert leads, never the feed's first),
   joining/counting/dedupe, the "no alerts" guards (caveat, unresolved fetch, sealless
   payload), the clauses an event-led red or double-red drops and the ones it keeps,
@@ -4481,6 +4600,13 @@ other caveat test uses symbolically.
   WAVE_TICKS_SCRIPT embed gate, the hazard lane (positioned band + tooltip, rip band,
   no lane for legacy estimates or without a series), the buoy case (stat without strip),
   legacy/absent payload omission, and the stale warning.
+- test/renderAlertDetails.test.js — the estimate card's per-alert disclosures via
+  renderDetailPage: the collapsed wa-details and its summary, the "* WHAT..." section form
+  rendered with a sentence-cased label, the reflow of the product's fixed-width wrapping
+  with its blank-line breaks kept, unlabelled ECCC prose as plain paragraphs, the window
+  phrased against onset with in-effect entries ordered first, the UTC fallback stamp, the
+  bare row for a legacy entry carrying no text, the empty string with no echo, escaping of
+  the office's own words, and the stale warning staying above the disclosures.
 - test/renderWqFloor.test.js — the water-quality advisory callout via renderDetailPage:
   the danger/warning variant per color, the reason/source/updated lines, its place between
   the estimate card and the wave forecast, escaping, the absence of any official marking,

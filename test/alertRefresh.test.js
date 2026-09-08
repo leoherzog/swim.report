@@ -10,7 +10,7 @@
 // inside the same "flag:" value, never from a second key and never from a
 // refetch.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { estimateFlag } from "../src/rules.js";
+import { estimateFlag, alertsInEffect } from "../src/rules.js";
 import { buildEstimateInputs, sealFromSignals } from "../src/flagInputs.js";
 import { MAP_DIRECTORY_KEY } from "../src/mapDirectory.js";
 import { runScheduledCron } from "./helpers/cron.js";
@@ -57,17 +57,25 @@ function beachRow(overrides) {
 // A standing "flag:" value exactly as runFlagRecompute writes it: estimateFlag
 // over the same bundle, with the seal spread on afterwards. Built through the
 // real functions so these fixtures cannot drift from what the hourly stores.
-function standingFlag(beach, alertEvents, signalOverrides, updatedIso) {
-  const alertPart = alertEvents === null
-    ? { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false }
-    : {
-      alerts: alertEvents,
-      alertDetails: alertEvents.map(function (e) {
-        return { event: e, onset: "2026-07-15T14:00:00.000Z", ends: null };
-      }),
+// alertEvents entries are event names (in effect since 06:00, open-ended) or
+// whole { event, onset, ends } details. The alert half is built the way
+// buildAlertInputs builds it: alerts is the in-effect subset at updatedIso and
+// alertsAt is that instant. legacy true builds the pre-onset-rule shape instead,
+// every name in alerts and no alertsAt.
+function standingFlag(beach, alertEvents, signalOverrides, updatedIso, legacy) {
+  let alertPart = { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false, alertsAt: null };
+  if (alertEvents !== null) {
+    const details = alertEvents.map(function (e) {
+      return typeof e === "string" ? { event: e, onset: "2026-07-15T06:00:00.000Z", ends: null } : e;
+    });
+    alertPart = {
+      alerts: legacy ? details.map(function (d) { return d.event; }) : alertsInEffect(details, updatedIso),
+      alertDetails: details,
       alertSources: [{ label: "NWS Alerts", url: "https://api.weather.gov/alerts/active?zone=MIZ071" }],
-      alertsResolved: true
+      alertsResolved: true,
+      alertsAt: legacy ? null : updatedIso
     };
+  }
   const signals = {
     alertsResolved: alertPart.alertsResolved,
     ripCurrentRisk: null,
@@ -146,16 +154,21 @@ function okJson(body) {
   });
 }
 
-function nwsFeature(event, zones) {
+function nwsFeature(event, zones, period) {
+  const p = period || {};
   return {
     properties: {
       event: event,
-      onset: "2026-07-15T15:30:00.000Z",
-      ends: "2026-07-16T02:00:00.000Z",
+      onset: p.onset === undefined ? "2026-07-15T15:30:00.000Z" : p.onset,
+      ends: p.ends === undefined ? "2026-07-16T02:00:00.000Z" : p.ends,
       geocode: { UGC: zones },
       affectedZones: []
     }
   };
+}
+
+function minutesAhead(n) {
+  return new Date(NOW_MS + n * 60000).toISOString();
 }
 
 function ecccFeature(name) {
@@ -337,6 +350,90 @@ describe("runAlertRefresh selection (level trigger)", function () {
     await runAlertCron(made.env);
 
     expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+  });
+
+  it("does not raise on an alert published ahead of its onset", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const made = makeEnv([beach], {
+      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+    });
+    stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: minutesAhead(120) })] });
+    await runAlertCron(made.env);
+
+    // In effect now: nothing, on both sides. The statement is a forecast until
+    // its onset, so the standing green stands.
+    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+  });
+
+  it("raises once the onset arrives, with no change to the feed itself", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const statement = { event: "Beach Hazards Statement", onset: minutesAgo(5), ends: minutesAhead(600) };
+    // Decided ten minutes ago, when the statement was still five minutes out.
+    const standing = standingFlag(beach, [statement], { waveHeightFt: 0.5 }, minutesAgo(10));
+    expect(standing.color).toBe("green");
+    expect(standing.alertDetails.length).toBe(1);
+    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: statement.onset, ends: statement.ends })] });
+    await runAlertCron(made.env);
+
+    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    expect(written.color).toBe("red");
+    expect(written.alertsAt).toBe(NOW);
+    // updated stays the standing instant: alertsAt is what records when the
+    // alert set was judged, so the next run compares against the same set.
+    expect(written.updated).toBe(minutesAgo(10));
+  });
+
+  it("does not re-select a beach the refresh already raised at its onset", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const statement = { event: "Beach Hazards Statement", onset: minutesAgo(15), ends: minutesAhead(600) };
+    // What the previous refresh wrote: decided against the in-effect set at its
+    // own clock (alertsAt), under the hourly's older updated.
+    const previous = standingFlag(beach, [statement], { waveHeightFt: 0.5 }, minutesAgo(10));
+    previous.alertsAt = minutesAgo(10);
+    previous.updated = minutesAgo(40);
+    previous.estimateInputs = Object.assign({}, previous.estimateInputs);
+    expect(previous.color).toBe("red");
+    const made = makeEnv([beach], { "flag:osm-node-a": previous });
+    stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: statement.onset, ends: statement.ends })] });
+    await runAlertCron(made.env);
+
+    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+  });
+
+  it("walks a beach back down once its standing alert's ends has passed, feed unchanged", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const gale = { event: "Gale Warning", onset: minutesAgo(300), ends: minutesAgo(5) };
+    const standing = standingFlag(beach, [gale], { waveHeightFt: 0.5 }, minutesAgo(10));
+    expect(standing.color).toBe("red");
+    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    // Still in the active feed: the product has not expired, only ended.
+    stubFetch({ features: [nwsFeature("Gale Warning", ["MIZ071"], { onset: gale.onset, ends: gale.ends })] });
+    await runAlertCron(made.env);
+
+    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("green");
+  });
+
+  it("lowers a legacy payload that a not-yet-effective alert colored", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const statement = { event: "Beach Hazards Statement", onset: minutesAhead(120), ends: minutesAhead(600) };
+    const legacy = standingFlag(beach, [statement], { waveHeightFt: 0.5 }, minutesAgo(10), true);
+    expect(legacy.color).toBe("red");
+    expect(legacy.alertsAt).toBeNull();
+    const made = makeEnv([beach], { "flag:osm-node-a": legacy });
+    stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: statement.onset, ends: statement.ends })] });
+    await runAlertCron(made.env);
+
+    // The legacy value was decided against every echoed entry, the current
+    // in-effect set is empty, so the beach is selected and walked down.
+    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    expect(written.color).toBe("green");
+    expect(written.alertDetails.map(function (d) { return d.event; })).toEqual(["Beach Hazards Statement"]);
   });
 
   it("selects a beach whose seal records a failed hourly alert fetch, even with both sets empty", async function () {

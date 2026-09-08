@@ -338,6 +338,68 @@ describe("verdictSentence: alerts and floors", function () {
 
 // The wave grids model wind waves only, so a sub-threshold height beside a
 // tsunami, hurricane or surge warning is the ordinary case, not an edge.
+describe("verdictSentence: alerts published ahead of their onset", function () {
+  const AT = "2026-07-05T11:30:00.000Z";
+  const upcoming = { event: "Beach Hazards Statement", onset: "2026-07-06T11:00:00.000Z", ends: "2026-07-07T00:00:00.000Z" };
+  const live = { event: "Small Craft Advisory", onset: "2026-07-05T06:00:00.000Z", ends: null };
+
+  it("names an upcoming alert as not yet in effect behind the calm-water lead", function () {
+    const estimate = estimateWith({ alertDetails: [upcoming], alertsAt: AT });
+    expect(verdictSentence(estimate, null, false, null))
+      .toBe("Calm water, Beach Hazards Statement not yet in effect.");
+  });
+
+  it("keeps in-effect and upcoming alerts in separate clauses", function () {
+    const estimate = estimateWith({
+      color: "yellow",
+      trigger: "nws-floor",
+      reason: "Active NWS alert: Small Craft Advisory",
+      alertDetails: [upcoming, live],
+      alertsAt: AT
+    });
+    expect(verdictSentence(estimate, null, false, null))
+      .toBe("Small Craft Advisory in effect; Beach Hazards Statement not yet in effect, calm water.");
+  });
+
+  it("follows an event-led red with the upcoming alert, since it is not reassurance", function () {
+    const estimate = estimateWith({
+      color: "red",
+      trigger: "nws-alert",
+      reason: "Active NWS alert: Rip Current Statement",
+      waveHeightFt: null,
+      alertDetails: [upcoming, { event: "Rip Current Statement", onset: null, ends: null }],
+      alertsAt: AT
+    });
+    expect(verdictSentence(estimate, null, false, null))
+      .toBe("Rip Current Statement in effect; Beach Hazards Statement not yet in effect.");
+  });
+
+  it("counts several upcoming alerts the same way it counts active ones", function () {
+    const estimate = estimateWith({
+      alertDetails: [
+        upcoming,
+        { event: "High Surf Advisory", onset: "2026-07-06T11:00:00.000Z", ends: null },
+        { event: "Small Craft Advisory", onset: "2026-07-06T11:00:00.000Z", ends: null }
+      ],
+      alertsAt: AT
+    });
+    expect(verdictSentence(estimate, null, false, null))
+      .toBe("Calm water, Beach Hazards Statement and 2 more alerts not yet in effect.");
+  });
+
+  it("treats every echoed alert as in effect for a payload without alertsAt", function () {
+    const estimate = estimateWith({
+      color: "red",
+      trigger: "nws-alert",
+      reason: "Active NWS alert: Beach Hazards Statement",
+      waveHeightFt: null,
+      alertDetails: [upcoming]
+    });
+    expect(verdictSentence(estimate, null, false, null))
+      .toBe("Beach Hazards Statement in effect.");
+  });
+});
+
 describe("verdictSentence: an alert-decided red keeps only what reinforces it", function () {
   it("drops a sub-threshold wave height from a double red", function () {
     const estimate = estimateWith({

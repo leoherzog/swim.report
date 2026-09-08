@@ -42,7 +42,7 @@ const ECCC_ZONES_FETCH_LIMIT = 2000;
 // Every active public alert nationwide in one fetch; the hourly cron calls this
 // once per run and matches beaches locally with ecccAlertsForPoint. nowIso drives
 // the expiry filter, so there is no Date.now() inside. Success ->
-//   { alerts: [{ event, onset, ends, geometry }], sourceUrl }
+//   { alerts: [{ event, onset, ends, description, area, geometry }], sourceUrl }
 // where event = properties.alert_name_en (ECCC serves lowercase names, e.g.
 // "severe thunderstorm warning"), onset = validity_datetime falling back to
 // publication_datetime, ends = event_end_datetime falling back to
@@ -94,6 +94,11 @@ export async function fetchActiveEcccAlerts(nowIso) {
       event: props.alert_name_en,
       onset: pickIsoString(props.validity_datetime, props.publication_datetime),
       ends: pickIsoString(props.event_end_datetime, props.expiration_datetime),
+      // Free text for the detail page's alert card, capped by matchedAlerts.
+      // ECCC folds what NWS splits into description and instruction into one
+      // alert_text_en block, so there is no separate instruction to carry.
+      description: props.alert_text_en,
+      area: props.feature_name_en,
       geometry: geometry
     });
   }
@@ -102,7 +107,8 @@ export async function fetchActiveEcccAlerts(nowIso) {
 
 // Pure. Filters a fetchActiveEcccAlerts result down to the alerts whose region
 // polygon contains the beach point, in the NWS-alert result shape:
-//   { events: [deduped event names], details: [{ event, onset, ends }] }
+//   { events: [deduped event names],
+//     details: [{ event, onset, ends, description, instruction, area, sender }] }
 // details dedupe only on exact (event, onset, ends) repeats. Malformed input gives
 // { events: [], details: [] }. The accumulate and dedupe walk lives in
 // ./alertMatch.js; only the containment test is local, and land alert polygons

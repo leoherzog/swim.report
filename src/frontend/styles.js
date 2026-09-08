@@ -415,6 +415,59 @@ const RULES = [
   "  border-width: var(--wa-border-width-l);",
   "}",
 
+  // --- per-alert disclosures inside the estimate card -------------------------
+  // Each alert collapses to one header row: the event name, then its window on
+  // the same line where there is room and wrapped beneath it where there is not.
+  // --spacing is wa-details' documented content-spacing property; the plain
+  // appearance carries no border of its own, so the rows are separated by one
+  // hairline apiece.
+  ".alert-details {",
+  "  margin-block-start: var(--wa-space-s);",
+  "}",
+
+  ".alert-detail {",
+  "  --spacing: var(--wa-space-s);",
+  "  border-block-start: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
+  "}",
+
+  ".alert-detail-summary,",
+  ".alert-detail-bare {",
+  "  display: flex;",
+  "  flex-wrap: wrap;",
+  "  align-items: baseline;",
+  "  gap: var(--wa-space-2xs) var(--wa-space-s);",
+  "}",
+
+  // The bare row has no toggle, so it pays wa-details' header padding itself to
+  // sit on the same rhythm as the expandable rows above and below it.
+  ".alert-detail-bare {",
+  "  padding-block: var(--wa-space-s);",
+  "}",
+
+  ".alert-detail-event {",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+
+  ".alert-detail-body p {",
+  "  margin-block: 0;",
+  "}",
+
+  ".alert-detail-body {",
+  "  font-size: var(--wa-font-size-s);",
+  "}",
+
+  // The office's own call to action, weighted above the description it follows.
+  ".alert-detail-instruction {",
+  "  align-items: start;",
+  "  color: var(--wa-color-text-loud);",
+  "  font-weight: var(--wa-font-weight-semibold);",
+  "}",
+
+  ".alert-detail-provenance {",
+  "  color: var(--wa-color-text-quiet);",
+  "}",
+  // --- end per-alert disclosures ---------------------------------------------
+
   // Tighter section spacing inside both flag cards (--spacing is wa-card's
   // documented section-spacing custom property, default var(--wa-space-l)).
   ".official-card,",

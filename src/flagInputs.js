@@ -20,6 +20,7 @@
 // thresholds.
 
 import { alertsCheckable } from "./alertsCheckable.js";
+import { alertsInEffect, decidedAlertDetails } from "./rules.js";
 import { ecccAlertsForPoint, ECCC_ALERTS_INFO_URL } from "./clients/eccc.js";
 import { ecccMarineAlertsForPoint, ECCC_MARINE_INFO_URL } from "./clients/ecccMarine.js";
 
@@ -36,19 +37,23 @@ function riskOrNull(risk) {
 }
 
 // The alert half of an estimateFlag bundle for one beach, matched locally from a
-// run's national fetches. alertCtx is { alertsMap, ecccAlerts, ecccMarineAlerts },
-// where alertsMap holds one entry per distinct NWS zone id
-// ({ events, details, sourceUrl }) and the two ECCC values are whole national
-// fetch results or null.
+// run's national fetches and filtered to the alerts in effect at nowIso.
+// alertCtx is { alertsMap, ecccAlerts, ecccMarineAlerts }, where alertsMap holds
+// one entry per distinct NWS zone id ({ events, details, sourceUrl }) and the two
+// ECCC values are whole national fetch results or null.
 //
-// Returns { alerts, alertDetails, alertSources, alertsResolved }. Neither branch
-// taken — an unenriched beach, or an authority whose fetch failed — yields
-// alerts null, alertDetails null, alertSources [] and alertsResolved false, which
-// is what keeps a failed fetch distinguishable from "checked, none active":
-// estimateFlag treats alerts null as "no alert evidence" and the two look
-// identical from the echoed alertDetails alone.
-export function buildAlertInputs(beach, alertCtx) {
+// Returns { alerts, alertDetails, alertSources, alertsResolved, alertsAt }.
+// alertDetails is the whole matched set, upcoming alerts included, so the hazard
+// lane can draw a band that starts later; alerts is the rules.js alertsInEffect
+// subset at nowIso, which is the only list that may decide a color. Neither
+// branch taken — an unenriched beach, or an authority whose fetch failed — yields
+// alerts null, alertDetails null, alertSources [], alertsResolved false and
+// alertsAt null, which is what keeps a failed fetch distinguishable from
+// "checked, none active": estimateFlag treats alerts null as "no alert evidence"
+// and the two look identical from the echoed alertDetails alone.
+export function buildAlertInputs(beach, alertCtx, nowIso) {
   const ctx = alertCtx || {};
+  const at = typeof nowIso === "string" ? nowIso : null;
   const alertsMap = ctx.alertsMap || null;
   const ecccAlerts = ctx.ecccAlerts === undefined ? null : ctx.ecccAlerts;
   const ecccMarineAlerts = ctx.ecccMarineAlerts === undefined ? null : ctx.ecccMarineAlerts;
@@ -58,22 +63,22 @@ export function buildAlertInputs(beach, alertCtx) {
   const marineEntry = (alertsMap && beach.marine_zone) ? alertsMap.get(beach.marine_zone) : null;
   if (landEntry || marineEntry) {
     // US beach: land forecast-zone alerts plus adjacent marine-zone alerts, both
-    // matched from the one national NWS fetch. concat leaves alerts null only
+    // matched from the one national NWS fetch. The concat leaves alerts null only
     // when both entries are absent — a failed fetch or an unenriched zone — so a
-    // real failure keeps alertsCheckable true with no false caveat. No dedup:
-    // alerts is read only via indexOf, and both estimateFlag and the hazard lane
-    // tolerate repeated events.
+    // real failure keeps alertsCheckable true with no false caveat.
     if (landEntry) {
       alertSources.push({ label: "NWS Alerts", url: landEntry.sourceUrl });
     }
     if (marineEntry) {
       alertSources.push({ label: "NWS Marine Alerts", url: marineEntry.sourceUrl });
     }
+    const usDetails = (landEntry ? landEntry.details : []).concat(marineEntry ? marineEntry.details : []);
     return {
-      alerts: (landEntry ? landEntry.events : []).concat(marineEntry ? marineEntry.events : []),
-      alertDetails: (landEntry ? landEntry.details : []).concat(marineEntry ? marineEntry.details : []),
+      alerts: alertsInEffect(usDetails, at),
+      alertDetails: usDetails,
       alertSources: alertSources,
-      alertsResolved: true
+      alertsResolved: true,
+      alertsAt: at
     };
   }
 
@@ -96,15 +101,17 @@ export function buildAlertInputs(beach, alertCtx) {
     if (ecccMarineAlerts !== null) {
       alertSources.push({ label: "Environment Canada Marine Alerts", url: ECCC_MARINE_INFO_URL });
     }
+    const caDetails = landMatched.details.concat(marineMatched.details);
     return {
-      alerts: landMatched.events.concat(marineMatched.events),
-      alertDetails: landMatched.details.concat(marineMatched.details),
+      alerts: alertsInEffect(caDetails, at),
+      alertDetails: caDetails,
       alertSources: alertSources,
-      alertsResolved: true
+      alertsResolved: true,
+      alertsAt: at
     };
   }
 
-  return { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false };
+  return { alerts: null, alertDetails: null, alertSources: [], alertsResolved: false, alertsAt: null };
 }
 
 // The complete estimateFlag input bundle: the alert half from buildAlertInputs,
@@ -119,13 +126,14 @@ export function buildAlertInputs(beach, alertCtx) {
 // unguarded non-finite value would also read back differently than it was
 // written and the two crons would decide different colors from one beach.
 export function buildEstimateInputs(beach, alertPart, signals) {
-  const alertHalf = alertPart || { alerts: null, alertDetails: null, alertSources: [] };
+  const alertHalf = alertPart || { alerts: null, alertDetails: null, alertSources: [], alertsAt: null };
   const signalSources = Array.isArray(signals.signalSources) ? signals.signalSources : [];
   const alertSources = Array.isArray(alertHalf.alertSources) ? alertHalf.alertSources : [];
   return {
     beachId: beach.id,
     alerts: alertHalf.alerts,
     alertDetails: alertHalf.alertDetails,
+    alertsAt: typeof alertHalf.alertsAt === "string" ? alertHalf.alertsAt : null,
     alertsCheckable: alertsCheckable(beach),
     // Selects the step 3 wave thresholds; null and every non-ocean class share
     // the default set.
@@ -189,26 +197,26 @@ export function signalsFromStanding(standing) {
   };
 }
 
-// The event names a standing estimate's color was decided against, from its
-// echoed alertDetails. [] for a malformed or missing echo.
+// The event names a standing estimate's color was decided against: the echoed
+// alertDetails in effect at its alertsAt (rules.js decidedAlertDetails), or every
+// echoed entry for a payload written before alertsAt existed. Comparing this
+// against the current in-effect set is what lets the refresh see an onset
+// arriving or an ends passing, since neither changes the matched name set.
+// [] for a malformed or missing echo.
 export function standingAlertEvents(standing) {
-  if (!standing || typeof standing !== "object" || !Array.isArray(standing.alertDetails)) {
-    return [];
-  }
+  const decided = decidedAlertDetails(standing);
   const events = [];
-  for (let i = 0; i < standing.alertDetails.length; i = i + 1) {
-    const entry = standing.alertDetails[i];
-    if (entry && typeof entry.event === "string") {
-      events.push(entry.event);
-    }
+  for (let i = 0; i < decided.length; i = i + 1) {
+    events.push(decided[i].event);
   }
   return events;
 }
 
 // The selection comparison: deduped, sorted, "|"-joined event names. Sets, not
 // order and not timestamps, because estimateFlag only ever does indexOf over the
-// four precedence lists — so only the name set can change a color, while
-// onset/ends churn would otherwise select thousands of beaches for no change.
+// four precedence lists — so only the in-effect name set can change a color,
+// while onset/ends churn within that set would otherwise select thousands of
+// beaches for no change.
 export function eventKey(events) {
   if (!Array.isArray(events)) {
     return "";
