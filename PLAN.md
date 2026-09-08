@@ -3778,30 +3778,41 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // on every path that ends with no map — the construction catch, the 'error'
       // event, and a failed module import — so a sheening placeholder never stands in
       // for a map that is not coming. On load it fetches /api/beaches.geojson once and hands the
-      // FeatureCollection to a native clustered GeoJSON source: count bubbles that
-      // expand on click (getClusterExpansionZoom + easeTo) when zoomed out, and
-      // individual rasterized fa-flag icons at high zoom, each tinted by its feature
-      // `flag` keyword to the flag-icon-* palette (the --flag-{green,yellow,red,unknown}
+      // FeatureCollection to a single UNCLUSTERED GeoJSON source, which carries every
+      // beach at every zoom: the zoomed-out view is a rendering choice, not a thinned
+      // dataset. Two renderings of that one source, handing off between zoom 7 and 8.6.
+      // Zoomed in, each beach is a rasterized fa-flag icon tinted by its feature `flag`
+      // keyword to the flag-icon-* palette (the --flag-{green,yellow,red,unknown}
       // variables resolved at runtime via getComputedStyle, with the mild hexes as
       // fallback; double-red rides in as "red").
-      // A bubble carries its members' mean flag color, so the zoomed-out view reads as
-      // a hazard map rather than a density map. clusterProperties accumulates fg/fy/fr
-      // per cluster (the unknown count is point_count minus those three, so an
-      // unexpected keyword falls to unknown exactly as the icon layer's match does).
-      // The color is (fy + 2*fr) / max(1, fg+fy+fr) — green 0, yellow 1, red 2 over the
-      // known flags only — stepped at 0.5 and 1.5 onto the same four hexes the icons
-      // use, never a blend: an off-palette hue would read as a flag color the cluster
-      // does not contain. A cluster whose unknowns are at least half its members reads
-      // gray instead, so absent data cannot average its way into a green bubble. The
-      // mean, not the worst: one red among fifty greens is a green neighbourhood, and
-      // the red is one zoom step away. circle-opacity is 1 so a bubble is the flag color
-      // exactly rather than a wash of it over the basemap. The count label takes the ink
-      // that clears 4.5:1 against its own bubble — white on green, red and gray (4.6),
-      // near-black on yellow, where white falls to 2.2 — both literals rather than theme
-      // tokens, because the basemap is fixed-light and a mode-dependent ink would vanish
-      // in dark mode.
-      // clusterRadius is one icon width and clusterMaxZoom is 8, so a located visitor
-      // never lands on a bubble. Clicking a flag navigates to /beach/<id>. Centering:
+      // Zoomed out, each beach instead paints one wide disc in that same flag color, and
+      // neighbouring discs merge into a highlight that traces the coast, because the
+      // beaches are on the coast. That is what makes the continental view a hazard map:
+      // a count bubble's number is beach density, which competes with its color for one
+      // symbol, and the highlight has no number to compete with. It over-claims nothing,
+      // because it is drawn from the beaches themselves and stops where they stop.
+      // One circle layer per color, added in the order unknown, green, yellow, red, so
+      // where two colors meet the worse one takes the pixel. The unknown filter is the
+      // COMPLEMENT of the other three rather than an equality test, so a keyword outside
+      // the four falls to unknown exactly as the flag layer's match fallback does. The
+      // discs are opaque and unblurred (circle-opacity 1, circle-blur 0): every
+      // highlighted pixel is exactly one of the four flag hexes, where a translucent or
+      // blurred disc would composite two of them into a third that reads as a flag color
+      // the coast does not carry. They are inserted before the style's first symbol
+      // layer, so the basemap's place labels stay legible on top of them.
+      // The handoff is a RADIUS ramp, never an opacity ramp: circle-opacity applies per
+      // feature, so two overlapping translucent discs of one color composite into a
+      // darker third and a highlight faded that way would mottle wherever the coast is
+      // densest. circle-radius interpolates zoom 3 → 4.5 px, 5 → 4.5, 6.5 → 7, 8.6 → 0,
+      // flat at the bottom because the beaches converge there and widening through the
+      // middle to stay merged as they spread apart; the layers carry maxzoom 8.6. The
+      // flag layer carries minzoom 7 and an icon-opacity ramp of 0 at zoom 7 to 1 at 8.6,
+      // so the highlight dissolves into the flags it is made of. A located visitor opens
+      // at zoom 9 or 10 and so never sees the highlight at all.
+      // Clicking the highlight eases to zoom 8.6 on the clicked point, the only way into
+      // a beach from the zoomed-out view; it is guarded on map.getZoom() >= 7, the band
+      // where both layers are live and one click would otherwise navigate and re-zoom at
+      // once. Clicking a flag navigates to /beach/<id>. Centering:
       // data-center (zoom 10 when precise, else 9), else fitBounds over all fetched
       // features, else a Great Lakes default ([-84, 44], zoom 5). It also listens for
       // "swimreport:nearupdate" on document and re-reads data-center to map.easeTo() the

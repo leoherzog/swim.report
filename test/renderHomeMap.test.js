@@ -1,8 +1,9 @@
 // Coverage for the homepage map mount: the #home-map container, its
 // accessibility attributes (aria-hidden, tabindex, no advertising aria-label),
 // the data-center attribute, section ordering (intro -> map -> search), and the
-// client script wiring (one-shot /api/beaches.geojson fetch feeding a clustered
-// GeoJSON source, keyboard:false, click handlers, re-center-only nearupdate).
+// client script wiring (one-shot /api/beaches.geojson fetch feeding one
+// unclustered GeoJSON source, the zoomed-out coast highlight and its handoff to
+// the flag icons, keyboard:false, click handlers, re-center-only nearupdate).
 // The per-beach flag data lives in the /api/beaches.geojson endpoint, so its
 // color-keyword coverage is in test/router.test.js.
 
@@ -159,64 +160,88 @@ describe("renderListPage home map", () => {
     expect(html).not.toContain("id=\"home-map-data\"");
   });
 
-  it("fetches the GeoJSON endpoint once (on load, not moveend) and clusters it", () => {
+  it("fetches the GeoJSON endpoint once (on load, not moveend) into one source", () => {
     const html = renderListPage({ entries: [] });
-    // One-shot fetch of the full flag-worthy directory, fed to a clustered source.
+    // One-shot fetch of the full flag-worthy directory into a single source that
+    // carries every beach at every zoom: the zoomed-out view is a rendering
+    // choice, not a thinned dataset.
     expect(html).toContain("fetch(GEOJSON_URL");
     expect(html).toContain("'/api/beaches.geojson'");
-    expect(html).toContain("cluster: true");
-    expect(html).toContain("map.addSource('beaches'");
+    expect(html).toContain("map.addSource('beaches', { type: 'geojson', data: fc });");
+    // The retired clustering must not come back: a bubble's count is beach
+    // density, which competes with its color for the same symbol.
+    expect(html).not.toContain("cluster: true");
+    expect(html).not.toContain("clusterProperties");
+    expect(html).not.toContain("getClusterExpansionZoom");
+    expect(html).not.toContain("point_count");
     // The removed viewport pan-to-load must be gone: no moveend fetch, no bbox.
     expect(html).not.toContain("scheduleViewportLoad");
     expect(html).not.toContain("/api/beaches?bbox=");
     expect(html).not.toContain("markersById");
   });
 
-  // Zoomed out, a bubble carries its members' mean flag color rather than a
-  // generic blue, so the continental view reads as a hazard map at every zoom.
-  it("accumulates a per-flag count on every cluster", () => {
+  // Zoomed out, each beach paints a wide disc in its flag color and the discs
+  // merge into a highlight along the coast, so the continental view reads as a
+  // hazard map without a count competing with the color.
+  it("paints one highlight layer per flag color, worst last", () => {
     const html = renderListPage({ entries: [] });
-    expect(html).toContain("clusterProperties: {");
-    expect(html).toContain("fg: ['+', ['case', ['==', ['get', 'flag'], 'green'], 1, 0]]");
-    expect(html).toContain("fy: ['+', ['case', ['==', ['get', 'flag'], 'yellow'], 1, 0]]");
-    expect(html).toContain("fr: ['+', ['case', ['==', ['get', 'flag'], 'red'], 1, 0]]");
-    // No fu accumulator: the unknown count is point_count minus the three, so a
-    // flag keyword outside the four falls to unknown, as the icon layer's match does.
-    expect(html).not.toContain("fu: [");
+    expect(html).toContain("const HIGHLIGHT_LAYERS = [");
+    expect(html).toContain("{ key: 'green', filter: ['==', ['get', 'flag'], 'green'] },");
+    expect(html).toContain("{ key: 'yellow', filter: ['==', ['get', 'flag'], 'yellow'] },");
+    expect(html).toContain("{ key: 'red', filter: ['==', ['get', 'flag'], 'red'] }");
+    // Paint order is the precedence: where two colors meet, the worse one takes
+    // the pixel.
+    const order = ["'unknown'", "'green'", "'yellow'", "'red'"].map(function (k) {
+      return html.indexOf("{ key: " + k + ",");
+    });
+    expect(order[0]).toBeGreaterThan(-1);
+    expect(order[0]).toBeLessThan(order[1]);
+    expect(order[1]).toBeLessThan(order[2]);
+    expect(order[2]).toBeLessThan(order[3]);
+    // The disc colors are the same four hexes the icons are tinted with.
+    expect(html).toContain("'circle-color': resolveFlagHex(HIGHLIGHT_LAYERS[i].key),");
   });
 
-  it("colors a cluster by mean flag severity, snapped to a flag hex", () => {
+  it("keeps every highlighted pixel on one flag hex", () => {
     const html = renderListPage({ entries: [] });
-    // green 0, yellow 1, red 2 over the known flags only.
-    expect(html).toContain("const clusterKnown = ['+', ['get', 'fg'], ['get', 'fy'], ['get', 'fr']];");
-    expect(html).toContain(
-      "const clusterSeverity = ['/', ['+', ['get', 'fy'], ['*', 2, ['get', 'fr']]],");
-    expect(html).toContain("['max', 1, clusterKnown]];");
-    // Unknowns at half the members or more read gray: absent data must never
-    // average its way into a green bubble.
-    expect(html).toContain(
-      "const clusterMostlyUnknown = ['<=', ['*', 2, clusterKnown], ['get', 'point_count']];");
-    expect(html).toContain("['step', clusterSeverity, green, 0.5, yellow, 1.5, red]];");
-    // The four snap targets are the same hexes the icons are tinted with.
-    expect(html).toContain(
-      "'circle-color': clusterPaint(resolveFlagHex('unknown'), resolveFlagHex('green'),");
-    expect(html).toContain("resolveFlagHex('yellow'), resolveFlagHex('red')),");
-    // The generic blue scale is gone.
-    expect(html).not.toContain("#5a8fc7");
-    expect(html).not.toContain("#4178b5");
-    expect(html).not.toContain("#2b5f9e");
-    // Opaque, so a bubble is the flag color exactly rather than a wash of it.
+    // Opaque and unblurred: a translucent or blurred disc would composite two
+    // flag hexes into a third that reads as a color the coast does not carry.
+    expect(html).toContain("'circle-blur': 0,");
     expect(html).toContain("'circle-opacity': 1");
+    expect(html).not.toContain("'circle-opacity': 0.");
   });
 
-  it("flips the count label to dark ink on the yellow bubble", () => {
+  it("filters the unknown highlight as the complement of the three known flags", () => {
     const html = renderListPage({ entries: [] });
-    // White clears 4.5:1 on green, red and gray but falls to 2.2 on yellow.
-    expect(html).toContain("const CLUSTER_INK_ON_DARK = '#ffffff';");
-    expect(html).toContain("const CLUSTER_INK_ON_LIGHT = '#1f1d22';");
-    expect(html).toContain(
-      "'text-color': clusterPaint(CLUSTER_INK_ON_DARK, CLUSTER_INK_ON_DARK,");
-    expect(html).toContain("CLUSTER_INK_ON_LIGHT, CLUSTER_INK_ON_DARK)");
+    // An equality test on 'unknown' would drop a keyword outside the four; the
+    // complement falls to unknown exactly as the flag layer's match fallback does.
+    expect(html).toContain("{ key: 'unknown', filter: " +
+      "['!', ['in', ['get', 'flag'], ['literal', ['green', 'yellow', 'red']]]] },");
+  });
+
+  it("hands the highlight off to the flags by radius, never by opacity", () => {
+    const html = renderListPage({ entries: [] });
+    // The discs widen with zoom to stay merged as the beaches spread apart, then
+    // collapse to nothing. circle-opacity applies per feature, so fading the
+    // highlight that way would composite overlapping discs of one color into a
+    // darker third wherever the coast is densest.
+    expect(html).toContain("const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],\n" +
+      "    3, 4.5, 5, 4.5, 6.5, 7, HIGHLIGHT_MAX_ZOOM, 0];");
+    expect(html).toContain("'circle-radius': HIGHLIGHT_RADIUS,");
+    expect(html).toContain("maxzoom: HIGHLIGHT_MAX_ZOOM,");
+    // The flags fade in over the same band and are absent below it.
+    expect(html).toContain("minzoom: FLAG_MIN_ZOOM,");
+    expect(html).toContain("'icon-opacity': FLAG_OPACITY");
+    expect(html).toContain("const FLAG_OPACITY = ['interpolate', ['linear'], ['zoom'],\n" +
+      "    FLAG_MIN_ZOOM, 0, HIGHLIGHT_MAX_ZOOM, 1];");
+  });
+
+  it("inserts the highlight beneath the basemap's labels", () => {
+    const html = renderListPage({ entries: [] });
+    // The discs are opaque, so place labels have to stay on top of them.
+    expect(html).toContain("const firstSymbolLayerId = function () {");
+    expect(html).toContain("if (layers[i].type === 'symbol') { return layers[i].id; }");
+    expect(html).toContain("}, beforeId);");
   });
 
   it("disables MapLibre keyboard handling and adds no focusable NavigationControl", () => {
@@ -227,11 +252,16 @@ describe("renderListPage home map", () => {
     expect(html).not.toContain("NavigationControl");
   });
 
-  it("wires cluster-expand and flag-click navigation handlers", () => {
+  it("wires highlight-zoom and flag-click navigation handlers", () => {
     const html = renderListPage({ entries: [] });
-    // Cluster click expands via the Promise-returning getClusterExpansionZoom.
-    expect(html).toContain("getClusterExpansionZoom");
-    // Unclustered flag click navigates to the beach page.
+    // Clicking the highlight zooms in until the flags are fully in, the only way
+    // into a beach from the zoomed-out view. The guard covers the handoff band,
+    // where both layers are live and one click would otherwise navigate and
+    // re-zoom at once.
+    expect(html).toContain("map.easeTo({ center: e.lngLat, zoom: HIGHLIGHT_MAX_ZOOM });");
+    expect(html).toContain("if (map.getZoom() >= FLAG_MIN_ZOOM) { return; }");
+    // Flag click navigates to the beach page.
+    expect(html).toContain("map.on('click', 'flags', function (e)");
     expect(html).toContain("window.location.href = '/beach/' + encodeURIComponent(id)");
   });
 

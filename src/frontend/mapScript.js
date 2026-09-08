@@ -8,14 +8,16 @@
 // render.js stays the single place both CDN pins live.
 //
 // The map uses the OpenFreeMap positron style and fetches every flag-worthy
-// beach once from the cacheable /api/beaches.geojson endpoint into a native
-// clustered GeoJSON source. Zoomed out, beaches collapse into count bubbles
-// carrying their members' mean flag color; zoomed in, each beach is a
-// rasterized fa-flag icon tinted by its `flag` keyword (green|yellow|red|
-// unknown) to the exact flag-icon-* palette. Both read the same four hexes,
-// resolved from the live --flag-* variables so the map matches the rest of the
-// UI, with the mild-palette hexes only as a fallback. Clicking a flag navigates
-// to /beach/:id; clicking a cluster zooms to expand it.
+// beach once from the cacheable /api/beaches.geojson endpoint into a single
+// unclustered GeoJSON source. Zoomed out, each beach paints one wide opaque
+// disc in its flag color, and neighbouring discs merge into a highlight that
+// traces the coast, because the beaches are on the coast. Zoomed in the
+// highlight collapses and each beach is a rasterized fa-flag icon tinted by its
+// `flag` keyword (green|yellow|red|unknown) to the exact flag-icon-* palette.
+// Both read the same four hexes, resolved from the live --flag-* variables so
+// the map matches the rest of the UI, with the mild-palette hexes only as a
+// fallback. Clicking a flag navigates to /beach/:id; clicking the highlight
+// zooms in far enough to resolve it into flags.
 //
 // Centering precedence: the container's data-center attribute (the resolved user
 // location, at zoom 10 when data-center-precise is "1", else zoom 9), then
@@ -98,31 +100,45 @@ const SCRIPT_LINES = [
   "    return v || FLAG_HEX_FALLBACK[key];",
   "  };",
 
-  // A cluster's color is its members' mean flag severity, snapped to one of the
-  // same four flag hexes the icons use — never a blend, because an off-palette
-  // hue would read as a flag color the cluster does not contain. Severity is
-  // green 0, yellow 1, red 2 over the known flags only; a cluster whose unknowns
-  // are at least half its members reads gray instead, so absent data can never
-  // average its way into a green bubble. The mean, not the worst, is what the
-  // bubble claims: one red among fifty greens is a green neighbourhood, and the
-  // red is one zoom step away.
-  "  const clusterKnown = ['+', ['get', 'fg'], ['get', 'fy'], ['get', 'fr']];",
-  "  const clusterMostlyUnknown = ['<=', ['*', 2, clusterKnown], ['get', 'point_count']];",
-  // max(known, 1) keeps the divisor finite for an all-unknown cluster; the guard
-  // above returns before the ratio is used, and this makes that independent of
-  // whether the surrounding case evaluates lazily.
-  "  const clusterSeverity = ['/', ['+', ['get', 'fy'], ['*', 2, ['get', 'fr']]],",
-  "    ['max', 1, clusterKnown]];",
-  "  const clusterPaint = function (gray, green, yellow, red) {",
-  "    return ['case', clusterMostlyUnknown, gray,",
-  "      ['step', clusterSeverity, green, 0.5, yellow, 1.5, red]];",
+  // One highlight layer per flag color, painted in this order, so where two
+  // colors meet the worse one takes the pixel. The unknown filter is the
+  // complement of the other three rather than an equality test, so a keyword
+  // outside the four falls to unknown exactly as the flag layer's match does.
+  //
+  // The discs are opaque and unblurred: every highlighted pixel is exactly one
+  // of the four flag hexes. A translucent or blurred disc would composite two of
+  // them into a third that reads as a flag color the coast does not carry.
+  "  const HIGHLIGHT_LAYERS = [",
+  "    { key: 'unknown', filter: ['!', ['in', ['get', 'flag'], ['literal', ['green', 'yellow', 'red']]]] },",
+  "    { key: 'green', filter: ['==', ['get', 'flag'], 'green'] },",
+  "    { key: 'yellow', filter: ['==', ['get', 'flag'], 'yellow'] },",
+  "    { key: 'red', filter: ['==', ['get', 'flag'], 'red'] }",
+  "  ];",
+  // The highlight is opaque, so it is inserted beneath the style's first symbol
+  // layer and the basemap's place labels stay legible on top of it. An undefined
+  // beforeId is MapLibre's "add on top", which is the right fallback for a style
+  // that carries no symbol layer at all.
+  "  const firstSymbolLayerId = function () {",
+  "    try {",
+  "      const layers = map.getStyle().layers || [];",
+  "      for (let i = 0; i < layers.length; i++) {",
+  "        if (layers[i].type === 'symbol') { return layers[i].id; }",
+  "      }",
+  "    } catch (e) {}",
+  "    return undefined;",
   "  };",
-  // The count label rides on the bubble's own color, so it takes the ink that
-  // clears 4.5:1 against it: white on green, red and gray (4.6), near-black on
-  // yellow, where white falls to 2.2. Both are literals, not theme tokens: the
-  // basemap is fixed-light, so a mode-dependent ink would vanish in dark mode.
-  "  const CLUSTER_INK_ON_DARK = '#ffffff';",
-  "  const CLUSTER_INK_ON_LIGHT = '#1f1d22';",
+  // The discs widen with zoom to stay merged as the beaches under them spread
+  // apart, then collapse to nothing as the flags fade in. The handoff is a
+  // radius ramp rather than an opacity ramp because circle-opacity applies per
+  // feature: two overlapping translucent discs of one color composite into a
+  // darker third, so a highlight faded that way would mottle wherever it is
+  // densest.
+  "  const HIGHLIGHT_MAX_ZOOM = 8.6;",
+  "  const FLAG_MIN_ZOOM = 7;",
+  "  const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],",
+  "    3, 4.5, 5, 4.5, 6.5, 7, HIGHLIGHT_MAX_ZOOM, 0];",
+  "  const FLAG_OPACITY = ['interpolate', ['linear'], ['zoom'],",
+  "    FLAG_MIN_ZOOM, 0, HIGHLIGHT_MAX_ZOOM, 1];",
   // The fa-flag single-path glyph. Explicit width/height give it an intrinsic
   // size so every browser rasterizes it (a viewBox-only SVG can draw blank).
   "  const FLAG_SVG =",
@@ -193,66 +209,38 @@ const SCRIPT_LINES = [
   "      try { map.fitBounds(bounds, { padding: 40, maxZoom: 10, animate: false }); } catch (e) {}",
   "    }",
   "  };",
-  // Add the clustered source plus its three layers (cluster circle, count label,
-  // unclustered flag icon), then wire the click/cursor handlers.
-  //
-  // Clustering is deliberately weak: it keeps the fully zoomed-out continental
-  // view legible rather than thinning out a regional one. clusterRadius is one
-  // icon width (CSS_SIZE) rather than the 50 px default, so two beaches merge
-  // only when their flags would genuinely collide, and clusterMaxZoom 8 turns
-  // clustering off from zoom 9 up, the zoom the map opens at once a user location
-  // is resolved, so a located visitor never lands on a bubble.
+  // Add the unclustered source, its four highlight layers and the flag layer,
+  // then wire the click/cursor handlers. The source carries every beach at every
+  // zoom: the zoomed-out view is a rendering choice, not a thinned dataset, so
+  // the highlight is drawn from the same features the flags are.
   "  const addBeachLayers = function (fc) {",
   "    try {",
-  "      map.addSource('beaches', {",
-  "        type: 'geojson',",
-  "        data: fc,",
-  "        cluster: true,",
-  "        clusterRadius: CSS_SIZE,",
-  "        clusterMaxZoom: 8,",
-  "        clusterProperties: {",
-  "          fg: ['+', ['case', ['==', ['get', 'flag'], 'green'], 1, 0]],",
-  "          fy: ['+', ['case', ['==', ['get', 'flag'], 'yellow'], 1, 0]],",
-  "          fr: ['+', ['case', ['==', ['get', 'flag'], 'red'], 1, 0]]",
-  "        }",
-  "      });",
+  "      map.addSource('beaches', { type: 'geojson', data: fc });",
   "    } catch (e) { return; }",
+  "    const beforeId = firstSymbolLayerId();",
+  "    for (let i = 0; i < HIGHLIGHT_LAYERS.length; i++) {",
+  "      try {",
+  "        map.addLayer({",
+  "          id: 'highlight-' + HIGHLIGHT_LAYERS[i].key,",
+  "          type: 'circle',",
+  "          source: 'beaches',",
+  "          maxzoom: HIGHLIGHT_MAX_ZOOM,",
+  "          filter: HIGHLIGHT_LAYERS[i].filter,",
+  "          paint: {",
+  "            'circle-color': resolveFlagHex(HIGHLIGHT_LAYERS[i].key),",
+  "            'circle-radius': HIGHLIGHT_RADIUS,",
+  "            'circle-blur': 0,",
+  "            'circle-opacity': 1",
+  "          }",
+  "        }, beforeId);",
+  "      } catch (e) {}",
+  "    }",
   "    try {",
   "      map.addLayer({",
-  "        id: 'clusters',",
-  "        type: 'circle',",
-  "        source: 'beaches',",
-  "        filter: ['has', 'point_count'],",
-  "        paint: {",
-  "          'circle-color': clusterPaint(resolveFlagHex('unknown'), resolveFlagHex('green'),",
-  "            resolveFlagHex('yellow'), resolveFlagHex('red')),",
-  "          'circle-radius': ['step', ['get', 'point_count'], 14, 25, 18, 100, 24],",
-  "          'circle-stroke-width': 2,",
-  "          'circle-stroke-color': '#ffffff',",
-  "          'circle-opacity': 1",
-  "        }",
-  "      });",
-  "      map.addLayer({",
-  "        id: 'cluster-count',",
+  "        id: 'flags',",
   "        type: 'symbol',",
   "        source: 'beaches',",
-  "        filter: ['has', 'point_count'],",
-  "        layout: {",
-  "          'text-field': ['get', 'point_count_abbreviated'],",
-  "          'text-size': 13,",
-  "          'text-font': ['Noto Sans Regular'],",
-  "          'text-allow-overlap': true",
-  "        },",
-  "        paint: {",
-  "          'text-color': clusterPaint(CLUSTER_INK_ON_DARK, CLUSTER_INK_ON_DARK,",
-  "            CLUSTER_INK_ON_LIGHT, CLUSTER_INK_ON_DARK)",
-  "        }",
-  "      });",
-  "      map.addLayer({",
-  "        id: 'unclustered',",
-  "        type: 'symbol',",
-  "        source: 'beaches',",
-  "        filter: ['!', ['has', 'point_count']],",
+  "        minzoom: FLAG_MIN_ZOOM,",
   "        layout: {",
   "          'icon-image': ['match', ['get', 'flag'],",
   "            'green', 'flag-green',",
@@ -261,28 +249,30 @@ const SCRIPT_LINES = [
   "            'flag-unknown'],",
   "          'icon-allow-overlap': true,",
   "          'icon-anchor': 'bottom'",
+  "        },",
+  "        paint: {",
+  "          'icon-opacity': FLAG_OPACITY",
   "        }",
   "      });",
   "    } catch (e) {}",
-  // Cluster click: expand to the zoom that splits it. getClusterExpansionZoom
-  // returns a Promise in MapLibre v4+ (the callback form is gone), so use .then.
-  "    map.on('click', 'clusters', function (e) {",
-  "      if (!e.features || !e.features.length) { return; }",
-  "      const clusterId = e.features[0].properties.cluster_id;",
-  "      const coords = e.features[0].geometry.coordinates;",
-  "      const src = map.getSource('beaches');",
-  "      if (!src || typeof src.getClusterExpansionZoom !== 'function') { return; }",
-  "      src.getClusterExpansionZoom(clusterId).then(function (zoom) {",
-  "        map.easeTo({ center: coords, zoom: zoom });",
-  "      }).catch(function () {});",
+  // Highlight click: zoom in on the clicked point until the flags are fully in,
+  // which is the only way into a beach from the zoomed-out view. Guarded on the
+  // handoff band, where both layers are live and one click would otherwise
+  // navigate and re-zoom at once.
+  "    const highlightIds = HIGHLIGHT_LAYERS.map(function (h) { return 'highlight-' + h.key; });",
+  "    highlightIds.forEach(function (layerId) {",
+  "      map.on('click', layerId, function (e) {",
+  "        if (map.getZoom() >= FLAG_MIN_ZOOM) { return; }",
+  "        map.easeTo({ center: e.lngLat, zoom: HIGHLIGHT_MAX_ZOOM });",
+  "      });",
   "    });",
-  "    map.on('click', 'unclustered', function (e) {",
+  "    map.on('click', 'flags', function (e) {",
   "      if (!e.features || !e.features.length) { return; }",
   "      const id = e.features[0].properties.id;",
   "      if (id === undefined || id === null) { return; }",
   "      window.location.href = '/beach/' + encodeURIComponent(id);",
   "    });",
-  "    ['clusters', 'unclustered'].forEach(function (layerId) {",
+  "    highlightIds.concat(['flags']).forEach(function (layerId) {",
   "      map.on('mouseenter', layerId, function () { map.getCanvas().style.cursor = 'pointer'; });",
   "      map.on('mouseleave', layerId, function () { map.getCanvas().style.cursor = ''; });",
   "    });",
