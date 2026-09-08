@@ -47,14 +47,14 @@ function detailHtml(beachExtra, waterTemp) {
 // The subtitle paragraph body, or null when the <p class="beach-subtitle"> is
 // absent from the page entirely.
 function subtitleText(html) {
-  const m = html.match(/<p class="beach-subtitle">([^<]*)<\/p>/);
+  const m = html.match(/<p class="beach-subtitle[^"]*">([^<]*)<\/p>/);
   return m ? m[1] : null;
 }
 
 // Everything the coordinates line carries after the OpenStreetMap link, as raw
 // HTML. "" for the current line, which carries the coordinates alone.
 function metaTail(html) {
-  const m = html.match(/<p class="beach-meta wa-caption-s"><a class="coords-link"[^>]*>[\s\S]*?<\/a>([\s\S]*?)<\/p>/);
+  const m = html.match(/<p class="beach-meta wa-caption-s"><a class="coords-link[^"]*"[^>]*>[\s\S]*?<\/a>([\s\S]*?)<\/p>/);
   return m ? m[1] : null;
 }
 

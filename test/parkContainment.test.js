@@ -157,7 +157,7 @@ describe("park-name-first rendering", () => {
       entries: [{ beach: parkBeach, estimate: null, official: null, distanceMi: null }],
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    const nameIdx = html.indexOf("<span class=\"beach-row-name\">Holland State Park");
+    const nameIdx = html.indexOf("<span class=\"beach-row-name wa-font-weight-semibold\">Holland State Park");
     expect(nameIdx).toBeGreaterThan(-1);
     expect(html).toContain("<span class=\"beach-row-subtitle\">Ottawa Beach</span>");
     // search filter must match both names
@@ -182,7 +182,7 @@ describe("park-name-first rendering", () => {
       entries: [{ beach: beach, estimate: null, official: null, distanceMi: null }],
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    expect(html).toContain("<span class=\"beach-row-name\">Weko Beach");
+    expect(html).toContain("<span class=\"beach-row-name wa-font-weight-semibold\">Weko Beach");
     expect(html).not.toContain("<span class=\"beach-row-subtitle\"");
   });
 
@@ -195,7 +195,7 @@ describe("park-name-first rendering", () => {
     });
     expect(html).toContain("<title>Holland State Park — Swim Report</title>");
     expect(html).toContain("<span>Holland State Park</span></h1>");
-    expect(html).toContain("<p class=\"beach-subtitle\">Ottawa Beach</p>");
+    expect(html).toContain("<p class=\"beach-subtitle wa-color-text-quiet wa-font-size-l\">Ottawa Beach</p>");
   });
 });
 

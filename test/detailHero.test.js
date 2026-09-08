@@ -168,7 +168,7 @@ describe("detail-page hero", () => {
 
   it("renders the back link at / and the share controls for the canonical URL", () => {
     const block = hero(render({}));
-    expect(block).toContain("<a class=\"back-link\" href=\"/\">");
+    expect(block).toContain("<a class=\"back-link icon-link wa-color-text-link\" href=\"/\">");
     expect(block).toContain("Back to all beaches");
     expect(block).toContain(
       "<wa-copy-button class=\"hero-copy\" value=\"https://swim.report/beach/osm-way-505668572\" " +

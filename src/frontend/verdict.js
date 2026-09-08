@@ -21,16 +21,10 @@ import {
   ECCC_ALERT_PRECEDENCE,
   NWS_FLOOR_PRECEDENCE,
   ECCC_FLOOR_PRECEDENCE,
-  decidedAlertDetails
+  decidedAlertDetails,
+  normalizeColor
 } from "../rules.js";
-import { bandLabelsForWaterClass } from "./waveStrip.js";
-
-const KNOWN_COLORS = ["green", "yellow", "red", "double-red", "unknown"];
-
-// Re-derived rather than imported: render.js keeps its normalizeColor private.
-function flagKey(color) {
-  return KNOWN_COLORS.indexOf(color) === -1 ? "unknown" : color;
-}
+import { bandLabelsForWaterClass, lowerFirst } from "./waveStrip.js";
 
 const OFFICIAL_SENTENCES = {
   "green": "A green flag is posted at the beach.",
@@ -63,10 +57,6 @@ const EVENT_PRECEDENCE = ALERT_PRECEDENCE
 
 function upperFirst(text) {
   return text.length === 0 ? text : (text.charAt(0).toUpperCase() + text.slice(1));
-}
-
-function lowerFirst(text) {
-  return text.length === 0 ? text : (text.charAt(0).toLowerCase() + text.slice(1));
 }
 
 // The estimate's echoed alert events, deduped and ordered by EVENT_PRECEDENCE,
@@ -207,12 +197,12 @@ function reinforces(clauseColor, color, leadIsEvent) {
 // explain.
 export function verdictSentence(estimate, official, displayIsOfficial, waterClass) {
   if (displayIsOfficial && official) {
-    return OFFICIAL_SENTENCES[flagKey(official.color)];
+    return OFFICIAL_SENTENCES[normalizeColor(official.color)];
   }
   if (!estimate) {
     return NO_DATA_SENTENCE;
   }
-  const color = flagKey(estimate.color);
+  const color = normalizeColor(estimate.color);
   if (color === "unknown") {
     return NO_DATA_SENTENCE;
   }

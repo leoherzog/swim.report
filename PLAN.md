@@ -4023,10 +4023,13 @@ exporting a CSS string); render.js is the sole module the router imports.
   the display name, optional subtitle, the estimated flag chip, and an OFFICIAL badge when
   official is non-null. The <li> also carries data-flag, the row's chip color through
   collapseFlagColor (green|yellow|red|unknown, double-red -> red), which drives both the
-  3px flag-colored inline-start border in styles.js and the client-side green-only filter.
+  flag-colored inline-start border in styles.js and the client-side green-only filter.
   It mirrors the chip beside it, not markerFlagColor, so border and chip can never
   disagree; unknown renders gray rather than being omitted. class="beach-row" stays the
   first attribute and never gains a color class.
+- Color normalization (normalizeColor in rules.js) — coerces any value to one of the five
+  flag colors, keyed by SEVERITY_RANK so the color set has one definition. render.js and
+  frontend/verdict.js both import it; anything SEVERITY_RANK does not name becomes unknown.
 - Display color (displayFlagColor in render.js) — the one rule behind both the detail
   page's h1 title flag and the map/list marker keyword (markerFlagColor), so the two can
   never disagree about one beach. displayFlagColor(estimate, official, nowIso) -> one of

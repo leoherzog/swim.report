@@ -19,6 +19,7 @@ const RULES = [
   // negative z-index positioned elements in the root stacking context, hiding
   // the waves. Restated here unlayered, so it outranks the @layer wa-native copy.
   "html {",
+  "  --content-measure: 48rem;",
   "  background-color: var(--wa-color-surface-default);",
   "}",
 
@@ -118,15 +119,19 @@ const RULES = [
   "  padding-inline: var(--wa-space-xl);",
   "}",
 
-  // inline-flex + gap stay custom: wa-cluster is block-level flex, so it is not
-  // an equivalent swap here, and wa-link-plain adds a hover color-mix this link
-  // deliberately does not have.
-  ".brand-link {",
+  // An undecorated icon-and-label link. inline-flex + gap stay custom:
+  // wa-cluster is block-level flex, so it is not an equivalent swap here, and
+  // wa-link-plain adds a hover color-mix these links deliberately do not have.
+  // Each link picks its own color with a wa-color-text-* utility.
+  ".icon-link {",
   "  display: inline-flex;",
   "  align-items: center;",
-  "  gap: var(--wa-space-xs);",
-  "  color: var(--wa-color-text-normal);",
+  "  gap: var(--wa-space-2xs);",
   "  text-decoration: none;",
+  "}",
+
+  ".brand-link {",
+  "  gap: var(--wa-space-xs);",
   "}",
 
   // wa-page's shadow sheet paints every slotted section opaque via
@@ -140,7 +145,6 @@ const RULES = [
   // holds exactly one child (.footer-lines) and centers it instead.
   ".app-footer {",
   "  padding-inline: var(--wa-space-xl);",
-  "  color: var(--wa-color-text-quiet);",
   "  background-color: transparent;",
   "  justify-content: center;",
   "}",
@@ -149,13 +153,12 @@ const RULES = [
   // basemap credit). Capped to the main column's width so a wrapped line
   // still reads as one centered paragraph rather than a full-bleed run.
   ".footer-lines {",
-  "  max-width: 48rem;",
+  "  max-width: var(--content-measure);",
   "  margin: 0;",
-  "  text-align: center;",
   "}",
 
   "main.app-main {",
-  "  max-width: 48rem;",
+  "  max-width: var(--content-measure);",
   "  margin-inline: auto;",
   "}",
 
@@ -182,9 +185,9 @@ const RULES = [
   "  background: var(--wa-color-neutral-fill-quiet);",
   "}",
 
+  // No flex utility ships, so the grow/shrink pair stays hand-written.
   ".beach-row-name {",
   "  flex: 1 1 auto;",
-  "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
   ".beach-row-subtitle {",
@@ -201,8 +204,6 @@ const RULES = [
   "}",
 
   ".empty-state {",
-  "  color: var(--wa-color-text-quiet);",
-  "  text-align: center;",
   "  padding: var(--wa-space-xl);",
   "}",
 
@@ -212,7 +213,7 @@ const RULES = [
   // the row's chip renders, and every keyword has a rule so unknown shows an
   // honest gray instead of nothing.
   ".beach-row .beach-row-link {",
-  "  border-inline-start-width: 3px;",
+  "  border-inline-start-width: var(--wa-border-width-l);",
   "}",
   ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--wa-color-green-50); }",
   ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--wa-color-yellow-70); }",
@@ -220,16 +221,10 @@ const RULES = [
   ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--wa-color-gray-50); }",
 
   // With nothing to filter the row still sits in the page stack, where a
-  // zero-height child would leave a full gap of white space.
+  // zero-height child would leave a full gap of white space. Unlayered, so it
+  // outranks the wa-cluster utility's layered display: flex.
   ".list-controls:empty {",
   "  display: none;",
-  "}",
-
-  ".list-controls {",
-  "  display: flex;",
-  "  flex-wrap: wrap;",
-  "  align-items: center;",
-  "  gap: var(--wa-space-s);",
   "}",
 
   ".list-filter {",
@@ -245,7 +240,6 @@ const RULES = [
   ".nearby-heading {",
   "  margin: 0;",
   "  font-size: var(--wa-font-size-l);",
-  "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
   ".your-beaches-label {",
@@ -271,36 +265,6 @@ const RULES = [
   "  display: block;",
   "  width: 100%;",
   "  height: 100%;",
-  "}",
-
-  ".back-link {",
-  "  display: inline-flex;",
-  "  align-items: center;",
-  "  gap: var(--wa-space-2xs);",
-  "  color: var(--wa-color-text-link);",
-  "  text-decoration: none;",
-  "}",
-
-  // Quiet coordinates link under the title (mirrors .back-link).
-  ".coords-link {",
-  "  display: inline-flex;",
-  "  align-items: center;",
-  "  gap: var(--wa-space-2xs);",
-  "  color: var(--wa-color-text-quiet);",
-  "  text-decoration: none;",
-  "}",
-
-  // Station, distance and observation age under the water-temperature tile's
-  // reading: quieter than the reading itself.
-  ".water-temp-src {",
-  "  color: var(--wa-color-text-quiet);",
-  "}",
-
-  // The parent .detail-hero (wa-stack wa-gap-s) zero-margins its children, so
-  // the title needs no rule of its own.
-  ".beach-subtitle {",
-  "  color: var(--wa-color-text-quiet);",
-  "  font-size: var(--wa-font-size-l);",
   "}",
 
   // --- detail hero + at-a-glance tiles ---------------------------------------
@@ -332,30 +296,17 @@ const RULES = [
   "  background: color-mix(in oklab, var(--wa-color-gray-50) 12%, var(--wa-color-surface-default));",
   "}",
 
-  // The flag label reads as the hero's second line, so it aligns with the badge
-  // beside it rather than sitting on the text baseline of a paragraph.
-  ".hero-flag {",
-  "  align-items: center;",
-  "}",
-
   // Plain-language verdict under the flag label: the hero's answer in one
   // sentence, so it reads louder than the quiet coordinates line below it.
   ".hero-verdict {",
   "  font-size: var(--wa-font-size-l);",
-  "  color: var(--wa-color-text-normal);",
-  "}",
-
-  ".hero-actions {",
-  "  align-items: center;",
   "}",
 
   // Shared heading for every detail-page section below the hero, sized between
   // the h1 and body text so the sections read as parts of one page.
   ".section-heading {",
   "  margin: 0;",
-  "  align-items: center;",
   "  font-size: var(--wa-font-size-l);",
-  "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
   // At-a-glance tiles: up to five small readings in the same responsive grid
@@ -365,17 +316,6 @@ const RULES = [
   "  --min-column-size: 9rem;",
   "}",
 
-  ".glance-tile {",
-  "  --spacing: var(--wa-space-m);",
-  "}",
-
-  ".glance-icon {",
-  "  font-size: var(--wa-font-size-l);",
-  "}",
-
-  ".glance-caption {",
-  "  font-weight: var(--wa-font-weight-semibold);",
-  "}",
   // --- end detail hero + at-a-glance tiles -----------------------------------
 
   // --- flag legend -----------------------------------------------------------
@@ -434,10 +374,6 @@ const RULES = [
   "  padding-block: var(--wa-space-s);",
   "}",
 
-  ".alert-detail-event {",
-  "  font-weight: var(--wa-font-weight-semibold);",
-  "}",
-
   ".alert-detail-body p {",
   "  margin-block: 0;",
   "}",
@@ -453,15 +389,15 @@ const RULES = [
   "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
-  ".alert-detail-provenance {",
-  "  color: var(--wa-color-text-quiet);",
-  "}",
   // --- end per-alert disclosures ---------------------------------------------
 
-  // Tighter section spacing inside both flag cards (--spacing is wa-card's
-  // documented section-spacing custom property, default var(--wa-space-l)).
+  // Tighter section spacing for every wa-card on the detail page (--spacing is
+  // wa-card's documented section-spacing custom property, default
+  // var(--wa-space-l)).
+  ".glance-tile,",
   ".official-card,",
-  ".estimate-card {",
+  ".estimate-card,",
+  ".nearby-card {",
   "  --spacing: var(--wa-space-m);",
   "}",
 
@@ -488,12 +424,6 @@ const RULES = [
 
   ".wave-alert-band:focus-visible {",
   "  outline: var(--wa-focus-ring);",
-  "}",
-
-  ".wave-alert-label {",
-  "  overflow: hidden;",
-  "  white-space: nowrap;",
-  "  text-overflow: ellipsis;",
   "}",
 
   // A short Dark Sky-style strip: a flex row of proportional colored segments
@@ -567,7 +497,6 @@ const RULES = [
   // it never occupies space on a page that kept the relative labels.
   ".wave-chart-hours-note {",
   "  margin: 0;",
-  "  color: var(--wa-color-text-quiet);",
   "}",
 
   // Quiet plain-appearance disclosure line: tighter body spacing via the
@@ -611,10 +540,6 @@ const RULES = [
   "  --min-column-size: 12rem;",
   "}",
 
-  ".nearby-card {",
-  "  --spacing: var(--wa-space-m);",
-  "}",
-
   ".nearby-card-link {",
   "  text-decoration: none;",
   "  color: var(--wa-color-text-normal);",
@@ -622,15 +547,6 @@ const RULES = [
 
   ".nearby-card:hover {",
   "  background: var(--wa-color-neutral-fill-quiet);",
-  "}",
-
-  ".nearby-card-name {",
-  "  font-weight: var(--wa-font-weight-semibold);",
-  "}",
-
-  ".nearby-card-subtitle,",
-  ".nearby-card-distance {",
-  "  color: var(--wa-color-text-quiet);",
   "}",
 
   // Homepage map: MapLibre collapses to 0px and renders blank without an

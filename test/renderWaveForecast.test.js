@@ -459,7 +459,7 @@ describe("wave-forecast hazard lane", () => {
     expect(band).toContain("left: 0%; width: " + ((14 / 24) * 100) + "%;");
     expect(band).toContain("background: var(--wa-color-danger-fill-quiet);");
     expect(band).toContain(
-      "<span class=\"wave-alert-label\">Beach Hazards Statement</span>");
+      "<span class=\"wave-alert-label wa-text-truncate\">Beach Hazards Statement</span>");
     // Tooltip and aria-label carry the name plus the period.
     expect(html).toContain("<wa-tooltip for=\"wave-alert-0\">" +
       "NWS alert: Beach Hazards Statement — now through +14 h</wa-tooltip>");
@@ -510,7 +510,7 @@ describe("wave-forecast hazard lane", () => {
     const band = html.slice(bandStart, html.indexOf("</div></div>", bandStart));
     expect(band).toContain("left: 0%; width: 100%;");
     expect(band).toContain(
-      "<span class=\"wave-alert-label\">Rip current risk: HIGH</span>");
+      "<span class=\"wave-alert-label wa-text-truncate\">Rip current risk: HIGH</span>");
     expect(html).toContain("<wa-tooltip for=\"wave-alert-0\">" +
       "Rip current risk HIGH — from the latest NWS surf zone forecast</wa-tooltip>");
   });

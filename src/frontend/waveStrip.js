@@ -335,7 +335,7 @@ function hourWord(n) {
 
 // Lowercase the first character of a band label. The first run keeps its label
 // verbatim; every "then" run passes through here.
-function lowerFirst(str) {
+export function lowerFirst(str) {
   if (str.length === 0) {
     return str;
   }

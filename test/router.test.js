@@ -1972,7 +1972,7 @@ describe("renderListPage color-coded rows", () => {
 
   it("carries one border rule per flag keyword, from the flag color tokens", () => {
     expect(PAGE_STYLES).toContain(".beach-row .beach-row-link {");
-    expect(PAGE_STYLES).toContain("border-inline-start-width: 3px;");
+    expect(PAGE_STYLES).toContain("border-inline-start-width: var(--wa-border-width-l);");
     expect(PAGE_STYLES).toContain(
       ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--wa-color-green-50); }");
     expect(PAGE_STYLES).toContain(

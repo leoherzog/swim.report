@@ -88,13 +88,13 @@ describe("cross-document view transitions", () => {
     // Names are unique per document, so rows and cards get theirs at click time
     // from the script, never in the server-rendered markup.
     const html = listPage();
-    expect(html).toContain("class=\"beach-row-name\"");
-    expect(html).not.toContain("class=\"beach-row-name\" style=\"view-transition-name");
+    expect(html).toContain("class=\"beach-row-name wa-font-weight-semibold\"");
+    expect(html).not.toContain("class=\"beach-row-name wa-font-weight-semibold\" style=\"view-transition-name");
     const detail = detailPage({
       nearby: [{ beach: beachWith({ id: "osm-way-2", name: "Tunnel Park" }), estimate: null, official: null, distanceMi: 2 }]
     });
-    expect(detail).toContain("class=\"nearby-card-name\"");
-    expect(detail).not.toContain("class=\"nearby-card-name\" style=\"view-transition-name");
+    expect(detail).toContain("class=\"nearby-card-name wa-font-weight-semibold\"");
+    expect(detail).not.toContain("class=\"nearby-card-name wa-font-weight-semibold\" style=\"view-transition-name");
   });
 
   it("ships the click-time naming script on both pages", () => {

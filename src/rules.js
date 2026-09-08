@@ -15,6 +15,15 @@ export const RULES_VERSION = "1.8.0";
 // has aged past the recompute horizon. One severity ordering, one place.
 export const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-red": 4 };
 
+/**
+ * Coerce an arbitrary value to one of the five flag colors.
+ * @param {*} color candidate color keyword
+ * @returns {string} the color, or "unknown" for anything SEVERITY_RANK does not name
+ */
+export function normalizeColor(color) {
+  return Object.prototype.hasOwnProperty.call(SEVERITY_RANK, color) ? color : "unknown";
+}
+
 // Caveat appended to the reason when the cron reports that weather alerts were
 // not checkable for this beach. Distinguishes "alerts checked, none active" from
 // "alerts never checked", so a wave-only green can never present itself as
