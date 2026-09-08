@@ -3778,12 +3778,28 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // on every path that ends with no map — the construction catch, the 'error'
       // event, and a failed module import — so a sheening placeholder never stands in
       // for a map that is not coming. On load it fetches /api/beaches.geojson once and hands the
-      // FeatureCollection to a native clustered GeoJSON source: neutral count bubbles
-      // that expand on click (getClusterExpansionZoom + easeTo) when zoomed out, and
+      // FeatureCollection to a native clustered GeoJSON source: count bubbles that
+      // expand on click (getClusterExpansionZoom + easeTo) when zoomed out, and
       // individual rasterized fa-flag icons at high zoom, each tinted by its feature
       // `flag` keyword to the flag-icon-* palette (the --flag-{green,yellow,red,unknown}
       // variables resolved at runtime via getComputedStyle, with the mild hexes as
       // fallback; double-red rides in as "red").
+      // A bubble carries its members' mean flag color, so the zoomed-out view reads as
+      // a hazard map rather than a density map. clusterProperties accumulates fg/fy/fr
+      // per cluster (the unknown count is point_count minus those three, so an
+      // unexpected keyword falls to unknown exactly as the icon layer's match does).
+      // The color is (fy + 2*fr) / max(1, fg+fy+fr) — green 0, yellow 1, red 2 over the
+      // known flags only — stepped at 0.5 and 1.5 onto the same four hexes the icons
+      // use, never a blend: an off-palette hue would read as a flag color the cluster
+      // does not contain. A cluster whose unknowns are at least half its members reads
+      // gray instead, so absent data cannot average its way into a green bubble. The
+      // mean, not the worst: one red among fifty greens is a green neighbourhood, and
+      // the red is one zoom step away. circle-opacity is 1 so a bubble is the flag color
+      // exactly rather than a wash of it over the basemap. The count label takes the ink
+      // that clears 4.5:1 against its own bubble — white on green, red and gray (4.6),
+      // near-black on yellow, where white falls to 2.2 — both literals rather than theme
+      // tokens, because the basemap is fixed-light and a mode-dependent ink would vanish
+      // in dark mode.
       // clusterRadius is one icon width and clusterMaxZoom is 8, so a located visitor
       // never lands on a bubble. Clicking a flag navigates to /beach/<id>. Centering:
       // data-center (zoom 10 when precise, else 9), else fitBounds over all fetched

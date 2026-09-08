@@ -172,6 +172,53 @@ describe("renderListPage home map", () => {
     expect(html).not.toContain("markersById");
   });
 
+  // Zoomed out, a bubble carries its members' mean flag color rather than a
+  // generic blue, so the continental view reads as a hazard map at every zoom.
+  it("accumulates a per-flag count on every cluster", () => {
+    const html = renderListPage({ entries: [] });
+    expect(html).toContain("clusterProperties: {");
+    expect(html).toContain("fg: ['+', ['case', ['==', ['get', 'flag'], 'green'], 1, 0]]");
+    expect(html).toContain("fy: ['+', ['case', ['==', ['get', 'flag'], 'yellow'], 1, 0]]");
+    expect(html).toContain("fr: ['+', ['case', ['==', ['get', 'flag'], 'red'], 1, 0]]");
+    // No fu accumulator: the unknown count is point_count minus the three, so a
+    // flag keyword outside the four falls to unknown, as the icon layer's match does.
+    expect(html).not.toContain("fu: [");
+  });
+
+  it("colors a cluster by mean flag severity, snapped to a flag hex", () => {
+    const html = renderListPage({ entries: [] });
+    // green 0, yellow 1, red 2 over the known flags only.
+    expect(html).toContain("const clusterKnown = ['+', ['get', 'fg'], ['get', 'fy'], ['get', 'fr']];");
+    expect(html).toContain(
+      "const clusterSeverity = ['/', ['+', ['get', 'fy'], ['*', 2, ['get', 'fr']]],");
+    expect(html).toContain("['max', 1, clusterKnown]];");
+    // Unknowns at half the members or more read gray: absent data must never
+    // average its way into a green bubble.
+    expect(html).toContain(
+      "const clusterMostlyUnknown = ['<=', ['*', 2, clusterKnown], ['get', 'point_count']];");
+    expect(html).toContain("['step', clusterSeverity, green, 0.5, yellow, 1.5, red]];");
+    // The four snap targets are the same hexes the icons are tinted with.
+    expect(html).toContain(
+      "'circle-color': clusterPaint(resolveFlagHex('unknown'), resolveFlagHex('green'),");
+    expect(html).toContain("resolveFlagHex('yellow'), resolveFlagHex('red')),");
+    // The generic blue scale is gone.
+    expect(html).not.toContain("#5a8fc7");
+    expect(html).not.toContain("#4178b5");
+    expect(html).not.toContain("#2b5f9e");
+    // Opaque, so a bubble is the flag color exactly rather than a wash of it.
+    expect(html).toContain("'circle-opacity': 1");
+  });
+
+  it("flips the count label to dark ink on the yellow bubble", () => {
+    const html = renderListPage({ entries: [] });
+    // White clears 4.5:1 on green, red and gray but falls to 2.2 on yellow.
+    expect(html).toContain("const CLUSTER_INK_ON_DARK = '#ffffff';");
+    expect(html).toContain("const CLUSTER_INK_ON_LIGHT = '#1f1d22';");
+    expect(html).toContain(
+      "'text-color': clusterPaint(CLUSTER_INK_ON_DARK, CLUSTER_INK_ON_DARK,");
+    expect(html).toContain("CLUSTER_INK_ON_LIGHT, CLUSTER_INK_ON_DARK)");
+  });
+
   it("disables MapLibre keyboard handling and adds no focusable NavigationControl", () => {
     const html = renderListPage({ entries: [] });
     expect(html).toContain("keyboard: false");

@@ -9,12 +9,13 @@
 //
 // The map uses the OpenFreeMap positron style and fetches every flag-worthy
 // beach once from the cacheable /api/beaches.geojson endpoint into a native
-// clustered GeoJSON source. Zoomed out, beaches collapse into neutral count
-// bubbles that expand on click; zoomed in, each beach is a rasterized fa-flag
-// icon tinted by its `flag` keyword (green|yellow|red|unknown) to the exact
-// flag-icon-* palette, resolved from the live WA tokens so the map matches the
-// rest of the UI, with the mild-palette hexes only as a fallback. Clicking a
-// flag navigates to /beach/:id; clicking a cluster zooms to expand it.
+// clustered GeoJSON source. Zoomed out, beaches collapse into count bubbles
+// carrying their members' mean flag color; zoomed in, each beach is a
+// rasterized fa-flag icon tinted by its `flag` keyword (green|yellow|red|
+// unknown) to the exact flag-icon-* palette. Both read the same four hexes,
+// resolved from the live --flag-* variables so the map matches the rest of the
+// UI, with the mild-palette hexes only as a fallback. Clicking a flag navigates
+// to /beach/:id; clicking a cluster zooms to expand it.
 //
 // Centering precedence: the container's data-center attribute (the resolved user
 // location, at zoom 10 when data-center-precise is "1", else zoom 9), then
@@ -96,6 +97,32 @@ const SCRIPT_LINES = [
   "    } catch (e) {}",
   "    return v || FLAG_HEX_FALLBACK[key];",
   "  };",
+
+  // A cluster's color is its members' mean flag severity, snapped to one of the
+  // same four flag hexes the icons use — never a blend, because an off-palette
+  // hue would read as a flag color the cluster does not contain. Severity is
+  // green 0, yellow 1, red 2 over the known flags only; a cluster whose unknowns
+  // are at least half its members reads gray instead, so absent data can never
+  // average its way into a green bubble. The mean, not the worst, is what the
+  // bubble claims: one red among fifty greens is a green neighbourhood, and the
+  // red is one zoom step away.
+  "  const clusterKnown = ['+', ['get', 'fg'], ['get', 'fy'], ['get', 'fr']];",
+  "  const clusterMostlyUnknown = ['<=', ['*', 2, clusterKnown], ['get', 'point_count']];",
+  // max(known, 1) keeps the divisor finite for an all-unknown cluster; the guard
+  // above returns before the ratio is used, and this makes that independent of
+  // whether the surrounding case evaluates lazily.
+  "  const clusterSeverity = ['/', ['+', ['get', 'fy'], ['*', 2, ['get', 'fr']]],",
+  "    ['max', 1, clusterKnown]];",
+  "  const clusterPaint = function (gray, green, yellow, red) {",
+  "    return ['case', clusterMostlyUnknown, gray,",
+  "      ['step', clusterSeverity, green, 0.5, yellow, 1.5, red]];",
+  "  };",
+  // The count label rides on the bubble's own color, so it takes the ink that
+  // clears 4.5:1 against it: white on green, red and gray (4.6), near-black on
+  // yellow, where white falls to 2.2. Both are literals, not theme tokens: the
+  // basemap is fixed-light, so a mode-dependent ink would vanish in dark mode.
+  "  const CLUSTER_INK_ON_DARK = '#ffffff';",
+  "  const CLUSTER_INK_ON_LIGHT = '#1f1d22';",
   // The fa-flag single-path glyph. Explicit width/height give it an intrinsic
   // size so every browser rasterizes it (a viewBox-only SVG can draw blank).
   "  const FLAG_SVG =",
@@ -182,7 +209,12 @@ const SCRIPT_LINES = [
   "        data: fc,",
   "        cluster: true,",
   "        clusterRadius: CSS_SIZE,",
-  "        clusterMaxZoom: 8",
+  "        clusterMaxZoom: 8,",
+  "        clusterProperties: {",
+  "          fg: ['+', ['case', ['==', ['get', 'flag'], 'green'], 1, 0]],",
+  "          fy: ['+', ['case', ['==', ['get', 'flag'], 'yellow'], 1, 0]],",
+  "          fr: ['+', ['case', ['==', ['get', 'flag'], 'red'], 1, 0]]",
+  "        }",
   "      });",
   "    } catch (e) { return; }",
   "    try {",
@@ -192,11 +224,12 @@ const SCRIPT_LINES = [
   "        source: 'beaches',",
   "        filter: ['has', 'point_count'],",
   "        paint: {",
-  "          'circle-color': ['step', ['get', 'point_count'], '#5a8fc7', 25, '#4178b5', 100, '#2b5f9e'],",
+  "          'circle-color': clusterPaint(resolveFlagHex('unknown'), resolveFlagHex('green'),",
+  "            resolveFlagHex('yellow'), resolveFlagHex('red')),",
   "          'circle-radius': ['step', ['get', 'point_count'], 14, 25, 18, 100, 24],",
   "          'circle-stroke-width': 2,",
   "          'circle-stroke-color': '#ffffff',",
-  "          'circle-opacity': 0.9",
+  "          'circle-opacity': 1",
   "        }",
   "      });",
   "      map.addLayer({",
@@ -210,7 +243,10 @@ const SCRIPT_LINES = [
   "          'text-font': ['Noto Sans Regular'],",
   "          'text-allow-overlap': true",
   "        },",
-  "        paint: { 'text-color': '#ffffff' }",
+  "        paint: {",
+  "          'text-color': clusterPaint(CLUSTER_INK_ON_DARK, CLUSTER_INK_ON_DARK,",
+  "            CLUSTER_INK_ON_LIGHT, CLUSTER_INK_ON_DARK)",
+  "        }",
   "      });",
   "      map.addLayer({",
   "        id: 'unclustered',",
