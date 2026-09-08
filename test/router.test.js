@@ -1938,13 +1938,6 @@ describe("shared list-swap helper contract", () => {
     // The helper replaces #beach-list-items wholesale, so every row loses the
     // inline display the search and green-only filters wrote.
     expect(LIST_SWAP_SCRIPT).toContain("new CustomEvent('swimreport:listswap')");
-    // The origin line is deliberately left alone: the live search fetches with
-    // the map's IP-derived center as "near", so carrying that response's line
-    // over would claim a precision the visitor never granted. geoScript.js sets
-    // it after its own genuinely precise fix.
-    expect(LIST_SWAP_SCRIPT).not.toContain("list-origin");
-    expect(LIST_GEO_SCRIPT).toContain("getElementById('list-origin')");
-    expect(LIST_GEO_SCRIPT).toContain("Distances from your location");
   });
 
   it("has both the geo upgrade and the live search delegate to the shared helper", () => {
@@ -2035,76 +2028,70 @@ describe("renderListPage green-only filter and distance origin", () => {
     const empty = renderListPage({ entries: [], nowIso: NOW_ISO });
     expect(empty).not.toContain("<wa-switch id=\"green-only-filter\"");
     expect(empty).not.toContain("class=\"list-filter\"");
-    // The origin container still ships, and the controls row collapses when it
-    // holds nothing but an empty one.
-    expect(empty).toContain("<p id=\"list-origin\"");
-    expect(PAGE_STYLES).toContain(
-      ".list-controls:not(:has(.list-filter)):has(.list-origin:empty) {");
+    // The controls row collapses rather than leaving a gap of white space.
+    expect(PAGE_STYLES).toContain(".list-controls:empty {");
     // A search miss is equally rowless, so it gets no filter over nothing either.
     const miss = renderListPage({ entries: [], nowIso: NOW_ISO, query: "zzz" });
     expect(miss).not.toContain("<wa-switch id=\"green-only-filter\"");
     expect(miss).toContain("No beaches match your search.");
   });
 
-  it("names a precise origin for a browser fix", () => {
+  it("heads a proximity-sorted list with Nearby, above the rows and below Your Beaches", () => {
     const html = renderListPage({
       entries: [ROW],
       nowIso: NOW_ISO,
       sortedByProximity: true,
-      preciseLocation: true,
       near: "42.658,-86.211"
     });
     expect(html).toContain(
-      "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\">" +
-      "Distances from your location</p>");
-    expect(html).not.toContain("approximate location");
+      "<h2 id=\"nearby-heading\" class=\"nearby-heading\">Nearby</h2>");
+    // The heading names its own section, so the list is a labelled region.
+    expect(html).toContain(
+      "<section class=\"beach-list-section wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">");
+    const headingAt = html.indexOf("id=\"nearby-heading\"");
+    expect(html.indexOf("id=\"your-beaches-heading\"")).toBeLessThan(headingAt);
+    expect(headingAt).toBeLessThan(html.indexOf("id=\"beach-list-items\""));
+    // Both headings are one size, set by one grouped rule.
+    expect(PAGE_STYLES).toContain(".nearby-heading {");
   });
 
-  it("names an approximate origin for the IP estimate", () => {
+  it("omits the Nearby heading when the list is not proximity-sorted", () => {
+    const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
+    // The class still ships inside PAGE_STYLES, so the assertion names the
+    // rendered heading rather than the string.
+    expect(html).not.toContain("<h2 id=\"nearby-heading\"");
+    expect(html).not.toContain("aria-labelledby=\"nearby-heading\"");
+    expect(html).toContain("<section class=\"beach-list-section wa-stack wa-gap-s\">");
+  });
+
+  it("names no origin for the distance labels", () => {
+    // The heading carries the claim now; a line under the search box explaining
+    // where the distances are measured from would only repeat it.
     const html = renderListPage({
       entries: [ROW],
       nowIso: NOW_ISO,
-      sortedByProximity: true
+      sortedByProximity: true,
+      near: "42.658,-86.211"
     });
-    expect(html).toContain(
-      "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\">" +
-      "Distances from your approximate location</p>");
+    expect(html).not.toContain("Distances from your");
+    expect(html).not.toContain("list-origin");
+    expect(LIST_GEO_SCRIPT).not.toContain("list-origin");
   });
 
-  it("says nothing about an origin when the list is not proximity-sorted", () => {
-    const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
-    // Scope to the rendered line: geoScript.js legitimately carries the precise
-    // wording as a string constant, so a bare substring check would be vacuous.
-    const originStart = html.indexOf("<p id=\"list-origin\"");
-    expect(originStart).toBeGreaterThan(-1);
-    expect(html.slice(originStart, html.indexOf("</p>", originStart)))
-      .not.toContain("Distances from your");
-    // The empty container still ships, because geoScript.js writes the precise
-    // wording into it after a granted fix on a page that started alphabetical.
-    expect(html).toContain(
-      "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\"></p>");
-    expect(PAGE_STYLES).toContain(".list-origin:empty {");
-  });
-
-  it("derives the precise flag from an explicit near param in the router", async () => {
+  it("heads the list with Nearby whenever the router resolved a location", async () => {
     const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
     const { env } = makeEnv(rows, nullFlags());
-    const precise = await handleRequest(homeRequest("?near=42.6,-86.2"), env);
-    expect(await precise.text()).toContain("Distances from your location</p>");
-    // The same coordinates from request.cf are the IP estimate, not a fix.
+    const located = await handleRequest(homeRequest("?near=42.6,-86.2"), env);
+    expect(await located.text()).toContain(">Nearby</h2>");
+    // With no near param and no request.cf coordinates the rows are alphabetical.
     const { env: env2 } = makeEnv(rows, nullFlags());
-    const ipRequest = {
-      method: "GET",
-      url: "https://swim.report/",
-      cf: { latitude: "42.6", longitude: "-86.2" }
-    };
-    expect(await (await handleRequest(ipRequest, env2)).text())
-      .toContain("Distances from your approximate location</p>");
+    expect(await (await handleRequest(homeRequest(), env2)).text())
+      .not.toContain(">Nearby</h2>");
   });
 });
 
 // GET /?ids=... — the bounded, order-preserving list mode the browser-side
-// "Your beaches" section fetches.
+// "Your Beaches" section fetches.
 describe("GET /?ids= list mode", () => {
   const ONE = { id: "osm-way-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114 };
   const TWO = { id: "osm-node-2", name: "Ottawa Beach", lat: 42.775, lon: -86.211 };

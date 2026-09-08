@@ -35,6 +35,14 @@ describe("brand asset files", () => {
     expect(svg).not.toContain("#cf443b");
   });
 
+  // The mark is Font Awesome's solid flag, which the Free license requires
+  // attributing wherever the glyph ships.
+  it("carries the Font Awesome attribution with the flag glyph", () => {
+    const svg = readFileSync(assetPath("favicon.svg"), "utf8");
+    expect(svg).toContain("Font Awesome Free");
+    expect(svg).toContain("M160 96C160 78.3 145.7 64 128 64");
+  });
+
   it("ships the apple-touch icon at the size its link tag claims", () => {
     expect(pngSize("apple-touch-icon.png")).toEqual({ width: 180, height: 180 });
   });

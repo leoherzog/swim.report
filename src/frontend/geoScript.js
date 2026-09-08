@@ -7,8 +7,8 @@
 // server-rendered pieces the location changes. The server must re-select,
 // because the nearest-100 set can differ and not merely its order.
 // history.replaceState then rewrites the URL, a hidden "near" input is appended
-// to the search form for the same reason, the #list-origin line is rewritten to
-// name a precise origin, and a polite aria-live region announces the reorder.
+// to the search form for the same reason, and a polite aria-live region
+// announces the reorder.
 // All rendering stays server-side in render.js; this script only moves finished
 // HTML.
 //
@@ -113,13 +113,6 @@ const SCRIPT_LINES = [
   "      const live = document.getElementById('geo-live-region');",
   "      if (live) {",
   "        live.textContent = 'Beaches sorted by distance from your location.';",
-  "      }",
-  // The origin line is set here rather than by the shared swap, because the live
-  // search fetches with the map's baked-in IP center as "near" and its response
-  // would claim a precision the visitor never granted. This fix genuinely is one.
-  "      const origin = document.getElementById('list-origin');",
-  "      if (origin) {",
-  "        origin.textContent = 'Distances from your location';",
   "      }",
   "    }).catch(function (err) {",
   "      console.log('geo upgrade failed, falling back to reload: ' + err.message);",

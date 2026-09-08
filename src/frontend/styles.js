@@ -219,16 +219,9 @@ const RULES = [
   ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--wa-color-red-50); }",
   ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--wa-color-gray-50); }",
 
-  // The origin line is always in the markup so geoScript.js can write a precise
-  // wording into it; empty means the list is alphabetical and there is nothing
-  // to say.
-  ".list-origin:empty {",
-  "  display: none;",
-  "}",
-
-  // With nothing to say and nothing to filter the row still sits in the page
-  // stack, where a zero-height child would leave a full gap of white space.
-  ".list-controls:not(:has(.list-filter)):has(.list-origin:empty) {",
+  // With nothing to filter the row still sits in the page stack, where a
+  // zero-height child would leave a full gap of white space.
+  ".list-controls:empty {",
   "  display: none;",
   "}",
 
@@ -244,11 +237,12 @@ const RULES = [
   "}",
   // --- End list polish. ---
 
-  // --- Your beaches: the saved / recently viewed section above the main list. ---
-  // Its rows are the server's own .beach-row markup and the sub-labels take their
-  // quiet color from wa-caption-s, so only the heading size and the stack's
+  // --- Section headings: the saved / recently viewed section and the main list. ---
+  // Their rows are the server's own .beach-row markup and the sub-labels take
+  // their quiet color from wa-caption-s, so only the heading size and the stack's
   // zeroed margins are left to set here.
-  ".your-beaches-heading {",
+  ".your-beaches-heading,",
+  ".nearby-heading {",
   "  margin: 0;",
   "  font-size: var(--wa-font-size-l);",
   "  font-weight: var(--wa-font-weight-semibold);",
@@ -257,7 +251,7 @@ const RULES = [
   ".your-beaches-label {",
   "  margin: 0;",
   "}",
-  // --- End your beaches. ---
+  // --- End section headings. ---
 
   ".flag-icon-green { color: var(--wa-color-green-50); }",
   ".flag-icon-yellow { color: var(--wa-color-yellow-70); }",
@@ -374,8 +368,9 @@ const RULES = [
   "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
-  // At-a-glance tiles: five small readings in the same responsive grid shape the
-  // nearby cards use, at a narrower column so two fit a phone on one row.
+  // At-a-glance tiles: up to five small readings in the same responsive grid
+  // shape the nearby cards use, at a narrower column so two fit a phone on one
+  // row. A reading with no data renders no tile, so the count varies.
   ".glance-grid {",
   "  --min-column-size: 9rem;",
   "}",

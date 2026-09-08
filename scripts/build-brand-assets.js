@@ -1,17 +1,18 @@
 // scripts/build-brand-assets.js — regenerate the committed brand assets under
 // public/ (node scripts/build-brand-assets.js [--dest public]).
 //
-// One flag-on-wave mark, described once as unit-square geometry and emitted
-// twice: as favicon.svg, and as PNGs rasterized here with a small supersampling
-// scan and node:zlib. It also writes manifest.webmanifest from a JS object, so
+// One flag-on-wave mark built on Font Awesome's solid flag glyph, placed once
+// as unit-square geometry and emitted twice: as favicon.svg, and as PNGs
+// rasterized here with a small supersampling scan and node:zlib. It also writes manifest.webmanifest from a JS object, so
 // the manifest's colors and the icon files can never drift apart.
 //
 // A raster carries no CSS, so every color below is a Web Awesome mild-palette
 // token value copied in literally.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Mild-palette token values (styles/color/palettes/mild.css).
 const BLUE_20 = "#02345b";
@@ -194,27 +195,111 @@ function polygon(points) {
 
 // --- The mark ---------------------------------------------------------------
 
-// Flag geometry in a unit square: a vertical pole with one or two pennants
-// flying right, all in unit coordinates so the SVG and the rasterizer read the
-// same numbers. Two pennants is the double-red card.
-function flagShapes(count) {
-  const poleX = 0.30;
-  const poleW = 0.05;
-  const poleTop = 0.14;
-  const poleBottom = 0.80;
-  const tipX = 0.74;
-  const pennants = [];
+// Font Awesome's solid flag (scripts/flag-solid-full.svg), the same glyph the
+// pages render as fa-flag, so the icon and the share cards match the UI. The
+// path is read from that file so the glyph has one source; its license comment
+// is carried into favicon.svg because the Free icons require attribution.
+const GLYPH_SOURCE = fileURLToPath(new URL("./flag-solid-full.svg", import.meta.url));
+
+function loadGlyph() {
+  const svg = readFileSync(GLYPH_SOURCE, "utf8");
+  const d = /<path d="([^"]+)"/.exec(svg);
+  const license = /<!--(.*?)-->/.exec(svg);
+  if (!d || !license) {
+    fail("cannot find the flag path in " + GLYPH_SOURCE);
+  }
+  // The glyph's own box, so the pole (x 96..160) and stacked flags share a
+  // frame the placement math can reason about.
+  return { d: d[1], license: license[1], box: { x0: 96, y0: 64, x1: 544, y1: 576 },
+    pole: { x: 96, w: 64 } };
+}
+
+const GLYPH = loadGlyph();
+
+const CURVE_STEPS = 12;
+
+// Flattens an absolute M/L/C/Z path into one polygon. The flag is a single
+// closed contour, so the even-odd polygon test needs no sub-path handling.
+function flattenPath(d) {
+  const tokens = d.match(/[MLCZz]|-?\d*\.?\d+/g) || [];
+  const points = [];
+  let i = 0;
+  let cursor = null;
+  function num() {
+    const value = Number(tokens[i]);
+    i = i + 1;
+    if (!Number.isFinite(value)) {
+      fail("unexpected path token in " + GLYPH_SOURCE);
+    }
+    return value;
+  }
+  while (i < tokens.length) {
+    const command = tokens[i];
+    i = i + 1;
+    if (command === "M" || command === "L") {
+      cursor = [num(), num()];
+      points.push(cursor);
+    } else if (command === "C") {
+      const c1 = [num(), num()];
+      const c2 = [num(), num()];
+      const end = [num(), num()];
+      const from = cursor;
+      for (let k = 1; k <= CURVE_STEPS; k = k + 1) {
+        const t = k / CURVE_STEPS;
+        const u = 1 - t;
+        points.push([
+          u * u * u * from[0] + 3 * u * u * t * c1[0] + 3 * u * t * t * c2[0] + t * t * t * end[0],
+          u * u * u * from[1] + 3 * u * u * t * c1[1] + 3 * u * t * t * c2[1] + t * t * t * end[1]
+        ]);
+      }
+      cursor = end;
+    } else if (command === "Z" || command === "z") {
+      break;
+    } else {
+      fail("unsupported path command " + command + " in " + GLYPH_SOURCE);
+    }
+  }
+  return points;
+}
+
+const GLYPH_POINTS = flattenPath(GLYPH.d);
+
+// Vertical distance, in glyph units, between stacked flags: a second banner
+// hangs below the first with a gap, both on one pole. Two flags is double-red.
+const STACK_UNITS = 370;
+
+// Height of the mark as a fraction of its unit square, and where its center
+// sits; a single flag and a stacked pair both fit the same frame, so the
+// double-red card draws smaller flags rather than a taller card.
+const MARK_HEIGHT = 0.72;
+const MARK_CENTER_Y = 0.47;
+
+// The mark in unit-square coordinates: one polygon per flag plus the shared
+// pole, so the SVG and the rasterizer read the same numbers.
+function flagMark(count) {
+  const box = GLYPH.box;
+  const y1 = box.y1 + (count - 1) * STACK_UNITS;
+  const fit = MARK_HEIGHT / (y1 - box.y0);
+  const offsetX = 0.5 - ((box.x0 + box.x1) / 2) * fit;
+  const offsetY = MARK_CENTER_Y - ((box.y0 + y1) / 2) * fit;
+  const flags = [];
   for (let i = 0; i < count; i = i + 1) {
-    const top = poleTop + i * 0.28;
-    pennants.push([
-      [poleX + poleW, top],
-      [tipX, top + 0.13],
-      [poleX + poleW, top + 0.26]
-    ]);
+    const shift = i * STACK_UNITS;
+    flags.push(GLYPH_POINTS.map(function (p) {
+      return [offsetX + p[0] * fit, offsetY + (p[1] + shift) * fit];
+    }));
   }
   return {
-    pole: { x: poleX, y: poleTop, w: poleW, h: poleBottom - poleTop },
-    pennants: pennants
+    fit: fit,
+    offsetX: offsetX,
+    offsetY: offsetY,
+    flags: flags,
+    pole: {
+      x: offsetX + GLYPH.pole.x * fit,
+      y: offsetY + box.y0 * fit,
+      w: GLYPH.pole.w * fit,
+      h: (y1 - box.y0) * fit
+    }
   };
 }
 
@@ -224,7 +309,7 @@ function scalePoints(points, size, offsetX, offsetY) {
   });
 }
 
-// The app icon: brand-blue rounded square, a darker wave, one white pennant.
+// The app icon: brand-blue rounded square, a darker wave, one white flag.
 // Never tinted with a flag color — the icon is identity, not condition.
 function renderIcon(size) {
   const canvas = makeCanvas(size, size, WHITE);
@@ -232,52 +317,46 @@ function renderIcon(size) {
   paint(canvas, BLUE_40, plate);
   paint(canvas, BLUE_20,
     intersect(plate, waveBand(size * 0.80, size * 0.045, size * 0.9, 0.35)));
-  const shapes = flagShapes(1);
-  const pole = shapes.pole;
-  paint(canvas, WHITE, roundRect(pole.x * size, pole.y * size, pole.w * size,
-    pole.h * size, pole.w * size * 0.5));
-  paint(canvas, WHITE, polygon(scalePoints(shapes.pennants[0], size, 0, 0)));
+  const mark = flagMark(1);
+  paint(canvas, WHITE, polygon(scalePoints(mark.flags[0], size, 0, 0)));
   return encodePng(size, size, canvas.rgb);
 }
 
 // One 1200x630 share card per display color, deliberately text-free: the
 // estimated-or-official wording lives in the page's title and description, so
-// the image can never contradict it.
+// the image can never contradict it. The banner takes the flag color and the
+// pole is repainted brand blue over it.
 function renderOgCard(color) {
   const canvas = makeCanvas(OG_WIDTH, OG_HEIGHT, BLUE_95);
   paint(canvas, BLUE_70, waveBand(OG_HEIGHT * 0.62, OG_HEIGHT * 0.05, OG_WIDTH * 0.55, 0.1));
   paint(canvas, BLUE_50, waveBand(OG_HEIGHT * 0.74, OG_HEIGHT * 0.045, OG_WIDTH * 0.42, 0.6));
   paint(canvas, BLUE_40, waveBand(OG_HEIGHT * 0.86, OG_HEIGHT * 0.04, OG_WIDTH * 0.33, 0.25));
-  const shapes = flagShapes(color === "double-red" ? 2 : 1);
+  const mark = flagMark(color === "double-red" ? 2 : 1);
   const size = OG_HEIGHT * 0.86;
   const offsetX = (OG_WIDTH - size) / 2;
   const offsetY = (OG_HEIGHT - size) / 2;
-  const pole = shapes.pole;
+  for (let i = 0; i < mark.flags.length; i = i + 1) {
+    paint(canvas, FLAG_HEX[color],
+      polygon(scalePoints(mark.flags[i], size, offsetX, offsetY)));
+  }
+  const pole = mark.pole;
   paint(canvas, BLUE_20, roundRect(offsetX + pole.x * size, offsetY + pole.y * size,
     pole.w * size, pole.h * size, pole.w * size * 0.5));
-  for (let i = 0; i < shapes.pennants.length; i = i + 1) {
-    paint(canvas, FLAG_HEX[color],
-      polygon(scalePoints(shapes.pennants[i], size, offsetX, offsetY)));
-  }
   return encodePng(OG_WIDTH, OG_HEIGHT, canvas.rgb);
 }
 
 function renderFaviconSvg() {
-  const shapes = flagShapes(1);
-  const pole = shapes.pole;
-  const pennant = shapes.pennants[0].map(function (p) {
-    return String(p[0] * 64) + "," + String(p[1] * 64);
-  }).join(" ");
+  const mark = flagMark(1);
   const lines = [];
   lines.push("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" " +
     "role=\"img\" aria-label=\"Swim Report\">");
+  lines.push("<!--" + GLYPH.license + "-->");
   lines.push("<rect width=\"64\" height=\"64\" rx=\"14\" fill=\"" + BLUE_40 + "\"/>");
   lines.push("<path d=\"M0 48 C 10 42, 22 55, 32 49 S 54 42, 64 48 L64 64 L0 64 Z\" " +
     "fill=\"" + BLUE_20 + "\"/>");
-  lines.push("<rect x=\"" + String(pole.x * 64) + "\" y=\"" + String(pole.y * 64) +
-    "\" width=\"" + String(pole.w * 64) + "\" height=\"" + String(pole.h * 64) +
-    "\" rx=\"1.6\" fill=\"" + WHITE + "\"/>");
-  lines.push("<polygon points=\"" + pennant + "\" fill=\"" + WHITE + "\"/>");
+  lines.push("<path transform=\"translate(" + (mark.offsetX * 64).toFixed(3) + " " +
+    (mark.offsetY * 64).toFixed(3) + ") scale(" + (mark.fit * 64).toFixed(5) + ")\" " +
+    "d=\"" + GLYPH.d + "\" fill=\"" + WHITE + "\"/>");
   lines.push("</svg>");
   return lines.join("\n") + "\n";
 }

@@ -561,12 +561,12 @@ remains partnership-gated.
   adjacent `<script type="application/json" id=…>`, add a small `waveChartScript.js` that
   parses it, attaches callbacks and assigns `el.config` before upgrade. That trades away
   works-without-our-JS, which is why v1 ships `without-tooltip` plus `events: []`.
-- **"Your beaches" rows can duplicate rows in the main list, and its heading survives an
+- **"Your Beaches" rows can duplicate rows in the main list, and its heading survives an
   empty section.** The saved and recently viewed rows are copies of the server's own
   `.beach-row` markup inserted above the list, so a beach in both places renders twice; every
   count in the filter pass is scoped to `#beach-list-items` for exactly that reason, but the
   page itself still shows the pair. The green-only switch and the search term hide rows in
-  both places, so a term or a filter that matches nothing saved leaves the "Your beaches"
+  both places, so a term or a filter that matches nothing saved leaves the "Your Beaches"
   heading standing over two empty lists. Folding the section away when every one of its rows
   is hidden needs the filter pass to keep per-container counts rather than only the main
   list's.

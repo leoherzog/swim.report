@@ -69,7 +69,8 @@ function tempTile(html) {
   return html.slice(start, html.indexOf("</wa-card>", start));
 }
 
-// The tile's value line: the reading, or "No data" when there is none.
+// The tile's value line. A page with no usable reading renders no tile at all,
+// so this is null there rather than a placeholder.
 function tempValue(html) {
   const tile = tempTile(html);
   const m = tile ? tile.match(/<span class="glance-value[^"]*">([^<]*)<\/span>/) : null;
@@ -163,27 +164,25 @@ describe("water-temperature tile (renderDetailPage)", function () {
     expect(tempValue(html)).toBe("73°F");
   });
 
-  it("reads No data when there is no water temp at all", function () {
-    const html = detailHtml({}, null);
-    expect(tempValue(html)).toBe("No data");
-    expect(tempSource(html)).toBe("Nearest NDBC station");
+  it("renders no tile at all when there is no water temp", function () {
+    expect(tempTile(detailHtml({}, null))).toBe(null);
   });
 
-  it("reads No data for a stale reading", function () {
+  it("renders no tile for a stale reading", function () {
     // observedIso 24 h before NOW_ISO -> older than WATER_TEMP_STALE_MS (12 h).
     const html = detailHtml({}, waterTempWith({ observedIso: "2026-07-04T12:00:00.000Z" }));
-    expect(tempValue(html)).toBe("No data");
+    expect(tempTile(html)).toBe(null);
     expect(html.indexOf("72°F")).toBe(-1);
   });
 
-  it("reads No data when observedIso is missing or unparseable", function () {
-    expect(tempValue(detailHtml({}, waterTempWith({ observedIso: undefined })))).toBe("No data");
-    expect(tempValue(detailHtml({}, waterTempWith({ observedIso: "not-a-date" })))).toBe("No data");
+  it("renders no tile when observedIso is missing or unparseable", function () {
+    expect(tempTile(detailHtml({}, waterTempWith({ observedIso: undefined })))).toBe(null);
+    expect(tempTile(detailHtml({}, waterTempWith({ observedIso: "not-a-date" })))).toBe(null);
   });
 
-  it("reads No data for a non-finite tempF", function () {
-    expect(tempValue(detailHtml({}, waterTempWith({ tempF: null })))).toBe("No data");
-    expect(tempValue(detailHtml({}, waterTempWith({ tempF: Number.NaN })))).toBe("No data");
+  it("renders no tile for a non-finite tempF", function () {
+    expect(tempTile(detailHtml({}, waterTempWith({ tempF: null })))).toBe(null);
+    expect(tempTile(detailHtml({}, waterTempWith({ tempF: Number.NaN })))).toBe(null);
   });
 
   it("names only what it knows when the station block is partial", function () {

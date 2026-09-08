@@ -1,6 +1,6 @@
 // test/favorites.test.js
 // Covers the favorites and recently-viewed enhancement: the detail page's save
-// toggle in the hero share row, the list page's empty "Your beaches" shell, and
+// toggle in the hero share row, the list page's empty "Your Beaches" shell, and
 // the two inline script constants that fill them from localStorage.
 
 import { describe, it, expect } from "vitest";
@@ -73,13 +73,13 @@ describe("detail-page favorite toggle", () => {
   });
 });
 
-describe("list-page \"Your beaches\" section", () => {
+describe("list-page \"Your Beaches\" section", () => {
   it("renders the section empty and hidden, above the main list", () => {
     const html = listHtml();
     expect(yourBeaches(html)).toBe(
       "<section id=\"your-beaches\" class=\"your-beaches wa-stack wa-gap-s\" " +
       "aria-labelledby=\"your-beaches-heading\" hidden>" +
-      "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your beaches</h2>" +
+      "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your Beaches</h2>" +
       "<p id=\"your-beaches-saved-label\" class=\"your-beaches-label wa-caption-s\" hidden>Saved</p>" +
       "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
       "<p id=\"your-beaches-recent-label\" class=\"your-beaches-label wa-caption-s\" hidden>" +

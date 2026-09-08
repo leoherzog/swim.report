@@ -9,4 +9,5 @@ dist/
 .wavegrids/
 .wavekv/
 .wave-snapshot.json
+.layers/
 coverage/

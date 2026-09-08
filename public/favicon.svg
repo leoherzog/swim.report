@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Swim Report">
+<!--!Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free Copyright 2026 Fonticons, Inc.-->
 <rect width="64" height="64" rx="14" fill="#2e5b89"/>
 <path d="M0 48 C 10 42, 22 55, 32 49 S 54 42, 64 48 L64 64 L0 64 Z" fill="#02345b"/>
-<rect x="19.2" y="8.96" width="3.2" height="42.24" rx="1.6" fill="#ffffff"/>
-<polygon points="22.4,8.96 47.36,17.28 22.4,25.6" fill="#ffffff"/>
+<path transform="translate(3.200 1.280) scale(0.09000)" d="M160 96C160 78.3 145.7 64 128 64C110.3 64 96 78.3 96 96L96 544C96 561.7 110.3 576 128 576C145.7 576 160 561.7 160 544L160 422.4L222.7 403.6C264.6 391 309.8 394.9 348.9 414.5C391.6 435.9 441.4 438.5 486.1 421.7L523.2 407.8C535.7 403.1 544 391.2 544 377.8L544 130.1C544 107.1 519.8 92.1 499.2 102.4L487.4 108.3C442.5 130.8 389.6 130.8 344.6 108.3C308.2 90.1 266.3 86.5 227.4 98.2L160 118.4L160 96z" fill="#ffffff"/>
 </svg>

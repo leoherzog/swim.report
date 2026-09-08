@@ -131,8 +131,8 @@ files under `public/`, served by Workers static assets before the Worker runs. N
 code and no binding is involved. Regenerate them with `node scripts/build-brand-assets.js`
 and commit the result.
 
-The `og/` files are the share cards, one per display flag color. They carry the flag graphic
-on a wave background and no text, so the estimated-or-official wording lives only in a page's
+The `og/` files are the share cards, one per display flag color. They carry the flag graphic,
+Font Awesome's solid flag glyph, on a wave background and no text, so the estimated-or-official wording lives only in a page's
 title and description and can never disagree with the picture.
 
 ### `GET /` and `GET /beach/:beachId`
@@ -150,16 +150,17 @@ supplied the displayed color — over a background washed 12% in that flag's own
 hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
 button. Its coordinates line links the beach on OpenStreetMap and offers a **Directions**
 link to Google Maps directions for those coordinates; the Directions link is omitted for a
-beach with no stored coordinates. Directly under it, five **at a glance** tiles summarize
-the waves now, the water temperature, the rip-current risk, the count of active alerts and
-the next sunrise or sunset; a tile with nothing to show says "No data" rather than inventing
-a number. The full official and estimate cards follow unchanged.
+beach with no stored coordinates. Directly under it, up to five **at a glance** tiles
+summarize the waves now, the water temperature, the rip-current risk, the count of active
+alerts and the next sunrise or sunset. A reading nobody published gets no tile, so the row
+carries only answers, and a beach with no readings at all shows no section. The full
+official and estimate cards follow unchanged.
 
 The sun tile is computed in the Worker from the beach's coordinates (`src/frontend/sun.js`,
 the NOAA solar position algorithm, no upstream call), and shown on the viewer's own clock by
 `<wa-format-date>`. Until that component upgrades, the served `<time>` element shows the same
 instant in UTC, because a beach's longitude fixes its solar day but not the clock posted
-there. Inside the polar circles the tile says the sun neither rises nor sets today.
+there. Inside the polar circles, where there is no next event, the tile is omitted.
 
 Under the flag's label the hero carries a one-sentence **plain-language verdict** built from
 the same estimate the flag card explains — "Calm water, no alerts.", "Beach Hazards Statement
@@ -214,11 +215,9 @@ per-model 24-hour series. The estimate still derives from the composite first-fi
 series; `byModel` is stored for transparency and future calibration, not for averaging.
 
 When Cloudflare's IP-derived geolocation is available (`request.cf`), the beach list is sorted
-by approximate distance to the visitor and each row shows a rough mileage label. A quiet line
-above the list names the origin those labels are measured from: "Distances from your
-approximate location" for the IP estimate, and "Distances from your location" once the browser
-supplies a real fix. Without geolocation the list falls back to alphabetical order and the line
-is absent.
+by approximate distance to the visitor, each row shows a rough mileage label, and the list is
+headed **Nearby**. Without geolocation the list falls back to alphabetical order and the
+heading is absent.
 `GET /?near=lat,lon` overrides the detected location, useful in local dev where `request.cf`
 has no coordinates; an invalid value falls back to alphabetical. Nothing about the visitor's
 location is stored. The located list really is the nearest beaches no matter where the visitor
@@ -245,10 +244,10 @@ the order given. At most 10 ids are read, each must match the `osm-<node|way|rel
 format, and ids that are malformed, unknown or not flag-worthy are skipped silently, so a
 list nothing matches renders the honest "No beaches match those ids." rather than the
 empty-database copy. The mode ignores `q`, `near` and the visitor's IP location, so the
-response depends only on the URL and is cacheable. It is what the **Your beaches** section
+response depends only on the URL and is cacheable. It is what the **Your Beaches** section
 fetches.
 
-**Your beaches.** The list page carries a saved-and-recently-viewed section above the main
+**Your Beaches.** The list page carries a saved-and-recently-viewed section above the main
 list, filled in the browser from `localStorage` — no accounts, no cookie, and nothing about
 the lists is stored server-side beyond the bounded `?ids=` request. The detail page's
 **Save** button toggles a beach in the saved list, and every detail view records the beach in

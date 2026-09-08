@@ -1,5 +1,5 @@
 // Exports the literal text of the two inline favorites scripts: the detail
-// page's save toggle and the list page's "Your beaches" section. Both run in
+// page's save toggle and the list page's "Your Beaches" section. Both run in
 // the browser, not in the Worker.
 //
 // Everything a visitor saves lives in localStorage under two keys — an array of

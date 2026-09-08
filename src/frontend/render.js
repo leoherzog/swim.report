@@ -839,7 +839,7 @@ function renderHomeMap(near, location) {
 function renderYourBeaches() {
   return "<section id=\"your-beaches\" class=\"your-beaches wa-stack wa-gap-s\" " +
     "aria-labelledby=\"your-beaches-heading\" hidden>" +
-    "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your beaches</h2>" +
+    "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your Beaches</h2>" +
     "<p id=\"your-beaches-saved-label\" class=\"your-beaches-label wa-caption-s\" hidden>Saved</p>" +
     "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
     "<p id=\"your-beaches-recent-label\" class=\"your-beaches-label wa-caption-s\" hidden>Recently viewed</p>" +
@@ -875,11 +875,9 @@ export function renderListPage(data) {
   const location = data && data.location ? data.location : null;
   const hasMore = !!(data && data.hasMore);
   const offerSearchAll = hasMore && query.length === 0;
-  // Whether the rows were sorted by distance at all, and whether that distance
-  // came from a browser fix rather than the IP estimate. The router decides
-  // both; the page only names the origin the labels are measured from.
+  // Whether the rows were sorted by distance. The router decides it; the page
+  // only heads the list with it.
   const sortedByProximity = !!(data && data.sortedByProximity);
-  const preciseLocation = !!(data && data.preciseLocation);
   // The ?ids= mode renders one caller-chosen slice of the table, so it may not
   // assert data-complete however few rows it holds.
   const idsMode = !!(data && data.idsMode);
@@ -895,8 +893,8 @@ export function renderListPage(data) {
 
   const introHtml = "<section class=\"list-intro wa-stack wa-gap-xs\">" +
     "<h1>Swim Report</h1>" +
-    "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags for Great Lakes and " +
-    "ocean-coast beaches across the United States and Canada.</p>" +
+    "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags across the " +
+    "United States and Canada.</p>" +
     "</section>";
 
   const mapHtml = renderHomeMap(nearParam, location);
@@ -924,19 +922,6 @@ export function renderListPage(data) {
       "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
   const activeQueryHtml = "<div id=\"list-active-query\">" + activeQueryInner + "</div>";
 
-  // The distance labels are meaningless without an origin, so a proximity-sorted
-  // list names one. The container is always rendered and empty when the list is
-  // alphabetical (styles.js hides an empty one), because geoScript.js writes the
-  // precise wording into it after a granted fix on a page that started coarse.
-  // __swimReportSwapList deliberately does not carry this line: the live search
-  // fetches with the map's baked-in IP center as "near" purely for cacheability,
-  // so a search response would otherwise claim a precision it does not have.
-  const originText = sortedByProximity
-    ? (preciseLocation ? "Distances from your location" : "Distances from your approximate location")
-    : "";
-  const originHtml = "<p id=\"list-origin\" class=\"list-origin wa-caption-s wa-color-text-quiet\">" +
-    escapeHtml(originText) + "</p>";
-
   // Client-side green-only filter. With no JS the switch is inert and every row
   // stays visible, which is why the server never renders a filtered list. The
   // label names the estimate, because the color it filters on is the row's
@@ -945,9 +930,9 @@ export function renderListPage(data) {
   const filterHtml = hasEntries ? ("<div class=\"list-filter\">" +
     "<wa-switch id=\"green-only-filter\" size=\"s\">Estimated green only</wa-switch>" +
     "</div>") : "";
-  // One row: the origin on the start edge, the switch pushed to the end edge so
-  // it still sits there when the origin line is empty and hidden.
-  const controlsHtml = "<div class=\"list-controls\">" + originHtml + filterHtml + "</div>";
+  // The switch sits on the end edge of its own row. The row is empty and hidden
+  // on a list with no rows to filter.
+  const controlsHtml = "<div class=\"list-controls\">" + filterHtml + "</div>";
 
   // Polite live region for the geolocation upgrade: geoScript.js swaps the list
   // in place with no navigation, so the reorder would otherwise be invisible to
@@ -962,7 +947,15 @@ export function renderListPage(data) {
   // matches rather than the full table.
   const listComplete = !hasMore && query.length === 0 && !idsMode;
   const completeAttr = listComplete ? " data-complete=\"1\"" : "";
-  const listHtml = "<section class=\"beach-list-section\">" +
+  // The list names itself only when its rows are sorted by distance: an
+  // alphabetical list is not nearby anything and may not claim to be. The
+  // heading is not swapped, and it does not have to be — filtering or
+  // re-fetching a distance-sorted list yields distance-sorted rows.
+  const nearbyHeadingHtml = sortedByProximity ?
+    "<h2 id=\"nearby-heading\" class=\"nearby-heading\">Nearby</h2>" : "";
+  const listLabelAttr = sortedByProximity ? " aria-labelledby=\"nearby-heading\"" : "";
+  const listHtml = "<section class=\"beach-list-section wa-stack wa-gap-s\"" + listLabelAttr + ">" +
+    nearbyHeadingHtml +
     "<ul class=\"beach-list wa-list-plain wa-stack wa-gap-xs\" id=\"beach-list-items\"" + completeAttr + ">" + rowsHtml + "</ul>" +
     "<p id=\"beach-list-empty\"" + emptyStyle + " class=\"empty-state\">" +
     "<span class=\"empty-state-message\">" + escapeHtml(emptyMessage) + "</span>" +
@@ -1406,21 +1399,18 @@ function renderWqFloorCallout(wqfloor) {
 }
 
 // One "at a glance" tile: a quiet icon, the reading, its caption, and a quiet
-// source line saying where the reading comes from. A tile with no reading says
-// "No data" in quiet text — never a blank tile, never a placeholder number.
+// source line saying where the reading comes from. Callers render a tile only
+// when they have a reading, so there is no empty-value branch here.
 // options.quiet renders a present-but-negative answer ("None active") in the
 // same quiet weight, so only a real reading carries the loud value type.
 // options.valueHtml is inserted raw and wins over options.value, for the one
 // reading that is a formatted time rather than text; the caller escapes it.
 function renderGlanceTile(options) {
-  const hasValue = typeof options.value === "string" && options.value.length > 0;
   const hasValueHtml = typeof options.valueHtml === "string" && options.valueHtml.length > 0;
-  const valueClass = ((hasValue || hasValueHtml) && !options.quiet)
-    ? "glance-value wa-font-size-xl wa-font-weight-bold"
-    : "glance-value wa-font-size-l wa-color-text-quiet";
-  const valueHtml = hasValueHtml
-    ? options.valueHtml
-    : escapeHtml(hasValue ? options.value : "No data");
+  const valueClass = options.quiet
+    ? "glance-value wa-font-size-l wa-color-text-quiet"
+    : "glance-value wa-font-size-xl wa-font-weight-bold";
+  const valueHtml = hasValueHtml ? options.valueHtml : escapeHtml(options.value);
   return "<wa-card class=\"glance-tile\" appearance=\"outlined\">" +
     "<div class=\"wa-stack wa-gap-2xs\">" +
     "<wa-icon class=\"glance-icon wa-color-text-quiet\" name=\"" + options.icon + "\"></wa-icon>" +
@@ -1432,26 +1422,18 @@ function renderGlanceTile(options) {
 }
 
 // The next sunrise or sunset for this beach, computed from its coordinates and
-// the passed-in now (src/frontend/sun.js) rather than fetched. wa-format-date
-// renders the instant on the viewer's own clock, and renders nothing until the
-// component upgrades, so its light-DOM child is the tile's server-rendered
-// answer. That fallback names UTC: the beach's longitude only fixes its solar
-// day, and is up to two hours from the clock posted at the beach.
+// the passed-in now (src/frontend/sun.js) rather than fetched. Returns the empty
+// string where there is no next event — no coordinates, or a polar day or night.
+// wa-format-date renders the instant on the viewer's own clock, and renders
+// nothing until the component upgrades, so its light-DOM child is the tile's
+// server-rendered answer. That fallback names UTC: the beach's longitude only
+// fixes its solar day, and is up to two hours from the clock posted at the beach.
 function renderSunTile(beach, nowIso) {
   const lat = (beach.lat === null || beach.lat === undefined) ? NaN : Number(beach.lat);
   const lon = (beach.lon === null || beach.lon === undefined) ? NaN : Number(beach.lon);
   const hasCoords = isFinite(lat) && isFinite(lon);
   const event = hasCoords ? nextSunEvent(lat, lon, nowIso) : null;
-  if (!event) {
-    return renderGlanceTile({
-      icon: "sun",
-      value: null,
-      caption: "Sunrise and sunset",
-      sourceHtml: escapeHtml(hasCoords
-        ? "The sun neither rises nor sets here today"
-        : "Calculated from this beach's coordinates")
-    });
-  }
+  if (!event) return "";
   const iso = escapeHtml(event.iso);
   return renderGlanceTile({
     icon: "sun",
@@ -1463,76 +1445,79 @@ function renderSunTile(beach, nowIso) {
   });
 }
 
-// The five readings a visitor scans before reading the cards, as small tiles
-// under the hero. Every one of them is estimated or display-only data — the
-// ESTIMATE badge and the quiet source lines say which for each — so the tiles
-// stay outlined and carry none of the official card's treatment.
+// The readings a visitor scans before reading the cards, as small tiles under
+// the hero. A reading nobody published gets no tile at all, so the row carries
+// only answers; with no readings at all the whole section is omitted. Every tile
+// is estimated or display-only data — the ESTIMATE badge and the quiet source
+// lines say which for each — so the tiles stay outlined and carry none of the
+// official card's treatment.
 //
 // alertsCheckable is not on the estimate and is deliberately not in the seal
 // (src/flagInputs.js), so the tile reads it from the beach row through the same
-// shared predicate the cron uses. The tile's caveat wording is its own: the
-// estimate's reason already carries ALERTS_UNAVAILABLE_CAVEAT, and the same
-// sentence twice on one page reads as a bug.
+// shared predicate the cron uses. A beach whose alerts were never checkable has
+// no alerts tile: "none active" would be a claim nobody made.
 function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
   const tiles = [];
 
   const hasWave = !!estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt);
-  tiles.push(renderGlanceTile({
-    icon: "water",
-    value: hasWave ? (estimate.waveHeightFt.toFixed(1) + " ft") : null,
-    caption: "Waves now",
-    sourceHtml: renderEstimateBadge()
-  }));
+  if (hasWave) {
+    tiles.push(renderGlanceTile({
+      icon: "water",
+      value: estimate.waveHeightFt.toFixed(1) + " ft",
+      caption: "Waves now",
+      sourceHtml: renderEstimateBadge()
+    }));
+  }
 
   // The reading's station, distance and age are the tile's source line, tooltip
   // included, so a temperature read up to 25 km away always says so.
   const tempLabel = waterTempLabel(waterTemp, nowIso);
-  tiles.push(renderGlanceTile({
-    icon: "temperature-half",
-    value: tempLabel,
-    caption: "Water temperature",
-    sourceHtml: tempLabel ? waterTempProvenance(waterTemp) : "Nearest NDBC station"
-  }));
+  if (tempLabel) {
+    tiles.push(renderGlanceTile({
+      icon: "temperature-half",
+      value: tempLabel,
+      caption: "Water temperature",
+      sourceHtml: waterTempProvenance(waterTemp)
+    }));
+  }
 
   const risk = estimate ? estimate.ripCurrentRisk : null;
-  const hasRisk = risk === "HIGH" || risk === "MODERATE" || risk === "LOW";
-  tiles.push(renderGlanceTile({
-    icon: "person-drowning",
-    value: hasRisk ? risk : "Not forecast",
-    quiet: !hasRisk,
-    caption: "Rip current risk",
-    sourceHtml: "NWS surf zone forecast"
-  }));
+  if (risk === "HIGH" || risk === "MODERATE" || risk === "LOW") {
+    tiles.push(renderGlanceTile({
+      icon: "person-drowning",
+      value: risk,
+      caption: "Rip current risk",
+      sourceHtml: "NWS surf zone forecast"
+    }));
+  }
 
   const details = (estimate && Array.isArray(estimate.alertDetails)) ? estimate.alertDetails : null;
   const alertCount = details ? details.length : 0;
-  const checkable = alertsCheckable(beach);
-  let alertValue = null;
-  let alertQuiet = true;
-  let alertSource = "NWS and ECCC alerts";
   if (alertCount > 0) {
-    alertValue = String(alertCount);
-    alertQuiet = false;
     const first = details[0];
-    alertSource = (first && typeof first.event === "string" && first.event.length > 0)
-      ? first.event : alertSource;
-  } else if (!checkable) {
-    // Never "None active" here: the cron could not look this beach's alerts up,
-    // which is not the same answer as having looked and found none.
-    alertSource = "Alerts not checked for this beach yet";
-  } else if (details) {
-    alertValue = "None active";
+    const alertSource = (first && typeof first.event === "string" && first.event.length > 0)
+      ? first.event : "NWS and ECCC alerts";
+    tiles.push(renderGlanceTile({
+      icon: "triangle-exclamation",
+      value: String(alertCount),
+      caption: "Active alerts",
+      sourceHtml: escapeHtml(alertSource)
+    }));
+  } else if (details && alertsCheckable(beach)) {
+    tiles.push(renderGlanceTile({
+      icon: "triangle-exclamation",
+      value: "None active",
+      quiet: true,
+      caption: "Active alerts",
+      sourceHtml: escapeHtml("NWS and ECCC alerts")
+    }));
   }
-  tiles.push(renderGlanceTile({
-    icon: "triangle-exclamation",
-    value: alertValue,
-    quiet: alertQuiet,
-    caption: "Active alerts",
-    sourceHtml: escapeHtml(alertSource)
-  }));
 
-  tiles.push(renderSunTile(beach, nowIso));
+  const sunHtml = renderSunTile(beach, nowIso);
+  if (sunHtml !== "") tiles.push(sunHtml);
+
+  if (tiles.length === 0) return "";
 
   return "<section class=\"at-a-glance wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\">" +
     renderSectionHeading("glance-heading", "gauge", "At a glance") +

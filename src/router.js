@@ -277,9 +277,6 @@ async function handleHome(env, location, rawQuery, nearParam) {
     entries: entries,
     nowIso: nowIso,
     sortedByProximity: !!location,
-    // An explicit near param is a browser fix the visitor granted; without one
-    // the location came from request.cf's IP estimate, and the page says so.
-    preciseLocation: typeof nearParam === "string" && nearParam.length > 0,
     // Same resolved location that sorted the rows above — the map centers on it
     // (browser "near" fix or Cloudflare IP estimate), so a first load with no
     // browser geolocation still opens on the visitor's area, not a fixed region.
@@ -302,7 +299,7 @@ async function handleHome(env, location, rawQuery, nearParam) {
 }
 
 // GET /?ids=a,b,c — the same list page rendered for exactly those beaches, in
-// the order asked for. It is what the browser-side "Your beaches" section
+// the order asked for. It is what the browser-side "Your Beaches" section
 // fetches for a visitor's saved and recently viewed ids, so it deliberately
 // ignores q, near and request.cf: the response is fully URL-determined and
 // therefore cacheable, and it holds nothing about the visitor beyond the ids

@@ -240,9 +240,9 @@ describe("at a glance tiles", () => {
       "<wa-badge variant=\"neutral\" appearance=\"outlined\">ESTIMATE</wa-badge>");
   });
 
-  it("reads No data rather than 0.0 ft when the estimate carries no wave height", () => {
+  it("renders no wave tile, and no 0.0 ft, when the estimate carries no wave height", () => {
     const html = render({ estimate: estimateWith({}) });
-    expect(tileValue(html, "water")).toEqual({ text: "No data", quiet: true });
+    expect(tile(html, "water")).toBe(null);
     expect(html.indexOf("0.0 ft")).toBe(-1);
   });
 
@@ -253,9 +253,9 @@ describe("at a glance tiles", () => {
     expect(tileSource(html, "person-drowning")).toBe("NWS surf zone forecast");
   });
 
-  it("says Not forecast, quietly, when no rip risk was published", () => {
+  it("renders no rip-current tile when no rip risk was published", () => {
     const html = render({ estimate: estimateWith({ ripCurrentRisk: null }) });
-    expect(tileValue(html, "person-drowning")).toEqual({ text: "Not forecast", quiet: true });
+    expect(tile(html, "person-drowning")).toBe(null);
   });
 
   it("counts the active alerts and names the first one", () => {
@@ -286,8 +286,8 @@ describe("at a glance tiles", () => {
     // No nws_zone and no eccc_zone: buildEstimateInputs would read
     // alertsCheckable false, so "none active" would be a claim nobody made.
     const html = render({ estimate: estimateWith({ alertDetails: [] }) });
-    expect(tileValue(html, "triangle-exclamation")).toEqual({ text: "No data", quiet: true });
-    expect(tileSource(html, "triangle-exclamation")).toBe("Alerts not checked for this beach yet");
+    expect(tile(html, "triangle-exclamation")).toBe(null);
+    expect(html.indexOf("None active")).toBe(-1);
   });
 
   it("still counts a marine alert on a beach with no land zone", () => {
@@ -300,12 +300,12 @@ describe("at a glance tiles", () => {
     expect(tileSource(html, "triangle-exclamation")).toBe("Small Craft Advisory");
   });
 
-  it("reads No data on a legacy estimate with no alert echo", () => {
+  it("renders no alerts tile on a legacy estimate with no alert echo", () => {
     const html = render({
       beach: beachWith({ nws_zone: "MIZ037" }),
       estimate: estimateWith({})
     });
-    expect(tileValue(html, "triangle-exclamation")).toEqual({ text: "No data", quiet: true });
+    expect(tile(html, "triangle-exclamation")).toBe(null);
   });
 
   it("escapes an alert event name into the source line", () => {
@@ -335,24 +335,49 @@ describe("at a glance tiles", () => {
     expect(tile(html, "sun")).toContain(">Sunrise</span>");
   });
 
-  it("reads No data rather than a 0,0 sun for a beach with no coordinates", () => {
+  it("renders no sun tile, and no 0,0 sun, for a beach with no coordinates", () => {
     const html = render({ beach: beachWith({ lat: null, lon: null }) });
-    expect(tileValue(html, "sun")).toEqual({ text: "No data", quiet: true });
-    expect(tile(html, "sun")).toContain(">Sunrise and sunset</span>");
+    expect(tile(html, "sun")).toBe(null);
   });
 
-  it("says so where the sun neither rises nor sets today", () => {
+  it("renders no sun tile where the sun neither rises nor sets today", () => {
     const html = render({ beach: beachWith({ lat: 78.2232, lon: 15.6469 }) });
-    expect(tileValue(html, "sun")).toEqual({ text: "No data", quiet: true });
-    expect(tileSource(html, "sun")).toBe("The sun neither rises nor sets here today");
+    expect(tile(html, "sun")).toBe(null);
   });
 
-  it("renders every tile even when the page has no data at all", () => {
+  it("keeps only the tiles that have a reading", () => {
+    // Nothing but the beach's own coordinates, so the sun tile stands alone.
     const html = render({});
     const glance = html.slice(html.indexOf("<section class=\"at-a-glance"));
-    expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(5);
+    expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(1);
+    expect(tile(html, "sun")).not.toBe(null);
     // No tile is ever blank, and none of them looks like the official card.
+    expect(glance).not.toContain("No data");
     expect(glance).not.toContain("official-card");
+  });
+
+  it("renders all five tiles when every reading is present", () => {
+    const html = render({
+      beach: beachWith({ nws_zone: "MIZ037" }),
+      waterTemp: {
+        tempF: 72,
+        observedIso: "2026-07-05T11:00:00.000Z",
+        station: { id: "45161", name: "Muskegon, MI", distanceKm: 5.0 }
+      },
+      estimate: estimateWith({
+        waveHeightFt: 2.4,
+        ripCurrentRisk: "MODERATE",
+        alertDetails: [{ event: "Beach Hazards Statement", onset: null, ends: null }]
+      })
+    });
+    const glance = html.slice(html.indexOf("<section class=\"at-a-glance"));
+    expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(5);
+  });
+
+  it("omits the whole section when no reading has any data", () => {
+    const html = render({ beach: beachWith({ lat: null, lon: null }) });
+    expect(html.indexOf("<section class=\"at-a-glance")).toBe(-1);
+    expect(html.indexOf("glance-heading")).toBe(-1);
   });
 });
 

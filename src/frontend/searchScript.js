@@ -31,7 +31,7 @@
 // Two events re-run it, and they are not interchangeable. "swimreport:listswap"
 // means fresh server markup replaced the list, so the server's empty-state copy
 // is re-captured before the pass. "swimreport:rowsadded" means rows were merely
-// appended elsewhere on the page (the "Your beaches" section), where re-reading
+// appended elsewhere on the page (the "Your Beaches" section), where re-reading
 // the empty state would capture whatever this script last wrote into it.
 //
 // Both filter passes cover every .beach-row on the page, so the section filters
@@ -183,7 +183,7 @@ const SCRIPT_LINES = [
   "    }",
   // Rows the green filter hid are on the page but not on screen, so the count
   // reads the display the filter pass wrote rather than the row total. It counts
-  // the main list alone: the "Your beaches" section holds copies of rows that
+  // the main list alone: the "Your Beaches" section holds copies of rows that
   // may also be in the list below, and counting both would report every match
   // twice.
   "    let count = 0;",

@@ -14,10 +14,6 @@
 // list nodes are missing so the caller can fall back to a full navigation. It
 // dispatches "swimreport:listswap" on document after a successful swap, which is
 // how searchScript.js re-applies its filters to the replaced rows.
-//
-// #list-origin is deliberately not swapped: the live search fetches with the
-// map's baked-in IP center as "near", so the response's origin line would claim
-// a precision the visitor never granted. geoScript.js sets that line itself.
 
 const SCRIPT_LINES = [
   "(function () {",
