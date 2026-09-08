@@ -576,9 +576,9 @@ remains partnership-gated.
   is needed once nationwide scale-out lands. The homepage map is already the whole-directory
   view — it fetches every flag-worthy beach once from the cacheable `GET /api/beaches.geojson`,
   now a single KV read of the cron-built map directory rather than a full-table D1 scan plus
-  `ceil(N/100) × 2` bulk KV gets, and renders them as a zoomed-out coast highlight over flag
-  icons — and that single-fetch model is comfortable to roughly 5–10k features; beyond that the
-  GeoJSON endpoint itself needs server-side clustering or tiling. Cross-reference, out of scope here: a browser-fetched static tiled
+  `ceil(N/100) × 2` bulk KV gets, and renders them as one colored disc each — and that
+  single-fetch model is comfortable to roughly 5–10k features; beyond that the GeoJSON endpoint
+  itself needs server-side clustering or tiling. Cross-reference, out of scope here: a browser-fetched static tiled
   artifact in the R2 bucket the layer build already writes would solve both this and the map's
   scale problem without the Worker ever touching R2. Such an artifact **must** be generated from
   D1, post-classification truth, and never from the OSM layers, or the map would show beaches

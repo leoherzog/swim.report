@@ -3780,39 +3780,42 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // for a map that is not coming. On load it fetches /api/beaches.geojson once and hands the
       // FeatureCollection to a single UNCLUSTERED GeoJSON source, which carries every
       // beach at every zoom: the zoomed-out view is a rendering choice, not a thinned
-      // dataset. Two renderings of that one source, handing off between zoom 7 and 8.6.
-      // Zoomed in, each beach is a rasterized fa-flag icon tinted by its feature `flag`
-      // keyword to the flag-icon-* palette (the --flag-{green,yellow,red,unknown}
-      // variables resolved at runtime via getComputedStyle, with the mild hexes as
-      // fallback; double-red rides in as "red").
-      // Zoomed out, each beach instead paints one wide disc in that same flag color, and
-      // neighbouring discs merge into a highlight that traces the coast, because the
-      // beaches are on the coast. That is what makes the continental view a hazard map:
-      // a count bubble's number is beach density, which competes with its color for one
-      // symbol, and the highlight has no number to compete with. It over-claims nothing,
-      // because it is drawn from the beaches themselves and stops where they stop.
+      // dataset. There is exactly ONE rendering of that source and it holds at every
+      // zoom — each beach paints an opaque disc in its feature `flag` color, from the
+      // --flag-{green,yellow,red,unknown} variables resolved at runtime via
+      // getComputedStyle with the mild hexes as fallback (double-red rides in as
+      // "red"). There are no marker symbols and no clustering: no symbol layer, no
+      // icon-image, and none of the canvas machinery that rasterized and tinted the
+      // fa-flag glyph.
+      // Zoomed out the discs merge into a highlight that traces the coast, because the
+      // beaches are on the coast; zoomed in they separate into one disc per beach. That
+      // is what makes the continental view a hazard map: a count bubble's number is beach
+      // density, which competes with its color for one symbol, and the highlight has no
+      // number to compete with. It over-claims nothing, because it is drawn from the
+      // beaches themselves and stops where they stop.
       // One circle layer per color, added in the order unknown, green, yellow, red, so
       // where two colors meet the worse one takes the pixel. The unknown filter is the
       // COMPLEMENT of the other three rather than an equality test, so a keyword outside
-      // the four falls to unknown exactly as the flag layer's match fallback does. The
-      // discs are opaque and unblurred (circle-opacity 1, circle-blur 0): every
-      // highlighted pixel is exactly one of the four flag hexes, where a translucent or
-      // blurred disc would composite two of them into a third that reads as a flag color
-      // the coast does not carry. They are inserted before the style's first symbol
-      // layer, so the basemap's place labels stay legible on top of them.
-      // The handoff is a RADIUS ramp, never an opacity ramp: circle-opacity applies per
-      // feature, so two overlapping translucent discs of one color composite into a
-      // darker third and a highlight faded that way would mottle wherever the coast is
-      // densest. circle-radius interpolates zoom 3 → 4.5 px, 5 → 4.5, 6.5 → 7, 8.6 → 0,
-      // flat at the bottom because the beaches converge there and widening through the
-      // middle to stay merged as they spread apart; the layers carry maxzoom 8.6. The
-      // flag layer carries minzoom 7 and an icon-opacity ramp of 0 at zoom 7 to 1 at 8.6,
-      // so the highlight dissolves into the flags it is made of. A located visitor opens
-      // at zoom 9 or 10 and so never sees the highlight at all.
-      // Clicking the highlight eases to zoom 8.6 on the clicked point, the only way into
-      // a beach from the zoomed-out view; it is guarded on map.getZoom() >= 7, the band
-      // where both layers are live and one click would otherwise navigate and re-zoom at
-      // once. Clicking a flag navigates to /beach/<id>. Centering:
+      // the four falls to unknown rather than disappearing from the map. The discs are
+      // opaque and unblurred (circle-opacity 1, circle-blur 0): every highlighted pixel
+      // is exactly one of the four flag hexes, where a translucent or blurred disc would
+      // composite two of them into a third that reads as a flag color the coast does not
+      // carry. They are inserted before the style's first symbol layer, so the basemap's
+      // place labels stay legible on top of them, and they carry no minzoom or maxzoom.
+      // What changes with zoom is the RADIUS, never the opacity: circle-opacity applies
+      // per feature, so two overlapping translucent discs of one color composite into a
+      // darker third and a highlight varied that way would mottle wherever the coast is
+      // densest. circle-radius interpolates zoom 3 → 4.5 px, 5 → 4.5, 6 → 6, 8 → 5,
+      // 14 → 8. It peaks around zoom 6, where the discs have to be wide enough to merge
+      // into a ribbon while the beaches under them are still spreading apart; above that
+      // they are markers, narrowed to stay distinct and widening again only at beach
+      // scale.
+      // One click handler, split on PICK_MIN_ZOOM (9): below it the discs are merged, so
+      // whichever feature sits under the cursor is arbitrary and the click eases to zoom
+      // 9 on the clicked point instead of guessing a beach; at or above it one disc is
+      // one beach and the click navigates to /beach/<id>. 9 is also the zoom the map
+      // opens at once a user location is resolved, so a located visitor can click
+      // straight through. Centering:
       // data-center (zoom 10 when precise, else 9), else fitBounds over all fetched
       // features, else a Great Lakes default ([-84, 44], zoom 5). It also listens for
       // "swimreport:nearupdate" on document and re-reads data-center to map.easeTo() the

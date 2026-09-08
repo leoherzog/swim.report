@@ -9,15 +9,14 @@
 //
 // The map uses the OpenFreeMap positron style and fetches every flag-worthy
 // beach once from the cacheable /api/beaches.geojson endpoint into a single
-// unclustered GeoJSON source. Zoomed out, each beach paints one wide opaque
-// disc in its flag color, and neighbouring discs merge into a highlight that
-// traces the coast, because the beaches are on the coast. Zoomed in the
-// highlight collapses and each beach is a rasterized fa-flag icon tinted by its
-// `flag` keyword (green|yellow|red|unknown) to the exact flag-icon-* palette.
-// Both read the same four hexes, resolved from the live --flag-* variables so
-// the map matches the rest of the UI, with the mild-palette hexes only as a
-// fallback. Clicking a flag navigates to /beach/:id; clicking the highlight
-// zooms in far enough to resolve it into flags.
+// unclustered GeoJSON source, rendered as one thing at every zoom: each beach
+// paints an opaque disc in its `flag` color (green|yellow|red|unknown). Zoomed
+// out the discs merge into a highlight that traces the coast, because the
+// beaches are on the coast; zoomed in they separate into one disc per beach.
+// There are no marker symbols and no clustering. The four hexes are resolved
+// from the live --flag-* variables so the map matches the rest of the UI, with
+// the mild-palette hexes only as a fallback. Clicking a merged highlight zooms
+// in; clicking a separated disc navigates to /beach/:id.
 //
 // Centering precedence: the container's data-center attribute (the resolved user
 // location, at zoom 10 when data-center-precise is "1", else zoom 9), then
@@ -80,11 +79,11 @@ const SCRIPT_LINES = [
   "  const DEFAULT_CENTER = [-84, 44];",
   "  const DEFAULT_ZOOM = 5;",
   "  const GEOJSON_URL = '/api/beaches.geojson';",
-  // The four flag tint hexes: resolve the flag variables styles.js declares on
-  // <html> so the map matches the rest of the UI exactly, falling back to the
-  // mild-palette hexes only if resolution yields an empty string. The tint is
-  // resolved once at init and rasterized into the icon images, so a later
-  // light/dark toggle does not re-tint them.
+  // The four flag hexes: resolve the flag variables styles.js declares on <html>
+  // so the map matches the rest of the UI exactly, falling back to the
+  // mild-palette hexes only if resolution yields an empty string. Resolved once,
+  // when the layers are added, so a later light/dark toggle does not repaint
+  // them.
   "  const FLAG_HEX_FALLBACK = { green: '#4f8051', yellow: '#c6ad4f', red: '#cf443b', unknown: '#777478' };",
   "  const FLAG_TOKEN = {",
   "    green: '--flag-green',",
@@ -103,7 +102,7 @@ const SCRIPT_LINES = [
   // One highlight layer per flag color, painted in this order, so where two
   // colors meet the worse one takes the pixel. The unknown filter is the
   // complement of the other three rather than an equality test, so a keyword
-  // outside the four falls to unknown exactly as the flag layer's match does.
+  // outside the four falls to unknown rather than disappearing from the map.
   //
   // The discs are opaque and unblurred: every highlighted pixel is exactly one
   // of the four flag hexes. A translucent or blurred disc would composite two of
@@ -127,66 +126,21 @@ const SCRIPT_LINES = [
   "    } catch (e) {}",
   "    return undefined;",
   "  };",
-  // The discs widen with zoom to stay merged as the beaches under them spread
-  // apart, then collapse to nothing as the flags fade in. The handoff is a
-  // radius ramp rather than an opacity ramp because circle-opacity applies per
-  // feature: two overlapping translucent discs of one color composite into a
-  // darker third, so a highlight faded that way would mottle wherever it is
-  // densest.
-  "  const HIGHLIGHT_MAX_ZOOM = 8.6;",
-  "  const FLAG_MIN_ZOOM = 7;",
+  // The radius peaks around zoom 6, where the discs have to be wide enough to
+  // merge into a ribbon while the beaches under them are still spreading apart.
+  // Above that they are markers, narrowed to stay distinct and widening again
+  // only at beach scale. The radius is what changes with zoom, never
+  // circle-opacity: opacity applies per feature, so two overlapping translucent
+  // discs of one color composite into a darker third and the highlight would
+  // mottle wherever the coast is densest.
   "  const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],",
-  "    3, 4.5, 5, 4.5, 6.5, 7, HIGHLIGHT_MAX_ZOOM, 0];",
-  "  const FLAG_OPACITY = ['interpolate', ['linear'], ['zoom'],",
-  "    FLAG_MIN_ZOOM, 0, HIGHLIGHT_MAX_ZOOM, 1];",
-  // The fa-flag single-path glyph. Explicit width/height give it an intrinsic
-  // size so every browser rasterizes it (a viewBox-only SVG can draw blank).
-  "  const FLAG_SVG =",
-  "    \"<svg xmlns='http://www.w3.org/2000/svg' width='640' height='640' viewBox='0 0 640 640'>\" +",
-  "    \"<path d='M160 96C160 78.3 145.7 64 128 64C110.3 64 96 78.3 96 96L96 544C96 561.7 110.3 576 128 576C145.7 576 160 561.7 160 544L160 422.4L222.7 403.6C264.6 391 309.8 394.9 348.9 414.5C391.6 435.9 441.4 438.5 486.1 421.7L523.2 407.8C535.7 403.1 544 391.2 544 377.8L544 130.1C544 107.1 519.8 92.1 499.2 102.4L487.4 108.3C442.5 130.8 389.6 130.8 344.6 108.3C308.2 90.1 266.3 86.5 227.4 98.2L160 118.4L160 96z'/>\" +",
-  "    \"</svg>\";",
-  "  const CSS_SIZE = 28;",
-  "  const DPR = Math.max(1, Math.min(4, Math.round(window.devicePixelRatio || 1)));",
-  // Paint the resolved hex into the glyph's own alpha via source-in compositing:
-  // the tint is pixel-exact and the anti-aliased edges are preserved (no SDF).
-  "  const tintToImageData = function (baseImg, hex) {",
-  "    const w = CSS_SIZE * DPR;",
-  "    const h = CSS_SIZE * DPR;",
-  "    const canvas = document.createElement('canvas');",
-  "    canvas.width = w;",
-  "    canvas.height = h;",
-  "    const ctx = canvas.getContext('2d');",
-  "    ctx.clearRect(0, 0, w, h);",
-  "    ctx.drawImage(baseImg, 0, 0, w, h);",
-  "    ctx.globalCompositeOperation = 'source-in';",
-  "    ctx.fillStyle = hex;",
-  "    ctx.fillRect(0, 0, w, h);",
-  "    ctx.globalCompositeOperation = 'source-over';",
-  "    return ctx.getImageData(0, 0, w, h);",
-  "  };",
-  // Register the four pre-tinted images before any layer references them. Decode
-  // is async, so the layers are gated behind this Promise, which resolves
-  // regardless of success: a decode failure leaves the resolver net below.
-  "  const addFlagImages = function () {",
-  "    return new Promise(function (resolve) {",
-  "      const img = new Image();",
-  "      const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(FLAG_SVG);",
-  "      img.onload = function () {",
-  "        const keys = ['green', 'yellow', 'red', 'unknown'];",
-  "        for (let i = 0; i < keys.length; i++) {",
-  "          const id = 'flag-' + keys[i];",
-  "          try {",
-  "            if (!map.hasImage(id)) {",
-  "              map.addImage(id, tintToImageData(img, resolveFlagHex(keys[i])), { pixelRatio: DPR });",
-  "            }",
-  "          } catch (e) {}",
-  "        }",
-  "        resolve();",
-  "      };",
-  "      img.onerror = function () { resolve(); };",
-  "      img.src = url;",
-  "    });",
-  "  };",
+  "    3, 4.5, 5, 4.5, 6, 6, 8, 5, 14, 8];",
+  // Below this zoom the discs are merged, so whichever feature sits under the
+  // cursor is arbitrary and a click zooms in rather than guessing a beach. At or
+  // above it one disc is one beach and a click navigates. It is also the zoom the
+  // map opens at once a user location is resolved, so a located visitor can click
+  // straight through.
+  "  const PICK_MIN_ZOOM = 9;",
   // Fit the whole fetched set only when there is no explicit data-center; the
   // resolved user/IP center always wins. Re-read the live center rather than the
   // init snapshot, so a geolocation swap that lands while the geojson fetch is in
@@ -209,10 +163,9 @@ const SCRIPT_LINES = [
   "      try { map.fitBounds(bounds, { padding: 40, maxZoom: 10, animate: false }); } catch (e) {}",
   "    }",
   "  };",
-  // Add the unclustered source, its four highlight layers and the flag layer,
-  // then wire the click/cursor handlers. The source carries every beach at every
-  // zoom: the zoomed-out view is a rendering choice, not a thinned dataset, so
-  // the highlight is drawn from the same features the flags are.
+  // Add the unclustered source and its four highlight layers, then wire the
+  // click/cursor handlers. The source carries every beach at every zoom: the
+  // zoomed-out view is a rendering choice, not a thinned dataset.
   "  const addBeachLayers = function (fc) {",
   "    try {",
   "      map.addSource('beaches', { type: 'geojson', data: fc });",
@@ -224,7 +177,6 @@ const SCRIPT_LINES = [
   "          id: 'highlight-' + HIGHLIGHT_LAYERS[i].key,",
   "          type: 'circle',",
   "          source: 'beaches',",
-  "          maxzoom: HIGHLIGHT_MAX_ZOOM,",
   "          filter: HIGHLIGHT_LAYERS[i].filter,",
   "          paint: {",
   "            'circle-color': resolveFlagHex(HIGHLIGHT_LAYERS[i].key),",
@@ -235,44 +187,20 @@ const SCRIPT_LINES = [
   "        }, beforeId);",
   "      } catch (e) {}",
   "    }",
-  "    try {",
-  "      map.addLayer({",
-  "        id: 'flags',",
-  "        type: 'symbol',",
-  "        source: 'beaches',",
-  "        minzoom: FLAG_MIN_ZOOM,",
-  "        layout: {",
-  "          'icon-image': ['match', ['get', 'flag'],",
-  "            'green', 'flag-green',",
-  "            'yellow', 'flag-yellow',",
-  "            'red', 'flag-red',",
-  "            'flag-unknown'],",
-  "          'icon-allow-overlap': true,",
-  "          'icon-anchor': 'bottom'",
-  "        },",
-  "        paint: {",
-  "          'icon-opacity': FLAG_OPACITY",
-  "        }",
-  "      });",
-  "    } catch (e) {}",
-  // Highlight click: zoom in on the clicked point until the flags are fully in,
-  // which is the only way into a beach from the zoomed-out view. Guarded on the
-  // handoff band, where both layers are live and one click would otherwise
-  // navigate and re-zoom at once.
+  // One click handler, split on PICK_MIN_ZOOM: zoom into a merged highlight,
+  // navigate from a disc that stands alone.
   "    const highlightIds = HIGHLIGHT_LAYERS.map(function (h) { return 'highlight-' + h.key; });",
   "    highlightIds.forEach(function (layerId) {",
   "      map.on('click', layerId, function (e) {",
-  "        if (map.getZoom() >= FLAG_MIN_ZOOM) { return; }",
-  "        map.easeTo({ center: e.lngLat, zoom: HIGHLIGHT_MAX_ZOOM });",
+  "        if (map.getZoom() < PICK_MIN_ZOOM) {",
+  "          map.easeTo({ center: e.lngLat, zoom: PICK_MIN_ZOOM });",
+  "          return;",
+  "        }",
+  "        if (!e.features || !e.features.length) { return; }",
+  "        const id = e.features[0].properties.id;",
+  "        if (id === undefined || id === null) { return; }",
+  "        window.location.href = '/beach/' + encodeURIComponent(id);",
   "      });",
-  "    });",
-  "    map.on('click', 'flags', function (e) {",
-  "      if (!e.features || !e.features.length) { return; }",
-  "      const id = e.features[0].properties.id;",
-  "      if (id === undefined || id === null) { return; }",
-  "      window.location.href = '/beach/' + encodeURIComponent(id);",
-  "    });",
-  "    highlightIds.concat(['flags']).forEach(function (layerId) {",
   "      map.on('mouseenter', layerId, function () { map.getCanvas().style.cursor = 'pointer'; });",
   "      map.on('mouseleave', layerId, function () { map.getCanvas().style.cursor = ''; });",
   "    });",
@@ -315,8 +243,9 @@ const SCRIPT_LINES = [
   // The canvas is the only always-present focusable-ish node; keep it out of the
   // tab order.
   "    try { map.getCanvas().setAttribute('tabindex', '-1'); } catch (e) {}",
-  // Safety net: if a layer ever references an unregistered icon-image, register a
-  // 1px transparent placeholder so MapLibre neither throws nor spams the console.
+  // Safety net for the basemap style's own sprite icons, the only icon-images
+  // left on this map: an unregistered one gets a 1px transparent placeholder, so
+  // MapLibre neither throws nor spams the console.
   // MapLibre 6 made 'styleimagemissing' notify-only, so a listener cannot satisfy
   // the request it is told about and the net has to be a missing-image resolver,
   // which is awaited before the image is given up on.
@@ -332,9 +261,7 @@ const SCRIPT_LINES = [
   // construction.
   "      clearSkeleton();",
   "      if (typeof fetch === 'undefined') { return; }",
-  "      addFlagImages().then(function () {",
-  "        return fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } });",
-  "      }).then(function (resp) {",
+  "      fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } }).then(function (resp) {",
   "        return resp && resp.ok ? resp.json() : null;",
   "      }).then(function (fc) {",
   "        if (!fc || !Array.isArray(fc.features)) { return; }",

@@ -2,8 +2,8 @@
 // accessibility attributes (aria-hidden, tabindex, no advertising aria-label),
 // the data-center attribute, section ordering (intro -> map -> search), and the
 // client script wiring (one-shot /api/beaches.geojson fetch feeding one
-// unclustered GeoJSON source, the zoomed-out coast highlight and its handoff to
-// the flag icons, keyboard:false, click handlers, re-center-only nearupdate).
+// unclustered GeoJSON source rendered only as the coast highlight, keyboard:false,
+// click handlers, re-center-only nearupdate).
 // The per-beach flag data lives in the /api/beaches.geojson endpoint, so its
 // color-keyword coverage is in test/router.test.js.
 
@@ -219,21 +219,30 @@ describe("renderListPage home map", () => {
       "['!', ['in', ['get', 'flag'], ['literal', ['green', 'yellow', 'red']]]] },");
   });
 
-  it("hands the highlight off to the flags by radius, never by opacity", () => {
+  it("changes the highlight with zoom by radius, never by opacity", () => {
     const html = renderListPage({ entries: [] });
-    // The discs widen with zoom to stay merged as the beaches spread apart, then
-    // collapse to nothing. circle-opacity applies per feature, so fading the
-    // highlight that way would composite overlapping discs of one color into a
-    // darker third wherever the coast is densest.
+    // The discs widen to stay merged as the beaches spread apart, then settle at
+    // marker size. circle-opacity applies per feature, so varying it would
+    // composite overlapping discs of one color into a darker third wherever the
+    // coast is densest.
     expect(html).toContain("const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],\n" +
-      "    3, 4.5, 5, 4.5, 6.5, 7, HIGHLIGHT_MAX_ZOOM, 0];");
+      "    3, 4.5, 5, 4.5, 6, 6, 8, 5, 14, 8];");
     expect(html).toContain("'circle-radius': HIGHLIGHT_RADIUS,");
-    expect(html).toContain("maxzoom: HIGHLIGHT_MAX_ZOOM,");
-    // The flags fade in over the same band and are absent below it.
-    expect(html).toContain("minzoom: FLAG_MIN_ZOOM,");
-    expect(html).toContain("'icon-opacity': FLAG_OPACITY");
-    expect(html).toContain("const FLAG_OPACITY = ['interpolate', ['linear'], ['zoom'],\n" +
-      "    FLAG_MIN_ZOOM, 0, HIGHLIGHT_MAX_ZOOM, 1];");
+    // The highlight is the whole rendering, so it is never cut off by zoom.
+    expect(html).not.toContain("maxzoom:");
+    expect(html).not.toContain("minzoom:");
+  });
+
+  it("renders no marker symbols at all", () => {
+    const html = renderListPage({ entries: [] });
+    // The highlight is the only rendering of the source: no symbol layer, and
+    // none of the machinery that rasterized and tinted the fa-flag glyph.
+    expect(html).not.toContain("type: 'symbol'");
+    expect(html).not.toContain("icon-image");
+    expect(html).not.toContain("FLAG_SVG");
+    expect(html).not.toContain("tintToImageData");
+    expect(html).not.toContain("addFlagImages");
+    expect(html).not.toContain("'flag-green'");
   });
 
   it("inserts the highlight beneath the basemap's labels", () => {
@@ -252,16 +261,15 @@ describe("renderListPage home map", () => {
     expect(html).not.toContain("NavigationControl");
   });
 
-  it("wires highlight-zoom and flag-click navigation handlers", () => {
+  it("splits one click handler on the zoom where a disc stands alone", () => {
     const html = renderListPage({ entries: [] });
-    // Clicking the highlight zooms in until the flags are fully in, the only way
-    // into a beach from the zoomed-out view. The guard covers the handoff band,
-    // where both layers are live and one click would otherwise navigate and
-    // re-zoom at once.
-    expect(html).toContain("map.easeTo({ center: e.lngLat, zoom: HIGHLIGHT_MAX_ZOOM });");
-    expect(html).toContain("if (map.getZoom() >= FLAG_MIN_ZOOM) { return; }");
-    // Flag click navigates to the beach page.
-    expect(html).toContain("map.on('click', 'flags', function (e)");
+    // Below PICK_MIN_ZOOM the discs are merged, so the feature under the cursor
+    // is arbitrary and a click zooms in rather than guessing a beach. At or above
+    // it, one disc is one beach and a click navigates.
+    expect(html).toContain("const PICK_MIN_ZOOM = 9;");
+    expect(html).toContain("if (map.getZoom() < PICK_MIN_ZOOM) {\n" +
+      "          map.easeTo({ center: e.lngLat, zoom: PICK_MIN_ZOOM });\n" +
+      "          return;\n        }");
     expect(html).toContain("window.location.href = '/beach/' + encodeURIComponent(id)");
   });
 
