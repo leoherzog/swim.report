@@ -18,8 +18,16 @@ const RULES = [
   // body-to-canvas propagation, and a body-painted background renders above
   // negative z-index positioned elements in the root stacking context, hiding
   // the waves. Restated here unlayered, so it outranks the @layer wa-native copy.
+  // The four flag colors, declared once. Every rule below and both client
+  // scripts read these, so a palette change lands in one edit. Yellow takes
+  // tint 70 because tint 50 reads olive in the mild palette (PLAN.md section 9);
+  // gray is honest absence, never a guessed condition.
   "html {",
   "  --content-measure: 48rem;",
+  "  --flag-green: var(--wa-color-green-50);",
+  "  --flag-yellow: var(--wa-color-yellow-70);",
+  "  --flag-red: var(--wa-color-red-50);",
+  "  --flag-unknown: var(--wa-color-gray-50);",
   "  background-color: var(--wa-color-surface-default);",
   "}",
 
@@ -215,10 +223,10 @@ const RULES = [
   ".beach-row .beach-row-link {",
   "  border-inline-start-width: var(--wa-border-width-l);",
   "}",
-  ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--wa-color-green-50); }",
-  ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--wa-color-yellow-70); }",
-  ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--wa-color-red-50); }",
-  ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--wa-color-gray-50); }",
+  ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--flag-green); }",
+  ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--flag-yellow); }",
+  ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--flag-red); }",
+  ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--flag-unknown); }",
 
   // With nothing to filter the row still sits in the page stack, where a
   // zero-height child would leave a full gap of white space. Unlayered, so it
@@ -247,10 +255,10 @@ const RULES = [
   "}",
   // --- End section headings. ---
 
-  ".flag-icon-green { color: var(--wa-color-green-50); }",
-  ".flag-icon-yellow { color: var(--wa-color-yellow-70); }",
-  ".flag-icon-red { color: var(--wa-color-red-50); }",
-  ".flag-icon-unknown { color: var(--wa-color-gray-50); }",
+  ".flag-icon-green { color: var(--flag-green); }",
+  ".flag-icon-yellow { color: var(--flag-yellow); }",
+  ".flag-icon-red { color: var(--flag-red); }",
+  ".flag-icon-unknown { color: var(--flag-unknown); }",
 
   // Shared framed-embed treatment. Only the 1px surface border lives here; the
   // wrapper's utilities supply the aspect ratio, clipping and rounded corners.
@@ -281,19 +289,19 @@ const RULES = [
   "}",
 
   ".detail-hero[data-flag='green'] {",
-  "  background: color-mix(in oklab, var(--wa-color-green-50) 12%, var(--wa-color-surface-default));",
+  "  background: color-mix(in oklab, var(--flag-green) 12%, var(--wa-color-surface-default));",
   "}",
 
   ".detail-hero[data-flag='yellow'] {",
-  "  background: color-mix(in oklab, var(--wa-color-yellow-70) 12%, var(--wa-color-surface-default));",
+  "  background: color-mix(in oklab, var(--flag-yellow) 12%, var(--wa-color-surface-default));",
   "}",
 
   ".detail-hero[data-flag='red'] {",
-  "  background: color-mix(in oklab, var(--wa-color-red-50) 12%, var(--wa-color-surface-default));",
+  "  background: color-mix(in oklab, var(--flag-red) 12%, var(--wa-color-surface-default));",
   "}",
 
   ".detail-hero[data-flag='unknown'] {",
-  "  background: color-mix(in oklab, var(--wa-color-gray-50) 12%, var(--wa-color-surface-default));",
+  "  background: color-mix(in oklab, var(--flag-unknown) 12%, var(--wa-color-surface-default));",
   "}",
 
   // Plain-language verdict under the flag label: the hero's answer in one
@@ -538,11 +546,6 @@ const RULES = [
   // is the shared .section-heading.
   ".nearby-grid {",
   "  --min-column-size: 12rem;",
-  "}",
-
-  ".nearby-card-link {",
-  "  text-decoration: none;",
-  "  color: var(--wa-color-text-normal);",
   "}",
 
   ".nearby-card:hover {",

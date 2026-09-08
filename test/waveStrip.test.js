@@ -359,11 +359,11 @@ describe("computeWaveRuns", () => {
     const runs = computeWaveRuns([1, 1, 1, 3, 3, 5]);
     expect(runs).toHaveLength(3);
     expect(runs[0]).toMatchObject({ band: "green", hours: 3, label: "Under 2 ft",
-      tokenVar: "var(--wa-color-green-50)" });
+      tokenVar: "var(--flag-green)" });
     expect(runs[1]).toMatchObject({ band: "yellow", hours: 2, label: "2–4 ft",
-      tokenVar: "var(--wa-color-yellow-70)" });
+      tokenVar: "var(--flag-yellow)" });
     expect(runs[2]).toMatchObject({ band: "red", hours: 1, label: "4 ft or more",
-      tokenVar: "var(--wa-color-red-50)" });
+      tokenVar: "var(--flag-red)" });
   });
 
   it("keeps singleton runs distinct when bands alternate", () => {
@@ -375,7 +375,7 @@ describe("computeWaveRuns", () => {
   it("maps null hours to a no-data (gray) run", () => {
     const runs = computeWaveRuns([null, null, 1]);
     expect(runs[0]).toMatchObject({ band: "no-data", hours: 2, label: "No data",
-      tokenVar: "var(--wa-color-gray-50)" });
+      tokenVar: "var(--flag-unknown)" });
     expect(runs[1].band).toBe("green");
   });
 

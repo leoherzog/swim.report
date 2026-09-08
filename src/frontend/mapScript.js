@@ -77,17 +77,17 @@ const SCRIPT_LINES = [
   "  const DEFAULT_CENTER = [-84, 44];",
   "  const DEFAULT_ZOOM = 5;",
   "  const GEOJSON_URL = '/api/beaches.geojson';",
-  // The four flag tint hexes: resolve the live WA palette tokens so the map
-  // matches the rest of the UI exactly, falling back to the mild-palette hexes
-  // only if resolution yields an empty string. The tint is resolved once at init
-  // and rasterized into the icon images, so a later light/dark toggle does not
-  // re-tint them.
+  // The four flag tint hexes: resolve the flag variables styles.js declares on
+  // <html> so the map matches the rest of the UI exactly, falling back to the
+  // mild-palette hexes only if resolution yields an empty string. The tint is
+  // resolved once at init and rasterized into the icon images, so a later
+  // light/dark toggle does not re-tint them.
   "  const FLAG_HEX_FALLBACK = { green: '#4f8051', yellow: '#c6ad4f', red: '#cf443b', unknown: '#777478' };",
   "  const FLAG_TOKEN = {",
-  "    green: '--wa-color-green-50',",
-  "    yellow: '--wa-color-yellow-70',",
-  "    red: '--wa-color-red-50',",
-  "    unknown: '--wa-color-gray-50'",
+  "    green: '--flag-green',",
+  "    yellow: '--flag-yellow',",
+  "    red: '--flag-red',",
+  "    unknown: '--flag-unknown'",
   "  };",
   "  const resolveFlagHex = function (key) {",
   "    let v = '';",

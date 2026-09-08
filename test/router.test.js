@@ -1974,13 +1974,24 @@ describe("renderListPage color-coded rows", () => {
     expect(PAGE_STYLES).toContain(".beach-row .beach-row-link {");
     expect(PAGE_STYLES).toContain("border-inline-start-width: var(--wa-border-width-l);");
     expect(PAGE_STYLES).toContain(
-      ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--wa-color-green-50); }");
+      ".beach-row[data-flag=\"green\"] .beach-row-link { border-inline-start-color: var(--flag-green); }");
     expect(PAGE_STYLES).toContain(
-      ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--wa-color-yellow-70); }");
+      ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--flag-yellow); }");
     expect(PAGE_STYLES).toContain(
-      ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--wa-color-red-50); }");
+      ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--flag-red); }");
     expect(PAGE_STYLES).toContain(
-      ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--wa-color-gray-50); }");
+      ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--flag-unknown); }");
+  });
+
+  // Every flag color in the sheet, the wave strip and mapScript reads one of
+  // these four variables, so this is the only place a palette tint is named.
+  it("declares the four flag variables once, on <html>", () => {
+    expect(PAGE_STYLES).toContain("--flag-green: var(--wa-color-green-50);");
+    expect(PAGE_STYLES).toContain("--flag-yellow: var(--wa-color-yellow-70);");
+    expect(PAGE_STYLES).toContain("--flag-red: var(--wa-color-red-50);");
+    expect(PAGE_STYLES).toContain("--flag-unknown: var(--wa-color-gray-50);");
+    const palette = PAGE_STYLES.match(/--wa-color-(green-50|yellow-70|red-50|gray-50)/g);
+    expect(palette).toHaveLength(4);
   });
 });
 

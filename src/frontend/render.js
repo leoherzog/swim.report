@@ -1185,7 +1185,7 @@ function renderNearbyCard(entry) {
   const subtitleHtml = span("nearby-card-subtitle wa-caption-s", subtitleName(beach));
   const distanceHtml = span("nearby-card-distance wa-caption-s", formatMiles(entry.distanceMi));
   return "<wa-card class=\"nearby-card\" appearance=\"outlined\">" +
-    "<a class=\"nearby-card-link wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
+    "<a class=\"nearby-card-link wa-link-plain wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
     "<span class=\"nearby-card-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + "</span>" +
     subtitleHtml +
     "<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(entry.estimate) + officialBadgeHtml + "</span>" +

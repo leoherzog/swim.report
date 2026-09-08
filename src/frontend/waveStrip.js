@@ -15,16 +15,16 @@ import {
   ripRiskColor
 } from "../rules.js";
 
-// Band presentation: palette token per waveColorForHeight result; the label is
+// Band presentation: flag variable per waveColorForHeight result; the label is
 // built per beach from its thresholds. null (non-numeric/masked hour) maps to
-// the "no-data" band, which uses the same gray token as the "unknown" flag —
-// gray means honest absence, never a guessed condition. Yellow uses tint 70
-// (tint 50 reads olive in the mild palette; see PLAN.md section 9).
+// the "no-data" band, which shares the "unknown" flag variable — gray means
+// honest absence, never a guessed condition. The four variables are declared
+// once on <html> in src/frontend/styles.js.
 const BAND_TOKENS = {
-  "green": "var(--wa-color-green-50)",
-  "yellow": "var(--wa-color-yellow-70)",
-  "red": "var(--wa-color-red-50)",
-  "no-data": "var(--wa-color-gray-50)"
+  "green": "var(--flag-green)",
+  "yellow": "var(--flag-yellow)",
+  "red": "var(--flag-red)",
+  "no-data": "var(--flag-unknown)"
 };
 
 // Band labels for a water class, e.g. "Under 2 ft", "2–4 ft", "4 ft or more".

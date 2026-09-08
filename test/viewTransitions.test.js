@@ -148,8 +148,8 @@ describe("wave-strip fill-in and now marker", () => {
       estimate: { color: "green", reason: "calm", sources: [], updated: NOW_ISO, waveHeightFt: 1.0 },
       waves: waves()
     });
-    expect(html).toContain("style=\"flex: 6 6 0%; background: var(--wa-color-green-50); --i: 0;\"");
-    expect(html).toContain("style=\"flex: 18 18 0%; background: var(--wa-color-yellow-70); --i: 1;\"");
+    expect(html).toContain("style=\"flex: 6 6 0%; background: var(--flag-green); --i: 0;\"");
+    expect(html).toContain("style=\"flex: 18 18 0%; background: var(--flag-yellow); --i: 1;\"");
   });
 
   it("animates the segments only behind a no-preference query", () => {

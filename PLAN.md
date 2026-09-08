@@ -3781,9 +3781,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // FeatureCollection to a native clustered GeoJSON source: neutral count bubbles
       // that expand on click (getClusterExpansionZoom + easeTo) when zoomed out, and
       // individual rasterized fa-flag icons at high zoom, each tinted by its feature
-      // `flag` keyword to the flag-icon-* palette (WA tokens
-      // --wa-color-{green-50,yellow-70,red-50,gray-50} resolved at runtime via
-      // getComputedStyle, with the mild hexes as fallback; double-red rides in as "red").
+      // `flag` keyword to the flag-icon-* palette (the --flag-{green,yellow,red,unknown}
+      // variables resolved at runtime via getComputedStyle, with the mild hexes as
+      // fallback; double-red rides in as "red").
       // clusterRadius is one icon width and clusterMaxZoom is 8, so a located visitor
       // never lands on a bubble. Clicking a flag navigates to /beach/<id>. Centering:
       // data-center (zoom 10 when precise, else 9), else fitBounds over all fetched
@@ -3961,14 +3961,18 @@ exporting a CSS string); render.js is the sole module the router imports.
 
 ### Flag rendering rules
 
-- Colors come from the Web Awesome palette tokens (mild palette, no custom hex values):
-  green var(--wa-color-green-50), yellow var(--wa-color-yellow-70), red
-  var(--wa-color-red-50), double-red = the red token rendered as two stacked flag icons
-  plus the label "DOUBLE RED — water closed" on the detail cards (list-row chips use the
-  short "DOUBLE RED", because the full text wraps badly beside long park names), unknown
-  var(--wa-color-gray-50) with label "UNKNOWN". Yellow uses tint 70 deliberately: tint 50
-  in the mild palette reads olive, not caution yellow. If the palette changes, re-verify
-  the four flag colors remain visually distinct safety signals.
+- Four variables carry the flag colors, declared once on <html> in src/frontend/styles.js
+  and mapped there to Web Awesome palette tokens (mild palette, no custom hex values):
+  --flag-green: var(--wa-color-green-50), --flag-yellow: var(--wa-color-yellow-70),
+  --flag-red: var(--wa-color-red-50), --flag-unknown: var(--wa-color-gray-50). Every rule
+  in styles.js, the wave strip's inline segment styles and mapScript's runtime
+  getComputedStyle read a --flag-* variable, so that block is the only place a tint is
+  named and a palette change is one edit. Yellow uses tint 70 deliberately: tint 50 in
+  the mild palette reads olive, not caution yellow. If the palette changes, re-verify the
+  four flag colors remain visually distinct safety signals.
+- double-red = --flag-red rendered as two stacked flag icons plus the label "DOUBLE RED —
+  water closed" on the detail cards (list-row chips use the short "DOUBLE RED", because
+  the full text wraps badly beside long park names); unknown carries the label "UNKNOWN".
 - Every estimated flag shows a color swatch or flag icon, the color name, an "ESTIMATE"
   badge, reason text, and an "Updated <wa-relative-time date=estimate.updated sync>"
   footer. The element formats the ISO timestamp in the visitor's browser locale and keeps
@@ -4247,9 +4251,9 @@ exporting a CSS string); render.js is the sole module the router imports.
     (renderWaveStrip). One segment per run from computeWaveRuns over waveColorForHeight
     (null hours are their own "No data" runs, so run lengths always sum to the trimmed hour
     count), sized by flex-grow = run.hours so there is no percentage rounding drift, and
-    colored by the run's palette token via an inline style: green var(--wa-color-green-50),
-    yellow var(--wa-color-yellow-70), red var(--wa-color-red-50), no-data
-    var(--wa-color-gray-50) — the unknown-flag gray, honest absence, never green. That same
+    colored by the run's flag variable via an inline style: green var(--flag-green),
+    yellow var(--flag-yellow), red var(--flag-red), no-data var(--flag-unknown) — the
+    unknown-flag gray, honest absence, never green. That same
     inline style carries "--i: <index>", the stagger step for the fill-in: under
     prefers-reduced-motion: no-preference each segment scales in from its left edge
     (transform-origin, 320 ms, delayed by --i × 70 ms, animation-fill-mode backwards). The

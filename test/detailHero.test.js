@@ -184,11 +184,11 @@ describe("detail-page hero", () => {
     // wa-dark; no hex, and gray for unknown rather than a green default.
     expect(PAGE_STYLES).toContain(".detail-hero[data-flag='green'] {");
     expect(PAGE_STYLES).toContain(
-      "background: color-mix(in oklab, var(--wa-color-yellow-70) 12%, var(--wa-color-surface-default));");
+      "background: color-mix(in oklab, var(--flag-yellow) 12%, var(--wa-color-surface-default));");
     expect(PAGE_STYLES).toContain(
-      "background: color-mix(in oklab, var(--wa-color-red-50) 12%, var(--wa-color-surface-default));");
+      "background: color-mix(in oklab, var(--flag-red) 12%, var(--wa-color-surface-default));");
     expect(PAGE_STYLES).toContain(
-      "background: color-mix(in oklab, var(--wa-color-gray-50) 12%, var(--wa-color-surface-default));");
+      "background: color-mix(in oklab, var(--flag-unknown) 12%, var(--wa-color-surface-default));");
   });
 
   it("escapes a beach id into the copy value", () => {
