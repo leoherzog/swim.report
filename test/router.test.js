@@ -776,21 +776,6 @@ describe("handleDetail nearby beaches", () => {
     expect(section).toContain("RED");
   });
 
-  it("gives each card a directions link outside the card link", async () => {
-    const { env } = nearbyEnv(candidates);
-    const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
-    const html = await res.text();
-    const section = sliceBetween(html, "<section class=\"nearby", "</section>");
-    const first = sliceBetween(section, "<wa-card class=\"nearby-card\"", "</wa-card>");
-    // The anchor follows the card link's own close: nesting it would break the
-    // card's click target.
-    expect(first).toContain("</a><a class=\"nearby-card-directions wa-caption-s\"" +
-      " href=\"https://www.google.com/maps/dir/?api=1&amp;destination=42.66000,-86.21000\"" +
-      " rel=\"noopener noreferrer\" target=\"_blank\">" +
-      "<wa-icon name=\"diamond-turn-right\"></wa-icon> Directions</a>");
-    expect(section.split("nearby-card-directions").length - 1).toBe(3);
-  });
-
   it("renders no section when nothing flag-worthy is nearby", async () => {
     const { env } = nearbyEnv([]);
     const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
@@ -826,13 +811,6 @@ describe("renderDetailPage nearby section placement", () => {
     expect(cam).toBeGreaterThan(map);
     expect(near).toBeGreaterThan(cam);
     expect(html).toContain("aria-labelledby=\"nearby-heading\"");
-  });
-
-  it("omits the directions link on a card whose beach has no coordinates", () => {
-    const noCoords = [{ beach: { id: "n-3", name: "Ghost Beach", lat: null, lon: null }, estimate: null, official: null, distanceMi: 0.4 }];
-    const html = renderDetailPage({ beach: base, estimate: null, official: null, nearby: noCoords, nowIso: "2026-07-05T12:00:00.000Z" });
-    expect(html).toContain("Ghost Beach");
-    expect(html).not.toContain("<a class=\"nearby-card-directions");
   });
 
   it("is absent when the router passes no nearby list", () => {

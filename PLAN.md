@@ -4059,13 +4059,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   official record is what supplied that color — fresh at the 2 h default, or aged and still
   more severe than the estimate, since displayFlagColor's weighing is raise-only; a
   plain-language verdict line under that label (p.hero-verdict); a lat/lon meta line linking
-  to OpenStreetMap, closed by a quiet "Directions" anchor (a.directions-link, wa-icon
-  diamond-turn-right, rel="noopener noreferrer", target="_blank") to
-  https://www.google.com/maps/dir/?api=1&destination=<lat>,<lon> with the coordinates at
-  5 decimals; and the share row. Both that link and the same anchor on each nearby-beach
-  card (a.nearby-card-directions, a sibling of the card link, never nested inside it)
-  render only when lat and lon are both finite, since Number(null) is 0 and would route to
-  0,0. The badge follows the record the color came from,
+  to OpenStreetMap; and the share row. The badge follows the record the color came from,
   never freshness alone, so the hero can neither call an estimate official nor credit the
   estimate with a color it did not produce. The flag label text below the title is what
   names the color, so the title flag icon is decorative there. The stack
@@ -4650,9 +4644,7 @@ test uses symbolically.
   markerFlagColor, its bounded all-unknown degraded branch, and cache-control behavior). It
   also covers the ?ids= list mode: parameter binding behind the flag-worthy gate, the
   caller's order restored over SQLite's, unknown and malformed ids skipped, the 10-id cap,
-  the CACHEABLE header, the absent data-complete, and the absent last_viewed stamp. It
-  also pins the nearby-beach cards, including the Directions anchor that follows the card
-  link's close and its absence for a card whose beach has no coordinates.
+  the CACHEABLE header, the absent data-complete, and the absent last_viewed stamp.
 - test/favorites.test.js — the favorites enhancement's rendered surfaces and script text:
   the hidden detail-page toggle (exact markup, escaped id, position in the hero share row),
   the empty hidden "Your Beaches" shell, idsMode dropping data-complete and owning its own

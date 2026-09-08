@@ -1164,31 +1164,6 @@ function renderWaveMap(beach) {
     "</section>";
 }
 
-// Google Maps directions URL for a beach, or null when either coordinate is
-// missing or non-finite. Number(null) is 0, so both are rejected before
-// coercion, or a coordinate-less row would route the visitor to 0,0.
-function directionsHref(beach) {
-  const lat = (beach.lat === null || beach.lat === undefined) ? NaN : Number(beach.lat);
-  const lon = (beach.lon === null || beach.lon === undefined) ? NaN : Number(beach.lon);
-  if (!isFinite(lat) || !isFinite(lon)) {
-    return null;
-  }
-  return "https://www.google.com/maps/dir/?api=1&destination=" +
-    lat.toFixed(5) + "," + lon.toFixed(5);
-}
-
-// Quiet "Directions" anchor for a beach, "" when it has no usable coordinates.
-// It carries no flag color: it is a secondary action, never a condition.
-function renderDirectionsLink(beach, className) {
-  const href = directionsHref(beach);
-  if (href === null) {
-    return "";
-  }
-  return "<a class=\"" + className + "\" href=\"" + escapeHtml(href) + "\"" +
-    " rel=\"noopener noreferrer\" target=\"_blank\">" +
-    "<wa-icon name=\"diamond-turn-right\"></wa-icon> Directions</a>";
-}
-
 // Nearby beaches, last in the detail stack: one card per entry in a responsive
 // wa-grid. Each card is one link carrying the same estimate chip and OFFICIAL
 // badge a list row does, so the estimated/official distinction reads the same
@@ -1207,9 +1182,6 @@ function renderNearbyCard(entry) {
     "<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(entry.estimate) + officialBadgeHtml + "</span>" +
     distanceHtml +
     "</a>" +
-    // Sibling of the card link, never nested inside it: an anchor within an
-    // anchor is invalid and would break the card's own click target.
-    renderDirectionsLink(beach, "nearby-card-directions wa-caption-s") +
     "</wa-card>";
 }
 
@@ -1760,14 +1732,9 @@ export function renderDetailPage(data) {
   // under the hero, not a fragment of this line.
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
-  // The Directions link closes the line; it formats its own coordinates to
-  // 5 dp and renders only when both are finite, which the display text above
-  // does not guard.
-  const directionsHtml = renderDirectionsLink(beach, "directions-link");
   const metaHtml = "<p class=\"beach-meta wa-caption-s\"><a class=\"coords-link\" href=\"" +
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
-    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a>" +
-    (directionsHtml ? (" • " + directionsHtml) : "") + "</p>";
+    "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
   // The badge names the record the displayed color came from, never freshness
   // alone. A fresh official record decides outright; an aged one still decides
