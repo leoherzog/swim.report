@@ -41,7 +41,8 @@
 import {
   WAVE_SCHEMA_VERSION,
   EXPECTED_WAVE_ARTIFACTS,
-  WAVE_KV_LEASE_SECONDS
+  WAVE_KV_LEASE_SECONDS,
+  WAVE_SERIES_LEASE_SECONDS
 } from "../src/waveManifest.js";
 import {
   GRIDS,
@@ -328,9 +329,28 @@ export function validTimeRefusals(bands, validStartEpoch) {
 // because a sentinel that survived a unit conversion is still a sentinel, and the raw
 // form is what would have been written had containment failed upstream.
 //
+// waveinput.hoursFt is the array the color path indexes, and the cell walk below runs
+// over waves.hoursFt. The sampler assigns one array to both, so what makes the walk
+// cover the color path is seriesMismatches: every series-bearing waveinput must have a
+// waves record whose cells are identical. A series with no counterpart, or one that
+// diverged across the NDJSON round trip, would reach KV unscanned.
+//
 // Wind is counted in its own fields: folding mph into the height distribution would
 // make meanWaveFt and distinctWaveValues a mixed measurement, and a constant wave
 // plane could then pass distinctValues on wind variance alone.
+// Element-wise equality over two nullable-number series. Length first, then cells:
+// Object.is rather than ===, so a NaN that survived JSON.parse as a number compares
+// equal to itself and a -0/0 drift is reported.
+function sameSeries(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i = i + 1) {
+    if (!Object.is(a[i], b[i])) { return false; }
+  }
+  return true;
+}
+
 export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
   const sentinels = Array.isArray(nodataValues) ? nodataValues : [];
   const stats = {
@@ -345,6 +365,7 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
     misalignedSeries: 0,
     nonNumericCells: 0,
     firstCellMismatches: 0,
+    seriesMismatches: 0,
     shapeProblems: 0,
     distinctWaveValues: 0,
     meanWaveFt: null,
@@ -354,6 +375,7 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
   const distinct = new Set();
   const heights = [];
   const heightById = new Map();
+  const seriesById = new Map();
 
   const inputs = Array.isArray(waveinputRecords) ? waveinputRecords : [];
   for (let i = 0; i < inputs.length; i = i + 1) {
@@ -366,6 +388,20 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
     }
     if (record.windGustMph !== null) {
       stats.shapeProblems = stats.shapeProblems + 1;
+    }
+    // startIso and hoursFt are what earn this record the long series lease, so they
+    // are present together or not at all. Half a series is a shape problem, not a
+    // record to consume.
+    const hasSeries = record.hoursFt !== null && record.hoursFt !== undefined;
+    if (hasSeries !== (typeof record.startIso === "string")) {
+      stats.shapeProblems = stats.shapeProblems + 1;
+    }
+    if (hasSeries) {
+      if (!Array.isArray(record.hoursFt)) {
+        stats.shapeProblems = stats.shapeProblems + 1;
+      } else {
+        seriesById.set(record.beachId, record.hoursFt);
+      }
     }
     // Scanned before the wave branch below, which returns early for a null height:
     // windSpeedMph is populated only when waveHeightFt is null, so for exactly the
@@ -429,7 +465,17 @@ export function scanRecords(waveinputRecords, wavesRecords, nodataValues) {
     if (heightById.has(record.beachId) && heightById.get(record.beachId) !== record.hoursFt[0]) {
       stats.firstCellMismatches = stats.firstCellMismatches + 1;
     }
+    const mirrored = seriesById.get(record.beachId);
+    if (mirrored !== undefined) {
+      seriesById.delete(record.beachId);
+      if (!sameSeries(mirrored, record.hoursFt)) {
+        stats.seriesMismatches = stats.seriesMismatches + 1;
+      }
+    }
   }
+  // Whatever is left carried a series no waves record mirrors, so no cell of it was
+  // scanned above.
+  stats.seriesMismatches = stats.seriesMismatches + seriesById.size;
 
   stats.distinctWaveValues = distinct.size;
   if (heights.length > 0) {
@@ -503,6 +549,11 @@ export function alignmentRefusals(stats) {
     out.push(refusal("alignment", "hoursFt[0]", String(stats.firstCellMismatches) +
       " series disagree with their own waveinput waveHeightFt", false));
   }
+  if (stats.seriesMismatches > 0) {
+    out.push(refusal("alignment", "waveinput.hoursFt", String(stats.seriesMismatches) +
+      " waveinput series were never scanned: no matching waves record, or one that " +
+      "disagrees cell for cell", false));
+  }
   if (stats.shapeProblems > 0) {
     out.push(refusal("alignment", "record shape", String(stats.shapeProblems) +
       " record(s) are malformed", false));
@@ -534,23 +585,37 @@ export function distributionRefusals(stats) {
 // The KV pair spelling gate, applied twice: here against the cycle's expiration
 // arithmetic, and in scripts/build-wave-kv.js against every pair it emits.
 //
-//   input = { kvExpirationEpoch, validStartEpoch, pairs }
+//   input = { kvExpirationEpoch, kvScalarExpirationEpoch, validStartEpoch, pairs }
 //
 // pairs may be empty at manifest time; the epoch arithmetic is checked either way.
 // Absolute expiration, never a TTL: a TTL measured from write time is wrong for a
-// scheduler that skips occurrences, because a run firing 9 h late would grant 7 more
-// hours of life to data already 9 h old.
+// scheduler that skips occurrences, because a run firing 9 h late would grant a
+// fresh lease to data already 9 h old.
+//
+// Two epochs because there are two leases. kvExpirationEpoch covers a record that
+// carries the hourly series and is indexed at read time; kvScalarExpirationEpoch
+// covers a wind-only record, which is one hour-0 sample and may not ride the long
+// one. Both are checked, so dropping either arithmetic refuses.
 export function ttlSpellingRefusals(input) {
   const out = [];
   const validStartEpoch = isPlainObject(input) ? input.validStartEpoch : null;
-  const kvExpirationEpoch = isPlainObject(input) ? input.kvExpirationEpoch : null;
+  const epochs = [
+    { field: "kvExpirationEpoch", lease: WAVE_SERIES_LEASE_SECONDS },
+    { field: "kvScalarExpirationEpoch", lease: WAVE_KV_LEASE_SECONDS }
+  ];
   if (!isFiniteNumber(validStartEpoch)) {
     out.push(refusal("ttlSpelling", "cycle", "validStartEpoch is not a finite number", false));
-  } else if (!isFiniteNumber(kvExpirationEpoch)) {
-    out.push(refusal("ttlSpelling", "cycle", "kvExpirationEpoch is not a finite number", false));
-  } else if (kvExpirationEpoch !== validStartEpoch + WAVE_KV_LEASE_SECONDS) {
-    out.push(refusal("ttlSpelling", "cycle", "kvExpirationEpoch " + String(kvExpirationEpoch) +
-      " is not validStartEpoch + " + String(WAVE_KV_LEASE_SECONDS), false));
+  } else {
+    for (let e = 0; e < epochs.length; e = e + 1) {
+      const value = isPlainObject(input) ? input[epochs[e].field] : null;
+      if (!isFiniteNumber(value)) {
+        out.push(refusal("ttlSpelling", "cycle",
+          epochs[e].field + " is not a finite number", false));
+      } else if (value !== validStartEpoch + epochs[e].lease) {
+        out.push(refusal("ttlSpelling", "cycle", epochs[e].field + " " + String(value) +
+          " is not validStartEpoch + " + String(epochs[e].lease), false));
+      }
+    }
   }
   const pairs = isPlainObject(input) && Array.isArray(input.pairs) ? input.pairs : [];
   for (let i = 0; i < pairs.length; i = i + 1) {
@@ -1005,6 +1070,7 @@ export function evaluateWaveGates(input) {
   const ttl = ttlSpellingRefusals({
     validStartEpoch: input.validStartEpoch,
     kvExpirationEpoch: input.kvExpirationEpoch,
+    kvScalarExpirationEpoch: input.kvScalarExpirationEpoch,
     pairs: []
   });
 
@@ -1330,7 +1396,8 @@ export async function main() {
     wavesRecords: stats.wavesRecords
   };
   const validStartEpoch = sampleReport.validStartEpoch;
-  const kvExpirationEpoch = validStartEpoch + WAVE_KV_LEASE_SECONDS;
+  const kvExpirationEpoch = validStartEpoch + WAVE_SERIES_LEASE_SECONDS;
+  const kvScalarExpirationEpoch = validStartEpoch + WAVE_KV_LEASE_SECONDS;
 
   const history = buildHistory(previousManifest, args.retain);
   const oldest = oldestRetained(history);
@@ -1349,6 +1416,7 @@ export async function main() {
     expectedElements: Array.isArray(expectDoc.bands) ? expectDoc.bands : [],
     validStartEpoch: validStartEpoch,
     kvExpirationEpoch: kvExpirationEpoch,
+    kvScalarExpirationEpoch: kvScalarExpirationEpoch,
     stats: stats,
     counts: counts,
     floorsFile: floorsFile,
@@ -1434,6 +1502,7 @@ export async function main() {
     validStartIso: sampleReport.validStartIso,
     validStartEpoch: validStartEpoch,
     kvExpirationEpoch: kvExpirationEpoch,
+    kvScalarExpirationEpoch: kvScalarExpirationEpoch,
     sources: sources,
     sourcesVerified: gridsReport.problems === undefined || gridsReport.problems.length === 0,
     // Both halves, because they answer different questions: the sample report's own

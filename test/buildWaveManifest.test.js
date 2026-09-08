@@ -16,7 +16,7 @@ import {
   REQUIRED_GRID_IDS,
   METERS_PER_SECOND_TO_MPH
 } from "../src/waveGrids.js";
-import { WAVE_KV_LEASE_SECONDS } from "../src/waveManifest.js";
+import { WAVE_KV_LEASE_SECONDS, WAVE_SERIES_LEASE_SECONDS } from "../src/waveManifest.js";
 import {
   WAVE_SHRINK_MIN_RATIO,
   WAVE_DECAY_MIN_RATIO,
@@ -139,6 +139,10 @@ function waveinputRecords(n, overrides) {
   return out;
 }
 
+// Mirrors the sampler: the series it builds is assigned to BOTH records, so the
+// cell walk over waves covers the array the color path indexes on waveinput. The
+// cross-check in scanRecords is what proves that identity survived the NDJSON round
+// trip, so a fixture that omitted it would leave the check untested.
 function wavesRecords(inputs, overrides) {
   const out = [];
   for (let i = 0; i < inputs.length; i = i + 1) {
@@ -146,6 +150,8 @@ function wavesRecords(inputs, overrides) {
     for (let h = 0; h < FORECAST_HOURS; h = h + 1) {
       hoursFt.push(h === 0 ? inputs[i].waveHeightFt : inputs[i].waveHeightFt + h * 0.02);
     }
+    inputs[i].startIso = "2026-09-03T12:00:00.000Z";
+    inputs[i].hoursFt = hoursFt;
     out.push(Object.assign({
       beachId: inputs[i].beachId,
       startIso: "2026-09-03T12:00:00.000Z",
@@ -332,6 +338,42 @@ describe("scanRecords", function () {
     const stats = scanRecords(inputs, [], [9999]);
     expect(stats.shapeProblems).toBe(2);
   });
+
+  it("passes when every waveinput series mirrors its waves record", function () {
+    const inputs = waveinputRecords(40);
+    expect(scanRecords(inputs, wavesRecords(inputs), [9999]).seriesMismatches).toBe(0);
+  });
+
+  it("catches a waveinput series that diverged from the scanned one", function () {
+    // Every cell walk runs over waves.hoursFt, so a waveinput series that says
+    // something else reaches the color path with no sentinel or range check behind it.
+    const inputs = waveinputRecords(40);
+    const series = wavesRecords(inputs);
+    inputs[7].hoursFt = inputs[7].hoursFt.slice();
+    inputs[7].hoursFt[11] = 9999;
+    const stats = scanRecords(inputs, series, [9999]);
+    expect(stats.seriesMismatches).toBe(1);
+    expect(stats.sentinelHits).toBe(0);
+    expect(alignmentRefusals(stats).length).toBe(1);
+    expect(alignmentRefusals(stats)[0].overridable).toBe(false);
+  });
+
+  it("catches a waveinput series with no waves record to scan it", function () {
+    const inputs = waveinputRecords(40);
+    const series = wavesRecords(inputs);
+    series.splice(3, 1);
+    const stats = scanRecords(inputs, series, [9999]);
+    expect(stats.seriesMismatches).toBe(1);
+  });
+
+  it("catches half a series, which would take the wrong lease", function () {
+    // startIso and hoursFt are present together or not at all: build-wave-kv.js
+    // reads exactly that pair to decide which of the two leases a record gets.
+    const inputs = waveinputRecords(2);
+    inputs[0].hoursFt = [1, 2, 3];
+    const stats = scanRecords(inputs, [], [9999]);
+    expect(stats.shapeProblems).toBe(1);
+  });
 });
 
 // windSpeedMph is populated only when waveHeightFt is null, so for exactly the
@@ -439,24 +481,42 @@ describe("distributionRefusals", function () {
 describe("ttlSpellingRefusals", function () {
   function pair(overrides) {
     return Object.assign({ key: "waveinput:b-1", value: "{}",
-      expiration: VALID_START + WAVE_KV_LEASE_SECONDS }, overrides || {});
+      expiration: VALID_START + WAVE_SERIES_LEASE_SECONDS }, overrides || {});
+  }
+
+  // Both epochs, correct. There are two leases — the long one for a record carrying
+  // the hourly series and the short one for a wind-only record — and each is checked
+  // separately, so dropping either arithmetic refuses.
+  function epochs(overrides) {
+    return Object.assign({
+      validStartEpoch: VALID_START,
+      kvExpirationEpoch: VALID_START + WAVE_SERIES_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS
+    }, overrides || {});
   }
 
   it("passes correct epoch arithmetic and correctly spelled pairs", function () {
-    expect(ttlSpellingRefusals({
-      validStartEpoch: VALID_START,
-      kvExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
-      pairs: [pair()]
-    })).toEqual([]);
+    expect(ttlSpellingRefusals(Object.assign(epochs(), { pairs: [pair()] }))).toEqual([]);
   });
 
-  it("refuses an expiration that is not validStartEpoch + 25200", function () {
-    expect(ttlSpellingRefusals({
-      validStartEpoch: VALID_START,
-      kvExpirationEpoch: VALID_START + 3600,
-      pairs: []
-    }).length).toBe(1);
+  it("refuses a series expiration that is not validStartEpoch + 86400", function () {
+    expect(ttlSpellingRefusals(Object.assign(
+      epochs({ kvExpirationEpoch: VALID_START + 3600 }), { pairs: [] })).length).toBe(1);
   });
+
+  it("refuses a scalar expiration that is not validStartEpoch + 25200", function () {
+    expect(ttlSpellingRefusals(Object.assign(
+      epochs({ kvScalarExpirationEpoch: VALID_START + 86400 }),
+      { pairs: [] })).length).toBe(1);
+  });
+
+  it("refuses a dropped scalar epoch, which would leave one lease unchecked",
+    function () {
+      const input = epochs();
+      delete input.kvScalarExpirationEpoch;
+      input.pairs = [];
+      expect(ttlSpellingRefusals(input).length).toBe(1);
+    });
 
   it("refuses the camelCase expirationTtl wrangler silently drops", function () {
     // wrangler warns and exits 0 on an unexpected property, so the key would never
@@ -464,11 +524,7 @@ describe("ttlSpellingRefusals", function () {
     const bad = pair();
     delete bad.expiration;
     bad.expirationTtl = 25200;
-    const refusals = ttlSpellingRefusals({
-      validStartEpoch: VALID_START,
-      kvExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
-      pairs: [bad]
-    });
+    const refusals = ttlSpellingRefusals(Object.assign(epochs(), { pairs: [bad] }));
     expect(refusals.length).toBe(2);
     for (let i = 0; i < refusals.length; i = i + 1) {
       expect(refusals[i].overridable).toBe(false);
@@ -476,11 +532,8 @@ describe("ttlSpellingRefusals", function () {
   });
 
   it("refuses a nested-object value", function () {
-    expect(ttlSpellingRefusals({
-      validStartEpoch: VALID_START,
-      kvExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
-      pairs: [pair({ value: { beachId: "b-1" } })]
-    }).length).toBe(1);
+    expect(ttlSpellingRefusals(Object.assign(epochs(),
+      { pairs: [pair({ value: { beachId: "b-1" } })] })).length).toBe(1);
   });
 
   it("accepts only the documented pair fields", function () {
@@ -865,7 +918,8 @@ describe("evaluateWaveGates", function () {
       bands: bands(),
       expectedElements: ["HTSGW", "WIND"],
       validStartEpoch: VALID_START,
-      kvExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
+      kvExpirationEpoch: VALID_START + WAVE_SERIES_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
       stats: scanRecords(inputs, wavesRecords(inputs), [9999]),
       counts: { waveinputRecords: 40, wavesRecords: 40 },
       floorsFile: floors,

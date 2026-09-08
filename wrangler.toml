@@ -35,11 +35,13 @@ directory = "public"
 #                    Offset off the congested top-of-hour :00 slot the repo's own
 #                    GH workflows deliberately avoid. It READS (never fetches) the
 #                    waveinput: KV that .github/workflows/waves.yml writes out of
-#                    band from NOAA GRIB2 model output. Those keys carry an ABSOLUTE
-#                    expiration derived from the model valid time rather than from
-#                    write time, so no schedule ordering between this cron and that
-#                    workflow is required or implied: a late or missing pipeline run
-#                    ages a beach out to unknown instead of serving stale data.
+#                    band from NOAA GRIB2 model output, resolving each record through
+#                    src/waveInput.js, which indexes the stored 24 h series at the
+#                    hour being estimated. Those keys carry an ABSOLUTE expiration
+#                    derived from the model valid time rather than from write time,
+#                    so no schedule ordering between this cron and that workflow is
+#                    required or implied: a late or missing pipeline run ages a beach
+#                    out to unknown instead of serving stale data.
 # 3-53/10 * * * * — level-triggered alerts refresh, every 10 minutes. Four national
 #                    fetches, no per-beach upstream call, and a "flag:" rewrite only
 #                    for beaches whose alert event set moved against the set their
@@ -52,7 +54,7 @@ directory = "public"
 # NO CRON THAT FANS OUT AN UPSTREAM CALL PER BEACH MAY GO SUB-HOURLY. What a
 # sub-hour interval actually costs is CPU: Cloudflare gives such an invocation
 # 30 seconds instead of 15 minutes, while wall clock stays 15 minutes either way.
-# The full 1102-beach hourly run measures 273-1213 ms of CPU, so CPU is not what
+# The full 3000-beach hourly run measures 1.0-2.7 s of CPU, so CPU is not what
 # keeps it hourly — its WALL clock is, and wall clock is what a beach-walking
 # fan-out consumes. The alerts refresh above makes four national fetches and
 # writes only the beaches whose alert set moved, so it fits.

@@ -11,8 +11,11 @@
 //     every wind reads green. No other test covers that conversion.
 //   * A camelCase expirationTtl is accepted by wrangler as an unexpected property,
 //     WARNED about, and IGNORED, with exit 0 — writing a key that NEVER EXPIRES.
-//     runFlagRecompute never reads waveinput.updated, so expiration is the only
-//     staleness control on the color path.
+//     runFlagRecompute never reads waveinput.updated, so expiration and the series
+//     hour index are the whole staleness control on the color path.
+//   * A waveinput carrying the hourly series that is written under the SHORT scalar
+//     lease loses 17 h of coverage; one written the other way round puts an hour-0
+//     wind on the color path for a day.
 //   * hoursFt[0] drifting from waveinput.waveHeightFt makes the detail page's "now"
 //     stat contradict its own first bar.
 
@@ -21,6 +24,7 @@ import { metersToFeet } from "../src/geo.js";
 import { metersPerSecondToMph } from "../src/waveGrids.js";
 import {
   WAVE_KV_LEASE_SECONDS,
+  WAVE_SERIES_LEASE_SECONDS,
   classifyWaveManifestFailure,
   waveKvWriteAllowed
 } from "../src/waveManifest.js";
@@ -81,13 +85,39 @@ describe("the unit conversions", function () {
 });
 
 describe("waveRecordsForBeach", function () {
-  it("emits a waveinput with exactly the six contracted fields", function () {
+  it("emits a waveinput with exactly the eight contracted fields", function () {
     const out = recordsFor();
     expect(Object.keys(out.waveinput).sort()).toEqual([
-      "beachId", "model", "updated", "waveHeightFt", "windGustMph", "windSpeedMph"
+      "beachId", "hoursFt", "model", "startIso", "updated", "waveHeightFt",
+      "windGustMph", "windSpeedMph"
     ]);
     expect(out.waveinput.model).toBe("noaa_gfswave");
     expect(out.waveinput.updated).toBe(START_ISO);
+  });
+
+  it("carries the same series object the waves record does", function () {
+    // scanRecords walks waves.hoursFt for sentinels and range, and the color path
+    // indexes waveinput.hoursFt. One array is what makes the first cover the second.
+    const out = recordsFor();
+    expect(out.waveinput.hoursFt).toBe(out.waves.hoursFt);
+    expect(out.waveinput.startIso).toBe(out.waves.startIso);
+  });
+
+  it("leaves a wind-only record with no series, which is what earns it the short lease",
+    function () {
+      const out = recordsFor({ waveMeters: null, windMs: 6 });
+      expect(out.waveinput.hoursFt).toBe(null);
+      expect(out.waveinput.startIso).toBe(null);
+    });
+
+  it("names the grid on a series whose hour 0 is masked", function () {
+    // waveHeightFt is hour 0 and stays null, but a later hour has a model behind it
+    // and resolveWaveInput needs the name to attribute the reading.
+    const m = meters(1);
+    m[0] = null;
+    const out = recordsFor({ waveMeters: m });
+    expect(out.waveinput.waveHeightFt).toBe(null);
+    expect(out.waveinput.model).toBe("noaa_gfswave");
   });
 
   it("always leaves windGustMph null (gfswave publishes no GUST element)", function () {
@@ -175,7 +205,8 @@ describe("kvPairGroups", function () {
     const out = [];
     for (let i = 0; i < n; i = i + 1) {
       out.push({ beachId: "b-" + String(i), waveHeightFt: 1, model: "noaa_gfswave",
-        windSpeedMph: null, windGustMph: null, updated: START_ISO });
+        windSpeedMph: null, windGustMph: null, startIso: START_ISO, hoursFt: [1],
+        updated: START_ISO });
     }
     return out;
   }
@@ -189,8 +220,18 @@ describe("kvPairGroups", function () {
     return out;
   }
 
+  // Every group in this block is series-bearing unless a test says otherwise, and
+  // nowEpoch sits just after the valid start, so no lease has run out.
+  function leases(overrides) {
+    return Object.assign({
+      series: VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS,
+      scalar: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS,
+      nowEpoch: VALID_START_EPOCH + 600
+    }, overrides || {});
+  }
+
   it("stringifies every value and stamps an absolute expiration", function () {
-    const groups = kvPairGroups(inputs(1), series(1), VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS);
+    const groups = kvPairGroups(inputs(1), series(1), leases());
     const pairs = groups[0];
     expect(pairs.length).toBe(2);
     for (let i = 0; i < pairs.length; i = i + 1) {
@@ -203,22 +244,46 @@ describe("kvPairGroups", function () {
     expect(JSON.parse(pairs[0].value).beachId).toBe("b-0");
   });
 
-  it("uses validStartEpoch + 25200 regardless of when the build ran", function () {
+  it("uses validStartEpoch + 86400 for a series pair, regardless of when the build ran",
+    function () {
+      expect(WAVE_SERIES_LEASE_SECONDS).toBe(86400);
+      const groups = kvPairGroups(inputs(1), series(1), leases());
+      expect(groups[0][0].expiration).toBe(VALID_START_EPOCH + 86400);
+      expect(groups[0][1].expiration).toBe(VALID_START_EPOCH + 86400);
+    });
+
+  it("gives a wind-only waveinput the short scalar lease", function () {
     expect(WAVE_KV_LEASE_SECONDS).toBe(25200);
-    const expiration = VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS;
-    const groups = kvPairGroups(inputs(1), series(1), expiration);
+    const windOnly = [{ beachId: "b-0", waveHeightFt: null, model: null,
+      windSpeedMph: 14, windGustMph: null, startIso: null, hoursFt: null,
+      updated: START_ISO }];
+    const groups = kvPairGroups(windOnly, [], leases());
+    expect(groups.length).toBe(1);
+    expect(groups[0].length).toBe(1);
     expect(groups[0][0].expiration).toBe(VALID_START_EPOCH + 25200);
-    expect(groups[0][1].expiration).toBe(VALID_START_EPOCH + 25200);
+  });
+
+  it("drops a wind-only record whose scalar lease has already run out", function () {
+    // The series lease outlives the scalar one, so a cycle the gate still accepts
+    // can carry wind-only records with nothing left. Emitting one would hand
+    // wrangler a past expiration; the key is simply left to have expired.
+    const windOnly = [{ beachId: "b-0", waveHeightFt: null, model: null,
+      windSpeedMph: 14, windGustMph: null, startIso: null, hoursFt: null,
+      updated: START_ISO }];
+    const late = leases({ nowEpoch: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS + 1 });
+    expect(kvPairGroups(windOnly, [], late)).toEqual([]);
+    // The series pairs of the same late cycle still go out whole.
+    expect(kvPairGroups(inputs(1), series(1), late)[0].length).toBe(2);
   });
 
   it("prefixes the two key families", function () {
-    const groups = kvPairGroups(inputs(1), series(1), 1);
+    const groups = kvPairGroups(inputs(1), series(1), leases());
     expect(groups[0][0].key).toBe("waveinput:b-0");
     expect(groups[0][1].key).toBe("waves:b-0");
   });
 
   it("keeps a beach's two pairs in one group", function () {
-    const groups = kvPairGroups(inputs(3), series(3), 1);
+    const groups = kvPairGroups(inputs(3), series(3), leases());
     expect(groups.length).toBe(3);
     for (let i = 0; i < groups.length; i = i + 1) {
       expect(groups[i].length).toBe(2);
@@ -343,12 +408,13 @@ describe("buildConsumerReport", function () {
 
   function manifest(overrides) {
     return Object.assign({
-      schemaVersion: 1,
+      schemaVersion: 2,
       cycleId: "cycle-a",
       buildStatus: "complete",
       validStartIso: START_ISO,
       validStartEpoch: VALID_START_EPOCH,
-      kvExpirationEpoch: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS,
+      kvExpirationEpoch: VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS,
       gridsDigest: DIGEST,
       gridsComplete: true,
       gridStatus: {
@@ -374,7 +440,8 @@ describe("buildConsumerReport", function () {
   it("folds in the two conjuncts the producer leaves absent", function () {
     const r = report();
     expect(r.gridsDigestMatches).toBe(true);
-    expect(r.secondsRemaining).toBe(WAVE_KV_LEASE_SECONDS - 600);
+    // Measured against the SERIES lease: that is the one the color path stands on.
+    expect(r.secondsRemaining).toBe(WAVE_SERIES_LEASE_SECONDS - 600);
   });
 
   it("computes secondsRemaining from validStartIso, so an unparseable one is NaN",

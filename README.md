@@ -428,8 +428,8 @@ classification (offline)](#discovery-and-classification-offline)).
   list chip and the map marker carry no age signal, so a rotation-old color reads there like a
   fresh one. It fetches the
   fast-changing safety signals (alerts and SRF rip-current risk) and reads each beach's wave
-  inputs from the `waveinput:` key the offline wave cycle writes — it performs **no** wave or
-  wind fetch itself. Both alert authorities are fetched nationally once per run and matched
+  inputs from the `waveinput:` key the offline wave cycle writes, indexing that record's
+  24-hour series at the hour it is estimating — it performs **no** wave or wind fetch itself. Both alert authorities are fetched nationally once per run and matched
   locally, so alert cost stays flat no matter how many beaches a run covers: one
   `api.weather.gov/alerts/active` fetch matched by `nws_zone` and `marine_zone`, and one GeoMet
   `weather-alerts` fetch matched by alert-region polygon. It runs the inputs through
@@ -441,7 +441,8 @@ classification (offline)](#discovery-and-classification-offline)).
   and `readingNote`, plus the resolver's `reportedFor`, ride along as display-side hints, not
   TTLs. `waveinput:` keys expire on an
   absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
-  required, and a missing key just means the estimate falls back to wind or `unknown`. As its
+  required, and a missing key — or one whose series is spent — just means the estimate falls
+  back to wind or `unknown`. As its
   last step it rebuilds the map directory `GET /api/beaches.geojson` serves, from KV truth
   plus the estimates and officials it wrote in the same run — KV offers no read-your-own-writes
   guarantee, so a rebuild that read those keys back would publish the previous hour's colors.
@@ -644,8 +645,10 @@ value and never touching the delete path. Regenerate the committed geometry file
 ### Wave data (offline)
 
 Wave height and the wind fallback come from NOAA GRIB2 model output, downloaded and
-point-sampled in `.github/workflows/waves.yml` (`52 */3 * * *`) and bulk-written into the
-`waveinput:` and `waves:` KV keys the hourly cron reads. Three grids are sampled in ordered
+point-sampled in `.github/workflows/waves.yml` (`52 */6 * * *`) and bulk-written into the
+`waveinput:` and `waves:` KV keys the hourly cron reads. Each cycle publishes 24 hours of
+forecast per beach and the hourly cron indexes into it, so four cycles a day is margin against
+a skipped GitHub schedule rather than a freshness requirement. Three grids are sampled in ordered
 fallthrough, constrained by each beach's `water_class`: NOAA's Great Lakes Wave model (GLWU,
 2.5 km) for the lakes, GFS-Wave `global.0p16` for ocean coasts, and GFS-Wave `arctic.9km` above
 52.58°N. A wave model masks land, and real beach coordinates frequently land on a masked cell,

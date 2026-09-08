@@ -20,25 +20,29 @@
 // expiration, so a unit error upstream is invisible from this file — which is
 // why test/buildWaveKv.test.js pins both conversions directly.
 //
-// Absolute expiration, never a TTL. Each pair carries
-// "expiration": validStartEpoch + 25200, so a key expires 7 h after the hour it
-// describes regardless of when the job ran. A TTL measured from write time is
-// wrong for a scheduler that skips occurrences: a run firing 9 h late would grant
-// 7 more hours of life to data already 9 h old. Republishing an old cycle
-// therefore yields a short or negative lease and is refused by construction.
+// Absolute expiration, never a TTL, and one of two leases per record. A record
+// carrying the hourly series expires at validStartEpoch + WAVE_SERIES_LEASE_SECONDS,
+// the span it describes, because runFlagRecompute indexes it at the hour it is
+// estimating (src/waveInput.js). A wind-only record is one hour-0 sample with no
+// series behind it and keeps the short validStartEpoch + WAVE_KV_LEASE_SECONDS.
+// Either way the lease is measured from the model valid time and not from the write
+// clock: a TTL from write time is wrong for a scheduler that skips occurrences,
+// since a run firing 9 h late would grant a fresh lease to data already 9 h old.
+// Republishing an old cycle therefore yields a short or negative lease and is
+// refused by construction.
 //
 // The spelling trap: the pair field is snake_case "expiration" /
 // "expiration_ttl". wrangler accepts the Worker runtime's camelCase
 // expirationTtl as an unexpected property, warns, ignores it and exits 0,
 // producing a key that never expires. Because runFlagRecompute never reads
-// waveinput.updated, expiration is the only staleness control on the color path,
-// so that key would color flags from dead data indefinitely. ttlSpellingRefusals
+// waveinput.updated, expiration and the series hour index are the whole staleness
+// control on the color path, and a key that never expires defeats both. ttlSpellingRefusals
 // is applied to every emitted pair, and the workflow greps wrangler's output for
 // "unexpected properties".
 
 import {
   EXPECTED_WAVE_ARTIFACTS,
-  WAVE_KV_LEASE_SECONDS,
+  WAVE_SERIES_LEASE_SECONDS,
   classifyWaveManifestFailure,
   waveKvWriteAllowed
 } from "../src/waveManifest.js";
@@ -185,7 +189,9 @@ export function manifestArtifact(manifest, key) {
 // secondsRemaining is derived from validStartIso, not manifest.kvExpirationEpoch,
 // so an unparseable validStartIso yields NaN and fails the range check. That is
 // correct: refusing because the age is unknowable is the same answer as refusing
-// because it is too old.
+// because it is too old. It measures the SERIES lease, the one the color path
+// stands on; a cycle down to its last hours of series is the news MIN_LEASE_SECONDS
+// exists to surface.
 export function buildConsumerReport(input) {
   const manifest = isPlainObject(input.manifest) ? input.manifest : null;
   const pointer = isPlainObject(input.pointer) ? input.pointer : null;
@@ -196,7 +202,7 @@ export function buildConsumerReport(input) {
   const artifactsPresent = verified.length;
   const artifactsExpected = EXPECTED_WAVE_ARTIFACTS.length;
   const validStartMs = manifest !== null ? Date.parse(manifest.validStartIso) : NaN;
-  const secondsRemaining = validStartMs / 1000 + WAVE_KV_LEASE_SECONDS - input.nowEpoch;
+  const secondsRemaining = validStartMs / 1000 + WAVE_SERIES_LEASE_SECONDS - input.nowEpoch;
 
   return {
     schemaVersion: manifest !== null ? manifest.schemaVersion : null,
@@ -225,6 +231,7 @@ export function buildConsumerReport(input) {
     validStartIso: manifest !== null ? manifest.validStartIso : null,
     validStartEpoch: manifest !== null ? manifest.validStartEpoch : null,
     kvExpirationEpoch: manifest !== null ? manifest.kvExpirationEpoch : null,
+    kvScalarExpirationEpoch: manifest !== null ? manifest.kvScalarExpirationEpoch : null,
     localGridsDigest: input.localGridsDigest || null,
     // Provenance: what the build managed with each grid. Not a conjunct, because
     // a gate on it would refuse a manifest that carries no per-grid counts.
@@ -241,13 +248,31 @@ export function buildConsumerReport(input) {
 // waveinput and waves must land in the same request or a partially applied chunk
 // set leaves a detail page showing a 24 h strip that disagrees with the flag card
 // above it.
-export function kvPairGroups(waveinputRecords, wavesRecords, expiration) {
+//
+// leases is { series, scalar, nowEpoch }. A record's own shape picks its lease: a
+// waveinput carrying hoursFt is indexed at read time and gets the series lease, and
+// a wind-only one gets the scalar lease. Both are absolute instants, so a scalar
+// lease that has already run out yields a pair wrangler would reject; that whole
+// group is dropped instead, which is the same outcome as the key having expired on
+// its own. The series lease cannot run out here — MIN_LEASE_SECONDS refused the
+// cycle long before — so a series group is never dropped and the pair stays atomic.
+export function kvPairGroups(waveinputRecords, wavesRecords, leases) {
+  const series = isPlainObject(leases) ? leases.series : null;
+  const scalar = isPlainObject(leases) ? leases.scalar : null;
+  const nowEpoch = isPlainObject(leases) && isFiniteNumber(leases.nowEpoch)
+    ? leases.nowEpoch : null;
   const groups = [];
   const byBeach = new Map();
   const inputs = Array.isArray(waveinputRecords) ? waveinputRecords : [];
   for (let i = 0; i < inputs.length; i = i + 1) {
     const record = inputs[i];
     if (!isPlainObject(record) || typeof record.beachId !== "string") { continue; }
+    const hasSeries = Array.isArray(record.hoursFt) && typeof record.startIso === "string";
+    const expiration = hasSeries ? series : scalar;
+    if (!hasSeries && nowEpoch !== null && isFiniteNumber(expiration) &&
+        expiration <= nowEpoch) {
+      continue;
+    }
     const group = [{
       key: "waveinput:" + record.beachId,
       value: JSON.stringify(record),
@@ -256,14 +281,17 @@ export function kvPairGroups(waveinputRecords, wavesRecords, expiration) {
     byBeach.set(record.beachId, group);
     groups.push(group);
   }
-  const series = Array.isArray(wavesRecords) ? wavesRecords : [];
-  for (let i = 0; i < series.length; i = i + 1) {
-    const record = series[i];
+  const wavesList = Array.isArray(wavesRecords) ? wavesRecords : [];
+  for (let i = 0; i < wavesList.length; i = i + 1) {
+    const record = wavesList[i];
     if (!isPlainObject(record) || typeof record.beachId !== "string") { continue; }
+    // The detail-page strip trims itself to the hours from now forward
+    // (trimWaveSeries), so it stays correct for exactly as long as the series it
+    // mirrors: one lease for both keys of a group.
     const pair = {
       key: "waves:" + record.beachId,
       value: JSON.stringify(record),
-      expiration: expiration
+      expiration: series
     };
     const group = byBeach.get(record.beachId);
     if (group === undefined) {
@@ -396,6 +424,7 @@ async function runEmit(args) {
     writeAllowed: waveKvWriteAllowed(report),
     validStartIso: report.validStartIso,
     kvExpirationEpoch: report.kvExpirationEpoch,
+    kvScalarExpirationEpoch: report.kvScalarExpirationEpoch,
     secondsRemaining: report.secondsRemaining,
     minimumRecordsPassed: report.minimumRecordsPassed,
     gridStatus: report.gridStatus,
@@ -412,7 +441,11 @@ async function runEmit(args) {
   }
 
   const groups = kvPairGroups(parsed[EXPECTED_WAVE_ARTIFACTS[0]],
-    parsed[EXPECTED_WAVE_ARTIFACTS[1]], report.kvExpirationEpoch);
+    parsed[EXPECTED_WAVE_ARTIFACTS[1]], {
+      series: report.kvExpirationEpoch,
+      scalar: report.kvScalarExpirationEpoch,
+      nowEpoch: nowEpoch
+    });
   const chunks = chunkGroups(groups, MAX_PAIRS_PER_CHUNK);
 
   let pairCount = 0;
@@ -420,6 +453,7 @@ async function runEmit(args) {
     const spelling = ttlSpellingRefusals({
       validStartEpoch: report.validStartEpoch,
       kvExpirationEpoch: report.kvExpirationEpoch,
+      kvScalarExpirationEpoch: report.kvScalarExpirationEpoch,
       pairs: chunks[i]
     });
     if (spelling.length > 0) {

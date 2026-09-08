@@ -15,23 +15,23 @@ name: Wave cycle
 # per-cycle prefix nobody is reading, and only then is the small waves/current.json
 # pointer overwritten. A reader can never see a torn set.
 #
-# Absolute expiration, never a TTL. Every emitted pair carries
-# "expiration": validStartEpoch + 25200, so a key expires 7 h after the hour it
-# describes regardless of when this job ran. runFlagRecompute never reads
-# waveinput.updated, so that expiration is the only staleness control on the color
-# path. A TTL measured from write time would be wrong for a scheduler that skips
-# occurrences: a run firing 9 h late would grant 7 more hours of life to data already
-# 9 h old.
+# Absolute expiration, never a TTL, and one of two leases per record. A waveinput
+# carrying the hourly series expires at validStartEpoch + 86400, the span it
+# describes, because runFlagRecompute indexes it at the hour it is estimating
+# (src/waveInput.js); the waves: series key shares that lease, since the detail-page
+# strip trims itself to the hours from now forward. A wind-only waveinput is one
+# hour-0 sample with no series behind it and keeps the short validStartEpoch + 25200.
+# Neither reads waveinput.updated, so expiration and the hour index are the whole
+# staleness control on the color path. A TTL measured from write time would be wrong
+# for a scheduler that skips occurrences: a run firing 9 h late would grant a fresh
+# lease to data already 9 h old.
 #
-# The unclosed risk: GitHub skips schedule occurrences rather than merely deferring
-# them, and 8 slots a day against a 7 h expiration tolerates two consecutive misses
-# and no more. That is this design's largest exposure and it is not closed here. The
-# permanent fix is to carry hoursFt and startIso in waveinput: and have
-# runFlagRecompute index the current hour, turning one landed cycle into 24 h of
-# coverage. Measure the exposure rather than assuming it: read the slot hit rate from
-# this workflow's run history and the per-beach coverage from
-# manifest.beaches.resolved across consecutive cycles, and treat a run of missed slots
-# as the trigger for that fix.
+# GitHub skips schedule occurrences rather than merely deferring them, so the cadence
+# must tolerate consecutive misses and not merely late runs. Four slots a day against
+# a 24 h series lease tolerates two consecutive misses with six hours to spare.
+# Measure the exposure rather than assuming it: read the slot hit rate from this
+# workflow's run history and the per-beach coverage from manifest.beaches.resolved
+# across consecutive cycles.
 #
 # Repository secrets, split so neither job holds both halves and the job that can
 # write production KV cannot write R2. sample reads CLOUDFLARE_R2_ACCESS_KEY and
@@ -44,13 +44,16 @@ name: Wave cycle
 # goes through npx --yes wrangler@<pin>.
 
 on:
-  # 8 slots a day. Minute 52 is clear of every existing cron minute in this repo
-  # (7, 15, 17, 29, 31, 41, 47) and off the congested top of the hour. The cron picks
-  # no model cycle: a runtime resolver walks GFS cycles newest-first and takes the
-  # first whose f(k)..f(k+23) all exist, so job cadence and model cadence are
-  # decoupled.
+  # 4 slots a day, matching the 4 GFS cycles and the 24 h series each one publishes.
+  # Every landed cycle covers a full day of hourly estimates, so slots buy margin
+  # against missed occurrences rather than freshness, and each one costs a full bulk
+  # write of roughly two KV pairs per resolved beach. Minute 52 is clear of every
+  # existing cron minute in this repo (7, 15, 17, 29, 31, 41, 47) and off the
+  # congested top of the hour. The cron picks no model cycle: a runtime resolver walks
+  # GFS cycles newest-first and takes the first whose f(k)..f(k+23) all exist, so job
+  # cadence and model cadence are decoupled.
   schedule:
-    - cron: "52 */3 * * *"
+    - cron: "52 */6 * * *"
   workflow_dispatch:
     inputs:
       publish:

@@ -30,6 +30,7 @@ import {
 import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
 import { findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
 import { WIND_SOURCE, waveSourceLabel, waveSourceUrl } from "./waveModels.js";
+import { resolveWaveInput } from "./waveInput.js";
 import { nearestWaterTempStation, stationWaterTemp } from "./waveSources/ndbcBuoys.js";
 import { updateScraperHealth } from "./scraperHealth.js";
 import { HOT_VIEW_WINDOW_MS } from "./demandWindow.js";
@@ -61,13 +62,19 @@ import { makeDeadline, runPool } from "./pool.js";
 // HOT_VIEW_WINDOW_MS, logged as hot=): hot rows are covered every run, so at
 // hot >= this the cold tier gets no slots and starves whatever the TTL is. The
 // run logs oldest=, the oldest cursor stamp it selected, so the left side of
-// that inequality is measurable rather than assumed. At 7,219 flag-worthy rows
-// and ~520 hot, 3000 gives the cold tier ~2,480 slots and a three-run wait
-// against the seven-hour TTL; 1200 gave a ten-run wait, so half the cold coast
-// read gray between turns. The 1,102-row run took about a minute of wall
-// clock, so this budgets roughly three; read oldest= and the run's own
-// timestamps before raising it again. Real pagination is still required past
-// what one run can walk (TODO.md).
+// that inequality is measurable rather than assumed.
+//
+// The inequality, not wall clock, is what sets this number. At 9,068 flag-worthy
+// rows and 719-837 hot, 3000 gives the cold tier ~2,160 slots, a four-run
+// rotation, and 6 <= 7 with one run of slack. Lowering it eats that slack fast,
+// because the hot tier comes off the top: 2600 lands exactly on 7 <= 7 with none
+// left, and 2000 gives a ten-run rotation and ages half the cold coast out to
+// unknown between turns. Wall clock is not the constraint here — the 3000-row run
+// measures 187-206 s against the 900 s ceiling, at 1.0-2.7 s of CPU — so a cut
+// made to save KV writes has to come from the rotation arithmetic or from the
+// TTL, never from this number alone. Read oldest= and the run's own timestamps
+// before moving it either way. Real pagination is still required past what one
+// run can walk (TODO.md).
 const MAX_BEACHES_PER_RUN = 3000;
 // HOT_VIEW_WINDOW_MS is imported from ./demandWindow.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry module
@@ -619,11 +626,20 @@ async function runFlagRecompute(env) {
 
     // Step 5: wave inputs — read only, never fetched here. The offline NOAA GRIB
     // pipeline bulk-writes a "waveinput:" + id payload
-    // ({ waveHeightFt, model, windSpeedMph, windGustMph, updated }) per beach. A
-    // missing key — no cycle has landed, or its data aged past its expiration —
-    // yields no wave input, and the estimate degrades to the wind fallback or
-    // "unknown", never a wrong flag. Prefetched concurrently in chunks so the
-    // per-beach loop below stays synchronous.
+    // ({ waveHeightFt, model, windSpeedMph, windGustMph, startIso, hoursFt, updated })
+    // per beach. A missing key — no cycle has landed, or its data aged past its
+    // expiration — yields no wave input, and the estimate degrades to the wind
+    // fallback or "unknown", never a wrong flag. Prefetched concurrently in chunks
+    // so the per-beach loop below stays synchronous.
+    //
+    // Each record is resolved through src/waveInput.js at nowMs, which indexes the
+    // stored series at the hour this run is estimating rather than reading hour 0.
+    // That is what lets one landed cycle color a day of runs, and it is why a
+    // series-bearing key's lease is the length of its series. A spent series
+    // resolves to null and is not stored, so the beach reads exactly as it would
+    // with no key at all. Resolving here rather than in the loop below means every
+    // beach in a run indexes the same instant.
+    const nowMs = Date.parse(nowIso);
     const waveInputs = new Map();
     const inputChunks = chunk(beaches, 50);
     for (const group of inputChunks) {
@@ -634,8 +650,9 @@ async function runFlagRecompute(env) {
         })
       );
       for (let i = 0; i < group.length; i = i + 1) {
-        if (fetched[i]) {
-          waveInputs.set(group[i].id, fetched[i]);
+        const resolved = resolveWaveInput(fetched[i], nowMs);
+        if (resolved !== null) {
+          waveInputs.set(group[i].id, resolved);
         }
       }
     }
@@ -709,7 +726,8 @@ async function runFlagRecompute(env) {
         }
 
         // Wave height and the wind fallback both come from the stored wave
-        // input (or are absent when there is no fresh data for this beach).
+        // input, already resolved to this run's hour in step 5 (or absent when
+        // there is no live data for this beach).
         const waveInput = waveInputs.get(beach.id);
 
         // Number.isFinite, not typeof "number": rules.js step 3's else branch has
@@ -725,7 +743,9 @@ async function runFlagRecompute(env) {
         }
 
         // Wind is only a fallback for wave-null beaches, and only names its
-        // source when it is the signal actually in play.
+        // source when it is the signal actually in play. resolveWaveInput has
+        // already nulled both wind fields for any hour but the series' first,
+        // since the stored wind is an hour-0 sample with no series behind it.
         let windSpeedMph = waveInput && Number.isFinite(waveInput.windSpeedMph)
           ? waveInput.windSpeedMph : null;
         let windGustMph = waveInput && Number.isFinite(waveInput.windGustMph)

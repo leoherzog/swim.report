@@ -57,12 +57,6 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     rather than `natural=coastline`. Harmless either way: ocean and great_lake are both
     flag-worthy and pass the gate identically — only inland versus {ocean, great_lake} must
     be reliable.
-- **GitHub Actions cron skipping is the wave pipeline's largest unclosed risk.** The
-  scheduler skips occurrences rather than deferring them, and 8 slots a day against a 7 h
-  absolute key expiration tolerates only two consecutive misses. The permanent fix is to
-  carry `hoursFt` and `startIso` in `waveinput:` and have `runFlagRecompute` index the
-  current hour, which turns one landed cycle into 24 h of coverage; it is out of scope here
-  because it changes the hourly cron's read contract.
 - **A grid that sampled but under-covers its seeded per-grid floor still refuses the whole
   cycle**, so a present-but-under-covering GLWU takes the ocean down with it. Dropping that
   grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside the
@@ -73,8 +67,9 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   scoped to the wave list and a new script on either side needs its own entry.
 - **Measure the slot hit rate before trusting the cadence.** No second wave source is left to
   shadow against, so read the hit rate from `waves.yml`'s run history and the per-beach coverage
-  from `manifest.beaches.resolved` across consecutive cycles. A run of missed slots is the
-  trigger for the `hoursFt`/`startIso` fix above.
+  from `manifest.beaches.resolved` across consecutive cycles. Four slots a day against the 24 h
+  series lease tolerates two consecutive misses with six hours to spare; a run of missed slots
+  is the trigger to add a slot back, at the cost of a full bulk write each.
 - **Arctic 9 km spiral is unvalidated against real Alaska coordinates.** Ring geometry on a
   polar-stereographic grid differs from a lat/lon one, and `gfswave.global.0p16` stops at
   52.583°N, so every Alaskan beach depends on that path. Check a handful of real rows before

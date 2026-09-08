@@ -240,33 +240,50 @@ and reused for all 24 hours, because re-running the nearest-wet-cell search per 
 let the series jump between cells and make the detail page's "now" stat contradict its own
 first bar.
 
-The key carries an absolute per-key expiration of validStartEpoch + 25200 rather than a
-write-time TTL. See WaveInput below for why.
+The key carries an absolute per-key expiration of validStartEpoch + 86400 rather than a
+write-time TTL, and the strip trims itself to the hours from now forward, so it stays correct
+for exactly as long as the series it holds. See WaveInput below for why.
 
 ### WaveInput (KV value under "waveinput:" + beachId)
 
     {
       "beachId": "osm-node-123456",
-      "waveHeightFt": 2.62,          // number (feet) or null — the hour-0 wave reading, what
-                                     // the hourly estimate consumes as inputs.waveHeightFt
-      "model": "noaa_gfswave",       // string or null: the grid that supplied waveHeightFt
+      "waveHeightFt": 2.62,          // number (feet) or null — hour 0 of hoursFt below. Read
+                                     // only by a record carrying NO series; a series-bearing
+                                     // record is indexed instead (see resolveWaveInput)
+      "model": "noaa_gfswave",       // string or null: the grid that supplied the series
                                      // (noaa_gfswave | noaa_gfswave_arctic | noaa_glwu);
                                      // drives the estimate's wave source label
       "windSpeedMph": null,          // number (mph) or null — the wind fallback, recorded only
-                                     // for beaches that resolved no wave height
+                                     // for beaches whose hour 0 resolved no wave height, and
+                                     // offered to rules.js only at hour 0
       "windGustMph": null,           // always null: NOAA gfswave publishes no GUST element, so
                                      // the wind red rule is effectively speed >= 25 mph alone
                                      // and rules.js renders "n/a" for the gust
+      "startIso": "2026-07-12T15:00:00.000Z",  // string or null: the instant hoursFt[0] describes
+      "hoursFt": [2.62, 2.7, ...],   // 24 x (number (feet) | null), or null on a wind-only
+                                     // record. The SAME array waves.hoursFt carries
       "updated": "2026-07-12T15:00:00.000Z"  // the model valid start, never the run clock
     }
 
 Written by the offline NOAA GRIB2 wave cycle and read by the hourly runFlagRecompute, which
 takes the current wave height and the wind fallback from this payload instead of a live
-fetch. Written only when the cycle produced something usable for the beach: a wave height,
-or a wind fallback for a beach that resolved none. A beach that resolved neither is skipped
-entirely, so its last-good key rides its own lease and the flag ages out to unknown rather
-than being recoloured from nothing. Absent or expired key → the estimate has no wave input
-this run, degrading to the wind fallback or "unknown", never a wrong flag.
+fetch. Written only when the cycle produced something usable for the beach: at least one
+finite forecast hour, or a wind fallback for a beach that resolved none. A beach that
+resolved neither is skipped entirely, so its last-good key rides its own lease and the flag
+ages out to unknown rather than being recoloured from nothing. Absent or expired key → the
+estimate has no wave input this run, degrading to the wind fallback or "unknown", never a
+wrong flag.
+
+The hour index. src/waveInput.js resolveWaveInput(record, nowMs) is the only reader of this
+shape. When the record carries a series it indexes hoursFt at the whole hours elapsed since
+startIso, matching trimWaveSeries in src/frontend/waveStrip.js so the flag card and the
+detail-page strip read the same hour of the same array. That is what lets one landed cycle
+color 24 h of hourly runs rather than one, and it is what sets the lease below. Two rules
+hold the staleness line: a record carrying a series NEVER falls back to its own
+waveHeightFt, which is hour 0 and is the exact reading the index exists to retire, and a
+spent series yields no wave input at all rather than its last hour. The wind is offered only
+at hour 0, because it is a single hour-0 sample with no series behind it.
 
 The units contract. GRIB HTSGW is metres and waveHeightFt is feet: metres * 3.28084
 (metersToFeet, src/geo.js). GRIB WIND is metres per second and windSpeedMph is mph: m/s *
@@ -279,15 +296,23 @@ which colors a flag red with a straight-faced reason string, so every masked cel
 to JSON null in the offline writer. rules.js tests waveHeightFt !== null with no isFinite
 guard and the cron guards with typeof === "number" only; containment belongs to the writer.
 
-Absolute expiration, not a TTL. Each pair is written with an expiration of
-validStartEpoch + 25200, so a key expires 7 h after the hour it describes regardless of when
-the job ran. runFlagRecompute never reads waveinput.updated, so expiration is the only
-staleness control on the color path, and a TTL measured from write time would grant a run
-firing 9 h late seven fresh hours on data already 9 h old. Republishing an older cycle
-therefore yields a short or negative lease and is refused by construction; the only rollback
-is to stop writing. The wrangler bulk-put field is snake_case "expiration"; a camelCase
-expirationTtl is accepted as an unexpected property, warned about and ignored with exit 0,
-producing a key that never expires.
+Absolute expiration, not a TTL, and one of two leases per record. A record carrying the
+series expires at validStartEpoch + 86400 (WAVE_SERIES_LEASE_SECONDS), the span it describes,
+and the matching "waves:" key shares that lease. A wind-only record expires at
+validStartEpoch + 25200 (WAVE_KV_LEASE_SECONDS), because one hour-0 sample may not ride the
+long lease the series earns. scripts/build-wave-kv.js picks the lease from the record's own
+shape — startIso and hoursFt present together, or neither — and drops a wind-only record
+whose scalar lease has already run out rather than handing wrangler a past expiration.
+
+Either way the lease is measured from the model valid time, so a key expires a fixed span
+after the hour it describes regardless of when the job ran. runFlagRecompute never reads
+waveinput.updated, so the expiration and the hour index above are the whole staleness control
+on the color path; a TTL measured from write time would grant a run firing 9 h late a fresh
+lease on data already 9 h old. Republishing an older cycle therefore yields a short or
+negative lease and is refused by construction; the only rollback is to stop writing. The
+wrangler bulk-put field is snake_case "expiration"; a camelCase expirationTtl is accepted as
+an unexpected property, warned about and ignored with exit 0, producing a key that never
+expires.
 
 ### WaterTemp (KV value under "watertemp:" + beachId)
 
@@ -647,10 +672,12 @@ Binding name: FLAGS (single namespace for both key families).
   wave-forecast strip, though the "now" stat can still render from
   FlagEstimate.waveHeightFt.
 - Key "waveinput:" + beachId → JSON.stringify(WaveInput). Written by the same cycle, only
-  when it produced a usable wave height or wind fallback. Read by the hourly
-  runFlagRecompute, which takes the current wave height and wind fallback from here rather
+  when it produced at least one finite forecast hour or a wind fallback. Read by the hourly
+  runFlagRecompute, which resolves the record through src/waveInput.js and takes the wave
+  height for the hour it is estimating, plus the wind fallback, from here rather
   than a live fetch. Absent key → the estimate has no wave input this run.
-- "waves:" and "waveinput:" carry an absolute per-key expiration of validStartEpoch + 25200
+- "waves:" and a series-bearing "waveinput:" carry an absolute per-key expiration of
+  validStartEpoch + 86400, and a wind-only "waveinput:" validStartEpoch + 25200
   (the wrangler bulk-put field is snake_case "expiration"), not a write-time TTL. They are
   the only keys in this namespace written from outside the Worker. See section 1 (WaveInput)
   for why absolute, and section 7's offline subsection for the pipeline.
@@ -1413,6 +1440,31 @@ export on the entry module (section 7).
     export function waveSourceLabel(model)        // unknown id degrades to "Wave Forecast";
     export function waveSourceUrl(model)          // never throws, never affects color
 
+### src/waveInput.js (the pure reader of a stored "waveinput:" record)
+
+The only reader of the WaveInput shape (section 1), and the mirror of the offline writer in
+scripts/build-wave-kv.js. Pure: the clock arrives as a parameter, so the cron and the tests
+walk one code path. Never throws; a malformed record resolves to nulls, which reach rules.js
+as "no wave data" and color gray.
+
+    export const WAVE_SERIES_HOURS                // 24, mirroring FORECAST_HOURS in
+                                                  // src/waveGrids.js, which is offline-only
+                                                  // and must not be imported by the Worker.
+                                                  // The length actually indexed is the
+                                                  // stored array's own.
+    export function waveSeriesHourIndex(startMs, nowMs, length)
+      // whole elapsed hours, or null once the series is spent. A start in the future or an
+      // unreadable clock clamps to 0, matching trimWaveSeries in src/frontend/waveStrip.js
+      // so the flag card and the detail strip read the same hour of the same array.
+    export function resolveWaveInput(record, nowMs)
+      // { waveHeightFt, model, windSpeedMph, windGustMph, hourIndex } | null.
+      // The series is authoritative whenever present: a record carrying hoursFt never falls
+      // back to its own waveHeightFt (hour 0, the reading the index exists to retire), and a
+      // spent series returns null outright. A record with no series uses the scalar, which
+      // the short lease bounds. model is null wherever waveHeightFt is, and the wind fields
+      // are populated only when the resolved height is null AND the hour is 0 — the stored
+      // wind is one hour-0 sample and may not ride the long series lease.
+
 ### src/waveManifest.js (the pure fail-closed consumer gate — never imported by the Worker)
 
 Mirrors src/layerManifest.js for the wave cycle. Three tiers on one conjunct walk, every
@@ -1420,7 +1472,10 @@ conjunct a strict !== true so a missing field refuses exactly as a false one doe
 
     export const WAVE_SCHEMA_VERSION
     export const EXPECTED_WAVE_ARTIFACTS          // ["waveinput.ndjson", "waves.ndjson"]
-    export const WAVE_KV_LEASE_SECONDS            // 25200
+    export const WAVE_SERIES_LEASE_SECONDS        // 86400: a record carrying the hourly
+                                                  // series, and its paired "waves:" key
+    export const WAVE_KV_LEASE_SECONDS            // 25200: a wind-only record, one hour-0
+                                                  // sample with no series behind it
     export function classifyWaveManifestFailure(report)
       // { tier: "ok" | "degraded" | "expired" | "fatal", reasons: string[] }
       //   fatal   → write no KV: schema mismatch, pointer/manifest disagreement, artifacts
@@ -1429,7 +1484,10 @@ conjunct a strict !== true so a missing field refuses exactly as a false one doe
       //             buildStatus not "complete", validTimes or sentinelScan not passed,
       //             minimumRecordsPassed not true (the absolute record rails, independent
       //             of the seeded floors, so a zero-record cycle can never publish)
-      //   expired → write no KV: secondsRemaining < 3600, or gridsDigestMatches !== true.
+      //   expired → write no KV: secondsRemaining < 10800 (MIN_LEASE_SECONDS, measured
+      //             against the SERIES lease — the one the color path stands on — so it
+      //             fires when the cycle is more than 21 h old, two consecutive missed
+      //             occurrences of the 6 h pipeline schedule), or gridsDigestMatches !== true.
       //             NaN from an unparseable validStartIso fails the range check, which is
       //             correct: refusing because the age is unknowable is the same answer as
       //             refusing because it is too old.
@@ -2365,12 +2423,17 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    spend the 900 s ceiling before any beach is written.
 5. Wave inputs: read only — the hourly cron performs no wave fetch. Prefetch every
    "waveinput:" + id payload (section 1) from KV concurrently in chunks of 50
-   (env.FLAGS.get(..., { type: "json" }), each guarded so a failed get yields no input)
-   into a Map. A missing key — the cycle has not landed, or its keys reached their absolute
-   expiration — yields no wave input, and the estimate degrades to the wind fallback or
-   "unknown", never a wrong flag. This step is the entire Worker-side wave contract.
+   (env.FLAGS.get(..., { type: "json" }), each guarded so a failed get yields no input),
+   pass each through resolveWaveInput(record, nowMs) (src/waveInput.js) and store what it
+   returns in a Map. That resolver indexes the record's series at the hour this run is
+   estimating, which is what lets one landed cycle color 24 h of runs; nowMs is
+   Date.parse(nowIso), so every beach in a run reads the same instant. A missing key — the
+   cycle has not landed, or its keys reached their absolute expiration — and a record whose
+   series is spent both yield no wave input, and the estimate degrades to the wind fallback
+   or "unknown", never a wrong flag. This step is the entire Worker-side wave contract.
 6. Wind is not fetched here: the wind fallback rides on the waveinput payload, recorded
-   offline only for beaches that resolved no wave height.
+   offline only for beaches whose hour 0 resolved no wave height, and offered by
+   resolveWaveInput only at hour 0 of a series.
 6b. Water-quality floor gather: one findWqFloorSource(beach) pass over the run's beaches
    builds wqSourceByBeach (beach.id -> source, reused by step 7 so the resolver runs once
    per beach) and wqDistinctSources (source.id -> source, the fetch list). Each distinct
@@ -3229,7 +3292,7 @@ new lat/lon), so a beach that moved to different water re-classifies.
 ### Wave cycle (offline batch — GitHub Actions, not an in-Worker cron)
 
 NOAA GRIB2 model output, downloaded and point-sampled in .github/workflows/waves.yml
-("52 */3 * * *", 8 slots a day) and bulk-written into the "waveinput:" / "waves:" KV the
+("52 */6 * * *", 4 slots a day) and bulk-written into the "waveinput:" / "waves:" KV the
 hourly cron reads. The Worker's read contract is untouched: runFlagRecompute step 5 and the
 KV shapes in section 1 are unchanged, and RULES_VERSION is not bumped.
 
@@ -4383,10 +4446,13 @@ other caveat test uses symbolically.
 - test/waveSample.test.js — the band plan (element/valid-time matching, refusal on an
   unplannable band), waveRecordsForBeach (both write-skip guards, hoursFt[0] ===
   waveHeightFt, exactly 24 entries), and the snapshot reader.
-- test/buildWaveKv.test.js — the pair emitter: the units pins (1 m -> 3.28084 ft, 1 m/s ->
+- test/buildWaveKv.test.js — the WRITER contract: the units pins (1 m -> 3.28084 ft, 1 m/s ->
   2.2369362920544 mph), snake_case "expiration" on every pair, value is a JSON STRING, the
-  absolute expiration = validStartEpoch + 25200, chunking, and the pointer parser's
-  refusals.
+  series lease against the scalar one and which record shape takes which, chunking, and the
+  pointer parser's refusals.
+- test/waveInput.test.js — the READER contract, mirroring the file above: the hour index,
+  that a live series never falls back to its own hour-0 height, that a spent one yields
+  nothing rather than its last hour, and that the wind is offered only at hour 0.
 - test/buildWaveManifest.test.js — every gate as a pure function: grid and band identity,
   valid times, the sentinel scan against each grid's own nodata, alignment, distinct values,
   mean plausibility, the coverage floors keyed by gridsDigest, the shrink and decay ratios,

@@ -3,8 +3,9 @@
 Wave height and the wind fallback change every few hours, tolerate latency, and produce one
 number per beach per hour. They are sampled outside the Worker, in a GitHub Actions job that
 decodes NOAA GRIB2 output with GDAL, resolves each beach to a wet grid cell, and bulk-writes
-the result into the `waveinput:` and `waves:` KV keys the hourly flag cron reads. The Worker's
-read contract does not move.
+the result into the `waveinput:` and `waves:` KV keys the hourly flag cron reads. The Worker
+reads those keys through `src/waveInput.js`, which indexes each record's series at the hour
+being estimated; nothing on the request path changes.
 
 **Blast radius.** This job never writes a flag color. A failed or refused cycle writes no KV
 and leaves the previous cycle's keys under an expiration derived from that cycle's own model
@@ -264,12 +265,23 @@ stubbed, because the gate is fail-closed on missing fields. The consumer folds t
 
 ## Absolute expiration
 
-Every emitted pair carries `"expiration": validStartEpoch + 25200` — seconds since the epoch,
-not a duration — so a key expires 7 hours after the hour it *describes*, regardless of when the
-job ran. `runFlagRecompute` never reads `waveinput.updated`, so expiration is the only staleness
-control on the color path. A TTL measured from write time is wrong for a scheduler that skips
-occurrences: a run firing 9 hours late would grant 7 more hours of life to data already 9 hours
-old.
+Every emitted pair carries an `expiration` in seconds since the epoch, never a duration, so a
+key expires a fixed span after the hour it *describes* regardless of when the job ran. A TTL
+measured from write time is wrong for a scheduler that skips occurrences: a run firing 9 hours
+late would grant a fresh lease to data already 9 hours old.
+
+There are two spans, and a record's own shape picks one. A `waveinput:` carrying the hourly
+series gets `validStartEpoch + 86400`, the span it describes, because `runFlagRecompute`
+indexes it at the hour it is estimating rather than reading hour 0; its paired `waves:` key
+shares that lease, since the detail-page strip trims itself to the hours from now forward. A
+wind-only `waveinput:` is one hour-0 sample with no series behind it and gets
+`validStartEpoch + 25200`. `startIso` and `hoursFt` are present together or not at all, which
+is the field `build-wave-kv.js` reads to choose. The series lease outlives the scalar one, so a
+cycle the gate still accepts can carry wind-only records with nothing left; those are dropped
+rather than handed to wrangler with a past expiration.
+
+`runFlagRecompute` never reads `waveinput.updated`, so the expiration and the hour index are
+the whole staleness control on the color path.
 
 The spelling is a trap worth stating plainly. The wrangler bulk-put pair field is snake_case
 `expiration` / `expiration_ttl`. The Worker runtime's camelCase `expirationTtl` — the spelling
@@ -278,18 +290,20 @@ accepted as an unexpected property, warned about, and **ignored**, with exit 0. 
 key that never expires, coloring flags from dead data indefinitely. `value` must also be a JSON
 string. The workflow greps wrangler's output for `unexpected properties` and fails the step.
 
-## Cadence and the unclosed risk
+## Cadence
 
-The workflow runs `52 */3 * * *` — 8 slots a day, on a minute clear of every other cron in this
-repo and off the congested top of the hour. The cron picks nothing; the runtime resolver picks
-the cycle. GitHub Actions **skips** cron occurrences rather than deferring them, so at 8 slots a
-day against a 7 hour absolute expiration this pipeline tolerates two consecutive misses. That is
-its single largest exposure, and it is not closed by this design.
+The workflow runs `52 */6 * * *` — 4 slots a day, matching the four GFS cycles, on a minute
+clear of every other cron in this repo and off the congested top of the hour. The cron picks
+nothing; the runtime resolver picks the cycle.
 
-The permanent fix is to carry `hoursFt` and `startIso` in `waveinput:` and have
-`runFlagRecompute` index the current hour, turning one landed cycle into 24 hours of coverage.
-That changes the hourly cron's read contract, so it is tracked in `TODO.md`. Until then, read
-the slot hit rate from the workflow's run history and the per-beach coverage from
+Every landed cycle carries 24 hours of forecast and the hourly cron indexes into it, so a slot
+buys margin against a missed occurrence rather than freshness. GitHub Actions **skips** cron
+occurrences rather than deferring them, so what the cadence has to survive is consecutive
+misses: 4 slots a day against a 24 hour series lease tolerates two, with six hours to spare.
+Each slot also costs a full bulk write of roughly two KV pairs per resolved beach, which is
+the largest single line in this account's KV write budget, so slots are not free to add.
+
+Read the slot hit rate from the workflow's run history and the per-beach coverage from
 `manifest.beaches.resolved` across consecutive cycles: the exposure has to be measured, and no
 second wave source is left to shadow against.
 
@@ -301,7 +315,7 @@ reverting.
 
 1. **Wrong but not yet written.** Nothing to do — a refused build leaves `waves/current.json` on
    the last good cycle and writes no KV.
-2. **Written and wrong.** Disable the workflow. The bad keys expire within 7 hours of the hour
+2. **Written and wrong.** Disable the workflow. The bad keys expire within 24 hours of the hour
    they describe, and beaches age out to `unknown` meanwhile.
 3. **The grid set itself is wrong.** Revert `src/waveGrids.js` and `data/wave-grids.json`
    together. The digest changes, which un-seeds the floors and withholds auto-publish until

@@ -340,10 +340,10 @@ export function planRefusal(entries, gridStatus) {
 
 // The record pair for one beach, carrying both write-skip guards:
 //
-//   wave null and wind null -> no record at all, so the previous KV key rides its
-//                              lease and the flag ages out to unknown rather than
-//                              being recoloured from nothing.
-//   wave null, wind present -> a waveinput record only, no series.
+//   no finite hour and no wind -> no record at all, so the previous KV key rides its
+//                                 lease and the flag ages out to unknown rather than
+//                                 being recoloured from nothing.
+//   no finite hour, wind present -> a waveinput record only, no series.
 //
 // The wind is a fallback and is recorded only for a wave-null beach, which keeps
 // src/index.js's "Wind Forecast" source attribution honest: it pushes that source
@@ -351,6 +351,16 @@ export function planRefusal(entries, gridStatus) {
 //
 // hoursFt[0] and waveHeightFt are the same conversion of the same sample, computed
 // once and written twice.
+//
+// The waveinput carries the whole series, not just hour 0, because the hourly cron
+// indexes it at the hour it is estimating (src/waveInput.js) so one landed cycle
+// colors 24 h of runs. It is the SAME array object as waves.hoursFt, which is what
+// makes scanRecords's cell walk over waves cover the array the color path reads;
+// scanRecords re-checks that identity after the NDJSON round trip.
+//
+// A record's shape decides its lease in scripts/build-wave-kv.js: a series-bearing
+// record gets WAVE_SERIES_LEASE_SECONDS, a wind-only record the short scalar lease.
+// So startIso and hoursFt are present together or not at all, never half.
 export function waveRecordsForBeach(input) {
   const hoursM = Array.isArray(input.waveMeters) ? input.waveMeters : null;
   const hoursFt = [];
@@ -364,25 +374,35 @@ export function waveRecordsForBeach(input) {
     ? metersPerSecondToMph(input.windMs)
     : null;
 
-  if (waveHeightFt === null && windSpeedMph === null) {
+  let hasFinite = false;
+  for (let i = 0; i < hoursFt.length; i = i + 1) {
+    if (hoursFt[i] !== null) { hasFinite = true; break; }
+  }
+
+  // The skip guard is scored against the whole series, not against hour 0. A beach
+  // whose hour 0 is masked but whose later hours resolved has a real forecast, and
+  // the hourly cron reaches those hours; dropping the record would blank it for the
+  // cycle.
+  if (!hasFinite && windSpeedMph === null) {
     return { waveinput: null, waves: null };
   }
 
   const waveinput = {
     beachId: input.beachId,
     waveHeightFt: waveHeightFt,
-    model: waveHeightFt === null ? null : input.gridId,
+    // The grid is named whenever a series exists, not only when hour 0 resolved:
+    // a masked hour 0 with finite later hours still has a model behind it, and
+    // resolveWaveInput drops the name again for whichever hour reads null.
+    model: hasFinite ? input.gridId : null,
     windSpeedMph: windSpeedMph,
     // gfswave publishes no GUST element, so this is permanently null and the wind
     // red rule narrows to speed alone.
     windGustMph: null,
+    startIso: hasFinite ? input.startIso : null,
+    hoursFt: hasFinite ? hoursFt : null,
     updated: input.updated
   };
 
-  let hasFinite = false;
-  for (let i = 0; i < hoursFt.length; i = i + 1) {
-    if (hoursFt[i] !== null) { hasFinite = true; break; }
-  }
   if (!hasFinite) {
     return { waveinput: waveinput, waves: null };
   }

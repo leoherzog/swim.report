@@ -2142,6 +2142,71 @@ describe("runFlagRecompute wave input finite guards", function () {
   });
 });
 
+// One landed cycle has to color a day of runs, or the offline pipeline is back to
+// publishing every three hours. The hour index is what does that, and reading the
+// wrong hour is invisible: the color is plausible, the reason string names a real
+// height, and nothing in the payload says which hour it came from.
+describe("runFlagRecompute indexes the wave series at the hour it estimates",
+  function () {
+    const START = "2026-07-18T00:00:00.000Z";
+
+    beforeEach(function () {
+      vi.stubGlobal("fetch", function () {
+        return Promise.reject(new Error("network disabled in test"));
+      });
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+
+    afterEach(function () {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    // Calm through hour 5, then over the 4 ft red threshold from hour 6.
+    function seriesInput() {
+      const hoursFt = [];
+      for (let h = 0; h < 24; h = h + 1) { hoursFt.push(h < 6 ? 1 : 5); }
+      return {
+        beachId: "osm-node-1",
+        waveHeightFt: 1,
+        model: "noaa_glwu",
+        windSpeedMph: null,
+        windGustMph: null,
+        startIso: START,
+        hoursFt: hoursFt,
+        updated: START
+      };
+    }
+
+    function estimateAt(hour) {
+      vi.setSystemTime(new Date(Date.parse(START) + hour * 3600000));
+      const made = makeEnv([makeBeachRow({ id: "osm-node-1" })],
+        { "waveinput:osm-node-1": seriesInput() });
+      return runHourlyCron(made.env).then(function () {
+        return JSON.parse(made.kvPuts.get("flag:osm-node-1").value);
+      });
+    }
+
+    it("colors from hour 0 at the valid start", async function () {
+      const estimate = await estimateAt(0);
+      expect(estimate.color).toBe("green");
+      expect(estimate.reason).toContain("1.0 ft");
+    });
+
+    it("colors from the later hour once the run reaches it", async function () {
+      const estimate = await estimateAt(9);
+      expect(estimate.color).toBe("red");
+      expect(estimate.reason).toContain("5.0 ft");
+    });
+
+    it("goes gray rather than replaying hour 0 once the series is spent",
+      async function () {
+        const estimate = await estimateAt(24);
+        expect(estimate.color).toBe("unknown");
+        expect(estimate.reason).not.toContain("ft");
+      });
+  });
+
 // The hourly is the seal's producer. If it ever wrote a value the refresh cron's
 // signalsFromStanding rejects, that cron would silently skip every beach — a
 // regression visible only as skipNoSeal= in a log line nobody reads.
@@ -2157,10 +2222,13 @@ describe("runFlagRecompute writes the estimateInputs seal", function () {
     const made = makeEnv(
       [makeBeachRow({ id: "osm-node-seal", nws_zone: "MIZ071" })],
       {
+        // No series, so resolveWaveInput falls through to the hour-0 scalar. A
+        // seal carrying a non-null wind is the wind-fallback block's case: wind
+        // is offered only where the resolved wave height is null.
         "waveinput:osm-node-seal": {
           waveHeightFt: 2.6,
           model: "noaa_glwu",
-          windSpeedMph: 12,
+          windSpeedMph: null,
           windGustMph: null,
           updated: "2026-07-15T15:00:00.000Z"
         }
@@ -2173,7 +2241,7 @@ describe("runFlagRecompute writes the estimateInputs seal", function () {
     // The national fetch failed, so the hourly decided this color with no alert
     // evidence at all — the fact the refresh cron needs to re-select the beach.
     expect(stored.estimateInputs.alertsResolved).toBe(false);
-    expect(stored.estimateInputs.windSpeedMph).toBe(12);
+    expect(stored.estimateInputs.windSpeedMph).toBeNull();
     expect(stored.estimateInputs.waterQualityAdvisory).toBeNull();
 
     const signals = signalsFromStanding(JSON.parse(JSON.stringify(stored)));

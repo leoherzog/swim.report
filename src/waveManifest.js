@@ -4,10 +4,10 @@
 // inside scripts/build-wave-kv.js on Deno, and is modelled on
 // src/layerManifest.js.
 //
-// The keys this pipeline writes are the only wave input src/rules.js sees, and
-// runFlagRecompute never reads waveinput.updated, so expiration is the entire
-// staleness control on the color path. A merely well-formed cycle is therefore not
-// enough: every checksum can match while the numbers describe a garbage plane, a
+// The keys this pipeline writes are the only wave input src/rules.js sees. Two
+// things bound their staleness: the absolute expiration below, and the hour index
+// runFlagRecompute takes into the series (src/waveInput.js). Neither reads
+// waveinput.updated. A merely well-formed cycle is therefore not enough: every checksum can match while the numbers describe a garbage plane, a
 // sentinel, or an hour that has already aged out. The gate answers "do I have
 // proof this cycle is decodable, intact, identity-checked and still fresh?" and
 // answers no whenever the proof is missing, malformed or merely absent.
@@ -21,10 +21,10 @@
 // Three tiers on one conjunct walk:
 //   fatal    — nothing about this cycle can be trusted. Write no KV at all.
 //   expired  — decodable and intact, but the lease it would grant is worthless.
-//              Write no KV. A cycle with 40 minutes of life left costs a full bulk
-//              write, buys almost nothing, and means the pipeline is more than six
-//              hours late, which the operator must see rather than have papered
-//              over.
+//              Write no KV. A cycle down to its last few hours of series costs a
+//              full bulk write, buys almost nothing, and means the pipeline has
+//              missed two consecutive occurrences, which the operator must see
+//              rather than have papered over.
 //   degraded — write, and warn. Less data than a clean cycle, but every number in
 //              it passed the identity and sentinel gates.
 //
@@ -33,8 +33,10 @@
 
 // Bump only alongside a breaking change to the manifest shape written by
 // scripts/build-wave-manifest.js. A cycle written under a different schemaVersion
-// is fatal, not degraded: this code cannot claim to understand it at all.
-export const WAVE_SCHEMA_VERSION = 1;
+// is fatal, not degraded: this code cannot claim to understand it at all. The
+// producer and this consumer run from one checkout in one workflow, so a bump
+// costs nothing beyond refusing a cycle left mid-flight across the change.
+export const WAVE_SCHEMA_VERSION = 2;
 
 // The artifact keys this code knows how to consume. The download list comes from
 // here and never from manifest.artifacts[].key, so a manifest describing a third
@@ -42,13 +44,24 @@ export const WAVE_SCHEMA_VERSION = 1;
 // every written filename stays a constant of this repo.
 export const EXPECTED_WAVE_ARTIFACTS = ["waveinput.ndjson", "waves.ndjson"];
 
-// Absolute lease granted to every emitted KV pair, measured from the model valid
-// time and not from the write clock. 7 h covers the 3 h cron interval with two
-// consecutive missed occurrences of margin.
+// Absolute leases granted to the emitted KV pairs, measured from the model valid
+// time and not from the write clock. Two, because the two record shapes carry
+// different amounts of time.
+//
+// A record carrying the hourly series is indexed at the hour being estimated
+// (src/waveInput.js), so it stays truthful for the whole span it describes and
+// its lease is that span: FORECAST_HOURS hours from the valid start.
+//
+// A wind-only record is one hour-0 sample with no series behind it, so ageing it
+// past a few hours would put a stale wind on the color path. It keeps the short
+// lease, which also covers every record written before the series existed.
+export const WAVE_SERIES_LEASE_SECONDS = 86400;
 export const WAVE_KV_LEASE_SECONDS = 25200;
 
-// Below this, writing is pointless and the lateness is the actual news.
-export const MIN_LEASE_SECONDS = 3600;
+// Below this much of the SERIES lease, writing is pointless and the lateness is
+// the actual news: the cycle is more than 21 h old, which is two consecutive
+// missed occurrences of the 8 h pipeline schedule.
+export const MIN_LEASE_SECONDS = 10800;
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
