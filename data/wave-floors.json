@@ -87,23 +87,27 @@
     "sha256:2df3c65045c0a808a61e45bcf4b2a5c4c0e602ec4ca2ba36d00a11d1b7a8a633": {
       "_comment": [
         "The grid set carrying noaa_nwps_sew, the Salish Sea NWPS nest, plus the waterClasses and",
-        "windFallback digest inputs. No cycle has sampled this set yet, so every floor below is null:",
-        "a floor scaled from an unobserved count is the invented number this file exists to refuse.",
+        "windFallback digest inputs. SEEDED from cycle 20260909T2300Z-g20260909T18Z-f06e1b2, the",
+        "first withheld cycle over this set, at 0.75x each measured count, rounded down.",
         "",
-        "Status \"bootstrap\" withholds auto-publish exactly as an absent entry does. It is here to",
-        "record that the grid set is known and its floors are pending, not to get a cycle past the",
-        "refusal."
+        "Cross-checked against D1 before commit: 9070 flag-worthy rows (7395 ocean, 1675 great_lake),",
+        "matching the manifest's beaches.total 9070; resolved 8302 (noaa_glwu 1675, noaa_gfswave 5849,",
+        "noaa_gfswave_arctic 225, noaa_nwps_sew 553). The three carried-over grids resolved exactly",
+        "their previous live counts. The Seattle box holds 861 ocean rows; 608 fell through to",
+        "noaa_nwps_sew and the other 253 are outer-coast beaches gfswave resolved first.",
+        "",
+        "noaa_nwps_sew publishes on demand, so a cycle with no Seattle run reports it unplanned and",
+        "the per-grid gates skip it; this floor scores only a cycle that sampled the nest."
       ],
-      "status": "bootstrap",
-      "note": "A human seeds this entry from the first withheld manifest for this digest: dispatch waves.yml with publish true, cross-check the manifest's beaches.resolved and per-grid split against D1, then commit status \"seeded\" with seededFromCycleId set to that manifest cycleId and each floor at 0.75x the observed count, rounded down.",
-      "seededFromCycleId": null,
-      "waveinputRecords": null,
-      "wavesRecords": null,
+      "status": "seeded",
+      "seededFromCycleId": "20260909T2300Z-g20260909T18Z-f06e1b2",
+      "waveinputRecords": 6226,
+      "wavesRecords": 6226,
       "grids": {
-        "noaa_glwu": null,
-        "noaa_gfswave": null,
-        "noaa_gfswave_arctic": null,
-        "noaa_nwps_sew": null
+        "noaa_glwu": 1256,
+        "noaa_gfswave": 4386,
+        "noaa_gfswave_arctic": 168,
+        "noaa_nwps_sew": 414
       }
     }
   }
