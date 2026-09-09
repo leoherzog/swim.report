@@ -13,7 +13,11 @@ import {
   OMR_URL,
   OMR_LABEL
 } from "../src/officialSources/nwsOmr.js";
-import { resolveSiteForBeach, scrapeOfficialFlagFromResult } from "../src/officialSources/index.js";
+import {
+  resolveSiteForBeach,
+  scrapeOfficialFlagFromResult,
+  scrapeReadingFromResult
+} from "../src/officialSources/index.js";
 import { installFetch } from "./helpers/fetch.js";
 import { makeBeach } from "./helpers/beach.js";
 
@@ -95,7 +99,7 @@ describe("normalizeOmrFlagColor", function () {
 });
 
 describe("parseOmrBeachReport", function () {
-  it("parses the live table into the posted colors, omitting None rows", function () {
+  it("parses the live table into the posted colors", function () {
     const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
     expect(sites).not.toBe(null);
     const byId = sitesById(sites);
@@ -107,9 +111,56 @@ describe("parseOmrBeachReport", function () {
     expect(byId["grand-haven-state-park"].color).toBe("red");
     expect(byId["holland-state-park"].color).toBe("red");
 
-    // Saugatuck reported "None" (M ft) -> omitted entirely, no green guess.
-    expect(byId["saugatuck-oval-beach"]).toBe(undefined);
-    expect(sites.length).toBe(6);
+    // Saugatuck reported "None" -> null color, never a green guess.
+    expect(byId["saugatuck-oval-beach"].color).toBe(null);
+    expect(sites.length).toBe(7);
+  });
+
+  it("carries the water-temperature and wave-height columns per site", function () {
+    const byId = sitesById(parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO));
+    expect(byId["holland-state-park"].waterTempF).toBe(68);
+    expect(byId["holland-state-park"].waveHeightFt).toBe(4);
+    expect(byId["grand-haven-state-park"].waterTempF).toBe(72);
+    expect(byId["grand-haven-state-park"].waveHeightFt).toBe(5);
+  });
+
+  it("keeps a None row that still carries a reading, with a null color", function () {
+    // Saugatuck: "70 F  M ft  None" — no posted flag, no wave, but a real
+    // water temperature, which is a reading worth publishing.
+    const site = sitesById(parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO))[
+      "saugatuck-oval-beach"
+    ];
+    expect(site.color).toBe(null);
+    expect(site.waterTempF).toBe(70);
+    expect(site.waveHeightFt).toBe(null);
+  });
+
+  it("reports Duck Lake State Park, which the product lists between Mears and Muskegon", function () {
+    const sites = parseOmrBeachReport(buildProduct([
+      "Duck Lake State Park           70 F       1 ft        Green"
+    ]), NOW_ISO);
+    const site = sitesById(sites)["duck-lake-state-park"];
+    expect(site.color).toBe("green");
+    expect(site.waterTempF).toBe(70);
+    expect(site.waveHeightFt).toBe(1);
+  });
+
+  it("maps an M in either numeric column to a null reading, never zero", function () {
+    const byId = sitesById(parseOmrBeachReport(buildProduct([
+      "Holland State Park             M F        M ft        Green"
+    ]), NOW_ISO));
+    expect(byId["holland-state-park"].color).toBe("green");
+    expect(byId["holland-state-park"].waterTempF).toBe(null);
+    expect(byId["holland-state-park"].waveHeightFt).toBe(null);
+  });
+
+  it("drops an implausible reading rather than rendering it (column shift)", function () {
+    const byId = sitesById(parseOmrBeachReport(buildProduct([
+      "Holland State Park             2026 F     88 ft       Green"
+    ]), NOW_ISO));
+    expect(byId["holland-state-park"].color).toBe("green");
+    expect(byId["holland-state-park"].waterTempF).toBe(null);
+    expect(byId["holland-state-park"].waveHeightFt).toBe(null);
   });
 
   it("emits names[] and lat/lon on each site for resolution", function () {
@@ -178,7 +229,7 @@ describe("parseOmrBeachReport", function () {
     const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
     const ids = sites.map(function (s) { return s.siteId; });
     expect(ids.indexOf("disclaimer")).toBe(-1);
-    expect(sites.length).toBe(6);
+    expect(sites.length).toBe(7);
   });
 
   it("returns null for null / empty input", function () {
@@ -360,7 +411,7 @@ describe("nwsOmr end-to-end resolution", function () {
     expect(site.siteId).toBe("holland-state-park");
   });
 
-  it("gives a None-reporting beach (Saugatuck) no official flag", function () {
+  it("gives a None-reporting beach (Saugatuck) no official flag but keeps its reading", function () {
     const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
     const result = {
       perBeach: true, sites: sites, source: OMR_URL, sources: [OMR_URL], updated: ISSUANCE
@@ -368,8 +419,46 @@ describe("nwsOmr end-to-end resolution", function () {
     const beach = makeBeach({
       name: "Oval Beach", park_name: "Saugatuck Oval Beach", lat: 42.6640, lon: -86.2170
     });
-    expect(resolveSiteForBeach(beach, sites)).toBe(null);
+    expect(resolveSiteForBeach(beach, sites).color).toBe(null);
     expect(scrapeOfficialFlagFromResult(beach, nwsOmr, result)).toBe(null);
+    const reading = scrapeReadingFromResult(beach, nwsOmr, result);
+    expect(reading.waterTempF).toBe(70);
+    expect(reading.waveHeightFt).toBe(null);
+    expect(reading.observedIso).toBe(ISSUANCE);
+    expect(reading.siteName).toBe("Saugatuck Oval Beach");
+  });
+
+  it("resolves a flagged beach to both an official flag and its reading", function () {
+    const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
+    const result = {
+      perBeach: true, sites: sites, source: OMR_URL, sources: [OMR_URL], updated: ISSUANCE
+    };
+    const beach = makeBeach({
+      name: "Holland State Park", park_name: "Holland State Park",
+      lat: 42.7739, lon: -86.2090
+    });
+    expect(scrapeOfficialFlagFromResult(beach, nwsOmr, result).color).toBe("red");
+    const reading = scrapeReadingFromResult(beach, nwsOmr, result);
+    expect(reading.waterTempF).toBe(68);
+    expect(reading.waveHeightFt).toBe(4);
+    expect(reading.scraperId).toBe(nwsOmr.id);
+    expect(reading.sourceLabel).toBe(OMR_LABEL);
+    expect(reading.source).toBe(OMR_URL);
+  });
+
+  it("publishes no reading when the resolved site carries neither number", function () {
+    const sites = parseOmrBeachReport(buildProduct([
+      "Holland State Park             M F        M ft        Red"
+    ]), NOW_ISO);
+    const result = {
+      perBeach: true, sites: sites, source: OMR_URL, sources: [OMR_URL], updated: ISSUANCE
+    };
+    const beach = makeBeach({
+      name: "Holland State Park", park_name: "Holland State Park",
+      lat: 42.7739, lon: -86.2090
+    });
+    expect(scrapeOfficialFlagFromResult(beach, nwsOmr, result).color).toBe("red");
+    expect(scrapeReadingFromResult(beach, nwsOmr, result)).toBe(null);
   });
 });
 
@@ -408,7 +497,7 @@ describe("nwsOmr.scrape", function () {
     expect(result.perBeach).toBe(true);
     expect(result.source).toBe(OMR_URL);
     expect(result.updated).toBe(ISSUANCE);
-    expect(result.sites.length).toBe(6);
+    expect(result.sites.length).toBe(7);
     // Newest id was chosen for the second fetch.
     expect(calls.length).toBe(2);
     expect(String(calls[1].url).indexOf("newest-id")).not.toBe(-1);

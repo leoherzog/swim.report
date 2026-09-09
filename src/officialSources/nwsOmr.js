@@ -18,12 +18,23 @@
 //   2. GET /products/{id} -> productText (plain text inside JSON)
 // every request sends the required NWS User-Agent (reused from src/clients/nws.js).
 //
+// Each table row carries three observed columns: Water Temp (whole F), Wave
+// Height (whole ft) and Flag Color. "M" marks a missing value in either numeric
+// column.
+//
 // COLOR MAPPING (the Flag Color column is a POSTED flag, 1:1):
 //   Green  -> green
 //   Yellow -> yellow
 //   Red    -> red
-//   None / M ft / anything unrecognized -> NO DATA (site omitted, never a color)
+//   None / M / anything unrecognized -> no posted flag (color null, never a color)
 // There is no double-red tier in this product.
+//
+// The two numeric columns ride along as site.waterTempF / site.waveHeightFt:
+// in-situ morning observations at the beach itself, which is better provenance
+// than the NDBC buoy up to 25 km away that otherwise fills the water-temperature
+// tile. They are display-only and reach src/rules.js through nothing. A row
+// whose Flag Color is "None" still carries them, so it is emitted with a null
+// color rather than dropped.
 //
 // updated = the product's issuanceTime (the observations are taken in the
 // morning and "may not be representative of conditions later in the day", so
@@ -91,6 +102,14 @@ const SITE_DEFS = [
     radiusMi: OMR_MATCH_RADIUS_MI
   },
   {
+    siteId: "duck-lake-state-park",
+    label: "Duck Lake State Park",
+    names: ["duck lake state park"],
+    lat: 43.3410,
+    lon: -86.4180,
+    radiusMi: OMR_MATCH_RADIUS_MI
+  },
+  {
     siteId: "muskegon-state-park",
     label: "Muskegon State Park",
     names: ["muskegon state park"],
@@ -139,7 +158,33 @@ const SITE_DEFS = [
 // The trailing flag word is a single alpha token, and "None" or an unknown token
 // normalizes to null.
 const OMR_ROW_RE =
-  /^(.+?)\s+(?:\d+|M)\s*F\s+(?:\d+|M)\s*ft\s+([A-Za-z]+)\s*$/;
+  /^(.+?)\s+(\d+|M)\s*F\s+(\d+|M)\s*ft\s+([A-Za-z]+)\s*$/;
+
+// Plausibility rails for the two observed columns, in their reported units. They
+// exist to catch a column shift rather than to judge the observation: a fixed-
+// width table that gains a column would otherwise feed a station id or a year
+// into the water-temperature tile as a temperature.
+const OMR_MIN_WATER_TEMP_F = 32;
+const OMR_MAX_WATER_TEMP_F = 100;
+const OMR_MAX_WAVE_HEIGHT_FT = 30;
+
+// Pure. One numeric table cell -> a finite number inside [0, max], or null. "M"
+// (the product's missing marker), a non-integer cell and an out-of-range value
+// all yield null, so a missing reading is always absent rather than zero.
+export function omrReadingNumber(raw, min, max) {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const value = Number(trimmed);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    return null;
+  }
+  return value;
+}
 
 // Pure. Map a raw Flag Color word to a known posted-flag color, or null. Uses an
 // explicit allowlist (never a prototype-chain membership test) so a stray value
@@ -185,7 +230,10 @@ function siteDefForRowName(rawName) {
 //     misread as a row.
 //   - A row not matching OMR_ROW_RE is skipped.
 //   - A row naming an unknown beach is skipped.
-//   - A row whose flag color is None or unrecognized is omitted, never guessed.
+//   - A row whose flag color is None or unrecognized gets color null, never a
+//     guess. It is still emitted when it carries a reading, since "no posted
+//     flag" and "no observation" are different states; a colorless row with
+//     neither reading carries nothing and is dropped.
 //   - Duplicate rows for the same site keep the first; the guard is defensive.
 export function parseOmrBeachReport(text, nowIso) {
   if (typeof text !== "string" || text.length === 0) {
@@ -236,9 +284,13 @@ export function parseOmrBeachReport(text, nowIso) {
       console.log("nwsOmr: unrecognized beach row, skipping: " + rawName);
       continue;
     }
-    const color = normalizeOmrFlagColor(match[2]);
-    if (color === null) {
-      // "None"/"M"/unknown flag word => no posted flag for this beach.
+    const color = normalizeOmrFlagColor(match[4]);
+    const waterTempF = omrReadingNumber(
+      match[2], OMR_MIN_WATER_TEMP_F, OMR_MAX_WATER_TEMP_F
+    );
+    const waveHeightFt = omrReadingNumber(match[3], 0, OMR_MAX_WAVE_HEIGHT_FT);
+    if (color === null && waterTempF === null && waveHeightFt === null) {
+      // "None"/"M"/unknown flag word and both columns missing: nothing to report.
       continue;
     }
     if (seen[def.siteId]) {
@@ -247,7 +299,11 @@ export function parseOmrBeachReport(text, nowIso) {
     seen[def.siteId] = true;
     sites.push({
       siteId: def.siteId,
+      // null when the row posted no flag. scrapeOfficialFlagFromResult resolves
+      // that to no official record, while the readings below still publish.
       color: color,
+      waterTempF: waterTempF,
+      waveHeightFt: waveHeightFt,
       reason: "Official flag reported by " + OMR_LABEL + " for " + def.label,
       // The report site's own name. A beach whose display name differs from it is
       // reading a neighboring site's posted flag, which the card must say out

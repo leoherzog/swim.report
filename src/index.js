@@ -27,7 +27,12 @@ import {
   parseNearestActiveWebcam,
   WEBCAM_FETCH_LIMIT
 } from "./clients/windyWebcams.js";
-import { findScraper, scrapeOfficialFlagFromResult } from "./officialSources/index.js";
+import {
+  findScraper,
+  scrapeOfficialFlagFromResult,
+  scrapeReadingFromResult
+} from "./officialSources/index.js";
+import { READING_MAX_AGE_MS } from "./officialReading.js";
 import { findWqFloorSource, scrapeWqFloorFromResult } from "./wqFloor/index.js";
 import { WIND_SOURCE, waveSourceLabel, waveSourceUrl } from "./waveModels.js";
 import { resolveWaveInput } from "./waveInput.js";
@@ -502,6 +507,7 @@ async function runFlagRecompute(env) {
   const nowIso = new Date().toISOString();
   let estimateCount = 0;
   let officialCount = 0;
+  let readingCount = 0;
   let failureCount = 0;
 
   // Calibration signal (migration 0006): capture per-beach estimate and official
@@ -937,6 +943,31 @@ async function runFlagRecompute(env) {
             });
             officialCount = officialCount + 1;
           }
+          // Point-in-time observations ride their own key, resolved independently
+          // of the flag: a site the source reports with no posted flag still
+          // publishes a water temperature and a wave height, and the "official:"
+          // record above is absent for it.
+          //
+          // The expiry is ABSOLUTE, anchored to the observation instant rather
+          // than the cron tick, so a morning reading dies four hours after it was
+          // taken no matter which run picked it up and a re-scrape cannot extend
+          // its life. Cloudflare rejects an expiration under 60 s out, and a
+          // reading that close to its horizon is not worth publishing, so the
+          // write is skipped instead.
+          const reading = scrapeReadingFromResult(beach, group.scraper, result);
+          if (reading !== null) {
+            const expiration = Math.floor(
+              (Date.parse(reading.observedIso) + READING_MAX_AGE_MS) / 1000
+            );
+            if (expiration - Math.floor(Date.now() / 1000) >= 60) {
+              await env.FLAGS.put(
+                "reading:" + beach.id,
+                JSON.stringify(reading),
+                { expiration: expiration }
+              );
+              readingCount = readingCount + 1;
+            }
+          }
         });
       } catch (err) {
         console.log("index: official scrape failed: " + err.message);
@@ -1035,6 +1066,7 @@ async function runFlagRecompute(env) {
       "index: flag recompute complete, beaches=" + String(beaches.length) +
       " estimates=" + String(estimateCount) +
       " officials=" + String(officialCount) +
+      " readings=" + String(readingCount) +
       " history=" + String(historyCount) +
       " failures=" + String(failureCount) +
       " hot=" + String(hotCount) +

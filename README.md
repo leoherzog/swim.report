@@ -463,7 +463,8 @@ classification (offline)](#discovery-and-classification-offline)).
   share a TTL so an estimate can never outlive the posted flag it is weighed against. A
   scraper's optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs`
   and `readingNote`, plus the resolver's `reportedFor`, ride along as display-side hints, not
-  TTLs. `waveinput:` keys expire on an
+  TTLs. A scraped point-in-time observation is written separately to `reading:`, expiring on
+  an absolute schedule 4 h past the observation instant. `waveinput:` keys expire on an
   absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
   required, and a missing key — or one whose series is spent — just means the estimate falls
   back to wind or `unknown`. As its
@@ -750,7 +751,7 @@ returns the first scraper whose `matches(beach)` is true:
 | South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version") | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data. A beach naming no pole resolves to the nearest one and carries `reportedFor`, so the card names the pole it borrowed |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion, never an inferred green |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red; records >36 h old dropped; a beach reports green only when its own Surf row is fresh, so a green resting solely on a water-quality row is no data rather than a false green |
-| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
+| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading:` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
 | Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
 | PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only |
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | Zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
@@ -846,6 +847,7 @@ nothing to report must never return null, or it would raise a false alert.
            // (b) multi-site, each matched beach resolving to at most one site:
            //   { perBeach: true, sites: [{ siteId, color, reason,
            //     names: ["lowercase substrings"], lat, lon, radiusMi,
+           //     waterTempF, waveHeightFt /* optional; see "Observed readings" */,
            //     reportSiteName /* optional; see "Transferred readings" */,
            //     updated /* optional ISO; overrides result updated */ }],
            //     source: url, sources: [url], updated: nowIso }
@@ -864,8 +866,22 @@ nothing to report must never return null, or it would raise a false alert.
    With shape (b), each matched beach is resolved to a site by `resolveSiteForBeach`, defined
    in `src/officialSources/util.js`: name substrings win over proximity, then nearest site
    within its `radiusMi` (default 1.5 mi). A beach that resolves to no site gets no official
-   flag — the correct outcome, not an error. Sites without a confirmed color must be omitted
-   from `sites`. Build the shape-(b) object with `perBeachResult(sites, source, updated)`.
+   flag — the correct outcome, not an error. A site without a confirmed color carries
+   `color: null`, which resolves to no official flag silently; omit it from `sites` entirely
+   unless it carries an observed reading. Build the shape-(b) object with
+   `perBeachResult(sites, source, updated)`.
+
+   **Observed readings (`waterTempF`, `waveHeightFt`).** A source that publishes point-in-time
+   observations alongside its posted flag puts them on the site, in °F and feet.
+   `scrapeReadingFromResult` resolves them independently of the color into the `reading:` KV
+   record, so a site reporting no flag still publishes its numbers. The detail page renders
+   them as "at a glance" tiles: the wave height beside the estimate's modeled "Waves now", and
+   the water temperature ahead of the NDBC buoy reading, since an observation taken at the
+   beach beats one from a station up to 25 km offshore. Both disappear four hours after the
+   observation rather than carrying a stale warning — a morning water temperature is not a
+   claim about the afternoon. They are display-only: they reach no rule and bump no
+   `RULES_VERSION`. Range-check them in the scraper, so a shifted column cannot render a
+   station id as a temperature.
 
    **Transferred readings (`reportSiteName`).** A shape-(b) site that is a real reporting
    location whose flag also serves nearby beaches declares `reportSiteName`, the site's own

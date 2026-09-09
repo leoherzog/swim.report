@@ -13,6 +13,7 @@ import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { ROW_TRANSITION_SCRIPT } from "./rowTransitionScript.js";
 import { SEVERITY_RANK, decidedAlertDetails, alertInEffectAt, normalizeColor } from "../rules.js";
 import { alertsCheckable } from "../alertsCheckable.js";
+import { READING_MAX_AGE_MS } from "../officialReading.js";
 import { verdictSentence } from "./verdict.js";
 import { nextSunEvent, utcClockLabel } from "./sun.js";
 import {
@@ -903,6 +904,51 @@ function waterTempProvenance(waterTemp) {
   return caption + renderTooltipFor(WATER_TEMP_TOOLTIP_ID, text);
 }
 
+// The ids the official morning reading's tooltips anchor to; one detail page
+// carries at most one such reading.
+const READING_TEMP_TOOLTIP_ID = "reading-temp";
+const READING_WAVE_TOOLTIP_ID = "reading-wave";
+
+// Pure. The official point-in-time reading a source scraped this morning
+// ("reading:" KV), or null when there is none to show. The cron gives the key an
+// absolute expiry at READING_MAX_AGE_MS past the observation, so this check
+// normally never fires; it is what guarantees a key that outlived its horizon —
+// a KV expiry runs late, an old record is replayed — is dropped rather than
+// presented as this afternoon's water. A missing or unparseable observedIso
+// yields null for the same reason it does for the buoy reading.
+function usableReading(reading, nowIso) {
+  if (!reading || typeof reading !== "object") {
+    return null;
+  }
+  if (typeof reading.observedIso !== "string" ||
+      Number.isNaN(Date.parse(reading.observedIso)) ||
+      isStale(nowIso, reading.observedIso, READING_MAX_AGE_MS)) {
+    return null;
+  }
+  return reading;
+}
+
+// Provenance under an official morning reading: the site the observation was
+// taken at and how old it is, with a tooltip naming the source that published
+// it. The site name is always rendered, so a beach reading a neighboring site's
+// observation says whose it is. A record naming no site yields the age alone,
+// with no tooltip.
+function readingProvenance(reading, tooltipId) {
+  const site = typeof reading.siteName === "string" ? reading.siteName.trim() : "";
+  const label = typeof reading.sourceLabel === "string" ? reading.sourceLabel.trim() : "";
+  const idAttr = site ? (" id=\"" + tooltipId + "\"") : "";
+  const lead = site ? (site + " · ") : "";
+  const caption = "<span class=\"water-temp-src\"" + idAttr + ">" + escapeHtml(lead) +
+    renderRelativeTime(reading.observedIso) + "</span>";
+  if (!site) {
+    return caption;
+  }
+  const text = "Observed at " + site +
+    (label ? (" and published by " + label) : "") +
+    ". A morning reading, not a live one.";
+  return caption + renderTooltipFor(tooltipId, text);
+}
+
 // Rough distance label for a row, e.g. "<1 mi" or "~12 mi". Distances come
 // from IP-level geolocation, so anything more precise would be false accuracy.
 function formatMiles(distance) {
@@ -1586,8 +1632,9 @@ function renderSunTile(beach, nowIso) {
 // (src/flagInputs.js), so the tile reads it from the beach row through the same
 // shared predicate the cron uses. A beach whose alerts were never checkable has
 // no alerts tile: "none active" would be a claim nobody made.
-function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
+function renderAtAGlance(beach, estimate, waterTemp, reading, nowIso) {
   const tiles = [];
+  const morning = usableReading(reading, nowIso);
 
   const hasWave = !!estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt);
@@ -1600,16 +1647,43 @@ function renderAtAGlance(beach, estimate, waterTemp, nowIso) {
     }));
   }
 
-  // The reading's station, distance and age are the tile's source line, tooltip
-  // included, so a temperature read up to 25 km away always says so.
-  const tempLabel = waterTempLabel(waterTemp, nowIso);
-  if (tempLabel) {
+  // The observed morning wave height sits BESIDE the modeled "Waves now" tile
+  // rather than replacing it: one is a measurement taken hours ago, the other a
+  // model value for this hour, and the reader wants both. Whole feet, as
+  // reported — a .0 here would claim a precision the source does not publish.
+  if (morning && typeof morning.waveHeightFt === "number" &&
+      isFinite(morning.waveHeightFt)) {
+    tiles.push(renderGlanceTile({
+      icon: "water",
+      value: String(morning.waveHeightFt) + " ft",
+      caption: "Waves this morning",
+      sourceHtml: readingProvenance(morning, READING_WAVE_TOOLTIP_ID)
+    }));
+  }
+
+  // An official reading taken at the beach wins over the NDBC buoy, which may
+  // sit up to 25 km offshore. Either way the tile's source line and tooltip name
+  // where the water was measured.
+  if (morning && typeof morning.waterTempF === "number" &&
+      isFinite(morning.waterTempF)) {
     tiles.push(renderGlanceTile({
       icon: "temperature-half",
-      value: tempLabel,
+      value: String(Math.round(morning.waterTempF)) + "°F",
       caption: "Water temperature",
-      sourceHtml: waterTempProvenance(waterTemp)
+      sourceHtml: readingProvenance(morning, READING_TEMP_TOOLTIP_ID)
     }));
+  } else {
+    // The reading's station, distance and age are the tile's source line, tooltip
+    // included, so a temperature read up to 25 km away always says so.
+    const tempLabel = waterTempLabel(waterTemp, nowIso);
+    if (tempLabel) {
+      tiles.push(renderGlanceTile({
+        icon: "temperature-half",
+        value: tempLabel,
+        caption: "Water temperature",
+        sourceHtml: waterTempProvenance(waterTemp)
+      }));
+    }
   }
 
   const risk = estimate ? estimate.ripCurrentRisk : null;
@@ -1706,6 +1780,10 @@ export function renderDetailPage(data) {
   // until the water-temperature cron writes it, so default to null; the tile
   // reads "No data" when it is null or stale.
   const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
+  // An official source's morning water-temperature and wave-height observation
+  // ("reading:" KV). Display-only and never a flag input, like the buoy reading
+  // it outranks. Absent for every beach no scraper reports observations for.
+  const reading = (data.reading === undefined || data.reading === null) ? null : data.reading;
   // Active water-quality advisory written by the hourly cron. Absent means no
   // advisory stands, never a clean reading.
   const wqfloor = (data.wqfloor === undefined || data.wqfloor === null) ? null : data.wqfloor;
@@ -1807,7 +1885,7 @@ export function renderDetailPage(data) {
     "</div>" +
     "</section>";
 
-  const glanceHtml = renderAtAGlance(beach, estimate, waterTemp, nowIso);
+  const glanceHtml = renderAtAGlance(beach, estimate, waterTemp, reading, nowIso);
 
   const officialHtml = renderOfficialCard(official, nowIso);
   const estimateHtml = renderEstimateCard(estimate, nowIso);

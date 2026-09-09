@@ -399,6 +399,95 @@ describe("at a glance tiles", () => {
   });
 });
 
+// An official source's morning water-temperature and wave-height observation
+// ("reading:" KV). Display-only: it adds tiles and outranks the buoy, and never
+// touches a flag color.
+describe("at a glance: the official morning reading", () => {
+  // 1 h before NOW_ISO — inside READING_MAX_AGE_MS.
+  const OBSERVED = "2026-07-05T11:00:00.000Z";
+  // 5 h before NOW_ISO — past it.
+  const EXPIRED = "2026-07-05T07:00:00.000Z";
+
+  function readingWith(extra) {
+    return Object.assign({
+      beachId: "osm-way-505668572",
+      waterTempF: 68,
+      waveHeightFt: 1,
+      observedIso: OBSERVED,
+      siteName: "Holland State Park",
+      sourceLabel: "NWS Grand Rapids Lake Michigan Beach Report",
+      source: "https://www.weather.gov/grr/",
+      scraperId: "nws-omr-grr"
+    }, extra);
+  }
+
+  function glanceOf(html) {
+    return html.slice(html.indexOf("<section class=\"at-a-glance"));
+  }
+
+  it("shows the observed wave height beside the modeled one, in whole feet", () => {
+    const glance = glanceOf(render({
+      reading: readingWith({}),
+      estimate: estimateWith({ waveHeightFt: 2.4 })
+    }));
+    expect(glance).toContain("Waves now");
+    expect(glance).toContain("2.4 ft");
+    expect(glance).toContain("Waves this morning");
+    expect(glance).toContain("1 ft");
+  });
+
+  it("outranks the NDBC buoy for water temperature and names the site instead", () => {
+    const glance = glanceOf(render({
+      reading: readingWith({ waterTempF: 68 }),
+      waterTemp: {
+        tempF: 72,
+        observedIso: OBSERVED,
+        station: { id: "45161", name: "Muskegon, MI", distanceKm: 5.0 }
+      }
+    }));
+    expect(glance).toContain("68°F");
+    expect(glance).not.toContain("72°F");
+    expect(glance).toContain("Holland State Park");
+    expect(glance).not.toContain("Muskegon, MI");
+  });
+
+  it("falls back to the buoy when the reading carries no temperature", () => {
+    const glance = glanceOf(render({
+      reading: readingWith({ waterTempF: null }),
+      waterTemp: {
+        tempF: 72,
+        observedIso: OBSERVED,
+        station: { id: "45161", name: "Muskegon, MI", distanceKm: 5.0 }
+      }
+    }));
+    expect(glance).toContain("72°F");
+    expect(glance).toContain("Muskegon, MI");
+  });
+
+  it("drops both tiles past the 4 h horizon rather than warning about them", () => {
+    const html = render({
+      reading: readingWith({ observedIso: EXPIRED }),
+      beach: beachWith({ lat: null, lon: null })
+    });
+    expect(html.indexOf("<section class=\"at-a-glance")).toBe(-1);
+  });
+
+  it("drops a reading whose observed instant does not parse", () => {
+    const html = render({
+      reading: readingWith({ observedIso: "not a date" }),
+      beach: beachWith({ lat: null, lon: null })
+    });
+    expect(html.indexOf("<section class=\"at-a-glance")).toBe(-1);
+  });
+
+  it("publishes a reading for a beach with no posted flag at all", () => {
+    const glance = glanceOf(render({ reading: readingWith({}), official: null }));
+    expect(glance).toContain("68°F");
+    expect(glance).toContain("Waves this morning");
+    expect(glance).not.toContain("official-card");
+  });
+});
+
 describe("detail-page section headings and order", () => {
   const beach = beachWith({
     lat: 42.775,

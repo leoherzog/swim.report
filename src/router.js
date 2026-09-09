@@ -429,22 +429,24 @@ async function handleDetail(env, ctx, beachId) {
   }
   touchLastViewed(env, ctx, beach);
   // The 24 h wave-forecast series, the NDBC water-temperature reading, the
-  // water-quality advisory and the nearby-beach rows are all detail-page-only
-  // reads (the list page must never gain a per-row KV get, and /api/flag must
-  // not gain the advisory). Fetched alongside the flag/official reads so the
-  // extra keys cost no added latency; the nearby rows' own flags are one more
-  // bulk get per family behind them.
+  // official morning reading, the water-quality advisory and the nearby-beach
+  // rows are all detail-page-only reads (the list page must never gain a per-row
+  // KV get, and /api/flag must not gain the advisory). Fetched alongside the
+  // flag/official reads so the extra keys cost no added latency; the nearby rows'
+  // own flags are one more bulk get per family behind them.
   const results = await Promise.all([
     readFlagAndOfficial(env, beachId),
     env.FLAGS.get("waves:" + beachId, { type: "json" }),
     env.FLAGS.get("watertemp:" + beachId, { type: "json" }),
     nearbyBeaches(env, beach),
-    env.FLAGS.get("wqfloor:" + beachId, { type: "json" })
+    env.FLAGS.get("wqfloor:" + beachId, { type: "json" }),
+    env.FLAGS.get("reading:" + beachId, { type: "json" })
   ]);
   const data = results[0];
   const waves = results[1];
   const waterTemp = results[2];
   const wqfloor = results[4];
+  const reading = results[5];
   const nearby = await attachNearbyFlags(env, results[3]);
   const nowIso = new Date().toISOString();
   const html = renderDetailPage({
@@ -453,6 +455,7 @@ async function handleDetail(env, ctx, beachId) {
     official: data.official,
     waves: waves,
     waterTemp: waterTemp,
+    reading: reading,
     wqfloor: wqfloor,
     nearby: nearby,
     nowIso: nowIso

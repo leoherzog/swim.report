@@ -143,6 +143,14 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       if (!site) {
         return null;
       }
+      if (site.color === null) {
+        // The source reported this site with no posted flag. A documented state,
+        // not a malformed value, so it is silent: a scraper whose table always
+        // carries an unflagged site would otherwise log every hour forever. The
+        // site may still carry readings, which scrapeReadingFromResult publishes
+        // on its own key.
+        return null;
+      }
       if (OFFICIAL_COLORS.indexOf(site.color) === -1) {
         console.log(
           "officialSources: invalid site color from " + scraper.id +
@@ -223,6 +231,63 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
   } catch (err) {
     console.log(
       "officialSources: resolve failed for " + scraper.id + ": " + err.message
+    );
+    return null;
+  }
+}
+
+// Pure (no fetch). Resolves the point-in-time observations a scrape result
+// carries for ONE beach, independent of whether that beach got a flag: a site
+// reporting no posted flag still publishes its water temperature and wave
+// height, and a site whose flag was rejected must not drag its readings down
+// with it. Returns an OfficialReading (PLAN.md section 6) or null.
+//
+// Readings are display-only. They never reach src/rules.js, never override a
+// color, and carry no color of their own — so unlike the flag path there is no
+// severity to validate, only finiteness and provenance.
+//
+// Both numbers are optional and independently absent; a site with neither
+// yields null rather than a record nobody can render. observedIso is the site's
+// own timestamp when it has one, else the result-level updated, and must parse:
+// the renderer drops a reading past READING_MAX_AGE_MS, which an unparseable
+// instant would silently defeat.
+export function scrapeReadingFromResult(beach, scraper, result) {
+  try {
+    if (!result || result.perBeach !== true) {
+      return null;
+    }
+    const site = resolveSiteForBeach(beach, result.sites);
+    if (!site) {
+      return null;
+    }
+    const waterTempF = isFiniteNumber(site.waterTempF) ? site.waterTempF : null;
+    const waveHeightFt = isFiniteNumber(site.waveHeightFt) ? site.waveHeightFt : null;
+    if (waterTempF === null && waveHeightFt === null) {
+      return null;
+    }
+    const observedIso = typeof site.updated === "string" && site.updated.length > 0
+      ? site.updated
+      : result.updated;
+    if (typeof observedIso !== "string" || Number.isNaN(Date.parse(observedIso))) {
+      return null;
+    }
+    const record = {
+      beachId: beach.id,
+      waterTempF: waterTempF,
+      waveHeightFt: waveHeightFt,
+      observedIso: observedIso,
+      // The reporting site's own name, always rendered, so a beach reading a
+      // neighboring site's observations says whose they are without needing the
+      // flag card's reportedFor comparison.
+      siteName: typeof site.reportSiteName === "string" ? site.reportSiteName : "",
+      sourceLabel: typeof scraper.label === "string" ? scraper.label : "",
+      source: result.source,
+      scraperId: scraper.id
+    };
+    return record;
+  } catch (err) {
+    console.log(
+      "officialSources: reading resolve failed for " + scraper.id + ": " + err.message
     );
     return null;
   }

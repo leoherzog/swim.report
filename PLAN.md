@@ -376,6 +376,56 @@ independent of the offline wave cycle in every
 respect: a different upstream, a per-station observedIso time basis rather than one
 cycle-wide valid time, and no path into a flag color.
 
+### OfficialReading (KV value under "reading:" + beachId)
+
+    {
+      "beachId": "osm-way-505668572",
+      "waterTempF": 68,              // number | null — observed water temperature (°F)
+      "waveHeightFt": 1,             // number | null — observed wave height (ft)
+      "observedIso": "2026-09-08T15:03:00+00:00", // when the source took the observation
+      "siteName": "Holland State Park",           // the reporting site's own name
+      "sourceLabel": "NWS Grand Rapids Lake Michigan Beach Report",
+      "source": "https://www.weather.gov/grr/",
+      "scraperId": "nws-omr-grr"
+    }
+
+The point-in-time observations an official source publishes ALONGSIDE a posted flag, kept on
+their own key rather than folded into OfficialFlag because the two resolve independently: a
+site the source reports with no posted flag (nwsOmr's "None" rows) has no OfficialFlag at
+all and still publishes readings, and a site whose color is rejected must not drag its
+numbers down with it. Written by the hourly cron from scrapeReadingFromResult (section 6),
+which is the only producer.
+
+Both numbers are optional and independently absent; a record with neither is never written.
+Display-only in the strongest sense: it carries no color, never reaches src/rules.js, and
+never bumps RULES_VERSION.
+
+The expiry is ABSOLUTE, anchored to observedIso rather than the cron tick:
+{ expiration: floor((Date.parse(observedIso) + READING_MAX_AGE_MS) / 1000) }, so a morning
+reading dies four hours after it was taken no matter which run picked it up, and a re-scrape
+cannot extend its life. READING_MAX_AGE_MS (4 h) lives in src/officialReading.js, its own
+dependency-free module, because both render.js and the cron need it and render.js must never
+import the scraper registry — the same rule that put FLAG_TTL_SECONDS in src/flagTtl.js.
+A write whose expiration is under 60 s out is skipped (Cloudflare rejects it, and a reading
+that close to its horizon is not worth publishing).
+
+Read by handleDetail alone, in the same concurrent read set as the flag/official/waves/
+watertemp/wqfloor keys, and passed to renderDetailPage as data.reading. render.js drops it
+past READING_MAX_AGE_MS or on an unparseable observedIso (usableReading) — REMOVED, not
+warned about, because a morning water temperature is not a claim about the afternoon. What
+survives renders as up to two "at a glance" tiles:
+
+- "Waves this morning", the observed height in whole feet as reported. It sits BESIDE the
+  estimate's modeled "Waves now" tile rather than replacing it: one is a measurement taken
+  hours ago, the other a model value for this hour.
+- "Water temperature", which OUTRANKS the "watertemp:" buoy reading when present — an
+  observation taken at the beach beats one from a station up to 25 km offshore. The buoy
+  fills the tile whenever the reading carries no temperature.
+
+Both tiles' source lines name siteName and the observation age through <wa-relative-time>,
+with a wa-tooltip (ids "reading-temp" / "reading-wave") naming sourceLabel, so a beach
+reading a neighboring site's observation always says whose it is.
+
 ### WqFloorAdvisory (KV value under "wqfloor:" + beachId)
 
     {
@@ -706,6 +756,13 @@ Binding name: FLAGS (single namespace for both key families).
   Display-only — never feeds src/rules.js. Absent key → the tile reads "No data".
   Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential per-beach
   await env.FLAGS.put (section 7, "Run budgets and write pools").
+- Key "reading:" + beachId → JSON.stringify(OfficialReading). Written by the hourly cron
+  with an ABSOLUTE { expiration } at READING_MAX_AGE_MS (4 h) past the observation instant,
+  only when the beach's resolved scrape site carried at least one observed number. Read by
+  handleDetail alone (never /api/flag) and rendered as up to two "at a glance" tiles
+  (section 1). Display-only — never feeds src/rules.js. Absent key → no tiles, and the
+  water-temperature tile falls back to "watertemp:". Its puts ride the same per-beach pool
+  as the "official:" write it sits beside.
 - Key "wqfloor:" + beachId → JSON.stringify(WqFloorAdvisory). Written by the hourly cron
   with { expirationTtl: 7200 }, only when a src/wqFloor source resolved an active advisory;
   a clean or absent reading writes nothing and the key expires naturally, like "official:".
@@ -728,9 +785,10 @@ Binding name: FLAGS (single namespace for both key families).
   streak must survive across runs). See section 7 step 8.
 
 Single writers that do not change: the hourly cron remains the sole writer of "wqfloor:",
-"official:", "scraperhealth:" and the recompute_updated rotation cursor. runAlertRefresh
-writes only "flag:" and "mapdirectory:v1", and must never gain one of those four — expiry
-stays the only way a cleared advisory is withdrawn, and the cursor stays single-writer.
+"official:", "reading:", "scraperhealth:" and the recompute_updated rotation cursor.
+runAlertRefresh writes only "flag:" and "mapdirectory:v1", and must never gain one of those
+five — expiry stays the only way a cleared advisory is withdrawn, and the cursor stays
+single-writer.
 
 Never written from the fetch handler. Absent/expired key means "no data": the API returns
 null for that slot; the frontend renders gray "unknown" for a missing estimate and omits the
@@ -2043,6 +2101,18 @@ Date.now(), no ambient clock.
       // single-beach path — the hourly cron instead calls each scraper's scrape() once
       // and reuses the result (section 7 step 8).
 
+    scrapeReadingFromResult(beach, scraper, result)
+      // -> OfficialReading (section 1) | null. Pure, shape (b) only. The reading half of
+      // the same resolution: resolveSiteForBeach, then the site's waterTempF /
+      // waveHeightFt when finite, plus provenance (siteName from reportSiteName,
+      // sourceLabel from scraper.label, source and scraperId). Null when no site
+      // resolves, when neither number is finite, or when observedIso (site.updated, else
+      // result.updated) does not parse — the renderer drops a reading past
+      // READING_MAX_AGE_MS, which an unparseable instant would silently defeat.
+      // Deliberately independent of scrapeOfficialFlagFromResult: a site with a null
+      // color still publishes readings, and a site whose color is rejected must not drag
+      // its numbers down with it. It validates no color because it carries none.
+
 ### Scraper contract v2 (every registry entry)
 
     {
@@ -2087,8 +2157,10 @@ Date.now(), no ambient clock.
       //   { perBeach: true,
       //     sites: [
       //       { siteId,                       // stable per-site string
-      //         color,                        // "green"|"yellow"|"red"|"double-red"
+      //         color,                        // "green"|"yellow"|"red"|"double-red"|null
       //         reason,                       // per-site reason string
+      //         waterTempF,                   // optional observed water temp (°F)
+      //         waveHeightFt,                 // optional observed wave height (ft)
       //         names: ["south beach", ...],  // optional lowercase substrings
       //         lat, lon,                     // optional site coordinates
       //         radiusMi,                     // optional, default 1.5
@@ -2100,9 +2172,21 @@ Date.now(), no ambient clock.
       //     ],
       //     source: url, sources: [url], updated: nowIso }
       //   Each site must carry names[] and/or lat+lon; a site with neither can never
-      //   be resolved. Sites the source reports without a usable color (unmonitored,
-      //   "no flag", unparseable) are omitted from sites — a beach that resolves to no
-      //   site gets no official flag.
+      //   be resolved.
+      //   A site the source reports without a usable color (unmonitored, "no flag",
+      //   unparseable) carries color: null. scrapeOfficialFlagFromResult resolves that
+      //   to no official flag, SILENTLY — it is a documented state, not a malformed
+      //   value, and a source whose table always carries an unflagged site would
+      //   otherwise log every hour forever. Only a non-null color outside
+      //   OFFICIAL_COLORS logs. A colorless site carrying no reading either has nothing
+      //   to publish and is omitted from sites entirely.
+      //   waterTempF / waveHeightFt are the source's own point-in-time observations,
+      //   resolved independently of the color by scrapeReadingFromResult into the
+      //   OfficialReading record (section 1). They are display-only, never reach
+      //   src/rules.js, and are what makes a colorless site worth emitting. A site with
+      //   neither publishes no reading. Validate them in the scraper against the
+      //   source's own plausible range: a fixed-width table that gains a column would
+      //   otherwise feed a station id into the water-temperature tile as a temperature.
       //   reportSiteName is how a beach learns it is reading a neighbor's flag: when it
       //   is neither the resolved beach's display name (park_name || name) nor claimed
       //   by that site's own names[] (siteNamesMatchBeach, section 5),
@@ -2579,6 +2663,13 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    the upstream publishes, which is why the display horizon is needed: the record is fresh,
    the reading may not be. A null scrape result, or a beach that resolves to no site, means
    no KV write for that beach and the old key expires naturally.
+   In the same pooled per-beach callback, scrapeReadingFromResult (section 6) resolves the
+   site's point-in-time observations and writes OfficialReading to "reading:" + beach.id with
+   an ABSOLUTE { expiration } at READING_MAX_AGE_MS past observedIso, skipping a write whose
+   expiration is under 60 s out. It is resolved independently of the flag above: a site the
+   source reports with no posted flag writes a reading and no "official:" record. A beach
+   that resolves to no site, or to a site carrying neither number, means no write and the old
+   key expires on its own.
    Only the inner per-beach put loop is pooled. The outer scraperGroups loop stays strictly
    sequential: it mutates shared per-scraper "scraperhealth:" state across a KV
    read-modify-write and carries the `if (result === null) continue`, neither of which
