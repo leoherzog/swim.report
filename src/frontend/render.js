@@ -55,8 +55,8 @@ const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome
 //
 // MapLibre 6 ships ES modules only, so the inline map script pulls the .mjs in
 // with a dynamic import(). Keep both pins on the same version.
-const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.1.0/dist/maplibre-gl.mjs";
-const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.1.0/dist/maplibre-gl.css";
+const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.8.0/dist/maplibre-gl.mjs";
+const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.8.0/dist/maplibre-gl.css";
 
 // Kit theme overrides, minus the kit's webfont downloads: each family leads
 // with genuine system fonts so the pinned matter.css @font-face rules (served

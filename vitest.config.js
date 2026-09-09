@@ -12,9 +12,9 @@ export default defineConfig({
       // and most faithful to the source.
       provider: "v8",
 
-      // Load-bearing. vitest 4 reports only files a test imported unless include names
+      // Load-bearing. Coverage reports only files a test imported unless include names
       // them, which would silently omit exactly the zero-coverage files the report
-      // exists to surface. (vitest 4 has no `all` option; include replaced it.)
+      // exists to surface. There is no `all` option any more; include replaced it.
       include: ["src/**/*.js", "scripts/**/*.js"],
 
       exclude: [

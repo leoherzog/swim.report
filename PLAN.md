@@ -3765,7 +3765,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // aria-label advertising a hidden map. data-center is the router's resolved
       // location (the same {lat,lon} that sorts the list, 3 dp); data-center-precise is
       // "1" for a browser fix, "0" for the IP estimate.
-      // Home-page-only, never in renderDocument's shared head: MapLibre GL JS 6.1.0 plus
+      // Home-page-only, never in renderDocument's shared head: MapLibre GL JS 6.8.0 plus
       // its CSS (pinned) and the browser-side map script (buildListMapScript(MAPLIBRE_JS)
       // from src/frontend/mapScript.js — the pinned .mjs URL is injected as
       // MAPLIBRE_MODULE_URL so render.js holds both CDN pins and they cannot drift
@@ -3846,10 +3846,11 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // listener can no longer supply the image it is told about — so the
       // 1px-transparent placeholder net is registered with
       // map.setMissingStyleImageResolver(id => ...), which MapLibre awaits before giving
-      // the image up; and a failed GPU/WebGL2 context is reported through the map's
-      // 'error' event (GPUInitializationError) rather than thrown out of the
-      // constructor, so an 'error' listener console.logs it — the construction try/catch
-      // alone would let a WebGL2-less browser surface an unhandled error.
+      // the image up; and a failed GPU/WebGL2 context throws GPUInitializationError out
+      // of the constructor (6.7.0 changed this from an 'error' event), so the
+      // construction try/catch is the browser-cannot-render path and logs it. The
+      // 'error' listener stays for every tile, source and style failure after
+      // construction, which never throws there.
 
       // Between the live region and the main list the page renders an empty, hidden
       // "Your Beaches" shell: <section id="your-beaches"

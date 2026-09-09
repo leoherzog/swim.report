@@ -34,9 +34,11 @@
 // the aria-hidden subtree holds no focusable node at any lifecycle point, tile
 // load or not.
 //
-// Everything degrades silently: a failed module import, a missing container, an
-// init throw, a GPU/WebGL2 failure, or a missing, failed or empty GeoJSON fetch
-// simply leaves the page with its server-rendered beach list. The server-rendered
+// Everything degrades to the server-rendered beach list: a failed module import,
+// a missing container, a GPU/WebGL2 failure or init throw, or a missing, failed
+// or empty GeoJSON fetch. Every one of those but the module import logs a named
+// console line, because a blank map area and a map that never got its data look
+// identical from the outside. The server-rendered
 // <wa-skeleton> inside the mount is removed on the map's load event and on every
 // path that ends with no map, so it never outlives the wait it describes.
 
@@ -335,12 +337,13 @@ const SCRIPT_LINES = [
   "      });",
   "    } catch (e) {",
   "      clearSkeleton();",
+  "      console.log('map init failed: ' + ((e && e.message) || 'unknown'));",
   "      return;",
   "    }",
-  // MapLibre 6 reports a failed GPU/WebGL2 context through the map's 'error'
-  // event (GPUInitializationError) rather than throwing out of the constructor,
-  // so the try/catch above does not cover the browser-cannot-render case.
-  // Listening keeps that, and any tile/source error, a logged no-op.
+  // A failed GPU/WebGL2 context (GPUInitializationError) throws out of the
+  // constructor as of MapLibre 6.7.0, so the catch above is the browser-cannot-
+  // render path and has to name it. The 'error' listener still covers every
+  // tile, source and style failure after construction, which never throws there.
   "    map.on('error', function (e) {",
   "      clearSkeleton();",
   "      console.log('map error: ' + ((e && e.error && e.error.message) || 'unknown'));",

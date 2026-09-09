@@ -64,7 +64,12 @@ describe("renderListPage home map", () => {
     // On the map's load event, in the construction catch, on the map 'error'
     // event, and when the MapLibre module import fails.
     expect(html).toContain("map.on('load', function () {\n      clearSkeleton();");
-    expect(html).toContain("} catch (e) {\n      clearSkeleton();\n      return;");
+    // The construction catch is also the browser-cannot-render path: MapLibre 6.7
+    // throws GPUInitializationError out of the constructor rather than firing an
+    // error event, so this catch names the failure as well as clearing.
+    expect(html).toContain("} catch (e) {\n      clearSkeleton();\n" +
+      "      console.log('map init failed: ' + ((e && e.message) || 'unknown'));\n" +
+      "      return;");
     expect(html).toContain("map.on('error', function (e) {\n      clearSkeleton();");
     expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap).catch(clearSkeleton);");
   });
@@ -95,8 +100,8 @@ describe("renderListPage home map", () => {
     const html = renderListPage({ entries: [] });
     // MapLibre 6 is ESM-only — the pinned bundle is the .mjs module, pulled in
     // by the inline script's dynamic import, and both pins share one version.
-    expect(html).toContain("maplibre-gl@6.1.0/dist/maplibre-gl.mjs");
-    expect(html).toContain("maplibre-gl@6.1.0/dist/maplibre-gl.css");
+    expect(html).toContain("maplibre-gl@6.8.0/dist/maplibre-gl.mjs");
+    expect(html).toContain("maplibre-gl@6.8.0/dist/maplibre-gl.css");
     expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap)");
     // The retired UMD bundle must not come back as a <script src>: it is no
     // longer published, so the tag would 404 and the map would never load.
