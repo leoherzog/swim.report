@@ -91,12 +91,22 @@ const SCRIPT_LINES = [
   "    red: '--flag-red',",
   "    unknown: '--flag-unknown'",
   "  };",
+  // A custom property whose own value is a var() reference does not always come
+  // back substituted: an engine that cannot resolve the reference may return the
+  // literal "var(--wa-color-green-50)" rather than an empty string, and the kit
+  // stylesheets those tokens live in are a third-party CDN that can be slow,
+  // blocked or unreachable. That string is fatal as a paint color — addLayer
+  // throws on it and the layer never renders — so anything still carrying a
+  // var() is treated as unresolved and takes the fallback hex.
   "  const resolveFlagHex = function (key) {",
   "    let v = '';",
   "    try {",
   "      v = getComputedStyle(document.documentElement).getPropertyValue(FLAG_TOKEN[key]).trim();",
   "    } catch (e) {}",
-  "    return v || FLAG_HEX_FALLBACK[key];",
+  "    if (!v || v.indexOf('var(') !== -1) {",
+  "      return FLAG_HEX_FALLBACK[key];",
+  "    }",
+  "    return v;",
   "  };",
 
   // One highlight layer per flag color, painted in this order, so where two
@@ -126,21 +136,78 @@ const SCRIPT_LINES = [
   "    } catch (e) {}",
   "    return undefined;",
   "  };",
-  // The radius peaks around zoom 6, where the discs have to be wide enough to
-  // merge into a ribbon while the beaches under them are still spreading apart.
-  // Above that they are markers, narrowed to stay distinct and widening again
-  // only at beach scale. The radius is what changes with zoom, never
-  // circle-opacity: opacity applies per feature, so two overlapping translucent
-  // discs of one color composite into a darker third and the highlight would
-  // mottle wherever the coast is densest.
-  "  const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],",
-  "    3, 4.5, 5, 4.5, 6, 6, 8, 5, 14, 8];",
-  // Below this zoom the discs are merged, so whichever feature sits under the
-  // cursor is arbitrary and a click zooms in rather than guessing a beach. At or
-  // above it one disc is one beach and a click navigates. It is also the zoom the
-  // map opens at once a user location is resolved, so a located visitor can click
-  // straight through.
+  // The handoff zoom, in three roles: the discs stop being a ribbon and become
+  // markers, the flag icons start fading in, and a click stops zooming in and
+  // starts navigating. Below it the discs are merged, so whichever feature sits
+  // under the cursor is arbitrary and guessing a beach from it would be a coin
+  // flip. It is also the zoom the map opens at once a user location is resolved,
+  // so a located visitor lands on flags and can click straight through.
+  //
+  // Declared before the ramps below, which read them: these are emitted as plain
+  // const declarations in one browser scope, so a ramp placed above them dies on
+  // the temporal dead zone and takes the whole script with it.
   "  const PICK_MIN_ZOOM = 9;",
+  "  const FLAG_FULL_ZOOM = 10;",
+  // The radius peaks around zoom 6, where the discs have to be wide enough to
+  // merge into a ribbon while the beaches under them are still spreading apart,
+  // then narrows to a marker and collapses to nothing as the flags take over.
+  // The radius is what changes with zoom, never circle-opacity: opacity applies
+  // per feature, so two overlapping translucent discs of one color composite
+  // into a darker third and the highlight would mottle wherever it is densest.
+  // The flag layer has no such problem — its glyphs are thin and sparse — so it
+  // fades in on icon-opacity over the same band.
+  "  const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],",
+  "    3, 4.5, 5, 4.5, 6, 6, 8, 5, PICK_MIN_ZOOM, 5, FLAG_FULL_ZOOM, 0];",
+  "  const FLAG_OPACITY = ['interpolate', ['linear'], ['zoom'],",
+  "    PICK_MIN_ZOOM, 0, FLAG_FULL_ZOOM, 1];",
+  // The fa-flag single-path glyph. Explicit width/height give it an intrinsic
+  // size so every browser rasterizes it (a viewBox-only SVG can draw blank).
+  "  const FLAG_SVG =",
+  "    \"<svg xmlns='http://www.w3.org/2000/svg' width='640' height='640' viewBox='0 0 640 640'>\" +",
+  "    \"<path d='M160 96C160 78.3 145.7 64 128 64C110.3 64 96 78.3 96 96L96 544C96 561.7 110.3 576 128 576C145.7 576 160 561.7 160 544L160 422.4L222.7 403.6C264.6 391 309.8 394.9 348.9 414.5C391.6 435.9 441.4 438.5 486.1 421.7L523.2 407.8C535.7 403.1 544 391.2 544 377.8L544 130.1C544 107.1 519.8 92.1 499.2 102.4L487.4 108.3C442.5 130.8 389.6 130.8 344.6 108.3C308.2 90.1 266.3 86.5 227.4 98.2L160 118.4L160 96z'/>\" +",
+  "    \"</svg>\";",
+  "  const CSS_SIZE = 28;",
+  "  const DPR = Math.max(1, Math.min(4, Math.round(window.devicePixelRatio || 1)));",
+  // Paint the resolved hex into the glyph's own alpha via source-in compositing:
+  // the tint is pixel-exact and the anti-aliased edges are preserved (no SDF).
+  "  const tintToImageData = function (baseImg, hex) {",
+  "    const w = CSS_SIZE * DPR;",
+  "    const h = CSS_SIZE * DPR;",
+  "    const canvas = document.createElement('canvas');",
+  "    canvas.width = w;",
+  "    canvas.height = h;",
+  "    const ctx = canvas.getContext('2d');",
+  "    ctx.clearRect(0, 0, w, h);",
+  "    ctx.drawImage(baseImg, 0, 0, w, h);",
+  "    ctx.globalCompositeOperation = 'source-in';",
+  "    ctx.fillStyle = hex;",
+  "    ctx.fillRect(0, 0, w, h);",
+  "    ctx.globalCompositeOperation = 'source-over';",
+  "    return ctx.getImageData(0, 0, w, h);",
+  "  };",
+  // Register the four pre-tinted images before any layer references them. Decode
+  // is async, so the layers are gated behind this Promise, which resolves
+  // regardless of success: a decode failure leaves the resolver net below.
+  "  const addFlagImages = function () {",
+  "    return new Promise(function (resolve) {",
+  "      const img = new Image();",
+  "      const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(FLAG_SVG);",
+  "      img.onload = function () {",
+  "        const keys = ['green', 'yellow', 'red', 'unknown'];",
+  "        for (let i = 0; i < keys.length; i++) {",
+  "          const id = 'flag-' + keys[i];",
+  "          try {",
+  "            if (!map.hasImage(id)) {",
+  "              map.addImage(id, tintToImageData(img, resolveFlagHex(keys[i])), { pixelRatio: DPR });",
+  "            }",
+  "          } catch (e) {}",
+  "        }",
+  "        resolve();",
+  "      };",
+  "      img.onerror = function () { resolve(); };",
+  "      img.src = url;",
+  "    });",
+  "  };",
   // Fit the whole fetched set only when there is no explicit data-center; the
   // resolved user/IP center always wins. Re-read the live center rather than the
   // init snapshot, so a geolocation swap that lands while the geojson fetch is in
@@ -169,7 +236,10 @@ const SCRIPT_LINES = [
   "  const addBeachLayers = function (fc) {",
   "    try {",
   "      map.addSource('beaches', { type: 'geojson', data: fc });",
-  "    } catch (e) { return; }",
+  "    } catch (e) {",
+  "      console.log('map source failed: ' + ((e && e.message) || 'unknown'));",
+  "      return;",
+  "    }",
   "    const beforeId = firstSymbolLayerId();",
   "    for (let i = 0; i < HIGHLIGHT_LAYERS.length; i++) {",
   "      try {",
@@ -177,6 +247,7 @@ const SCRIPT_LINES = [
   "          id: 'highlight-' + HIGHLIGHT_LAYERS[i].key,",
   "          type: 'circle',",
   "          source: 'beaches',",
+  "          maxzoom: FLAG_FULL_ZOOM,",
   "          filter: HIGHLIGHT_LAYERS[i].filter,",
   "          paint: {",
   "            'circle-color': resolveFlagHex(HIGHLIGHT_LAYERS[i].key),",
@@ -185,10 +256,36 @@ const SCRIPT_LINES = [
   "            'circle-opacity': 1",
   "          }",
   "        }, beforeId);",
-  "      } catch (e) {}",
+  "      } catch (e) {",
+  "        console.log('map layer failed: highlight-' + HIGHLIGHT_LAYERS[i].key +",
+  "          ' (' + ((e && e.message) || 'unknown') + ')');",
+  "      }",
   "    }",
-  // One click handler, split on PICK_MIN_ZOOM: zoom into a merged highlight,
-  // navigate from a disc that stands alone.
+  "    try {",
+  "      map.addLayer({",
+  "        id: 'flags',",
+  "        type: 'symbol',",
+  "        source: 'beaches',",
+  "        minzoom: PICK_MIN_ZOOM,",
+  "        layout: {",
+  "          'icon-image': ['match', ['get', 'flag'],",
+  "            'green', 'flag-green',",
+  "            'yellow', 'flag-yellow',",
+  "            'red', 'flag-red',",
+  "            'flag-unknown'],",
+  "          'icon-allow-overlap': true,",
+  "          'icon-anchor': 'bottom'",
+  "        },",
+  "        paint: {",
+  "          'icon-opacity': FLAG_OPACITY",
+  "        }",
+  "      });",
+  "    } catch (e) {",
+  "      console.log('map layer failed: flags (' + ((e && e.message) || 'unknown') + ')');",
+  "    }",
+  // The highlight click is split on PICK_MIN_ZOOM: zoom into a merged ribbon,
+  // navigate from a disc that stands alone. Above the handoff the flag layer
+  // carries the same navigation, so both marks lead to the same page.
   "    const highlightIds = HIGHLIGHT_LAYERS.map(function (h) { return 'highlight-' + h.key; });",
   "    highlightIds.forEach(function (layerId) {",
   "      map.on('click', layerId, function (e) {",
@@ -204,6 +301,14 @@ const SCRIPT_LINES = [
   "      map.on('mouseenter', layerId, function () { map.getCanvas().style.cursor = 'pointer'; });",
   "      map.on('mouseleave', layerId, function () { map.getCanvas().style.cursor = ''; });",
   "    });",
+  "    map.on('click', 'flags', function (e) {",
+  "      if (!e.features || !e.features.length) { return; }",
+  "      const id = e.features[0].properties.id;",
+  "      if (id === undefined || id === null) { return; }",
+  "      window.location.href = '/beach/' + encodeURIComponent(id);",
+  "    });",
+  "    map.on('mouseenter', 'flags', function () { map.getCanvas().style.cursor = 'pointer'; });",
+  "    map.on('mouseleave', 'flags', function () { map.getCanvas().style.cursor = ''; });",
   "  };",
   // startMap runs once the dynamic import below resolves: it constructs the map
   // and wires the lifecycle. readCenter() is called here, not at parse time, so a
@@ -261,13 +366,21 @@ const SCRIPT_LINES = [
   // construction.
   "      clearSkeleton();",
   "      if (typeof fetch === 'undefined') { return; }",
-  "      fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } }).then(function (resp) {",
+  "      addFlagImages().then(function () {",
+  "        return fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } });",
+  "      }).then(function (resp) {",
   "        return resp && resp.ok ? resp.json() : null;",
   "      }).then(function (fc) {",
-  "        if (!fc || !Array.isArray(fc.features)) { return; }",
+  "        if (!fc || !Array.isArray(fc.features)) {",
+  "          console.log('map directory unusable');",
+  "          return;",
+  "        }",
+  "        console.log('map directory: ' + fc.features.length + ' features');",
   "        addBeachLayers(fc);",
   "        fitToFeatures(fc);",
-  "      }).catch(function () {});",
+  "      }).catch(function (e) {",
+  "        console.log('map directory failed: ' + ((e && e.message) || 'unknown'));",
+  "      });",
   "    });",
   "  };",
   // Proximity swap (geoScript.js): a pure re-center on the updated data-center,

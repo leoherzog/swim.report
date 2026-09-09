@@ -462,8 +462,7 @@ async function handleDetail(env, ctx, beachId) {
 
 // Cacheable GeoJSON directory of every flag-worthy beach: the homepage map
 // fetches it once on load and hands it to one MapLibre GeoJSON source, drawn as
-// one colored disc per beach: a coast highlight when zoomed out, separate marks
-// when zoomed in.
+// a coast highlight when zoomed out and as flag icons from zoom 9 up.
 // Location-independent, so fully cacheable.
 //
 // One KV read. The cron path precomputes "mapdirectory:v1" (src/mapDirectory.js)

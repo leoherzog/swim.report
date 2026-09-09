@@ -39,9 +39,8 @@ scheduled crons and the offline NOAA wave cycle.
 Returns a GeoJSON `FeatureCollection` of **every** flag-worthy beach in the D1 directory (no
 bounding box, no parameters). Results exclude confirmed-inland beaches; still-unclassified
 rows remain visible during backfill. The response is location-independent and cacheable, so
-the homepage map fetches it once on load and hands it to a single MapLibre GeoJSON source,
-rendered as one colored disc per beach: a coast highlight when zoomed out, separate marks when
-zoomed in.
+the homepage map fetches it once on load and hands it to a single MapLibre GeoJSON source that
+renders it as a coast highlight when zoomed out and as flag icons from zoom 9 up.
 
 Example response:    {
       "type": "FeatureCollection",

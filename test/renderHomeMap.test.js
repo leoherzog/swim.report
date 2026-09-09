@@ -2,8 +2,10 @@
 // accessibility attributes (aria-hidden, tabindex, no advertising aria-label),
 // the data-center attribute, section ordering (intro -> map -> search), and the
 // client script wiring (one-shot /api/beaches.geojson fetch feeding one
-// unclustered GeoJSON source rendered only as the coast highlight, keyboard:false,
-// click handlers, re-center-only nearupdate).
+// unclustered GeoJSON source, the zoomed-out coast highlight and its handoff to
+// the flag icons, keyboard:false, click handlers, re-center-only nearupdate).
+// Assertions here are on the script's TEXT; test/mapScriptRuntime.test.js
+// executes it, which is what catches a script that parses and then throws.
 // The per-beach flag data lives in the /api/beaches.geojson endpoint, so its
 // color-keyword coverage is in test/router.test.js.
 
@@ -221,28 +223,60 @@ describe("renderListPage home map", () => {
 
   it("changes the highlight with zoom by radius, never by opacity", () => {
     const html = renderListPage({ entries: [] });
-    // The discs widen to stay merged as the beaches spread apart, then settle at
-    // marker size. circle-opacity applies per feature, so varying it would
-    // composite overlapping discs of one color into a darker third wherever the
-    // coast is densest.
+    // The discs widen to stay merged as the beaches spread apart, narrow to a
+    // marker, then collapse as the flags take over. circle-opacity applies per
+    // feature, so varying it would composite overlapping discs of one color into
+    // a darker third wherever the coast is densest.
     expect(html).toContain("const HIGHLIGHT_RADIUS = ['interpolate', ['linear'], ['zoom'],\n" +
-      "    3, 4.5, 5, 4.5, 6, 6, 8, 5, 14, 8];");
+      "    3, 4.5, 5, 4.5, 6, 6, 8, 5, PICK_MIN_ZOOM, 5, FLAG_FULL_ZOOM, 0];");
     expect(html).toContain("'circle-radius': HIGHLIGHT_RADIUS,");
-    // The highlight is the whole rendering, so it is never cut off by zoom.
-    expect(html).not.toContain("maxzoom:");
-    expect(html).not.toContain("minzoom:");
+    expect(html).toContain("maxzoom: FLAG_FULL_ZOOM,");
   });
 
-  it("renders no marker symbols at all", () => {
+  it("brings the flag icons back over the handoff band", () => {
     const html = renderListPage({ entries: [] });
-    // The highlight is the only rendering of the source: no symbol layer, and
-    // none of the machinery that rasterized and tinted the fa-flag glyph.
-    expect(html).not.toContain("type: 'symbol'");
-    expect(html).not.toContain("icon-image");
-    expect(html).not.toContain("FLAG_SVG");
-    expect(html).not.toContain("tintToImageData");
-    expect(html).not.toContain("addFlagImages");
-    expect(html).not.toContain("'flag-green'");
+    // The flags are absent below the handoff and fade in across it, over the
+    // same four tinted images the highlight takes its hexes from.
+    expect(html).toContain("minzoom: PICK_MIN_ZOOM,");
+    expect(html).toContain("'icon-opacity': FLAG_OPACITY");
+    expect(html).toContain("const FLAG_OPACITY = ['interpolate', ['linear'], ['zoom'],\n" +
+      "    PICK_MIN_ZOOM, 0, FLAG_FULL_ZOOM, 1];");
+    expect(html).toContain("'green', 'flag-green',");
+  });
+
+  // The zoom constants are emitted as plain consts in one browser scope, so a
+  // ramp placed above the constant it reads dies on the temporal dead zone and
+  // takes the whole map script with it. Text assertions cannot see that;
+  // mapScriptRuntime.test.js executes the script, and this pins the ordering.
+  it("declares the zoom constants before the ramps that read them", () => {
+    const html = renderListPage({ entries: [] });
+    const pick = html.indexOf("const PICK_MIN_ZOOM = 9;");
+    const full = html.indexOf("const FLAG_FULL_ZOOM = 10;");
+    const radius = html.indexOf("const HIGHLIGHT_RADIUS =");
+    const opacity = html.indexOf("const FLAG_OPACITY =");
+    expect(pick).toBeGreaterThan(-1);
+    expect(full).toBeGreaterThan(-1);
+    expect(Math.max(pick, full)).toBeLessThan(radius);
+    expect(Math.max(pick, full)).toBeLessThan(opacity);
+  });
+
+  it("falls back when a flag custom property resolves to an unusable value", () => {
+    const html = renderListPage({ entries: [] });
+    // An unresolved custom property can come back as its own var() token rather
+    // than an empty string. Handing that to circle-color makes addLayer throw and
+    // the layer never renders, with the basemap still drawing normally.
+    expect(html).toContain("if (!v || v.indexOf('var(') !== -1) {");
+    expect(html).toContain("return FLAG_HEX_FALLBACK[key];");
+  });
+
+  it("logs a failed source, layer or directory fetch instead of swallowing it", () => {
+    const html = renderListPage({ entries: [] });
+    // A silently skipped layer is indistinguishable from a map that never got
+    // its data, which is the state this leaves undiagnosable.
+    expect(html).toContain("console.log('map source failed: '");
+    expect(html).toContain("console.log('map layer failed: highlight-'");
+    expect(html).toContain("console.log('map directory: ' + fc.features.length + ' features')");
+    expect(html).toContain("console.log('map directory failed: '");
   });
 
   it("inserts the highlight beneath the basemap's labels", () => {

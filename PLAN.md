@@ -3780,19 +3780,23 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // for a map that is not coming. On load it fetches /api/beaches.geojson once and hands the
       // FeatureCollection to a single UNCLUSTERED GeoJSON source, which carries every
       // beach at every zoom: the zoomed-out view is a rendering choice, not a thinned
-      // dataset. There is exactly ONE rendering of that source and it holds at every
-      // zoom — each beach paints an opaque disc in its feature `flag` color, from the
-      // --flag-{green,yellow,red,unknown} variables resolved at runtime via
-      // getComputedStyle with the mild hexes as fallback (double-red rides in as
-      // "red"). There are no marker symbols and no clustering: no symbol layer, no
-      // icon-image, and none of the canvas machinery that rasterized and tinted the
-      // fa-flag glyph.
-      // Zoomed out the discs merge into a highlight that traces the coast, because the
-      // beaches are on the coast; zoomed in they separate into one disc per beach. That
-      // is what makes the continental view a hazard map: a count bubble's number is beach
-      // density, which competes with its color for one symbol, and the highlight has no
-      // number to compete with. It over-claims nothing, because it is drawn from the
-      // beaches themselves and stops where they stop.
+      // dataset. Two renderings of that one source, handing off at PICK_MIN_ZOOM (9).
+      // Zoomed out, each beach paints an opaque disc in its feature `flag` color and the
+      // discs merge into a highlight that traces the coast, because the beaches are on
+      // the coast. That is what makes the continental view a hazard map: a count
+      // bubble's number is beach density, which competes with its color for one symbol,
+      // and the highlight has no number to compete with. It over-claims nothing, because
+      // it is drawn from the beaches themselves and stops where they stop. There is no
+      // clustering at any zoom. Zoomed in, the discs collapse and each beach is a
+      // rasterized fa-flag icon tinted to the same color.
+      // Both take the four hexes from the --flag-{green,yellow,red,unknown} variables
+      // resolved at runtime via getComputedStyle (double-red rides in as "red"). A
+      // resolved value that is empty OR still carries a var( token is treated as
+      // unresolved and takes the mild-palette fallback hex: those tokens live in the
+      // third-party kit stylesheets, and an engine that returns the unsubstituted var()
+      // literal rather than an empty string would otherwise hand circle-color a value
+      // addLayer THROWS on — every highlight layer silently missing while the basemap
+      // draws normally.
       // One circle layer per color, added in the order unknown, green, yellow, red, so
       // where two colors meet the worse one takes the pixel. The unknown filter is the
       // COMPLEMENT of the other three rather than an equality test, so a keyword outside
@@ -3801,21 +3805,31 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // is exactly one of the four flag hexes, where a translucent or blurred disc would
       // composite two of them into a third that reads as a flag color the coast does not
       // carry. They are inserted before the style's first symbol layer, so the basemap's
-      // place labels stay legible on top of them, and they carry no minzoom or maxzoom.
-      // What changes with zoom is the RADIUS, never the opacity: circle-opacity applies
-      // per feature, so two overlapping translucent discs of one color composite into a
-      // darker third and a highlight varied that way would mottle wherever the coast is
-      // densest. circle-radius interpolates zoom 3 → 4.5 px, 5 → 4.5, 6 → 6, 8 → 5,
-      // 14 → 8. It peaks around zoom 6, where the discs have to be wide enough to merge
-      // into a ribbon while the beaches under them are still spreading apart; above that
-      // they are markers, narrowed to stay distinct and widening again only at beach
-      // scale.
-      // One click handler, split on PICK_MIN_ZOOM (9): below it the discs are merged, so
+      // place labels stay legible on top of them, and carry maxzoom FLAG_FULL_ZOOM (10).
+      // What changes the highlight with zoom is the RADIUS, never the opacity:
+      // circle-opacity applies per feature, so two overlapping translucent discs of one
+      // color composite into a darker third and a highlight varied that way would mottle
+      // wherever the coast is densest. circle-radius interpolates zoom 3 → 4.5 px,
+      // 5 → 4.5, 6 → 6, 8 → 5, 9 → 5, 10 → 0. It peaks around zoom 6, where the discs
+      // have to be wide enough to merge into a ribbon while the beaches under them are
+      // still spreading apart. The flag layer has no such problem — its glyphs are thin
+      // and sparse — so it carries minzoom 9 and fades in on icon-opacity, 0 at zoom 9
+      // to 1 at 10.
+      // PICK_MIN_ZOOM and FLAG_FULL_ZOOM are declared ABOVE the two ramps that read
+      // them. The script is emitted as plain const declarations in one browser scope, so
+      // a ramp placed above its constant dies on the temporal dead zone and takes the
+      // whole map with it — a failure no text assertion can see, which is why
+      // test/mapScriptRuntime.test.js executes the generated script.
+      // The highlight click is split on PICK_MIN_ZOOM: below it the discs are merged, so
       // whichever feature sits under the cursor is arbitrary and the click eases to zoom
       // 9 on the clicked point instead of guessing a beach; at or above it one disc is
-      // one beach and the click navigates to /beach/<id>. 9 is also the zoom the map
-      // opens at once a user location is resolved, so a located visitor can click
-      // straight through. Centering:
+      // one beach and the click navigates to /beach/<id>, as a flag click does. 9 is also
+      // the zoom the map opens at once a user location is resolved, so a located visitor
+      // lands on flags and can click straight through.
+      // A failed source, a failed layer, an unusable directory and a failed fetch each
+      // console.log a named line, and the load path logs the feature count, because a
+      // silently skipped layer is indistinguishable from a map that never got its data.
+      // Centering:
       // data-center (zoom 10 when precise, else 9), else fitBounds over all fetched
       // features, else a Great Lakes default ([-84, 44], zoom 5). It also listens for
       // "swimreport:nearupdate" on document and re-reads data-center to map.easeTo() the
