@@ -1862,7 +1862,7 @@ describe("search script <-> rendered markup id contract", () => {
     expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('submit'");
     // A stale response (value moved on) or one overtaken by another swap
     // (generation advanced, e.g. the geo upgrade) must not be applied.
-    expect(LIST_SEARCH_SCRIPT).toContain("input.value.trim() !== term");
+    expect(LIST_SEARCH_SCRIPT).toContain("searchTerm() !== term");
     expect(LIST_SEARCH_SCRIPT).toContain("__swimReportListGen");
     // No sticky "last sent" term — a failed fetch must not disable retries.
     expect(LIST_SEARCH_SCRIPT).not.toContain("lastSent");

@@ -66,7 +66,12 @@ const SCRIPT_LINES = [
   "    const params = new URLSearchParams(window.location.search);",
   "    params.set('near', lat.toFixed(3) + ',' + lon.toFixed(3));",
   "    const searchInput = document.getElementById('beach-search');",
-  "    const currentQuery = searchInput ? searchInput.value.trim() : '';",
+  // <wa-input> may not have upgraded yet, in which case only the
+  // server-rendered attribute carries the query and the value property is
+  // undefined.
+  "    const rawQuery = !searchInput ? '' :",
+  "      (typeof searchInput.value === 'string' ? searchInput.value : searchInput.getAttribute('value'));",
+  "    const currentQuery = (rawQuery || '').trim();",
   "    if (currentQuery) {",
   "      params.set('q', currentQuery);",
   "    } else {",

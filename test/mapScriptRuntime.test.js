@@ -142,6 +142,17 @@ describe("map script runtime", () => {
     colors.forEach((c) => expect(c).not.toContain("var("));
   });
 
+  it("strips the comment Firefox keeps in a custom property's computed value", async () => {
+    // The kit declares each palette token as a hex followed by an oklch comment.
+    // Firefox returns the comment with the value, and "#4f8051 /* oklch(...) */"
+    // is as fatal to addLayer as an unresolved var().
+    const s = await runScript("#4f8051 /* oklch(55.201% 0.08939 145.16) */");
+    const colors = s.added.layers
+      .filter((l) => l.type === "circle")
+      .map((l) => l.paint["circle-color"]);
+    colors.forEach((c) => expect(c).toBe("#4f8051"));
+  });
+
   it("takes the resolved theme color when the property does resolve", async () => {
     const s = await runScript("#123456");
     const colors = s.added.layers

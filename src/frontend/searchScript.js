@@ -50,6 +50,14 @@ const SCRIPT_LINES = [
   "    return;",
   "  }",
   "  const hasFetch = typeof fetch !== 'undefined' && typeof AbortController !== 'undefined';",
+  // #beach-search is a <wa-input>, and this script runs before the kit module
+  // that defines it: until the element upgrades, the "value" property does not
+  // exist and only the server-rendered attribute carries the query. Reading it
+  // directly throws on the first pass, which kills the whole listener setup.
+  "  const searchTerm = function () {",
+  "    const v = typeof input.value === 'string' ? input.value : input.getAttribute('value');",
+  "    return (v || '').trim();",
+  "  };",
   // Green-only filter state. One localStorage key, both reads and writes in
   // try/catch because private mode throws on access rather than returning null.
   "  const GREEN_ONLY_KEY = 'swimreport:green-only';",
@@ -102,7 +110,7 @@ const SCRIPT_LINES = [
   "  const filterRows = function () {",
   "    const rows = document.querySelectorAll('.beach-row');",
   "    const mainList = document.getElementById('beach-list-items');",
-  "    const term = input.value.trim().toLowerCase();",
+  "    const term = searchTerm().toLowerCase();",
   "    let visibleCount = 0;",
   "    let termCount = 0;",
   "    rows.forEach(function (row) {",
@@ -204,7 +212,7 @@ const SCRIPT_LINES = [
   "    if (!hasFetch) {",
   "      return;",
   "    }",
-  "    const term = input.value.trim();",
+  "    const term = searchTerm();",
   // A 1-char term is skipped: the local filter already narrows the rendered
   // rows, and a server LIKE '%x%' for one character scans the whole table to
   // match almost everything. Empty and 2+ char terms proceed.
@@ -249,7 +257,7 @@ const SCRIPT_LINES = [
   "    }).then(function (html) {",
   // seq: a newer search superseded this one. value: the user typed on, so this
   // response is for a stale term and a fresh debounced fetch is already coming.
-  "      if (mySeq !== seq || input.value.trim() !== term) {",
+  "      if (mySeq !== seq || searchTerm() !== term) {",
   "        return;",
   "      }",
   // Another swap (typically the geo upgrade introducing "near") landed while we

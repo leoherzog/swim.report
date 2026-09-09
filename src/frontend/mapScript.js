@@ -100,10 +100,26 @@ const SCRIPT_LINES = [
   // blocked or unreachable. That string is fatal as a paint color — addLayer
   // throws on it and the layer never renders — so anything still carrying a
   // var() is treated as unresolved and takes the fallback hex.
+  //
+  // The computed value of a custom property is a token stream, and Firefox
+  // keeps comments in it while Chrome drops them: the kit declares each palette
+  // token as a hex followed by an oklch comment, so the resolved value arrives
+  // as "#4f8051 /* oklch(...) */" and is equally fatal to addLayer. Strip any
+  // comment before the var() check.
+  "  const stripCssComments = function (s) {",
+  "    let out = s;",
+  "    let open = out.indexOf('/*');",
+  "    while (open !== -1) {",
+  "      const close = out.indexOf('*/', open + 2);",
+  "      out = close === -1 ? out.slice(0, open) : (out.slice(0, open) + ' ' + out.slice(close + 2));",
+  "      open = out.indexOf('/*');",
+  "    }",
+  "    return out.trim();",
+  "  };",
   "  const resolveFlagHex = function (key) {",
   "    let v = '';",
   "    try {",
-  "      v = getComputedStyle(document.documentElement).getPropertyValue(FLAG_TOKEN[key]).trim();",
+  "      v = stripCssComments(getComputedStyle(document.documentElement).getPropertyValue(FLAG_TOKEN[key]));",
   "    } catch (e) {}",
   "    if (!v || v.indexOf('var(') !== -1) {",
   "      return FLAG_HEX_FALLBACK[key];",
