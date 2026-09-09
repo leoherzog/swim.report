@@ -50,7 +50,8 @@ import {
   sampleAtCell,
   isUsableSample,
   matchesNodata,
-  metersPerSecondToMph
+  metersPerSecondToMph,
+  windFallbackAllowed
 } from "../src/waveGrids.js";
 import { metersToFeet } from "../src/geo.js";
 import { EXPECTED_WAVE_ARTIFACTS } from "../src/waveManifest.js";
@@ -732,12 +733,18 @@ async function runSample(args) {
     unresolved = stillUnresolved;
   }
 
-  // Pass 2 — wind fallback for beaches with no wet wave cell. WIND shares the wave
-  // model's land mask, so this is expected to be nearly empty; it exists because
-  // the Worker's read contract has a wind-only branch.
+  // Pass 2 — wind fallback for beaches with no wet wave cell. It exists because the
+  // Worker's read contract has a wind-only branch, and it is default-deny: only a
+  // grid declaring that its WIND plane shares the wave model's land mask may serve
+  // it. Pass 1 already searched the whole cap over the same cell geometry, so a hit
+  // here necessarily sits on a wave-masked cell; on a grid whose masked WIND cells
+  // read 0 m/s instead of a sentinel that is a land cell rules.js colors green.
   const windOnly = Object.create(null);
   for (let g = 0; g < gridIds.length && unresolved.length > 0; g = g + 1) {
     const grid = gridById(gridIds[g]);
+    // Leaves unresolved untouched, exactly like the missing-plane branch below, so
+    // a later grid still sees these beaches.
+    if (!windFallbackAllowed(grid)) { continue; }
     const plane = await loadPlane(planeKey(grid.id, 0, WIND_ELEMENT));
     if (plane === null) { continue; }
     const stillUnresolved = [];

@@ -9,12 +9,13 @@
 const WAVE_MODEL_LABELS = {
   "noaa_gfswave": "NOAA GFS Wave Model",
   "noaa_gfswave_arctic": "NOAA GFS Wave Model (Arctic)",
-  "noaa_glwu": "NOAA Great Lakes Wave Model"
+  "noaa_glwu": "NOAA Great Lakes Wave Model",
+  "noaa_nwps_sew": "NOAA Nearshore Wave Prediction System (Seattle)"
 };
 
 export const WAVE_MODEL_IDS = Object.keys(WAVE_MODEL_LABELS);
 
-// One provenance page for all three grids: NOAA publishes no per-grid page that
+// One provenance page for every grid: NOAA publishes no per-grid page that
 // resolves, and these render as plain-text chips on the flag cards, never as
 // links.
 const NOAA_WAVES_URL = "https://polar.ncep.noaa.gov/waves/";

@@ -1,4 +1,4 @@
-// src/waveGrids.js — the three NOAA GRIB2 wave grids the offline pipeline samples,
+// src/waveGrids.js — the NOAA GRIB2 wave grids the offline pipeline samples,
 // plus the pure geometry over them: grid selection, the nearest-wet-cell search and
 // the m/s -> mph conversion the GRIB path needs.
 //
@@ -17,7 +17,9 @@
 // 9.999000260554009e+20. Both are read per band from the gdalinfo sidecar and
 // never hardcoded at a sample site — 9999 m is 32808.4 ft and colors a flag red
 // with a straight-faced reason string, so every candidate is screened here before
-// it can reach a record.
+// it can reach a record. A masked cell is not always a sentinel either: the NWPS
+// nest's WIND plane reads 0 m/s over land, so whether a cell is wet is a question
+// only HTSGW can answer.
 
 import { distanceKm, KM_PER_DEG } from "./geo.js";
 
@@ -52,16 +54,20 @@ export const GRID_ELEMENTS = [WIND_ELEMENT, WAVE_ELEMENT];
 // src/frontend/waveStrip.js drops the whole strip.
 export const FORECAST_HOURS = 24;
 
-// The three grids, in fallthrough order. wcoast.0p16, atlocn.0p16, epacif.0p16 and
+// The grids, in fallthrough order. wcoast.0p16, atlocn.0p16, epacif.0p16 and
 // global.0p25 are deliberately absent: global.0p16 supersedes the first three and
 // closes the coverage gap between wcoast's -109.917 edge and atlocn's -100.083
 // edge, which matters because this repo builds layers for us/canada/mexico, and
 // epacif is a 0-360 longitude grid on which a real Hawaii longitude silently
 // samples as empty.
 //
+// noaa_nwps_sew is last, so it is offered only the beaches global.0p16 masked. An
+// earlier position would move thousands of beaches to a different model while the
+// floors seeded under the current assignment still validate.
+//
 // sampled{} describes the raster the workflow hands to scripts/sample-waves.js,
-// after the shell's gdal_translate (gfswave, already lat/lon) or gdalwarp (glwu
-// and arctic, both projected). Sampling every grid in one lat/lon frame keeps
+// after the shell's gdal_translate (gfswave and nwps, both already lat/lon) or
+// gdalwarp (glwu and arctic, both projected). Sampling every grid in one lat/lon frame keeps
 // nearestWetSample free of projection math. -r near is mandatory on the warp,
 // because any interpolating resampler smears wave values across the land mask and
 // manufactures readings on shore.
@@ -105,7 +111,10 @@ export const GRIDS = [
     // 25 km reach would cross from one lake to another at the straits.
     searchMaxKm: 10,
     // water_class 'ocean' must never reach this grid.
-    waterClasses: ["great_lake"]
+    waterClasses: ["great_lake"],
+    // This grid's WIND plane shares its wave land mask, so a wind-only reading
+    // taken where the wave plane is masked is still a reading over water.
+    windFallback: true
   },
   {
     id: "noaa_gfswave",
@@ -136,7 +145,8 @@ export const GRIDS = [
     // southern Canada up to 52.583N.
     domain: { minLon: -180.083333343214463, minLat: -15.0833333, maxLon: 179.9167093, maxLat: 52.583333333333336 },
     searchMaxKm: 25,
-    waterClasses: ["ocean"]
+    waterClasses: ["ocean"],
+    windFallback: true
   },
   {
     id: "noaa_gfswave_arctic",
@@ -172,12 +182,83 @@ export const GRIDS = [
     },
     domain: { minLon: -180.0, minLat: 50.0, maxLon: -128.0, maxLat: 73.2 },
     searchMaxKm: 25,
-    waterClasses: ["ocean"]
+    waterClasses: ["ocean"],
+    windFallback: true
+  },
+  {
+    id: "noaa_nwps_sew",
+    source: "nomads",
+    label: "NOAA Nearshore Wave Prediction System (Seattle)",
+    infoUrl: "https://polar.ncep.noaa.gov/nwps/",
+    // A per-WFO SWAN nest over the Salish Sea, which global.0p16 masks entirely at
+    // 0.1667 degrees. The NOMADS filter CGI is the only access route: there is no
+    // NODD or S3 mirror, and the plain directory tree has autoindex off and 403s
+    // every real path under it. One ~3.3 MB response carries all 145 hourly steps
+    // as 290 bands, HTSGW interleaved with WIND.
+    fetchMode: "whole",
+    // The %2F sequences must stay encoded: the url is built by string substitution
+    // and never parsed, and fetch does not re-decode an already-encoded query. The
+    // subregion parameters are deliberately omitted, because a bbox could silently
+    // exclude an assigned beach.
+    urlTemplate: "https://nomads.ncep.noaa.gov/cgi-bin/filter_wrnwps.pl" +
+      "?dir=%2Fwr.{YYYYMMDD}%2Fsew%2F{HH}%2FCG1" +
+      "&file=sew_nwps_CG1_{YYYYMMDD}_{HH}00.grib2" +
+      "&lev_surface=on&var_HTSGW=on&var_WIND=on",
+    // CG1, not CG2: CG2's 4.9 km cells cover more beaches only on a direct hit, and
+    // once nearestWetSample runs CG1 resolves as many or more at every cap, with the
+    // sharper land mask. CG0 is swell-partition tracking and carries no HTSGW.
+    variables: GRID_ELEMENTS,
+    // Published on demand, when the office submits wind grids, in practice near 00Z
+    // and 12Z with whole days sometimes absent. cycleStepHours is both the candidate
+    // alignment and the walk-back granularity, so 12 addresses the two real
+    // publication hours; a run at any other hour is unreachable, which is the price
+    // of not spending the NOMADS request budget on candidates that never exist.
+    cycleStepHours: 12,
+    maxCycleAgeHours: 36,
+    // 145 hourly steps f000..f144, so the k + 24 > forecastSteps cut does not bind
+    // until k reaches 122: age, not step count, is what ends the walk.
+    forecastSteps: 145,
+    // The CGI is a script, not a file server, so a HEAD proves nothing about whether
+    // a cycle exists. The probe is a GET whose first bytes must read GRIB.
+    cycleProbe: "get",
+    // Plain lat/lon on a sphere already, so the shell takes the gdal_translate branch
+    // and no resampler touches the land mask. This nest's GRIB2 DRS is template 5.0
+    // simple packing, not the JPEG 2000 gfswave uses.
+    warp: null,
+    // Seeded from the geotransform of an extracted plane, never from the corner
+    // coordinates gdalinfo prints: those are rounded to seven decimals and land
+    // 1.2e-8 from the true origin, while the identity gate compares origins within
+    // 1e-9 absolute.
+    sampled: {
+      width: 99,
+      height: 93,
+      originLon: -127.0259693877551,
+      originLat: 49.43804347826087,
+      pixelLon: 0.05193877551020408,
+      pixelLat: -0.03608695652173913,
+      nodata: 9999
+    },
+    domain: {
+      minLon: -127.0259693877551,
+      minLat: 46.08195652173914,
+      maxLon: -121.8840306122449,
+      maxLat: 49.43804347826087
+    },
+    // Cells are about 3.9 by 4.0 km at 47.6N. Tighter than the ocean cap for the
+    // same reason the lakes are: a 25 km reach crosses from Puget Sound into the
+    // Strait of Juan de Fuca, which is a different wave regime.
+    searchMaxKm: 10,
+    waterClasses: ["ocean"],
+    // WIND reads 0, not nodata, on this nest's masked cells: Carr Inlet returns
+    // HTSGW 9999 beside WIND 0, and isUsableSample accepts 0. A wind-only reading
+    // taken where no wet HTSGW cell was found would be a false calm that rules.js
+    // colors green, and no build gate can see it.
+    windFallback: false
   }
 ];
 
 // A grid whose absence is a refusal rather than a degradation. gfswave global.0p16
-// is every ocean beach in the table; the other two are regional.
+// is every ocean beach in the table; the others are regional.
 export const REQUIRED_GRID_IDS = ["noaa_gfswave"];
 
 // --- small helpers ---------------------------------------------------------------
@@ -202,18 +283,23 @@ export function gridById(id, grids) {
 
 // --- the grids digest -------------------------------------------------------------
 
-// Canonical digest input: id, domain, sampled cell size, url template, variables
-// and cap km, with a fixed key order. The caller hashes the returned string with
-// sha256.
+// Canonical digest input: id, domain, sampled cell size, url template, variables,
+// cap km, accepted water classes and the wind-fallback flag, with a fixed key
+// order. The caller hashes the returned string with sha256.
 //
 // The beach set is deliberately not in the digest. It grows daily, and a digest
 // that changes daily is not a gate: it would invalidate the seeded floors in
 // data/wave-floors.json every cycle and permanently withhold auto-publish.
 //
 // What must invalidate a floors entry: adding or removing a grid, moving a domain
-// edge, changing a cell size, retargeting a url template, or changing a search
-// cap. All five change which beaches resolve and how far a sample may reach, so
-// counts seeded under the old set say nothing about the new one.
+// edge, changing a cell size, retargeting a url template, changing a search cap,
+// changing which water classes a grid accepts, or changing whether a grid's wind
+// plane may answer a wave-null beach. All seven change which beaches resolve to
+// which grid, how far a sample may reach, or how many records come back, so counts
+// seeded under the old set say nothing about the new one. Cadence and probe fields
+// stay out: the digest covers assignment policy and geometry, which decide which
+// beaches resolve to which grid, not availability, which decides whether a cycle
+// lands at all.
 //
 // Throws on malformed input: GRIDS is repo-committed source, so a malformed entry
 // is a commit bug that must fail loudly rather than digest to something that
@@ -262,7 +348,17 @@ export function gridsDigestInput(grids) {
       cell: { lon: grid.sampled.pixelLon, lat: grid.sampled.pixelLat },
       urlTemplate: grid.urlTemplate,
       variables: grid.variables.slice(),
-      searchMaxKm: grid.searchMaxKm
+      searchMaxKm: grid.searchMaxKm,
+      // Normalised rather than passed through: waterClassAllowsGrid treats a
+      // non-array as permissive, so a grid that declares no list must digest as an
+      // explicit "accepts everything" rather than as a key JSON.stringify drops.
+      // Sorted, because membership is what decides assignment and a reordering is
+      // not a change.
+      waterClasses: Array.isArray(grid.waterClasses) ? grid.waterClasses.slice().sort() : null,
+      // Normalised the same way and for the same reason: windFallbackAllowed is
+      // default-deny, so a grid that declares nothing must digest as an explicit
+      // false rather than as a key JSON.stringify drops.
+      windFallback: grid.windFallback === true
     });
   }
   entries.sort(function (a, b) {
@@ -330,6 +426,14 @@ export function waterClassAllowsGrid(waterClass, grid) {
     return true;
   }
   return grid.waterClasses.indexOf(waterClass) !== -1;
+}
+
+// Whether a grid's WIND plane may answer a beach its wave plane could not resolve.
+// Default-deny: true only for a grid that declares it, because a grid whose masked
+// WIND cells hold 0 rather than a sentinel would otherwise publish a calm-wind
+// green over a land cell, and no build gate can see that record as wrong.
+export function windFallbackAllowed(grid) {
+  return isPlainObject(grid) && grid.windFallback === true;
 }
 
 // The ordered list of grids a beach may be sampled from: permitted by water_class

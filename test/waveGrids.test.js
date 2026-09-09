@@ -20,7 +20,10 @@ import {
   waterClassAllowsGrid,
   candidateGrids,
   selectGrid,
-  nearestWetSample
+  nearestWetSample,
+  windFallbackAllowed,
+  cellCenterLat,
+  cellCenterLon
 } from "../src/waveGrids.js";
 import { WAVE_MODEL_IDS, waveSourceLabel } from "../src/waveModels.js";
 
@@ -30,15 +33,28 @@ const LAKE_BEACH = { id: "b-lake", lat: 42.4, lon: -86.29, water_class: "great_l
 const OCEAN_BEACH = { id: "b-ocean", lat: 34.01, lon: -118.5, water_class: "ocean" };
 // An Alaskan beach above gfswave global's 52.583N ceiling.
 const ARCTIC_BEACH = { id: "b-arctic", lat: 60.5, lon: -151.4, water_class: "ocean" };
+// Alki Beach, Puget Sound: ocean, inside gfswave global and inside the NWPS
+// Seattle nest, which is the only grid with a wet cell anywhere near it.
+const SALISH_BEACH = { id: "b-alki", lat: 47.5763, lon: -122.4065, water_class: "ocean" };
 
 function alwaysProbe() {
   return true;
 }
 
 describe("GRIDS", function () {
-  it("is exactly the three grids, in fallthrough order", function () {
+  it("is exactly the four grids, in fallthrough order", function () {
     const ids = GRIDS.map(function (g) { return g.id; });
-    expect(ids).toEqual(["noaa_glwu", "noaa_gfswave", "noaa_gfswave_arctic"]);
+    expect(ids).toEqual([
+      "noaa_glwu", "noaa_gfswave", "noaa_gfswave_arctic", "noaa_nwps_sew"
+    ]);
+  });
+
+  it("keeps the NWPS nest last, so it is offered only what gfswave masked", function () {
+    // Position is the whole blast radius of adding it: pass 1 is an ordered
+    // fallthrough, so an earlier slot would move thousands of already-resolved
+    // beaches to a different model while the seeded floors still validate.
+    const ids = GRIDS.map(function (g) { return g.id; });
+    expect(ids[ids.length - 1]).toBe("noaa_nwps_sew");
   });
 
   it("carries no superseded regional grid", function () {
@@ -122,12 +138,14 @@ describe("waterClassAllowsGrid", function () {
     expect(waterClassAllowsGrid("great_lake", gridById("noaa_glwu"))).toBe(true);
     expect(waterClassAllowsGrid("great_lake", gridById("noaa_gfswave"))).toBe(false);
     expect(waterClassAllowsGrid("great_lake", gridById("noaa_gfswave_arctic"))).toBe(false);
+    expect(waterClassAllowsGrid("great_lake", gridById("noaa_nwps_sew"))).toBe(false);
   });
 
-  it("confines ocean to the two gfswave grids", function () {
+  it("confines ocean to the ocean grids", function () {
     expect(waterClassAllowsGrid("ocean", gridById("noaa_glwu"))).toBe(false);
     expect(waterClassAllowsGrid("ocean", gridById("noaa_gfswave"))).toBe(true);
     expect(waterClassAllowsGrid("ocean", gridById("noaa_gfswave_arctic"))).toBe(true);
+    expect(waterClassAllowsGrid("ocean", gridById("noaa_nwps_sew"))).toBe(true);
   });
 
   it("lets a NULL water_class try every grid", function () {
@@ -230,6 +248,61 @@ describe("nearestWetSample over a masked gfswave plane", function () {
   });
 });
 
+// The NWPS nest's cap is 10 km, not the ocean 25, because a 25 km reach crosses
+// from Puget Sound into the Strait of Juan de Fuca and answers with a different
+// wave regime. The cap is the only thing enforcing that, so it is asserted against
+// a cell the search WOULD reach at the ocean cap.
+describe("nearestWetSample at the NWPS nest's 10 km cap", function () {
+  const nest = gridById("noaa_nwps_sew");
+  const header = nest.sampled;
+  // Alki's containing cell centre. Sampling from the centre makes each eastward
+  // neighbour exactly one cell away, so the distances below are the grid's, not an
+  // artefact of where inside the cell the beach sits.
+  const centerCol = Math.floor((SALISH_BEACH.lon - header.originLon) / header.pixelLon);
+  const centerRow = Math.floor((SALISH_BEACH.lat - header.originLat) / header.pixelLat);
+  const lat = cellCenterLat(header, centerRow);
+  const lon = cellCenterLon(header, centerCol);
+
+  function planeWithWetCellEast(cells) {
+    const plane = new Float32Array(header.width * header.height).fill(header.nodata);
+    plane[centerRow * header.width + (centerCol + cells)] = 1.5;
+    return plane;
+  }
+
+  it("holds a 10 km cap and the ~3.9 km cells that cap is sized for", function () {
+    expect(nest.searchMaxKm).toBe(10);
+    expect(nest.waterClasses).toEqual(["ocean"]);
+  });
+
+  it("reaches a wet cell two cells east, at 7.8 km", function () {
+    const hit = nearestWetSample(nest, header, planeWithWetCellEast(2), lat, lon);
+    expect(hit.value).toBe(1.5);
+    expect(hit.col).toBe(centerCol + 2);
+    expect(hit.ring).toBe(2);
+    expect(hit.distanceKm).toBeLessThan(10);
+    expect(hit.distanceKm).toBeGreaterThan(7);
+  });
+
+  it("refuses a wet cell three cells east, at 11.7 km", function () {
+    expect(nearestWetSample(nest, header, planeWithWetCellEast(3), lat, lon)).toBe(null);
+  });
+
+  it("refuses it on the cap alone, not on a short search", function () {
+    // The same plane at the ocean cap resolves, which is what proves the 10 km
+    // ruling is doing the work: widening the cap is all it takes to cross the
+    // strait.
+    const widened = Object.assign({}, nest, { searchMaxKm: 25 });
+    const hit = nearestWetSample(widened, header, planeWithWetCellEast(3), lat, lon);
+    expect(hit.value).toBe(1.5);
+    expect(hit.distanceKm).toBeGreaterThan(10);
+  });
+
+  it("returns null over a fully masked nest plane", function () {
+    const masked = new Float32Array(header.width * header.height).fill(header.nodata);
+    expect(nearestWetSample(nest, header, masked, lat, lon)).toBe(null);
+  });
+});
+
 describe("selectGrid", function () {
   it("never routes a great_lake beach to a gfswave grid", function () {
     const grid = selectGrid(LAKE_BEACH, GRIDS, alwaysProbe);
@@ -276,11 +349,61 @@ describe("selectGrid", function () {
         .toBe(false);
       expect(selectGrid(ARCTIC_BEACH, GRIDS, alwaysProbe).id).toBe("noaa_gfswave_arctic");
     });
+
+  it("offers a Salish Sea beach gfswave first and the NWPS nest second", function () {
+    const ids = candidateGrids(SALISH_BEACH, GRIDS).map(function (g) { return g.id; });
+    expect(ids).toEqual(["noaa_gfswave", "noaa_nwps_sew"]);
+  });
+
+  it("falls through to the NWPS nest where global.0p16 has no wet cell", function () {
+    // The real shape of every Puget Sound beach: gfswave contains the point and is
+    // tried first, its 0.1667-degree mask answers nothing, and the nest resolves.
+    const refuseGfswave = function (grid) { return grid.id !== "noaa_gfswave"; };
+    expect(selectGrid(SALISH_BEACH, GRIDS, refuseGfswave).id).toBe("noaa_nwps_sew");
+    expect(selectGrid(SALISH_BEACH, GRIDS, alwaysProbe).id).toBe("noaa_gfswave");
+  });
+
+  it("never routes a great_lake beach to the NWPS nest", function () {
+    // The nest's window is Pacific, so only water_class is asserted here; the
+    // ordering above is what keeps an ocean beach off the lakes.
+    const nestBoxLake = { id: "b-y", lat: 47.5763, lon: -122.4065, water_class: "great_lake" };
+    expect(candidateGrids(nestBoxLake, GRIDS)).toEqual([]);
+  });
+});
+
+// Default-deny is the contract. A grid whose masked WIND cells hold 0 rather than a
+// sentinel resolves its own land cell at ring 0 on the wind pass, and rules.js
+// colors that fabricated calm green with no build gate able to see it.
+describe("windFallbackAllowed", function () {
+  it("allows a grid whose WIND plane shares the wave land mask", function () {
+    expect(windFallbackAllowed(gridById("noaa_glwu"))).toBe(true);
+    expect(windFallbackAllowed(gridById("noaa_gfswave"))).toBe(true);
+    expect(windFallbackAllowed(gridById("noaa_gfswave_arctic"))).toBe(true);
+  });
+
+  it("refuses the NWPS nest, whose masked WIND cells read 0 m/s", function () {
+    expect(windFallbackAllowed(gridById("noaa_nwps_sew"))).toBe(false);
+  });
+
+  it("refuses a grid that declares nothing", function () {
+    const silent = Object.assign({}, gridById("noaa_gfswave"));
+    delete silent.windFallback;
+    expect(windFallbackAllowed(silent)).toBe(false);
+  });
+
+  it("refuses a truthy non-true value and a non-object", function () {
+    expect(windFallbackAllowed({ windFallback: "yes" })).toBe(false);
+    expect(windFallbackAllowed({ windFallback: 1 })).toBe(false);
+    expect(windFallbackAllowed(null)).toBe(false);
+    expect(windFallbackAllowed("noaa_gfswave")).toBe(false);
+  });
 });
 
 describe("gridsDigest", function () {
   it("is stable across a reordering of the array", async function () {
-    const reordered = [GRIDS[2], GRIDS[0], GRIDS[1]];
+    // Derived from GRIDS rather than indexed, so it stays a permutation of the
+    // whole set as grids are added.
+    const reordered = GRIDS.slice().reverse();
     expect(gridsDigestInput(reordered)).toBe(gridsDigestInput(GRIDS));
     expect(await gridsDigest(reordered)).toBe(await gridsDigest(GRIDS));
   });
@@ -290,6 +413,61 @@ describe("gridsDigest", function () {
       return g.id === "noaa_glwu" ? Object.assign({}, g, { searchMaxKm: 11 }) : g;
     });
     expect(await gridsDigest(moved)).not.toBe(await gridsDigest(GRIDS));
+  });
+
+  it("changes when a grid's accepted water classes change", async function () {
+    // waterClasses decides beach-to-grid assignment outright. Left out of the
+    // digest, retargeting a grid at another water body would move thousands of
+    // beaches while the floors seeded under the old assignment kept validating.
+    const retargeted = GRIDS.map(function (g) {
+      if (g.id !== "noaa_nwps_sew") { return g; }
+      return Object.assign({}, g, { waterClasses: ["ocean", "great_lake"] });
+    });
+    expect(await gridsDigest(retargeted)).not.toBe(await gridsDigest(GRIDS));
+  });
+
+  it("changes when a grid drops its water-class list entirely", async function () {
+    // waterClassAllowsGrid treats a missing list as permissive, so this is the
+    // widest possible retarget and must never digest as the narrow original.
+    const unconstrained = GRIDS.map(function (g) {
+      if (g.id !== "noaa_glwu") { return g; }
+      const copy = Object.assign({}, g);
+      delete copy.waterClasses;
+      return copy;
+    });
+    expect(await gridsDigest(unconstrained)).not.toBe(await gridsDigest(GRIDS));
+  });
+
+  it("does not change when a water-class list is merely reordered", async function () {
+    // Membership decides assignment; order does not. A false reseed costs a
+    // hand-measured floors entry, so the digest normalises rather than reseeding.
+    const reordered = GRIDS.map(function (g) {
+      if (!Array.isArray(g.waterClasses) || g.waterClasses.length < 2) { return g; }
+      return Object.assign({}, g, { waterClasses: g.waterClasses.slice().reverse() });
+    });
+    expect(await gridsDigest(reordered)).toBe(await gridsDigest(GRIDS));
+  });
+
+  it("changes when a grid's wind fallback is flipped", async function () {
+    // The flag decides whether a grid contributes wind-only records at all, so
+    // flipping it moves the very counts the floors are seeded against.
+    const flipped = GRIDS.map(function (g) {
+      if (g.id !== "noaa_nwps_sew") { return g; }
+      return Object.assign({}, g, { windFallback: true });
+    });
+    expect(await gridsDigest(flipped)).not.toBe(await gridsDigest(GRIDS));
+  });
+
+  it("changes when a grid drops its wind-fallback declaration", async function () {
+    // windFallbackAllowed is default-deny, so a dropped key is a real behaviour
+    // change and must never digest as the declaring original.
+    const silent = GRIDS.map(function (g) {
+      if (g.id !== "noaa_glwu") { return g; }
+      const copy = Object.assign({}, g);
+      delete copy.windFallback;
+      return copy;
+    });
+    expect(await gridsDigest(silent)).not.toBe(await gridsDigest(GRIDS));
   });
 
   it("changes when a domain edge moves", async function () {

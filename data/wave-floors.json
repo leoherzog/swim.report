@@ -12,9 +12,11 @@
     "commit - the same discipline data/layer-floors.json already has.",
     "",
     "WHY IT IS KEYED BY gridsDigest. The digest is sha256 over gridsDigestInput(GRIDS) from",
-    "src/waveGrids.js: id, domain, cell size, url template, variables and cap km, sorted, canonical",
-    "JSON. Adding a grid, moving a domain edge or changing a search cap changes the digest, so the",
-    "new grid set has NO entry here and the build refuses to auto-publish until someone seeds one.",
+    "src/waveGrids.js: id, domain, cell size, url template, variables, cap km, water classes and",
+    "the wind-fallback flag, sorted, canonical JSON. Adding a grid, moving a domain edge, changing",
+    "a search cap, retargeting which water classes a grid accepts or flipping whether a grid's wind",
+    "plane may answer a wave-null beach changes the digest, so the new grid set has NO entry here",
+    "and the build refuses to auto-publish until someone seeds one.",
     "The BEACH SET is deliberately not in the digest: it grows daily, and a digest that changes",
     "daily would withhold auto-publish forever.",
     "",
@@ -25,7 +27,17 @@
     "  2. Read the produced manifest.json. Cross-check beaches.resolved against the D1 row count and",
     "     the per-grid split against where the beaches actually are before trusting any of it.",
     "  3. Commit an entry under the new digest with status \"seeded\", seededFromCycleId set to that",
-    "     manifest cycleId, and each floor set to 0.75x the observed count (rounded down).",
+    "     manifest cycleId, and each floor set to 0.75x the observed count (rounded down). Every",
+    "     grid id in GRIDS needs its own floor: perGridFloorRefusals iterates this entry, so an",
+    "     omitted grid is unfloored with no refusal and no warning.",
+    "",
+    "test/waveGateData.test.js holds this file to the digest the committed GRIDS produce, but only",
+    "STRUCTURALLY: an entry exists for that digest, every GRIDS id is keyed in its grids map,",
+    "nothing is keyed that GRIDS does not contain, and the entry is wholly seeded or wholly",
+    "pending. It passes on a \"bootstrap\" entry by design, so a green suite is not evidence that a",
+    "grid set has been seeded. What catches an unseeded digest in production is the scheduled",
+    "withheld-publish failure in .github/workflows/waves.yml; what prevents it landing is the",
+    "sequence in docs/offline-waves.md under \"Adding a grid\".",
     "",
     "SHAPE.",
     "  floors[<gridsDigest>].status               \"bootstrap\" | \"seeded\"",
@@ -70,6 +82,28 @@
         "noaa_glwu": 826,
         "noaa_gfswave": 3612,
         "noaa_gfswave_arctic": 80
+      }
+    },
+    "sha256:2df3c65045c0a808a61e45bcf4b2a5c4c0e602ec4ca2ba36d00a11d1b7a8a633": {
+      "_comment": [
+        "The grid set carrying noaa_nwps_sew, the Salish Sea NWPS nest, plus the waterClasses and",
+        "windFallback digest inputs. No cycle has sampled this set yet, so every floor below is null:",
+        "a floor scaled from an unobserved count is the invented number this file exists to refuse.",
+        "",
+        "Status \"bootstrap\" withholds auto-publish exactly as an absent entry does. It is here to",
+        "record that the grid set is known and its floors are pending, not to get a cycle past the",
+        "refusal."
+      ],
+      "status": "bootstrap",
+      "note": "A human seeds this entry from the first withheld manifest for this digest: dispatch waves.yml with publish true, cross-check the manifest's beaches.resolved and per-grid split against D1, then commit status \"seeded\" with seededFromCycleId set to that manifest cycleId and each floor at 0.75x the observed count, rounded down.",
+      "seededFromCycleId": null,
+      "waveinputRecords": null,
+      "wavesRecords": null,
+      "grids": {
+        "noaa_glwu": null,
+        "noaa_gfswave": null,
+        "noaa_gfswave_arctic": null,
+        "noaa_nwps_sew": null
       }
     }
   }

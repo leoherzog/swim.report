@@ -270,14 +270,17 @@ for exactly as long as the series it holds. See WaveInput below for why.
                                      // only by a record carrying NO series; a series-bearing
                                      // record is indexed instead (see resolveWaveInput)
       "model": "noaa_gfswave",       // string or null: the grid that supplied the series
-                                     // (noaa_gfswave | noaa_gfswave_arctic | noaa_glwu);
-                                     // drives the estimate's wave source label
+                                     // (noaa_gfswave | noaa_gfswave_arctic | noaa_glwu |
+                                     // noaa_nwps_sew); drives the estimate's wave source
+                                     // label
       "windSpeedMph": null,          // number (mph) or null — the wind fallback, recorded only
-                                     // for beaches whose hour 0 resolved no wave height, and
-                                     // offered to rules.js only at hour 0
-      "windGustMph": null,           // always null: NOAA gfswave publishes no GUST element, so
-                                     // the wind red rule is effectively speed >= 25 mph alone
-                                     // and rules.js renders "n/a" for the gust
+                                     // for beaches whose hour 0 resolved no wave height, only
+                                     // from a grid declaring windFallback, and offered to
+                                     // rules.js only at hour 0
+      "windGustMph": null,           // always null: no grid in the set publishes a GUST
+                                     // element, so the wind red rule is effectively speed
+                                     // >= 25 mph alone and rules.js renders "n/a" for the
+                                     // gust
       "startIso": "2026-07-12T15:00:00.000Z",  // string or null: the instant hoursFt[0] describes
       "hoursFt": [2.62, 2.7, ...],   // 24 x (number (feet) | null), or null on a wind-only
                                      // record. The SAME array waves.hoursFt carries
@@ -1502,21 +1505,30 @@ detail page's water-temperature tile and never src/rules.js.
       // Null/empty/non-matching input -> null. Accepted limitation: "LOW TO MODERATE"
       // captures "LOW", a conservative parse, pinned by a test.
 
-### src/waveGrids.js (the three NOAA GRIB2 wave grids + pure sampling geometry — offline only)
+### src/waveGrids.js (the NOAA GRIB2 wave grids + pure sampling geometry — offline only)
 
 Offline only. Nothing in the Worker's import closure may import this module; it exists for
 scripts/sample-waves.js and scripts/build-wave-manifest.js.
 
     export const GRIDS                     // ordered fallthrough: noaa_glwu, noaa_gfswave,
-                                           // noaa_gfswave_arctic. Each carries its domain,
-                                           // url template, fetch mode, warp descriptor, the
-                                           // decoded raster geometry and its own nodata.
+                                           // noaa_gfswave_arctic, noaa_nwps_sew. Each carries
+                                           // its domain, url template, fetch mode, warp
+                                           // descriptor, the decoded raster geometry, its own
+                                           // nodata, and whether its WIND plane may answer a
+                                           // beach its wave plane could not. Array position
+                                           // decides which beaches a grid is offered, so
+                                           // noaa_nwps_sew is last: it sees only the beaches
+                                           // global.0p16 masked and moves no existing
+                                           // assignment.
     export const REQUIRED_GRID_IDS         // ["noaa_gfswave"] — the grids a cycle cannot do
                                            // without. Read by the fetch, the band plan, the
                                            // workflow shell and the build gate, so all four
                                            // refusals move together. Emptying it makes every
                                            // grid optional and lets a cycle carrying no
-                                           // gfswave data publish.
+                                           // gfswave data publish. noaa_nwps_sew is
+                                           // deliberately absent: it publishes on demand, so
+                                           // requiring it would turn one missing office run
+                                           // into a nationwide refusal.
     export const WAVE_ELEMENT / WIND_ELEMENT      // "HTSGW" (metres) / "WIND" (metres/second)
     export const FORECAST_HOURS                   // 24
     export const METERS_PER_SECOND_TO_MPH         // 2.2369362920544
@@ -1524,8 +1536,8 @@ scripts/sample-waves.js and scripts/build-wave-manifest.js.
     export function gridById(id)
     export function candidateGrids(waterClass)    // water_class constrains the grid set:
                                                   // 'great_lake' may match only noaa_glwu,
-                                                  // 'ocean' only the two gfswave grids,
-                                                  // NULL may try both in order
+                                                  // 'ocean' the three ocean grids, NULL may
+                                                  // try every grid, each in GRIDS order
     export function containsPoint(grid, lat, lon)
     export function nearestWetSample(grid, header, data, lat, lon)
                                                   // The nearest-wet-cell spiral, by
@@ -1540,10 +1552,22 @@ scripts/sample-waves.js and scripts/build-wave-manifest.js.
     export function sampleAtCell(header, data, row, col)
     export function isUsableSample(value, nodata)  // rejects non-finite, the band's own
                                                    // nodata, > 9000 and < 0
+    export function windFallbackAllowed(grid)      // whether this grid's WIND plane may answer
+                                                   // a beach its wave plane could not resolve.
+                                                   // Default-deny: true only for a grid that
+                                                   // declares windFallback: true, because a
+                                                   // grid whose masked WIND cells hold 0
+                                                   // rather than a sentinel would publish a
+                                                   // calm-wind green over land.
     export async function gridsDigest()            // sha256 over the canonical serialization
                                                    // of GRIDS (id, domain, cell size, url
-                                                   // template, variables, cap km). Keys the
-                                                   // coverage floors. The beach set is
+                                                   // template, variables, cap km, accepted
+                                                   // water classes, wind-fallback flag). Keys
+                                                   // the coverage floors. Cadence and probe
+                                                   // fields stay out: the digest covers what
+                                                   // decides which beaches resolve to which
+                                                   // grid and how many records come back, not
+                                                   // whether a cycle lands. The beach set is
                                                    // deliberately excluded: it grows daily,
                                                    // and a digest that changes daily is not
                                                    // a gate.
@@ -1555,8 +1579,9 @@ module. It lives outside src/index.js because workerd rejects every non-function
 export on the entry module (section 7).
 
     export const WAVE_MODEL_IDS                   // noaa_gfswave, noaa_gfswave_arctic,
-                                                  // noaa_glwu — every id must also appear in
-                                                  // MODEL_DISPLAY in src/frontend/waveStrip.js
+                                                  // noaa_glwu, noaa_nwps_sew — every id must
+                                                  // also appear in MODEL_DISPLAY in
+                                                  // src/frontend/waveStrip.js
                                                   // or the chart legend renders the raw id
     export const WIND_SOURCE                      // frozen { label, url } the hourly cron
                                                   // pushes into an estimate's sources array
@@ -3468,26 +3493,60 @@ honest — never a stale wave height deciding a color. That is what sorts the ga
 everything that could produce a wrong number is non-overridable, everything that is merely
 less data is overridable and warns.
 
-The grid set. Three grids in ordered fallthrough, constrained by beaches.water_class
-(great_lake may match only noaa_glwu, ocean only the two gfswave grids, NULL may try both in
-order):
+The grid set. Four grids in ordered fallthrough, constrained by beaches.water_class
+(great_lake may match only noaa_glwu, ocean the three ocean grids, NULL may try every grid,
+each in GRIDS order):
 
   1. noaa_glwu           NOMADS glwu.grlc_2p5km_sr, 2.5 km Lambert, 49 steps in one ~22 MB
                          file, nodata 9.999000260554009e+20, 10 km search cap. The only
-                         source for the Great Lakes, which gfswave masks entirely. NOMADS
-                         documents a 10 second wait between scripted fetches, honoured by
-                         construction: at most two spaced whole-file requests per cycle.
+                         source for the Great Lakes, which gfswave masks entirely.
   2. noaa_gfswave        AWS noaa-gfs-bdp-pds gfswave.global.0p16, 2160x406 at 0.166666 deg,
                          -180.083..179.917 by 52.583N..-15.083S, nodata 9999, 25 km cap.
   3. noaa_gfswave_arctic AWS gfswave.arctic.9km, polar stereographic, above 52.58N, nodata
                          9999, 25 km cap.
+  4. noaa_nwps_sew       NOMADS filter CGI sew_nwps_CG1, the Seattle office's NWPS SWAN nest
+                         over the Salish Sea, 99x93 at ~4 km, 145 hourly steps as 290
+                         interleaved HTSGW/WIND bands in one ~3.3 MB response, nodata 9999,
+                         10 km cap, wind fallback off.
 
 global.0p16 supersedes wcoast.0p16, atlocn.0p16 and epacif.0p16 in one file: it closes the
 coverage gap between wcoast's -109.917 edge and atlocn's -100.083 edge that left Mexican
 Pacific beaches uncovered, and it uses the normal -180..180 convention, so epacif's 0-360
-longitude trap — on which a real Hawaii longitude samples as empty — does not exist. A beach
-out of extent, or with no wet cell inside its cap, falls through to the next permitted grid
-and then to null.
+longitude trap — on which a real Hawaii longitude samples as empty — does not exist. It is
+not every ocean beach: at 0.1667 degrees it masks the sheltered inland seas whole, which is
+the gap noaa_nwps_sew closes for the Salish Sea. That grid sits last in GRIDS, so it is
+offered only the beaches global.0p16 could not resolve; an earlier position would move
+thousands of beaches to a different model while the floors seeded under the current
+assignment still validate. Its 10 km cap is the lakes' reasoning — a 25 km reach crosses from
+Puget Sound into the Strait of Juan de Fuca, a different wave regime — and Puget Sound sits
+under the ocean class's yellow threshold in fair weather, so a green there is the model, not
+a fault. CG1 rather than CG2: the coarser CG2 covers more beaches only on a direct hit, and
+once the spiral runs CG1 resolves as many or more at every cap with a sharper land mask. CG0
+carries no HTSGW at all. A beach out of extent, or with no wet cell inside its cap, falls
+through to the next permitted grid and then to null.
+
+NOMADS access. NOMADS documents a 10 second wait between scripted fetches, so every request
+to it is spaced and each grid's NOMADS request count is capped on its own — a shared counter
+lets one grid's walk-back starve the next grid's cycle. A whole-file grid is one such request
+in the normal case. noaa_nwps_sew is reachable only through the filter CGI: there is no NODD
+or S3 mirror, and the plain directory tree has autoindex off and 403s every real path under
+it. Because that CGI is a script rather than a file server, its cycle probe is a GET whose
+first bytes must read GRIB, and the probed bytes are the download. A HEAD proves nothing
+about a script, and a 200 carrying an error page would take a real sha256 and surface only as
+a gdalinfo warning two steps later. Every NOMADS request also sends a User-Agent, since an
+unidentified client is throttled and a 403 there is terminal. The office publishes on demand,
+near 00Z and 12Z with whole days sometimes absent, so cycleStepHours 12 addresses the two
+real publication hours and maxCycleAgeHours 36 walks back three of them; one file carries 145
+hourly steps, so a cycle over a day old still covers the 24 h window.
+
+The wind fallback is default-deny. A beach that resolved no wet wave cell gets a second pass
+over the same grid's hour-0 WIND plane, and only a grid declaring windFallback: true may
+serve it (windFallbackAllowed). A masked cell is not always a sentinel: noaa_nwps_sew writes
+0 m/s over land — Carr Inlet returns HTSGW 9999 beside WIND 0 — and isUsableSample accepts 0.
+Pass 1 already searched the whole cap over the same cell geometry, so a pass-2 hit
+necessarily sits on a wave-masked cell; on that grid it would be a fabricated calm that
+rules.js colors green, with no build gate able to see it. Whether a cell is wet is a question
+only HTSGW can answer.
 
 The spiral is the sampling mechanism, not a fallback. Beach coordinates frequently land on
 masked land cells: four of five real beach points return the nodata sentinel at the exact
@@ -3506,8 +3565,9 @@ scripts/fetch-wave-grids.js carries --allow-net. The permission guard in
 on review (TODO.md).
 
 Pipeline. scripts/fetch-wave-grids.js resolves the cycle at runtime — validStart is the top
-of the current UTC hour, GFS cycles are walked newest-first back 24 h, and the first whose
-f(k)..f(k+23) all exist wins — and downloads it. The shell captures a gdalinfo -json sidecar
+of the current UTC hour, GFS cycles are walked newest-first back 24 h and the first whose
+f(k)..f(k+23) all exist wins, and a whole-file grid walks its own cycleStepHours steps back
+through maxCycleAgeHours and takes the first cycle actually published — and downloads it. The shell captures a gdalinfo -json sidecar
 per file; scripts/sample-waves.js --mode plan names the band index carrying each hour's
 HTSGW and WIND, discovered from gdalinfo and never assumed; the shell extracts each band to
 a flat ENVI plane; scripts/sample-waves.js --mode sample samples every beach in the D1
@@ -3540,13 +3600,18 @@ missing entry as absent, which is not a measurement either and warns rather than
 element requirement splits in one direction only: any HTSGW gap unplans the grid and drops
 both its elements, while a WIND-only gap keeps its waves and drops just its WIND entries —
 the inverse would publish wind-only records from a grid whose wave plane was never proven. A
-grid in REQUIRED_GRID_IDS that does not reach "planned" refuses the whole cycle.
+grid in REQUIRED_GRID_IDS that does not reach "planned" refuses the whole cycle; noaa_nwps_sew
+is deliberately outside that set, because requiring a grid the office publishes on demand
+would turn one missing run into a nationwide refusal.
 
 Gates. Non-overridable: gridIdentity and bandIdentity against the committed
 data/wave-grids.json — gridIdentity compares every plane of a grid against that grid's
 hour-0 wave header, not the hour-0 header alone, so a later plane with a shifted origin and
 identical dimensions cannot sample the wrong cells unobserved, and a sample report carrying
-no plane-identity count is refused rather than passing vacuously; per-band validTimes
+no plane-identity count is refused rather than passing vacuously, and a grid the cycle
+sampled with no block of its own in data/wave-grids.json is refused outright, before any
+artifact uploads, so a new grid's identity block ships in the commit that adds the grid;
+per-band validTimes
 (GRIB_VALID_TIME === validStartEpoch + i*3600, which catches an .idx off-by-one); the
 sentinel scan against each grid's own nodata, covering wave values in feet against
 MAX_EMITTED_FT and wind values in mph against MAX_EMITTED_MPH, each grid's nodata converted
@@ -3569,7 +3634,26 @@ to zero; the global coverage floor and the global ratio fallback apply only when
 sampled. validPercent is scored through the same per-grid shrink and decay ratios as the
 counts. An unseeded digest sets autoPublishAllowed:false without failing the build, and
 auto-publish is likewise withheld, without a refusal, when no ratio comparison was scored at
-all.
+all. A withheld publish is a warning on a dispatch and a failure on a scheduled run: that run
+wrote no KV for any grid and moved no pointer, so the failing step is the only alert the state
+produces, and the reports artifact has already uploaded for the human to seed floors from.
+
+The floors contract. gridsDigest covers id, domain, cell size, url template, variables, cap
+km, accepted water classes and the wind-fallback flag: each decides which beaches resolve to
+which grid, how far a sample may reach, or how many records come back, so counts seeded under
+the old set say nothing about the new one. Cadence and probe fields stay out, because they
+decide whether a cycle lands rather than which beaches it covers. Every GRIDS id needs its
+own floor in the entry, since the per-grid refusal walk iterates the floors entry rather than
+GRIDS and an omitted grid is unfloored with no refusal and no warning.
+test/waveGateData.test.js holds the committed data to the structural half of that contract —
+an entry exists for the digest the committed GRIDS produce, every GRIDS id is keyed in it,
+nothing else is, the entry is wholly seeded or wholly pending, and every grid has an identity
+block — and it passes on a "bootstrap" entry by design, so a green suite is not evidence that
+a grid set has been seeded. Landing a grid set whose floors are unseeded withholds
+auto-publish on every scheduled cycle, which writes no KV for any grid and ages the whole
+site out to unknown within a day; the scheduled withheld-publish failure is what makes that
+state visible, and the rollout sequence in docs/offline-waves.md is what keeps it from
+landing.
 
 Cadence and the open risk. GitHub Actions skips cron occurrences rather than merely
 deferring them. At 8 slots a day against the 7 h absolute key expiration this tolerates two
@@ -4418,8 +4502,8 @@ exporting a CSS string); render.js is the sole module the router imports.
     (toFixed(1), " · " separator, display-name order); with 0-1 models it is omitted, since
     one model would repeat the stat. Model display names live in waveStrip.js's
     MODEL_DISPLAY (noaa_glwu -> "NOAA Great Lakes", noaa_gfswave -> "NOAA GFS",
-    noaa_gfswave_arctic -> "NOAA GFS Arctic"; unknown ids fall back to the raw id after the
-    known ones), deliberately not imported from src/waveModels.js so a backend id rename
+    noaa_gfswave_arctic -> "NOAA GFS Arctic", noaa_nwps_sew -> "NOAA NWPS Seattle"; unknown
+    ids fall back to the raw id after the known ones), deliberately not imported from src/waveModels.js so a backend id rename
     cannot silently reorder the UI. Every id waveSourceLabel can name must appear here, and
     test/waveModels.test.js asserts that across the two files. With one grid per beach the
     multi-model machinery is dormant but reachable.
@@ -4683,7 +4767,9 @@ test uses symbolically.
   exact alert strings, "never" fallback).
 - test/waveGrids.test.js — grid selection under water_class, containsPoint, the
   nearest-wet-cell spiral (great-circle tie-break, cap enforcement, all-dry return), sample
-  containment against each grid's own nodata, and gridsDigest stability.
+  containment against each grid's own nodata, the default-deny windFallbackAllowed predicate,
+  and gridsDigest stability, including its sensitivity to a search cap, to a grid's accepted
+  water classes and to its wind-fallback flag.
 - test/waveSample.test.js — the band plan (element/valid-time matching, refusal on an
   unplannable band), waveRecordsForBeach (both write-skip guards, hoursFt[0] ===
   waveHeightFt, exactly 24 entries), and the snapshot reader.
@@ -4698,6 +4784,12 @@ test uses symbolically.
   valid times, the sentinel scan against each grid's own nodata, alignment, distinct values,
   mean plausibility, the coverage floors keyed by gridsDigest, the shrink and decay ratios,
   and which refusals --allow-shrink may override.
+- test/waveGateData.test.js — the committed gate DATA against the GRIDS table it describes:
+  data/wave-floors.json carries an entry for the digest the committed GRIDS produce, keyed on
+  exactly the GRIDS ids and wholly seeded or wholly pending, and data/wave-grids.json carries
+  an identity block matching each grid's sampled geometry. Structural only, and deliberately
+  green on a "bootstrap" entry: what it catches is a grid silently unfloored or without an
+  identity block, both otherwise invisible.
 - test/waveManifest.test.js — the three-tier consumer gate, including that a MISSING field
   refuses exactly as a false one does and that artifactsPresent/artifactsExpected are
   isFiniteNumber-guarded before comparison.

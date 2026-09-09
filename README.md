@@ -673,14 +673,16 @@ Wave height and the wind fallback come from NOAA GRIB2 model output, downloaded 
 point-sampled in `.github/workflows/waves.yml` (`52 */6 * * *`) and bulk-written into the
 `waveinput:` and `waves:` KV keys the hourly cron reads. Each cycle publishes 24 hours of
 forecast per beach and the hourly cron indexes into it, so four cycles a day is margin against
-a skipped GitHub schedule rather than a freshness requirement. Three grids are sampled in ordered
+a skipped GitHub schedule rather than a freshness requirement. Four grids are sampled in ordered
 fallthrough, constrained by each beach's `water_class`: NOAA's Great Lakes Wave model (GLWU,
-2.5 km) for the lakes, GFS-Wave `global.0p16` for ocean coasts, and GFS-Wave `arctic.9km` above
-52.58°N. A wave model masks land, and real beach coordinates frequently land on a masked cell,
-so each beach is resolved to the nearest wet cell within a per-grid cap — a search only
-possible with the whole grid in hand, and a genuine capability gain over asking a coordinate
-API. GRIB2 uses JPEG 2000 compression and has no pure-JavaScript decoder, so decoding requires
-GDAL and can never happen inside the Worker.
+2.5 km) for the lakes, GFS-Wave `global.0p16` for ocean coasts, GFS-Wave `arctic.9km` above
+52.58°N, and the Seattle forecast office's Nearshore Wave Prediction System nest
+(`sew_nwps_CG1`, about 4 km) for the Salish Sea, which `global.0p16` masks entirely at its
+0.1667° resolution. A wave model masks land, and real beach coordinates frequently land on a
+masked cell, so each beach is resolved to the nearest wet cell within a per-grid cap — a search
+only possible with the whole grid in hand, and a genuine capability gain over asking a
+coordinate API. GFS-Wave's GRIB2 uses JPEG 2000 compression and has no pure-JavaScript decoder,
+so decoding requires GDAL and can never happen inside the Worker.
 
 Publication follows the layer build exactly: an immutable `waves/<cycleId>/` prefix holding
 the manifest, the two NDJSON artifacts and `SHA256SUMS`, with the small `waves/current.json`

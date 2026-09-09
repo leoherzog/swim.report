@@ -47,7 +47,8 @@ export function bandLabelsForWaterClass(waterClass) {
 const MODEL_DISPLAY = [
   { id: "noaa_glwu", name: "NOAA Great Lakes" },
   { id: "noaa_gfswave", name: "NOAA GFS" },
-  { id: "noaa_gfswave_arctic", name: "NOAA GFS Arctic" }
+  { id: "noaa_gfswave_arctic", name: "NOAA GFS Arctic" },
+  { id: "noaa_nwps_sew", name: "NOAA NWPS Seattle" }
 ];
 
 // Precomputed lookups over the fixed MODEL_DISPLAY list: known-id membership

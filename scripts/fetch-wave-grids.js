@@ -19,10 +19,13 @@
 // a several-hours-old cycle is an ordinary, healthy outcome. GLWU resolves
 // independently on its own hourly cycle.
 //
-// NOMADS documents a 10 second wait between scripted fetches. GLWU is therefore
-// one whole-file fetch carrying all 49 steps, every NOMADS request is spaced by
-// NOMADS_MIN_GAP_MS, and the total is capped. The AWS mirror publishes no such
-// rule and is Range-sliced freely.
+// NOMADS documents a 10 second wait between scripted fetches, so every NOMADS
+// request is spaced by NOMADS_MIN_GAP_MS and each grid's NOMADS total is capped on
+// its own — a shared counter lets one grid's walk-back starve the next grid's
+// cycle. A whole-file grid is one such request in the normal case, and a grid
+// published through a CGI probes with a validated GET rather than a HEAD, because a
+// script's HEAD proves nothing about the file the query names. The AWS mirror
+// publishes no such rule and is Range-sliced freely.
 //
 // A grid in REQUIRED_GRID_IDS that resolves no complete cycle inside its age
 // window exits 1 and publishes nothing: the previous cycle's KV rides its lease
@@ -57,9 +60,25 @@ export const FETCH_ATTEMPTS = 3;
 export const FETCH_RETRY_BASE_MS = 1000;
 
 // The documented NOMADS spacing between scripted fetches, plus a cap on how many
-// NOMADS requests one run may make at all.
+// NOMADS requests one grid may spend. The spacing is global because it is a promise
+// to the host; the cap is per grid because two NOMADS grids sharing one counter lets
+// the first grid's walk-back starve the second's cycle.
 const NOMADS_MIN_GAP_MS = 10000;
-const NOMADS_MAX_REQUESTS = 6;
+const NOMADS_MAX_REQUESTS_PER_GRID = 6;
+
+// NOMADS throttles unidentified scripted clients, and a 403 here is terminal and
+// unretried, so an anonymous request fails the grid outright.
+const NOMADS_HEADERS = { "User-Agent": "swim.report wave pipeline (https://swim.report)" };
+
+// A whole-mode response must be a GRIB2 message. The NOMADS filter CGI is a script,
+// not a file server, so a 200 can carry a text error page; written to cycle.grib2 it
+// would take a real sha256 and surface only as a gdalinfo warning two steps later.
+export const MIN_WHOLE_CYCLE_BYTES = 1024;
+
+export function looksLikeGrib(bytes) {
+  return bytes instanceof Uint8Array && bytes.length >= MIN_WHOLE_CYCLE_BYTES &&
+    bytes[0] === 0x47 && bytes[1] === 0x52 && bytes[2] === 0x49 && bytes[3] === 0x42;
+}
 
 function log(msg) {
   console.error("fetch-wave-grids: " + msg);
@@ -242,11 +261,16 @@ function sleep(ms) {
 let nomadsLastAt = 0;
 let nomadsRequests = 0;
 
+// The spacing carries across grids; the budget does not.
+function resetNomadsBudget() {
+  nomadsRequests = 0;
+}
+
 async function paceNomads() {
   nomadsRequests = nomadsRequests + 1;
-  if (nomadsRequests > NOMADS_MAX_REQUESTS) {
+  if (nomadsRequests > NOMADS_MAX_REQUESTS_PER_GRID) {
     throw new Error("fetch-wave-grids: NOMADS request cap (" +
-      String(NOMADS_MAX_REQUESTS) + ") reached");
+      String(NOMADS_MAX_REQUESTS_PER_GRID) + ") per grid reached");
   }
   const wait = nomadsLastAt + NOMADS_MIN_GAP_MS - Date.now();
   if (wait > 0) {
@@ -310,7 +334,12 @@ async function request(url, options) {
 }
 
 async function headExists(url, nomads) {
-  const res = await request(url, { method: "HEAD", notFoundOk: true, nomads: nomads === true });
+  const res = await request(url, {
+    method: "HEAD",
+    notFoundOk: true,
+    nomads: nomads === true,
+    headers: nomads === true ? NOMADS_HEADERS : {}
+  });
   return res.ok;
 }
 
@@ -362,15 +391,38 @@ async function resolveSteppedCycle(grid, validStartEpoch) {
   return null;
 }
 
+// Returns { candidate, bytes, lastModified } or null. bytes is non-null only on the
+// GET-probe path, where the probed response is the download: a grid served by a CGI
+// cannot be HEAD-probed, because a script's HEAD says nothing about whether the
+// cycle it names exists, and reusing the bytes keeps the normal case at one request.
 async function resolveWholeCycle(grid, validStartEpoch) {
   const candidates = cycleCandidates(grid, validStartEpoch);
+  const nomads = grid.source === "nomads";
   for (let c = 0; c < candidates.length; c = c + 1) {
     const candidate = candidates[c];
     const url = gridUrl(grid, candidate.cycleEpoch);
-    if (await headExists(url, grid.source === "nomads")) {
+    if (grid.cycleProbe === "get") {
+      const res = await request(url, {
+        nomads: nomads,
+        notFoundOk: true,
+        headers: nomads ? NOMADS_HEADERS : {}
+      });
+      if (res.ok && looksLikeGrib(res.bytes)) {
+        log(grid.id + ": cycle " + candidate.cycleIso + " present (offset f" +
+          pad3(candidate.forecastOffset) + ")");
+        return {
+          candidate: candidate,
+          bytes: res.bytes,
+          lastModified: res.headers.get("last-modified") || null
+        };
+      }
+      log(grid.id + ": cycle " + candidate.cycleIso + " not published");
+      continue;
+    }
+    if (await headExists(url, nomads)) {
       log(grid.id + ": cycle " + candidate.cycleIso + " present (offset f" +
         pad3(candidate.forecastOffset) + ")");
-      return candidate;
+      return { candidate: candidate, bytes: null, lastModified: null };
     }
     log(grid.id + ": cycle " + candidate.cycleIso + " not published");
   }
@@ -410,19 +462,34 @@ async function downloadStepped(grid, candidate, destDir) {
   return files;
 }
 
-async function downloadWhole(grid, candidate, destDir) {
+async function downloadWhole(grid, candidate, destDir, prefetched, prefetchedLastModified) {
   const url = gridUrl(grid, candidate.cycleEpoch);
-  const res = await request(url, { nomads: grid.source === "nomads" });
+  const nomads = grid.source === "nomads";
+  let bytes = prefetched;
+  let lastModified = prefetchedLastModified || null;
+  if (bytes === null || bytes === undefined) {
+    const res = await request(url, {
+      nomads: nomads,
+      headers: nomads ? NOMADS_HEADERS : {}
+    });
+    bytes = res.bytes;
+    lastModified = res.headers.get("last-modified") || null;
+  }
+  // A 200 is not a cycle. Refusing here keeps an error page out of cycle.grib2,
+  // where it would take a real sha256 and read as a fetched grid.
+  if (!looksLikeGrib(bytes)) {
+    throw new Error("response is not a GRIB2 message (" + String(bytes.length) + " bytes)");
+  }
   const name = "cycle.grib2";
-  await Deno.writeFile(destDir + "/" + name, res.bytes);
+  await Deno.writeFile(destDir + "/" + name, bytes);
   return [{
     name: name,
     hour: null,
     forecastStep: candidate.forecastOffset,
     url: url,
-    bytes: res.bytes.length,
-    sha256: await sha256Hex(res.bytes),
-    lastModified: res.headers.get("last-modified") || null
+    bytes: bytes.length,
+    sha256: await sha256Hex(bytes),
+    lastModified: lastModified
   }];
 }
 
@@ -483,17 +550,28 @@ async function main() {
 
   for (let i = 0; i < grids.length; i = i + 1) {
     const grid = grids[i];
+    resetNomadsBudget();
     const destDir = args.dest + "/" + grid.id;
     await Deno.mkdir(destDir, { recursive: true });
     try {
-      const candidate = grid.fetchMode === "whole"
-        ? await resolveWholeCycle(grid, validStartEpoch)
-        : await resolveSteppedCycle(grid, validStartEpoch);
+      let candidate = null;
+      let prefetched = null;
+      let prefetchedLastModified = null;
+      if (grid.fetchMode === "whole") {
+        const resolved = await resolveWholeCycle(grid, validStartEpoch);
+        if (resolved !== null) {
+          candidate = resolved.candidate;
+          prefetched = resolved.bytes;
+          prefetchedLastModified = resolved.lastModified;
+        }
+      } else {
+        candidate = await resolveSteppedCycle(grid, validStartEpoch);
+      }
       if (candidate === null) {
         throw new Error("no complete cycle inside " + String(grid.maxCycleAgeHours) + " h");
       }
       const files = grid.fetchMode === "whole"
-        ? await downloadWhole(grid, candidate, destDir)
+        ? await downloadWhole(grid, candidate, destDir, prefetched, prefetchedLastModified)
         : await downloadStepped(grid, candidate, destDir);
       let total = 0;
       for (let f = 0; f < files.length; f = f + 1) { total = total + files[f].bytes; }

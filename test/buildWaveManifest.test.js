@@ -1244,7 +1244,10 @@ describe("main", function () {
   // statusOverrides is the NOMADS-outage shape.
   function files(options) {
     const opts = options || {};
-    const sampledIds = opts.sampledIds || ["noaa_glwu", "noaa_gfswave", "noaa_gfswave_arctic"];
+    // Derived from GRIDS, so the fixture keeps describing a whole cycle: gridStatus()
+    // reports every committed grid as sampled, and a hand-listed subset here would
+    // pair that with stats for fewer grids, a shape no real cycle produces.
+    const sampledIds = opts.sampledIds || GRIDS.map(function (g) { return g.id; });
     const inputs = waveinputRecords(40);
     const store = {};
     store[SAMPLE_DIR + "/sample-report.json"] = JSON.stringify({

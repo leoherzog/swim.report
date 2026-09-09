@@ -245,8 +245,9 @@ jobs:
 
       - name: Fetch the GRIB2 cycle
         # The only network-touching script in this pipeline, and the only one carrying
-        # --allow-net. It Range-slices HTSGW and WIND off the .idx sidecars and takes
-        # GLWU as one whole-file NOMADS fetch, spaced by the documented 10 s.
+        # --allow-net. It Range-slices HTSGW and WIND off the .idx sidecars on the AWS
+        # grids and takes each NOMADS grid as one whole-file fetch, spaced by the
+        # documented 10 s and capped per grid.
         run: |
           set -euo pipefail
           deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
@@ -648,6 +649,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Fail a scheduled withheld publish
+        # The pointer was never going to move and publish-kv was never going to run, so
+        # failing costs nothing and is the only alert this state produces. A scheduled
+        # run that withholds otherwise goes green with one annotation while every
+        # waveinput: key on the site expires on its own lease and the whole map ages out
+        # to unknown. Last in the job, so the reports artifact has already uploaded and
+        # its manifest.json is what seeds the floors. Deliberately without always(), so
+        # it cannot fire confusingly on top of an earlier failure.
+        if: ${{ github.event_name == 'schedule' && env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
+        run: |
+          echo "::error::the scheduled wave cycle withheld auto-publish. waves/current.json still names the previous cycle and NO KV was written, for any grid. Seed data/wave-floors.json for the current gridsDigest from the manifest in this run's wave-cycle-reports artifact."
+          exit 1
+
   publish-kv:
     needs: sample
     # Only when this run actually moved the pointer. A withheld publish leaves the
@@ -749,7 +763,8 @@ jobs:
             });
             console.log('::warning::the wave cycle passed the gate in the DEGRADED tier: ' +
               parts.join(', ') + '. Every beach those grids serve — the Great Lakes for ' +
-              'noaa_glwu, the ocean for the gfswave grids — has no wave record this cycle ' +
+              'noaa_glwu, the ocean for the gfswave grids, the Salish Sea for ' +
+              'noaa_nwps_sew — has no wave record this cycle ' +
               'and ages out to unknown, while the grids that sampled were written normally.');
           " "$DL/kv/kv-report.json" "$DL/quarantine/manifest.json"
 

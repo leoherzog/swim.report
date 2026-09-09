@@ -27,6 +27,8 @@ import {
   rangeHeaderFor,
   selectedGrids,
   gridFailureIsFatal,
+  looksLikeGrib,
+  MIN_WHOLE_CYCLE_BYTES,
   sha256Hex
 } from "../scripts/fetch-wave-grids.js";
 import { GRIDS, GRID_ELEMENTS, FORECAST_HOURS, gridById } from "../src/waveGrids.js";
@@ -372,7 +374,7 @@ describe("pad3", function () {
 });
 
 describe("selectedGrids", function () {
-  it("returns all three grids in fallthrough order when none are named", function () {
+  it("returns every grid in fallthrough order when none are named", function () {
     const all = GRIDS.map(function (g) { return g.id; });
     expect(selectedGrids([]).map(function (g) { return g.id; })).toEqual(all);
     expect(selectedGrids(null).map(function (g) { return g.id; })).toEqual(all);
@@ -457,6 +459,38 @@ describe("sha256Hex", function () {
   });
 });
 
+// The NOMADS filter CGI is a script, not a file server: a 200 can carry a text error
+// page, and written to cycle.grib2 it takes a real sha256 and reads downstream as a
+// fetched cycle until gdalinfo fails two steps later.
+describe("looksLikeGrib", function () {
+  function body(magic, length) {
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < magic.length; i = i + 1) { bytes[i] = magic.charCodeAt(i); }
+    return bytes;
+  }
+
+  it("accepts a body of real size carrying the GRIB magic", function () {
+    expect(looksLikeGrib(body("GRIB", MIN_WHOLE_CYCLE_BYTES))).toBe(true);
+    expect(looksLikeGrib(body("GRIB", 3310884))).toBe(true);
+  });
+
+  it("rejects an error page of real size", function () {
+    expect(looksLikeGrib(body("<!DOCTYPE html>", 4096))).toBe(false);
+  });
+
+  it("rejects a short body even with the magic", function () {
+    expect(looksLikeGrib(body("GRIB", MIN_WHOLE_CYCLE_BYTES - 1))).toBe(false);
+    expect(looksLikeGrib(body("GRIB", 4))).toBe(false);
+  });
+
+  it("returns false rather than throwing on a non-Uint8Array", function () {
+    expect(looksLikeGrib(null)).toBe(false);
+    expect(looksLikeGrib(undefined)).toBe(false);
+    expect(looksLikeGrib("GRIB")).toBe(false);
+    expect(looksLikeGrib(new ArrayBuffer(MIN_WHOLE_CYCLE_BYTES))).toBe(false);
+  });
+});
+
 describe("gridFailureIsFatal", function () {
   // The single decision that separates a partial cycle from no cycle: a required
   // grid's failure writes grids-report.json and exits 1, and any other grid's failure
@@ -471,6 +505,9 @@ describe("gridFailureIsFatal", function () {
     expect(gridFailureIsFatal("noaa_gfswave")).toBe(true);
     expect(gridFailureIsFatal("noaa_glwu")).toBe(false);
     expect(gridFailureIsFatal("noaa_gfswave_arctic")).toBe(false);
+    // The NWPS nest publishes on demand, so a missing cycle is a normal outcome:
+    // requiring it would turn every SEW gap into a refusal for the whole country.
+    expect(gridFailureIsFatal("noaa_nwps_sew")).toBe(false);
   });
 
   it("reads REQUIRED_GRID_IDS when the caller names no list", function () {
