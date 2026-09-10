@@ -112,7 +112,7 @@ describe("detail-page hero", () => {
 
   it("returns to the ESTIMATE badge once the estimate supplies the color again", () => {
     // Past STALE_MS the color is decided by the raise-only weighing in
-    // displayFlagColor, and here the estimate is the more severe half, so the
+    // displayFlag, and here the estimate is the more severe half, so the
     // hero must stop calling the color official.
     const html = render({
       estimate: estimateWith({ color: "red" }),
@@ -125,7 +125,7 @@ describe("detail-page hero", () => {
   });
 
   it("keeps the OFFICIAL badge on an aged reading that is still the more severe half", () => {
-    // displayFlagColor is raise-only past STALE_MS, so an aged official red
+    // displayFlag is raise-only past STALE_MS, so an aged official red
     // still decides the display color over a green estimate. Calling that red
     // an ESTIMATE would credit the estimate with a color it never produced.
     const html = render({
@@ -150,6 +150,39 @@ describe("detail-page hero", () => {
     expect(block).toContain("data-flag=\"yellow\"");
     expect(block).toContain(">ESTIMATE</wa-badge>");
     expect(block).not.toContain("OFFICIAL</wa-badge>");
+  });
+
+  it("carries no source badge when no record supplies a color", () => {
+    const block = hero(render({}));
+    expect(block).not.toContain(">ESTIMATE</wa-badge>");
+    expect(block).not.toContain("OFFICIAL</wa-badge>");
+    expect(block).toContain(">UNKNOWN</span>");
+    expect(block).toContain("data-flag=\"unknown\"");
+  });
+
+  it("carries no source badge beside an estimate the rules engine left unknown", () => {
+    const block = hero(render({ estimate: estimateWith({ color: "unknown" }) }));
+    expect(block).not.toContain(">ESTIMATE</wa-badge>");
+    expect(block).not.toContain("OFFICIAL</wa-badge>");
+    expect(block).toContain(">UNKNOWN</span>");
+    expect(block).toContain("data-flag=\"unknown\"");
+  });
+
+  it("an official with an unusable color neither decides nor earns OFFICIAL", () => {
+    const html = render({
+      estimate: estimateWith({ color: "yellow" }),
+      official: officialWith("magenta", FRESH)
+    });
+    const block = hero(html);
+    expect(block).toContain("data-flag=\"yellow\"");
+    expect(block).toContain(">ESTIMATE</wa-badge>");
+    expect(block).not.toContain("OFFICIAL</wa-badge>");
+    // The official card below still reports its own record, as UNKNOWN.
+    const cardStart = html.indexOf("<wa-card class=\"official-card\"");
+    expect(cardStart).toBeGreaterThan(-1);
+    const card = html.slice(cardStart, html.indexOf("</wa-card>", cardStart));
+    expect(card).toContain(">UNKNOWN</span>");
+    expect(card).toContain("flag-icon-unknown");
   });
 
   it("leaves both flag cards standing below the hero", () => {

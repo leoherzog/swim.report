@@ -70,20 +70,28 @@ Each feature's geometry is a `Point` in GeoJSON `[longitude, latitude]` order �
 `properties.name` is the beach's display name: the containing park name from OpenStreetMap
 when the beach sits inside a named park, otherwise the beach's own name.
 
-`properties.flag` is the beach's current best-known flag color as a keyword — `green`,
-`yellow`, `red` or `unknown`. A scraped official reading wins over the estimate, which wins
+`properties.flag` is the beach's display flag as a keyword — `green`, `yellow`, `red` or
+`unknown`. A scraped official reading wins over the estimate, which wins
 over `unknown`; `double-red` collapses to `red`; a missing or expired reading maps to
 `unknown`, never a green default. One exception keeps a point-in-time official reading from
 going stale on the map: once the official record is more than 2 h old, the more severe of the
 official and estimated colors wins, so a fresher estimate can **raise** the marker but never
-lower it. The detail page's title flag uses the identical rule. Beaches with non-finite
-coordinates are omitted.
+lower it. List rows, nearby cards and the detail page show the identical color, each with an
+OFFICIAL badge only when the scraped record supplied it. Beaches with non-finite coordinates
+are omitted.
 
 ### `GET /api/flag/:beachId`
 
 Returns the stored estimate and official reading (if any) for one beach, read straight from
 D1. Either field may be `null` if there is no live record (a missing or expired one just
 means "no data").
+
+The response also carries `display`, the flag swim.report shows for the beach:
+`display.color` is `green`, `yellow`, `red`, `double-red` or `unknown`, and `display.source`
+names the record that supplied it — `official`, `estimate`, or `none` when the color is
+unknown. It follows the `properties.flag` rule without collapsing double-red, and never
+alters either record. Once the official record is more than 2 h old it is credited only while
+strictly more severe than the estimate; on a tie `display.source` is `estimate`.
 
 Example request:
 
@@ -120,7 +128,8 @@ Example response:
         ],
         "updated": "2026-07-04T15:00:03.000Z"
       },
-      "official": null
+      "official": null,
+      "display": { "color": "yellow", "source": "estimate" }
     }
 
 The statement's onset is still ahead of `alertsAt`, so it is echoed for the detail
@@ -159,8 +168,8 @@ are shown. The list page's map area holds a skeleton placeholder until the map's
 fires, so it is never a blank framed box while tiles arrive.
 
 The detail page opens with a **flag hero**: the beach name behind its flag icon, the flag's
-label, and the ESTIMATE badge — or the OFFICIAL badge when the scraped record is what
-supplied the displayed color — over a background washed 12% in that flag's own color. The
+label, and a badge naming the record that supplied that color — OFFICIAL for a posted flag,
+ESTIMATE for the estimate, none when the status is unknown — over a background washed 12% in that flag's own color. The
 hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
 button. Directly under it, up to five **at a glance** tiles summarize the waves now, the
 water temperature, the rip-current risk, the count of active alerts and the next sunrise or
@@ -189,8 +198,8 @@ directly under the estimate card, between it and the wave forecast — see the r
 below.
 
 Last on the detail page, after the wave map and the webcam, come up to three **nearby
-beaches** as cards: the nearest flag-worthy rows within 50 mi, each with the same estimate
-chip and OFFICIAL badge a list row carries, its distance, and a link. The section is omitted
+beaches** as cards: the nearest flag-worthy rows within 50 mi, each with the same flag chip,
+and OFFICIAL badge when earned, that a list row carries, its distance, and a link. The section is omitted
 when nothing lies within range.
 
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from the
@@ -244,9 +253,10 @@ escaped so the term matches literally. Results are capped at 100 rows and combin
 or whitespace-only `q` is ignored. The on-page search box submits this as a `GET` form while
 also filtering the rendered rows client-side as you type.
 
-Each list row carries a flag-colored border on its leading edge, matching its estimate chip, so
-the list scans as a color-coded feed; unknown rows show gray. An **Estimated green only** switch
-above the list hides every row whose estimate is not green. It is browser-side and works over the
+Each list row shows the beach's flag — the same color as its map marker and detail page — as
+a chip, followed by an OFFICIAL badge when a posted flag supplied it, and a border in that
+color on its leading edge, so the list scans as a color-coded feed; unknown rows show gray. A
+**Green flags only** switch above the list hides every row whose flag is not green. It is browser-side and works over the
 rendered rows alone, so it means green among the beaches on this page, not across the whole
 table. It combines with the search term in one pass, and remembers its position between visits,
 re-applying it as the page loads; with JavaScript off it is inert and every row shows.
@@ -765,8 +775,10 @@ returns the first scraper whose `matches(beach)` is true:
 
 Only hazard, flag and closure sources are registered. An official color **overrides** the
 estimate wherever it is shown, with one bounded exception: a reading older than 2 h may be
-**raised** (never lowered) by a more severe fresh estimate on the title flag and map marker,
-while the OFFICIAL card always reports the scraped color verbatim. Water-quality monitoring
+**raised** (never lowered) by a more severe fresh estimate on every surface that shows the
+beach's flag, and is credited as the source only while strictly more severe, so an aged
+reading the estimate ties shows as the estimate. The OFFICIAL card always reports the scraped
+color verbatim. Water-quality monitoring
 sources are deliberately excluded from *this* registry, because a clean-water reading is a
 different axis from surf hazard and letting its green win would mask a genuine hazard estimate.
 Water quality feeds a **separate raise-only floor** (below) that can never lower a flag.

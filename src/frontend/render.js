@@ -11,7 +11,8 @@ import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { ROW_TRANSITION_SCRIPT } from "./rowTransitionScript.js";
-import { SEVERITY_RANK, decidedAlertDetails, alertInEffectAt, normalizeColor } from "../rules.js";
+import { decidedAlertDetails, alertInEffectAt, normalizeColor } from "../rules.js";
+import { STALE_MS, isStale, collapseFlagColor, displayFlag } from "../displayFlag.js";
 import { alertsCheckable } from "../alertsCheckable.js";
 import { READING_MAX_AGE_MS } from "../officialReading.js";
 import { verdictSentence } from "./verdict.js";
@@ -28,14 +29,8 @@ import {
   waveModelSummary
 } from "./waveStrip.js";
 
-// STALE_MS is the default horizon, calibrated to the hourly flag recompute, and
-// a scraper may override it per official record with its own staleMs when its
-// source publishes on a slower schedule. WAVE_STALE_MS is 8 h because the wave
-// cycle publishes on its own slower cadence.
-//
-// Exported because the alerts refresh refuses to lower a flag from inputs this
-// page would mark stale, and the two horizons must be one value.
-export const STALE_MS = 7200000;
+// WAVE_STALE_MS is 8 h because the wave cycle publishes on its own slower
+// cadence than the hourly flag recompute.
 const WAVE_STALE_MS = 28800000;
 // The water-temperature tile shows a reading only when it is this fresh;
 // matches the parser window (NDBC_WATER_TEMP_MAX_OBS_AGE_MS) — water temp is
@@ -90,7 +85,7 @@ const THEME_COLOR_DARK = "#121214";
 const SITE_DESCRIPTION = "Estimated beach hazard flags for Great Lakes and " +
   "ocean-coast beaches across the United States and Canada.";
 
-// One label per key of rules.js SEVERITY_RANK, which normalizeColor coerces to.
+// One label per color normalizeColor coerces to.
 const FLAG_LABELS = {
   "green": "GREEN",
   "yellow": "YELLOW",
@@ -130,81 +125,9 @@ function renderTooltipFor(id, text) {
   return "<wa-tooltip for=\"" + id + "\">" + escapeHtml(text) + "</wa-tooltip>";
 }
 
-// The single collapse rule for a flag color's display keyword: double-red shares
-// the red tint (only its icon count differs), everything else normalizes to its
-// own color (unknown as the honest fallback). Behind both the UI's flag-icon
-// class and the map marker's `flag` keyword, so the color-to-keyword rule lives
-// in exactly one place. Always returns one of green|yellow|red|unknown.
-function collapseFlagColor(color) {
-  const normalized = normalizeColor(color);
-  return normalized === "double-red" ? "red" : normalized;
-}
-
 // The flag color's tint class, used by renderFlagIcon (the UI's flags).
 function flagIconColorClass(color) {
   return "flag-icon-" + collapseFlagColor(color);
-}
-
-function isStale(nowIso, updatedIso, thresholdMs) {
-  if (!nowIso || !updatedIso) {
-    return false;
-  }
-  const now = Date.parse(nowIso);
-  const updated = Date.parse(updatedIso);
-  if (Number.isNaN(now) || Number.isNaN(updated)) {
-    return false;
-  }
-  const limit = typeof thresholdMs === "number" ? thresholdMs : STALE_MS;
-  return (now - updated) > limit;
-}
-
-// The more severe of two colors by the shared SEVERITY_RANK. "unknown" ranks
-// below green, so it can never pull a real color down and is never raised to.
-function worstColor(a, b) {
-  const ca = normalizeColor(a);
-  const cb = normalizeColor(b);
-  return SEVERITY_RANK[cb] > SEVERITY_RANK[ca] ? cb : ca;
-}
-
-// The single "best current reading" color for a beach, given its cached
-// estimate, its scraped official record, and now. Behind both the detail page's
-// title flag and the map/list marker (markerFlagColor), so the two can never
-// disagree about one beach.
-//
-// A scraped official color normally wins outright: it is a posted flag, and an
-// estimate must never talk over one. But "official" is not the same as
-// "current". Several of these sources are point-in-time readings on their own
-// slow cadence, such as an NWS office's single morning beach observation. Once
-// such a reading has aged past the hourly-recompute horizon, a fresher estimate
-// may raise the displayed color but never lower it, the same raise-only floor
-// shape rules.js uses for nws-floor, eccc-floor and wq-floor.
-//
-// The gate is the 2 h default, deliberately not the source's own longer staleMs:
-// a longer horizon means "the card is not yet misleading to show", not "this
-// reading is still current enough to outrank live hazard data".
-//
-// Raise-only in every staleness state, so a fresher green estimate can never
-// pull a posted red down. The official card itself is untouched and keeps
-// rendering the scraped color verbatim with its own stale warning, so no
-// estimate is ever presented as an official flag status.
-export function displayFlagColor(estimate, official, nowIso) {
-  const estimateColor = estimate ? estimate.color : null;
-  if (!official) {
-    return normalizeColor(estimateColor);
-  }
-  // No usable timestamp (a legacy KV record) reads as fresh: without evidence
-  // that the reading has aged, the posted flag keeps winning outright.
-  if (!isStale(nowIso, official.updated, STALE_MS)) {
-    return normalizeColor(official.color);
-  }
-  return worstColor(official.color, estimateColor);
-}
-
-// The collapsed map-flag color keyword for a beach, always one of
-// green|yellow|red|unknown. Exported so /api/beaches.geojson stamps each
-// feature's `flag` property from the same color rule the UI flags use.
-export function markerFlagColor(estimate, official, nowIso) {
-  return collapseFlagColor(displayFlagColor(estimate, official, nowIso));
 }
 
 // Flag wording for a meta description. FLAG_LABELS carries the UI's longer
@@ -227,19 +150,13 @@ const OG_IMAGE_ALT = {
   "unknown": "A gray beach flag flying over a wave"
 };
 
-// A detail page's meta description, and the one place the shared link's wording
-// is decided. It reads the same displayFlagColor the title flag uses, and says
-// "official" only when a scraped record is deciding that color — the same gate
-// displayFlagColor applies, a non-stale official record. Everything else reads
-// "estimated", and no color at all reads "flag status unknown". The wave clause
-// is omitted rather than invented when the estimate carries no finite height.
-function detailMetaDescription(beach, estimate, official, nowIso) {
-  const color = displayFlagColor(estimate, official, nowIso);
-  const officialDecides = !!official && !isStale(nowIso, official.updated, STALE_MS);
-  const phrase = (color === "unknown")
+// A detail page's meta description: the page's displayFlag color, worded by its
+// source. The wave clause is omitted rather than invented without a finite height.
+function detailMetaDescription(beach, estimate, flag) {
+  const phrase = flag.source === "none"
     ? "flag status unknown right now"
-    : ((officialDecides ? "official " : "estimated ") + META_FLAG_WORDS[color] +
-      " flag right now");
+    : ((flag.source === "official" ? "official " : "estimated ") +
+      META_FLAG_WORDS[flag.color] + " flag right now");
   const waves = (estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt))
     ? (", " + estimate.waveHeightFt.toFixed(1) + " ft waves")
@@ -328,17 +245,6 @@ function renderFlagIcon(color, sizeClass, slotName, labelText, transitionName) {
     " name=\"flag\" class=\"" + iconClass + "\"></wa-icon>";
 }
 
-function renderFlagChip(estimate) {
-  const color = estimate ? normalizeColor(estimate.color) : "unknown";
-  // Short chip label only: the full "— water closed" text wraps badly beside
-  // long park names; the detail card keeps the full FLAG_LABELS text.
-  const label = color === "double-red" ? "DOUBLE RED" : FLAG_LABELS[color];
-  return "<wa-badge variant=\"neutral\" appearance=\"outlined\">" +
-    renderFlagIcon(color, "wa-font-size-l", "start") +
-    escapeHtml(label) +
-    "</wa-badge>";
-}
-
 function renderEstimateBadge() {
   return "<wa-badge variant=\"neutral\" appearance=\"outlined\">ESTIMATE</wa-badge>";
 }
@@ -347,6 +253,31 @@ function renderOfficialBadge(sizeClass) {
   const cls = sizeClass ? (" class=\"" + sizeClass + "\"") : "";
   return "<wa-badge variant=\"success\" appearance=\"filled\"" + cls + ">" +
     "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>";
+}
+
+// The compact flag a list row or nearby card carries. The chip comes first,
+// because ROW_TRANSITION_SCRIPT claims the link's first wa-badge; OFFICIAL
+// follows only when the posted record supplied the chip's color.
+function renderCompactFlag(flag) {
+  // Short label only: "— water closed" wraps badly beside long park names.
+  const label = flag.color === "double-red" ? "DOUBLE RED" : FLAG_LABELS[flag.color];
+  const officialHtml = flag.source === "official" ? (" " + renderOfficialBadge(null)) : "";
+  return "<span class=\"wa-cluster wa-gap-xs\">" +
+    "<wa-badge variant=\"neutral\" appearance=\"outlined\">" +
+    renderFlagIcon(flag.color, "wa-font-size-l", "start") + escapeHtml(label) +
+    "</wa-badge>" + officialHtml + "</span>";
+}
+
+// The hero badge names the record displayFlag says supplied the color; an
+// unknown is supplied by neither, so it carries no badge.
+function renderHeroSourceBadge(flag) {
+  if (flag.source === "official") {
+    return renderOfficialBadge(null);
+  }
+  if (flag.source === "estimate") {
+    return renderEstimateBadge();
+  }
+  return "";
 }
 
 // Wrapper for the small source cluster on a card header; estimate sources
@@ -980,32 +911,28 @@ function renderSectionHeading(id, iconName, text) {
     "<wa-icon name=\"" + iconName + "\"></wa-icon>" + escapeHtml(text) + "</h2>";
 }
 
-function renderBeachRow(entry) {
+function renderBeachRow(entry, nowIso) {
   const beach = entry.beach;
-  const estimate = entry.estimate;
-  const official = entry.official;
+  const flag = displayFlag(entry, nowIso);
   // data-name feeds the client-side search filter: both the park name and the
   // beach's own name must match, so "Holland State Park" and "Ottawa Beach"
   // each find the same row.
   const searchable = (beach.park_name ? beach.park_name + " " : "") + String(beach.name || "");
   const dataName = escapeHtml(searchable.toLowerCase());
   const href = "/beach/" + encodeURIComponent(beach.id);
-  const officialBadgeHtml = official ? (" " + renderOfficialBadge(null)) : "";
   const milesLabel = formatMiles(entry.distanceMi);
   const distanceHtml = span("beach-row-distance wa-caption-s", milesLabel);
   const subtitle = subtitleName(beach);
   const subtitleHtml = span("beach-row-subtitle", subtitle);
-  // data-flag is the row's chip color as a keyword, read by the client-side
-  // green-only filter and by the flag-colored inline-start border in styles.js.
-  // It mirrors the chip beside it (the estimate), so border and chip can never
-  // disagree; unknown is a visible gray keyword, never omitted.
-  const flagKeyword = collapseFlagColor(estimate ? estimate.color : null);
+  // data-flag is the row's displayFlag keyword, read by the green-only filter
+  // and the inline-start border in styles.js, so chip, border, map marker and
+  // detail title are one decision; unknown is a visible gray keyword, never omitted.
   const lines = [];
-  lines.push("<li class=\"beach-row\" data-flag=\"" + flagKeyword + "\" data-name=\"" + dataName + "\">");
+  lines.push("<li class=\"beach-row\" data-flag=\"" + flag.keyword + "\" data-name=\"" + dataName + "\">");
   lines.push("<a class=\"beach-row-link\" href=\"" + escapeHtml(href) + "\">");
   lines.push("<span class=\"beach-row-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + distanceHtml +
     subtitleHtml + "</span>");
-  lines.push("<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(estimate) + officialBadgeHtml + "</span>");
+  lines.push(renderCompactFlag(flag));
   lines.push("<wa-icon name=\"chevron-right\" class=\"wa-color-text-quiet\"></wa-icon>");
   lines.push("</a>");
   lines.push("</li>");
@@ -1076,7 +1003,8 @@ function listEmptyMessage(idsMode, hasEntries, query) {
 
 export function renderListPage(data) {
   const entries = (data && Array.isArray(data.entries)) ? data.entries : [];
-  const rowsHtml = entries.map(renderBeachRow).join("\n");
+  const nowIso = (data && typeof data.nowIso === "string") ? data.nowIso : null;
+  const rowsHtml = entries.map(function (entry) { return renderBeachRow(entry, nowIso); }).join("\n");
   const hasEntries = entries.length > 0;
   // On a q-filtered page the rendered rows are already the full-table matches;
   // only the default listing offers to submit the search server-side, and only
@@ -1135,13 +1063,11 @@ export function renderListPage(data) {
       "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
   const activeQueryHtml = "<div id=\"list-active-query\">" + activeQueryInner + "</div>";
 
-  // Client-side green-only filter. With no JS the switch is inert and every row
-  // stays visible, which is why the server never renders a filtered list. The
-  // label names the estimate, because the color it filters on is the row's
-  // estimate chip and never a scraped official flag. A list with no rows offers
-  // nothing to filter, so the switch is omitted rather than left over nothing.
+  // Client-side green-only filter over each row's displayFlag keyword, which
+  // either record may supply, so the label names no source. With no JS the
+  // switch is inert and every row stays visible. A list with no rows omits it.
   const filterHtml = hasEntries ? ("<div class=\"list-filter\">" +
-    "<wa-switch id=\"green-only-filter\" size=\"s\">Estimated green only</wa-switch>" +
+    "<wa-switch id=\"green-only-filter\" size=\"s\">Green flags only</wa-switch>" +
     "</div>") : "";
   // The switch sits on the end edge of its own row. The row is empty and hidden
   // on a list with no rows to filter.
@@ -1222,32 +1148,32 @@ function renderWaveMap(beach) {
 }
 
 // Nearby beaches, last in the detail stack: one card per entry in a responsive
-// wa-grid. Each card is one link carrying the same estimate chip and OFFICIAL
-// badge a list row does, so the estimated/official distinction reads the same
-// on every surface. Entries arrive distance-sorted from the router; an empty
-// list renders nothing rather than an empty heading.
-function renderNearbyCard(entry) {
+// wa-grid. Each card is one link carrying the same displayFlag chip, and
+// OFFICIAL badge when earned, that a list row does, so the estimated/official
+// distinction reads the same on every surface. Entries arrive distance-sorted
+// from the router; an empty list renders nothing rather than an empty heading.
+function renderNearbyCard(entry, nowIso) {
   const beach = entry.beach;
   const href = "/beach/" + encodeURIComponent(beach.id);
-  const officialBadgeHtml = entry.official ? (" " + renderOfficialBadge(null)) : "";
+  const flag = displayFlag(entry, nowIso);
   const subtitleHtml = span("nearby-card-subtitle wa-caption-s", subtitleName(beach));
   const distanceHtml = span("nearby-card-distance wa-caption-s", formatMiles(entry.distanceMi));
   return "<wa-card class=\"nearby-card\" appearance=\"outlined\">" +
     "<a class=\"nearby-card-link wa-link-plain wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
     "<span class=\"nearby-card-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + "</span>" +
     subtitleHtml +
-    "<span class=\"wa-cluster wa-gap-xs\">" + renderFlagChip(entry.estimate) + officialBadgeHtml + "</span>" +
+    renderCompactFlag(flag) +
     distanceHtml +
     "</a>" +
     "</wa-card>";
 }
 
-function renderNearby(nearby) {
+function renderNearby(nearby, nowIso) {
   const entries = Array.isArray(nearby) ? nearby : [];
   if (entries.length === 0) {
     return "";
   }
-  const cards = entries.map(renderNearbyCard).join("\n");
+  const cards = entries.map(function (entry) { return renderNearbyCard(entry, nowIso); }).join("\n");
   return "<section class=\"nearby wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">" +
     renderSectionHeading("nearby-heading", "location-dot", "Nearby beaches") +
     "<div class=\"wa-grid wa-gap-m nearby-grid\">" + cards + "</div>" +
@@ -1794,12 +1720,10 @@ export function renderDetailPage(data) {
   const lat = Number(beach.lat).toFixed(4);
   const lon = Number(beach.lon).toFixed(4);
 
-  // Title flag mirrors the best current reading; displayFlagColor holds the
-  // rule. Null-safe: no flag data renders gray. Decorative, like every other
-  // flag icon: the hero prints the same color as FLAG_LABELS text right below
-  // it, so an accessible name here would only read the color out twice.
-  const titleColor = displayFlagColor(estimate, official, nowIso);
-  const titleFlagHtml = renderFlagIcon(titleColor, "wa-font-size-4xl", null, null,
+  // The title flag is displayFlag's color. Decorative: the hero label below
+  // names the color.
+  const flag = displayFlag({ estimate: estimate, official: official }, nowIso);
+  const titleFlagHtml = renderFlagIcon(flag.color, "wa-font-size-4xl", null, null,
     "beach-flag");
 
   // The park-first beach name, only when it differs from the title. The guard
@@ -1817,22 +1741,15 @@ export function renderDetailPage(data) {
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
-  // The badge names the record the displayed color came from, never freshness
-  // alone. A fresh official record decides outright; an aged one still decides
-  // whenever it is the more severe of the two, because displayFlagColor's
-  // weighing is raise-only, and labeling that color ESTIMATE would credit the
-  // estimate with a color it never produced. Same two badge builders as the
-  // cards, so the official/estimated distinction cannot drift.
-  const estimateColor = normalizeColor(estimate ? estimate.color : null);
-  const displayIsOfficial = !!official &&
-    (!isStale(nowIso, official.updated, STALE_MS) || titleColor !== estimateColor);
-  const heroBadgeHtml = displayIsOfficial ? renderOfficialBadge(null) : renderEstimateBadge();
+  // The badge names displayFlag's source, never freshness alone. Same two badge
+  // builders as the cards, so the official/estimated distinction cannot drift.
+  const heroBadgeHtml = renderHeroSourceBadge(flag);
 
-  // One plain-language sentence under the flag label, derived from the same
-  // estimate the label came from. Empty for an estimate with nothing to say (a
-  // legacy payload with no trigger and no echoed signals), which renders no
-  // line at all.
-  const verdictText = verdictSentence(estimate, official, displayIsOfficial,
+  // One plain-language sentence under the flag label, branched on the same
+  // displayFlag decision the label and badge read. Empty for an estimate with
+  // nothing to say (a legacy payload with no trigger and no echoed signals),
+  // which renders no line at all.
+  const verdictText = verdictSentence(estimate, flag,
     typeof beach.water_class === "string" ? beach.water_class : null);
   const verdictHtml = verdictText ?
     ("<p class=\"hero-verdict\">" + escapeHtml(verdictText) + "</p>") : "";
@@ -1865,14 +1782,14 @@ export function renderDetailPage(data) {
   // icon holds beach-flag): it is the one element per document a list row or a
   // nearby card morphs into.
   const heroHtml = "<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
-    collapseFlagColor(titleColor) + "\">" +
+    flag.keyword + "\">" +
     "<a class=\"back-link icon-link wa-color-text-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\" style=\"view-transition-name: beach-title;\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
     "<p class=\"hero-flag wa-cluster wa-gap-s\">" +
     "<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">" +
-    escapeHtml(FLAG_LABELS[normalizeColor(titleColor)]) + "</span>" +
+    escapeHtml(FLAG_LABELS[flag.color]) + "</span>" +
     heroBadgeHtml +
     "</p>" +
     verdictHtml +
@@ -1921,7 +1838,7 @@ export function renderDetailPage(data) {
   if (webcamHtml) {
     stackParts.push(webcamHtml);
   }
-  const nearbyHtml = renderNearby(nearby);
+  const nearbyHtml = renderNearby(nearby, nowIso);
   if (nearbyHtml) {
     stackParts.push(nearbyHtml);
   }
@@ -1939,13 +1856,12 @@ export function renderDetailPage(data) {
     "<script>" + DETAIL_HERO_SCRIPT + "</script>" +
     "<script>" + DETAIL_FAVORITE_SCRIPT + "</script>" +
     "<script>" + ROW_TRANSITION_SCRIPT + "</script>" + ticksScriptHtml;
-  // The share card takes titleColor, so the picture, the title flag and the map
-  // marker are the one displayFlagColor decision.
+  // The share card, title, hero, rows and map marker are one displayFlag decision.
   return renderDocument(title, bodyHtml, {
     title: title,
-    description: detailMetaDescription(beach, estimate, official, nowIso),
+    description: detailMetaDescription(beach, estimate, flag),
     path: "/beach/" + encodeURIComponent(beach.id),
-    flagColor: titleColor
+    flagColor: flag.color
   });
 }
 

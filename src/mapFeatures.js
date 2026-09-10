@@ -3,15 +3,14 @@
 //
 // Pure: no fetch, no Date, no env. The row carries the estimate's and the
 // official's color, updated stamp and expiry as scalar columns, and the marker
-// color is resolved here through the same markerFlagColor the detail page's
-// title flag resolves through, so the two surfaces cannot disagree about one
-// beach.
+// keyword is displayFlag's, the one decision every surface that shows a beach's
+// flag makes, so no two surfaces can disagree about one beach.
 //
 // Each record honors its own *_expires: an expired estimate reads as null
 // without dropping a live official beside it, and the reverse. The expiry rule
 // itself lives in src/beachState.js, so the map and the list surfaces cut a
 // record off at the same instant.
-import { markerFlagColor } from "./frontend/render.js";
+import { displayFlag } from "./displayFlag.js";
 import { liveChipState } from "./beachState.js";
 
 // One Feature from a row of the geojson SELECT, or null when the coordinates are
@@ -40,7 +39,7 @@ export function mapFeatureFromRow(row, nowIso, nowMs) {
     properties: {
       id: row.id,
       name: row.park_name || row.name || "",
-      flag: markerFlagColor(state.estimate, state.official, nowIso)
+      flag: displayFlag(state, nowIso).keyword
     }
   };
 }

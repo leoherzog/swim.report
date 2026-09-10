@@ -217,9 +217,9 @@ const RULES = [
 
   // --- List polish: the color-coded feed and the controls above it. ---
   // The row's inline-start border carries its flag color so the list scans as a
-  // feed rather than a wall of names. It reads from data-flag, the same keyword
-  // the row's chip renders, and every keyword has a rule so unknown shows an
-  // honest gray instead of nothing.
+  // feed rather than a wall of names. It reads data-flag, the row's displayFlag
+  // keyword that its chip and the map marker share, and every keyword has a rule
+  // so unknown shows an honest gray instead of nothing.
   ".beach-row .beach-row-link {",
   "  border-inline-start-width: var(--wa-border-width-l);",
   "}",

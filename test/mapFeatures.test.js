@@ -3,12 +3,12 @@
 //
 // The load-bearing case is parity. The row stores ingredients — each record's
 // color, updated stamp and expiry — and resolves them through the real
-// markerFlagColor, so every case below is asserted against that function called
-// directly on the same values. If the two ever diverge, the map marker and the
-// detail page's title flag disagree about one beach.
+// displayFlag, so every case below is asserted against its keyword called
+// directly on the same values. If the two ever diverge, the map marker and every
+// other surface that shows the beach's flag disagree about one beach.
 import { describe, it, expect } from "vitest";
 import { mapFeatureFromRow } from "../src/mapFeatures.js";
-import { markerFlagColor } from "../src/frontend/render.js";
+import { displayFlag } from "../src/displayFlag.js";
 
 const NOW_MS = Date.parse("2026-07-04T15:00:00.000Z");
 const NOW_ISO = new Date(NOW_MS).toISOString();
@@ -96,8 +96,8 @@ describe("mapFeatureFromRow geometry and label", function () {
 });
 
 describe("mapFeatureFromRow color resolution", function () {
-  it("matches markerFlagColor called directly on the same records", function () {
-    // Four fixtures spanning the whole displayFlagColor gate: no official; a
+  it("matches displayFlag's keyword called directly on the same records", function () {
+    // Four fixtures spanning the whole displayFlag gate: no official; a
     // fresh official below its estimate; a fresh official above it; and an
     // official past the 2 h horizon with a more severe estimate.
     const fixtures = [
@@ -121,7 +121,7 @@ describe("mapFeatureFromRow color resolution", function () {
         fixture.estimate ? live(fixture.estimate) : null,
         fixture.official ? live(fixture.official) : null
       ));
-      expect(flag).toBe(markerFlagColor(fixture.estimate, fixture.official, NOW_ISO));
+      expect(flag).toBe(displayFlag({ estimate: fixture.estimate, official: fixture.official }, NOW_ISO).keyword);
       colors.push(flag);
     }
     // Sanity: the fixture set actually exercises more than one outcome.
@@ -151,7 +151,7 @@ describe("mapFeatureFromRow color resolution", function () {
     const official = { color: "red", updated: agoIso(43200000) };
     const flag = flagOf(withRecords(live(estimate), live(official)));
     expect(flag).toBe("red");
-    expect(flag).toBe(markerFlagColor(estimate, official, NOW_ISO));
+    expect(flag).toBe(displayFlag({ estimate: estimate, official: official }, NOW_ISO).keyword);
   });
 });
 

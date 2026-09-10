@@ -163,12 +163,33 @@ describe("detail page description", () => {
       "Ottawa Beach: official RED flag right now, 1.0 ft waves.");
   });
 
-  // Past STALE_MS the official record stops deciding and only floors the
-  // estimate, so the wording drops back to "estimated" — the same gate
-  // displayFlagColor applies to the title flag.
-  it("says estimated once the official record is stale", () => {
+  // Past STALE_MS the official record stops deciding alone and only floors the
+  // estimate, so the wording follows displayFlag's source: "estimated" when the
+  // estimate supplied the color, "official" when the aged record still did.
+  it("says estimated once an aged official record is outranked by the estimate", () => {
     const stale = officialWith({ color: "green", updated: "2026-07-05T08:00:00.000Z" });
     const html = detailHtml(estimateWith({ color: "yellow", waveHeightFt: 2.4 }), stale);
+    expect(metaContent(html, "name", "description")).toBe(
+      "Ottawa Beach: estimated YELLOW flag right now, 2.4 ft waves.");
+  });
+
+  it("says official when an aged official record is the more severe half", () => {
+    const aged = officialWith({ color: "red", updated: "2026-07-05T08:00:00.000Z" });
+    const html = detailHtml(estimateWith({ color: "green", waveHeightFt: 1.0 }), aged);
+    expect(metaContent(html, "name", "description")).toBe(
+      "Ottawa Beach: official RED flag right now, 1.0 ft waves.");
+  });
+
+  it("says official for an aged official with no estimate", () => {
+    const aged = officialWith({ color: "green", updated: "2026-07-05T08:00:00.000Z" });
+    const html = detailHtml(null, aged);
+    expect(metaContent(html, "name", "description")).toBe(
+      "Ottawa Beach: official GREEN flag right now.");
+  });
+
+  it("says estimated when an aged official merely ties", () => {
+    const aged = officialWith({ color: "yellow", updated: "2026-07-05T08:00:00.000Z" });
+    const html = detailHtml(estimateWith({ color: "yellow", waveHeightFt: 2.4 }), aged);
     expect(metaContent(html, "name", "description")).toBe(
       "Ottawa Beach: estimated YELLOW flag right now, 2.4 ft waves.");
   });
@@ -221,7 +242,7 @@ describe("detail page canonical and share card", () => {
   });
 
   // One card per display color, so the picture cannot disagree with the title
-  // flag: both come from displayFlagColor.
+  // flag: both come from displayFlag.
   const cards = [
     ["green", "https://swim.report/og/green.png", "A green beach flag flying over a wave"],
     ["yellow", "https://swim.report/og/yellow.png", "A yellow beach flag flying over a wave"],

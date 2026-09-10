@@ -955,7 +955,7 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
 });
 
 // Step 8's official_expires: writeEpoch + FLAG_TTL_SECONDS (25200) by default,
-// so the record never expires ahead of the estimate displayFlagColor weighs it
+// so the record never expires ahead of the estimate displayFlag weighs it
 // against, unless the scraper declares a numeric officialTtlSeconds. No
 // registered scraper currently declares one (the override hook is retained as a
 // generic extension point for a future reduced-cadence scraper), so only the

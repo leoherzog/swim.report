@@ -4,11 +4,11 @@
 // it is shown.
 //
 // The product is a single morning observation, which makes it the canonical case
-// for render.js displayFlagColor's raise-only rule: past the 2 h STALE_MS horizon
-// a fresher, more severe estimate lifts the title flag and map marker above this
-// color but never below it, and this card keeps reporting the scraped color
-// verbatim. A morning table posting Yellow can be overtaken within hours by the
-// same WFO's Beach Hazards Statement and Surf Zone Forecast.
+// for displayFlag's raise-only rule: past the 2 h STALE_MS horizon a fresher,
+// more severe estimate lifts every surface's flag above this color but never
+// below it, and this card keeps reporting the scraped color verbatim. A morning
+// table posting Yellow can be overtaken within hours by the same WFO's Beach
+// Hazards Statement and Surf Zone Forecast.
 //
 // Source: NWS Grand Rapids (WFO GRR) "Other Marine Reports" product (AWIPS
 // OMRGRR), which carries the fixed "Lake Michigan Beach Reports" table for the

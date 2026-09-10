@@ -3,6 +3,7 @@ import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 import { IDS_LIST_LIMIT } from "./idsListLimit.js";
 import { mapFeatureFromRow } from "./mapFeatures.js";
+import { displayFlag } from "./displayFlag.js";
 import {
   BEACH_STATE_SELECT,
   CHIP_STATE_SELECT,
@@ -160,8 +161,8 @@ const LIKE_WHERE =
 const BEACH_WITH_STATE_FROM =
   "SELECT b.*, " + BEACH_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN;
 
-// The same read for the list surfaces, which render one chip color and an
-// OFFICIAL badge per row: scalar mirror columns instead of the four JSON blobs.
+// The same read for the list surfaces, which render one displayFlag decision per
+// row from the scalar mirror columns instead of the four JSON blobs.
 // The proximity branch ranks HOME_GEO_FETCH_LIMIT rows to render
 // HOME_LIST_LIMIT of them, so a blob here would cross the binding five times for
 // every row a visitor sees.
@@ -357,10 +358,11 @@ const NEARBY_LIMIT = 3;
 const NEARBY_MAX_MI = 50;
 
 // The NEARBY_LIMIT nearest flag-worthy beaches to the beach, each carrying its
-// distance and its own estimate and official so the cards read exactly as a list
-// row does, or [] when none lies within NEARBY_MAX_MI or the coordinates are
-// unusable. The beach's own row is excluded in SQL and again here, since the
-// second guard costs nothing and keeps a stale id-less row out.
+// distance and its own estimate and official, so the card resolves through
+// displayFlag exactly as a list row does, or [] when none lies within
+// NEARBY_MAX_MI or the coordinates are unusable. The beach's own row is excluded
+// in SQL and again here, since the second guard costs nothing and keeps a stale
+// id-less row out.
 async function nearbyBeaches(env, beach, nowMs) {
   const orderBy = proximityOrderByClause({ lat: beach.lat, lon: beach.lon });
   if (orderBy === null) {
@@ -443,9 +445,9 @@ const MAP_FEATURE_SQL =
 // a coast highlight when zoomed out and as flag icons from zoom 9 up.
 // Location-independent, so fully cacheable.
 //
-// One D1 read, resolved per row through the same markerFlagColor the detail
-// page's title flag uses, so the map marker and the title flag cannot disagree
-// about a beach. builtAt — the freshest live estimate on the map — rides along
+// One D1 read, resolved per row through displayFlag, the decision every surface
+// that shows a beach's flag makes, so no two surfaces can disagree about a
+// beach. builtAt — the freshest live estimate on the map — rides along
 // as a top-level GeoJSON foreign member (RFC 7946 section 6.1) so a dead hourly
 // is visible to anyone hitting the endpoint. A D1 failure surfaces as the error
 // boundary's 500, never as a silently all-unknown map.
@@ -510,9 +512,17 @@ async function handleApiFlag(env, ctx, beachId) {
     );
   }
   touchLastViewed(env, ctx, beach);
-  const state = liveBeachState(beach, Date.now());
+  const nowMs = Date.now();
+  const state = liveBeachState(beach, nowMs);
+  const flag = displayFlag(state, new Date(nowMs).toISOString());
   return Response.json(
-    { beachId: beachId, estimate: state.estimate, official: state.official },
+    {
+      beachId: beachId,
+      estimate: state.estimate,
+      official: state.official,
+      // Built field by field so no internal decision field reaches the public shape.
+      display: { color: flag.color, source: flag.source }
+    },
     { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
   );
 }

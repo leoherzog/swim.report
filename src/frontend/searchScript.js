@@ -19,7 +19,7 @@
 // fetch/AbortController are unavailable the script degrades to the local-only
 // filter, which then owns the empty state itself.
 //
-// The same pass applies the "Estimated green only" switch, whose state persists
+// The same pass applies the "Green flags only" switch, whose state persists
 // in one localStorage key and is applied once at load, because a wa-switch fires
 // "change" only on real interaction and a restored state would otherwise show a
 // switch reading on above an unfiltered list. It hides rows the server rendered
@@ -61,7 +61,7 @@ const SCRIPT_LINES = [
   // Green-only filter state. One localStorage key, both reads and writes in
   // try/catch because private mode throws on access rather than returning null.
   "  const GREEN_ONLY_KEY = 'swimreport:green-only';",
-  "  const GREEN_EMPTY_MESSAGE = 'No estimated-green beaches match your search.';",
+  "  const GREEN_EMPTY_MESSAGE = 'No green-flag beaches match your search.';",
   "  const greenSwitch = document.getElementById('green-only-filter');",
   "  let greenOnly = false;",
   // The server's own empty-state copy and visibility, re-captured after every

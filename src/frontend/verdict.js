@@ -1,12 +1,12 @@
 // The detail page's plain-language verdict: one sentence saying what the
-// displayed flag means for a swimmer right now, built from the estimate the
-// rules engine already decided (its trigger, wave height, rip risk and echoed
-// alerts) or from the posted flag when an official record is what the page
-// displays. Pure — data in, plain text out; the caller escapes it.
+// displayed flag means for a swimmer right now. Pure — data in, plain text out;
+// the caller escapes it.
 //
-// A sentence names a flag color only alongside who decided it: the official
-// branch always says the flag is posted, and the estimated branch names no
-// color at all, so no estimate can read as an official flag status.
+// flag is the hero's displayFlag decision. Source official returns the
+// posted-flag sentence for its color. Source estimate explains the estimate's own
+// signals (trigger, wave height, rip risk, echoed alerts) and names no color, so
+// no estimate can read as an official flag status. Source none reads no data.
+// The sentence and the badge read one field.
 //
 // Wave thresholds are never restated here. The band comes from
 // waveColorForHeight and its wording from bandLabelsForWaterClass, both built
@@ -21,8 +21,7 @@ import {
   ECCC_ALERT_PRECEDENCE,
   NWS_FLOOR_PRECEDENCE,
   ECCC_FLOOR_PRECEDENCE,
-  decidedAlertDetails,
-  normalizeColor
+  decidedAlertDetails
 } from "../rules.js";
 import { bandLabelsForWaterClass, lowerFirst } from "./waveStrip.js";
 
@@ -30,8 +29,7 @@ const OFFICIAL_SENTENCES = {
   "green": "A green flag is posted at the beach.",
   "yellow": "A yellow flag is posted at the beach.",
   "red": "A red flag is posted at the beach.",
-  "double-red": "Water closed by the posted flag.",
-  "unknown": "No data yet for this beach."
+  "double-red": "Water closed by the posted flag."
 };
 
 const RIP_CLAUSES = {
@@ -186,23 +184,25 @@ function reinforces(clauseColor, color, leadIsEvent) {
   return own !== undefined && own >= SEVERITY_RANK.red;
 }
 
-// One sentence for the detail hero, or "" when the estimate carries nothing
-// worth saying (a legacy payload with no trigger and no echoed signals), in
-// which case the caller renders no verdict line at all.
-//
-// displayIsOfficial is the caller's already-decided "the displayed color came
-// from the posted flag" signal, the same one that picks the hero's OFFICIAL
-// badge; official != null alone is not that signal, since an aged official
-// record that merely agrees with the estimate is the estimate's verdict to
-// explain.
-export function verdictSentence(estimate, official, displayIsOfficial, waterClass) {
-  if (displayIsOfficial && official) {
-    return OFFICIAL_SENTENCES[normalizeColor(official.color)];
+/**
+ * One sentence for the detail hero, branched on displayFlag's source, or "" when
+ * the estimate carries nothing worth saying and no verdict line renders.
+ * @param {?Object} estimate the live estimate blob
+ * @param {?{color: string, keyword: string, source: string}} flag displayFlag's decision
+ * @param {?string} waterClass the beach's water_class
+ * @returns {string} plain text, unescaped
+ */
+export function verdictSentence(estimate, flag, waterClass) {
+  if (!flag || flag.source === "none") {
+    return NO_DATA_SENTENCE;
+  }
+  if (flag.source === "official") {
+    return OFFICIAL_SENTENCES[flag.color];
   }
   if (!estimate) {
     return NO_DATA_SENTENCE;
   }
-  const color = normalizeColor(estimate.color);
+  const color = flag.color;
   if (color === "unknown") {
     return NO_DATA_SENTENCE;
   }

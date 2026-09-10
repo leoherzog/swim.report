@@ -13,7 +13,8 @@ import {
   parseBeachIds,
   handleRequest
 } from "../src/router.js";
-import { renderListPage, renderDetailPage, markerFlagColor } from "../src/frontend/render.js";
+import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
+import { displayFlag } from "../src/displayFlag.js";
 import { makeD1 } from "./helpers/d1.js";
 import { PAGE_STYLES } from "../src/frontend/styles.js";
 import { COLOR_SCHEME_SCRIPT } from "../src/frontend/colorSchemeScript.js";
@@ -331,17 +332,31 @@ describe("handleHome reads the list's flags from beach_state", () => {
   }
 
   // The two records carry DIFFERENT colors, so crossing the estimate and official
-  // slots — which would render a scraped official color as an estimate — fails
-  // the chip-color assertions below.
-  it("renders the estimate column as the chip and the official column as the badge", async () => {
+  // slots fails the chip-color assertions below. OFFICIAL's updated is aged
+  // against the real clock and more severe than the yellow estimate, so the
+  // aged official still supplies the displayed red.
+  it("renders the display flag as the chip and credits the official only when it supplied the color", async () => {
     const out = await rowFor({ estimate: ESTIMATE, official: OFFICIAL });
-    expect(out.row).toContain("flag-icon-yellow");
-    expect(out.row).toContain(">YELLOW</wa-badge>");
-    expect(out.row).not.toContain("flag-icon-red");
-    expect(out.row).not.toContain(">RED</wa-badge>");
+    expect(out.row).toContain("flag-icon-red");
+    expect(out.row).toContain(">RED</wa-badge>");
+    expect(out.row).not.toContain("flag-icon-yellow");
+    expect(out.row).not.toContain(">YELLOW</wa-badge>");
     expect(out.row).toContain(">OFFICIAL</wa-badge>");
+    expect(out.row).toContain("data-flag=\"red\"");
     // The list page reads no KV at all: both records rode in on the row.
     expect(out.keys).toEqual([]);
+  });
+
+  it("credits the estimate, with no OFFICIAL badge, when an aged official is outranked", async () => {
+    const out = await rowFor({
+      estimate: Object.assign({}, ESTIMATE, { color: "red" }),
+      official: Object.assign({}, OFFICIAL, { color: "yellow" })
+    });
+    expect(out.row).toContain(">RED</wa-badge>");
+    expect(out.row).toContain("flag-icon-red");
+    expect(out.row).not.toContain(">YELLOW</wa-badge>");
+    expect(out.row).not.toContain(">OFFICIAL</wa-badge>");
+    expect(out.row).toContain("data-flag=\"red\"");
   });
 
   it("renders an expired estimate as unknown rather than its stored yellow", async () => {
@@ -369,7 +384,7 @@ describe("handleHome reads the list's flags from beach_state", () => {
     expect(row).not.toContain("flag-icon-green");
   });
 
-  // The list renders a chip color and an OFFICIAL badge, so it reads the scalar
+  // The list renders one displayFlag decision per row, so it reads the scalar
   // mirror columns. The proximity branch ranks five times the rows it renders,
   // and an alert-bearing estimate blob runs kilobytes, so a blob on this select
   // would cross the binding five times per rendered row.
@@ -844,11 +859,13 @@ describe("handleDetail nearby beaches", () => {
     expect(section).not.toContain("/beach/b-far");
     expect(section).not.toContain("/beach/b-self");
     expect(section).not.toContain("/beach/b-inland");
-    // Each card's estimate chip and OFFICIAL badge come off its own joined row,
-    // and read exactly as a list row's do.
+    // Each card's displayFlag chip and OFFICIAL badge come off its own joined
+    // row, and read exactly as a list row's do.
     const first = sliceBetween(section, "<wa-card class=\"nearby-card\"", "</wa-card>");
     expect(first).toContain("Dune Park");
     expect(first).toContain("OFFICIAL");
+    expect(first).toContain(">GREEN</wa-badge>");
+    expect(first).not.toContain("UNKNOWN");
     expect(first).toContain("&lt;1 mi");
     expect(section).toContain("RED");
   });
@@ -1242,9 +1259,9 @@ describe("GET /api/beaches.geojson", () => {
     expect(f.properties.flag).toBe("green");
   });
 
-  it("resolves every feature exactly as markerFlagColor does at read time", async () => {
+  it("resolves every feature exactly as displayFlag does at read time", async () => {
     // Parity is the whole reason the row stores ingredients: the map marker and
-    // the detail page's title flag resolve through the same function object.
+    // every other surface that shows the beach's flag resolve through displayFlag.
     const fixtures = [
       { id: "est-only", estimate: { color: "yellow", updated: agoIso(600000) }, official: null },
       {
@@ -1277,7 +1294,7 @@ describe("GET /api/beaches.geojson", () => {
     out.body.features.forEach(function (f) { byId[f.properties.id] = f.properties.flag; });
     for (const fixture of fixtures) {
       expect(byId[fixture.id]).toBe(
-        markerFlagColor(fixture.estimate, fixture.official, nowIso)
+        displayFlag({ estimate: fixture.estimate, official: fixture.official }, nowIso).keyword
       );
     }
     expect(byId["est-only"]).toBe("yellow");
@@ -1343,6 +1360,200 @@ describe("GET /api/beaches.geojson", () => {
     const res = await geojson(made.env);
     expect(res.headers.get("cache-control")).toBe(MAP_DIRECTORY_CACHE);
     expect(res.headers.get("content-type")).toContain("application/geo+json");
+  });
+});
+
+// The cross-surface matrix: for each fixture, every route that shows the beach's
+// flag must show the one displayFlag decision, and credit OFFICIAL exactly when
+// the posted record supplied the color. Timestamps are relative to the real
+// clock, since every route resolves at its own Date.now().
+describe("every surface shows the one displayFlag decision", () => {
+  const T = Date.now();
+  function ago(ms) {
+    return new Date(T - ms).toISOString();
+  }
+  function est(color) {
+    return { color: color, reason: "r", official: false, sources: [], updated: ago(600000) };
+  }
+  function off(color, updated) {
+    return {
+      color: color,
+      reason: "posted",
+      official: true,
+      source: "https://ex.gov/f",
+      sources: ["https://ex.gov/f"],
+      updated: updated
+    };
+  }
+  function expected(color, keyword, source) {
+    return { color: color, keyword: keyword, source: source };
+  }
+
+  const HOST = { id: "osm-way-9000", name: "Host Beach", lat: 42.6579, lon: -86.2114 };
+  const FIXTURES = [
+    { name: "holland", estimate: est("green"), official: off("yellow", ago(1800000)),
+      want: expected("yellow", "yellow", "official") },
+    { name: "holland-pm", estimate: est("green"), official: off("yellow", ago(14400000)),
+      want: expected("yellow", "yellow", "official") },
+    { name: "aged-red", estimate: est("green"), official: off("red", ago(10800000)),
+      want: expected("red", "red", "official") },
+    { name: "outranked", estimate: est("red"), official: off("yellow", ago(10800000)),
+      want: expected("red", "red", "estimate") },
+    { name: "tie", estimate: est("yellow"), official: off("yellow", ago(10800000)),
+      want: expected("yellow", "yellow", "estimate") },
+    { name: "official-only", estimate: null, official: off("green", ago(10800000)),
+      want: expected("green", "green", "official") },
+    { name: "fresh-lower", estimate: est("red"), official: off("yellow", ago(600000)),
+      want: expected("yellow", "yellow", "official") },
+    { name: "double", estimate: est("double-red"), official: null,
+      want: expected("double-red", "red", "estimate") },
+    { name: "engine-unknown", estimate: est("unknown"), official: null,
+      want: expected("unknown", "unknown", "none") },
+    { name: "bad-official", estimate: est("yellow"), official: off("magenta", ago(600000)),
+      want: expected("yellow", "yellow", "estimate") },
+    { name: "nothing", estimate: null, official: null,
+      want: expected("unknown", "unknown", "none") }
+  ];
+  const HERO_LABELS = {
+    "green": "GREEN",
+    "yellow": "YELLOW",
+    "red": "RED",
+    "double-red": "DOUBLE RED — water closed",
+    "unknown": "UNKNOWN"
+  };
+
+  function shortLabel(color) {
+    return color === "double-red" ? "DOUBLE RED" : HERO_LABELS[color];
+  }
+
+  function envFor(fixture, id) {
+    const beach = { id: id, name: "Fixture " + fixture.name, lat: 42.66, lon: -86.21 };
+    const state = {};
+    if (fixture.estimate || fixture.official) {
+      state[id] = { estimate: fixture.estimate, official: fixture.official };
+    }
+    return makeEnv({ beaches: [beach, HOST], state: state }).env;
+  }
+
+  // The enclosing element of the link to /beach/<id>.
+  function enclosing(html, id, openMarker, closeMarker) {
+    const at = html.indexOf("href=\"/beach/" + id + "\"");
+    expect(at).toBeGreaterThan(-1);
+    const start = html.lastIndexOf(openMarker, at);
+    expect(start).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf(closeMarker, at) + closeMarker.length);
+  }
+
+  function firstBadge(markup) {
+    const start = markup.indexOf("<wa-badge");
+    expect(start).toBeGreaterThan(-1);
+    return markup.slice(start, markup.indexOf("</wa-badge>", start) + "</wa-badge>".length);
+  }
+
+  // The compact flag a row or a nearby card carries.
+  function expectCompactFlag(markup, d) {
+    const chip = firstBadge(markup);
+    expect(chip).toContain("flag-icon-" + d.keyword);
+    expect(chip).toContain(">" + shortLabel(d.color) + "</wa-badge>");
+    if (d.source === "official") {
+      expect(markup).toContain(">OFFICIAL</wa-badge>");
+    } else {
+      expect(markup).not.toContain(">OFFICIAL</wa-badge>");
+    }
+    expect(markup).not.toContain(">ESTIMATE</wa-badge>");
+  }
+
+  function metaDescription(html) {
+    const marker = "<meta name=\"description\" content=\"";
+    const start = html.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const from = start + marker.length;
+    return html.slice(from, html.indexOf("\"", from));
+  }
+
+  FIXTURES.forEach(function (fixture, index) {
+    const id = "osm-way-" + (100 + index);
+    const d = fixture.want;
+
+    it(fixture.name + ": the decision itself", () => {
+      const nowIso = new Date().toISOString();
+      expect(displayFlag({ estimate: fixture.estimate, official: fixture.official }, nowIso))
+        .toEqual(d);
+    });
+
+    it(fixture.name + ": home list row", async () => {
+      const html = await (await handleRequest(homeRequest(""), envFor(fixture, id))).text();
+      const row = enclosing(html, id, "<li class=\"beach-row\"", "</li>");
+      expect(row).toContain("data-flag=\"" + d.keyword + "\"");
+      expectCompactFlag(row, d);
+    });
+
+    it(fixture.name + ": ?ids= row", async () => {
+      const req = { method: "GET", url: "https://swim.report/?ids=" + id, cf: {} };
+      const html = await (await handleRequest(req, envFor(fixture, id))).text();
+      const row = enclosing(html, id, "<li class=\"beach-row\"", "</li>");
+      expect(row).toContain("data-flag=\"" + d.keyword + "\"");
+      expectCompactFlag(row, d);
+    });
+
+    it(fixture.name + ": nearby card on a neighbor's page", async () => {
+      const res = await handleRequest(getRequest("/beach/" + HOST.id), envFor(fixture, id), makeCtx());
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      const section = sliceBetween(html, "<section class=\"nearby", "</section>");
+      const card = enclosing(section, id, "<wa-card class=\"nearby-card\"", "</wa-card>");
+      expectCompactFlag(card, d);
+    });
+
+    it(fixture.name + ": detail hero and share meta", async () => {
+      const res = await handleRequest(getRequest("/beach/" + id), envFor(fixture, id), makeCtx());
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain("<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
+        d.keyword + "\">");
+      expect(sliceBetween(html, "<span class=\"hero-flag-label", "</span>")).toBe(
+        "<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">" +
+        HERO_LABELS[d.color] + "</span>");
+      const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
+      expect(h1).toContain("flag-icon-" + d.keyword);
+      const heroFlag = sliceBetween(html, "<p class=\"hero-flag", "</p>");
+      expect(heroFlag.indexOf("OFFICIAL</wa-badge>") !== -1).toBe(d.source === "official");
+      expect(heroFlag.indexOf(">ESTIMATE</wa-badge>") !== -1).toBe(d.source === "estimate");
+      expect(html).toContain("<meta property=\"og:image\" content=\"https://swim.report/og/" +
+        d.color + ".png\">");
+      const description = metaDescription(html);
+      if (d.source === "official") {
+        expect(description).toContain("official ");
+      } else if (d.source === "estimate") {
+        expect(description).toContain("estimated ");
+      } else {
+        expect(description).toContain("flag status unknown right now");
+      }
+      if (fixture.official) {
+        // The official card keeps reporting its own record verbatim.
+        const card = officialCardOf(html);
+        const ownColor = ["green", "yellow", "red", "double-red"].indexOf(fixture.official.color) !== -1
+          ? fixture.official.color : "unknown";
+        expect(card).toContain(">" + HERO_LABELS[ownColor] + "</span>");
+      }
+    });
+
+    it(fixture.name + ": geojson marker", async () => {
+      const body = await (await handleRequest(getRequest("/api/beaches.geojson"), envFor(fixture, id))).json();
+      const feature = body.features.filter(function (f) { return f.properties.id === id; })[0];
+      expect(feature.properties.flag).toBe(d.keyword);
+      expect(Object.keys(feature.properties)).toEqual(["id", "name", "flag"]);
+    });
+
+    it(fixture.name + ": /api/flag display field", async () => {
+      const res = await handleRequest(getRequest("/api/flag/" + id), envFor(fixture, id), makeCtx());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Object.keys(body)).toEqual(["beachId", "estimate", "official", "display"]);
+      expect(body.display).toEqual({ color: d.color, source: d.source });
+      expect(body.estimate).toEqual(fixture.estimate);
+      expect(body.official).toEqual(fixture.official);
+    });
   });
 });
 
@@ -1887,7 +2098,8 @@ describe("search script <-> rendered markup id contract", () => {
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('green-only-filter')");
     expect(LIST_SEARCH_SCRIPT).toContain("getAttribute('data-flag') === 'green'");
     expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('swimreport:listswap'");
-    expect(LIST_SEARCH_SCRIPT).toContain("No estimated-green beaches match your search.");
+    expect(LIST_SEARCH_SCRIPT).toContain("No green-flag beaches match your search.");
+    expect(LIST_SEARCH_SCRIPT).not.toContain("estimated-green");
     // A restored state must be applied at load: wa-switch fires "change" only on a
     // real click or keypress, so without this the switch would read on above a
     // list still showing every red, yellow and unknown row.
@@ -1959,7 +2171,13 @@ describe("renderListPage color-coded rows", () => {
     return html.slice(start, html.indexOf("</li>", start));
   }
 
-  it("stamps each row with its chip's collapsed flag keyword", () => {
+  function entryWithOfficial(estimateColor, officialColor, officialUpdated) {
+    const entry = entryWith(estimateColor);
+    entry.official = { color: officialColor, updated: officialUpdated };
+    return entry;
+  }
+
+  it("stamps each row with its display flag's keyword", () => {
     const cases = [
       [entryWith("green"), "green"],
       [entryWith("yellow"), "yellow"],
@@ -1967,13 +2185,22 @@ describe("renderListPage color-coded rows", () => {
       // double-red shares the red tint, exactly as collapseFlagColor decides.
       [entryWith("double-red"), "red"],
       // No estimate is an honest gray, never an omitted attribute.
-      [entryWith(null), "unknown"]
+      [entryWith(null), "unknown"],
+      // A fresh official decides outright, even below the estimate.
+      [entryWithOfficial("green", "yellow", NOW_ISO), "yellow"],
+      // An aged official yellow is outranked by the fresher estimate's red.
+      [entryWithOfficial("red", "yellow", "2026-07-05T08:00:00.000Z"), "red"],
+      // An aged official with no estimate still supplies the color.
+      [entryWithOfficial(null, "green", "2026-07-05T08:00:00.000Z"), "green"]
     ];
     for (const pair of cases) {
       const row = firstRow(renderListPage({ entries: [pair[0]], nowIso: NOW_ISO }));
       expect(row).toContain("data-flag=\"" + pair[1] + "\"");
       // class="beach-row" stays the first attribute and gains no color class.
       expect(row.indexOf("<li class=\"beach-row\" data-flag=")).toBe(0);
+      // The chip, the row's first badge, carries the same keyword as the border.
+      const chip = row.slice(row.indexOf("<wa-badge"), row.indexOf("</wa-badge>"));
+      expect(chip).toContain("flag-icon-" + pair[1]);
     }
   });
 
@@ -2008,10 +2235,10 @@ describe("renderListPage green-only filter and distance origin", () => {
   it("renders the green-only switch above the list, inert without JS", () => {
     const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
     expect(html).toContain("<div class=\"list-filter\">");
-    // The label names the estimate: data-flag mirrors the row's estimate chip and
-    // never a scraped official color.
+    // data-flag is the row's displayFlag keyword, which either record may supply.
     expect(html).toContain(
-      "<wa-switch id=\"green-only-filter\" size=\"s\">Estimated green only</wa-switch>");
+      "<wa-switch id=\"green-only-filter\" size=\"s\">Green flags only</wa-switch>");
+    expect(html).not.toContain("Estimated green only");
     // The control sits above the list, and the server never pre-filters: the row
     // renders whether or not the switch would hide it.
     expect(html.indexOf("class=\"list-filter\"")).toBeLessThan(html.indexOf("id=\"beach-list-items\""));
@@ -2131,6 +2358,9 @@ describe("GET /?ids= list mode", () => {
     expect(first).not.toContain(">OFFICIAL</wa-badge>");
     const second = html.slice(html.indexOf("<li class=\"beach-row\"", html.indexOf("</li>")));
     expect(second).toContain(">OFFICIAL</wa-badge>");
+    // The official-only row shows the posted green, not an unknown estimate chip.
+    expect(second).toContain(">GREEN</wa-badge>");
+    expect(second).not.toContain(">UNKNOWN</wa-badge>");
   });
 
   it("renders the rows in the requested order, not the order SQLite returned", async () => {

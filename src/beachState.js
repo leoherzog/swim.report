@@ -23,10 +23,10 @@ export const BEACH_STATE_JOIN = " LEFT JOIN beach_state s ON s.beach_id = b.id";
 
 // Selected instead of BEACH_STATE_SELECT by every query that renders a color
 // chip and nothing else — the home list, ?ids=, the nearby cards and the map
-// features. Those surfaces read the estimate's color and whether an official
-// exists, so they take the scalar mirror columns and never the JSON blobs: an
-// alert-bearing estimate runs kilobytes, and the home proximity branch ranks
-// five times the rows it renders.
+// features. Those surfaces render only displayFlag, which reads each record's
+// color and updated, so they take the scalar mirror columns and never the JSON
+// blobs: an alert-bearing estimate runs kilobytes, and the home proximity branch
+// ranks five times the rows it renders.
 export const CHIP_STATE_SELECT =
   "s.estimate_color, s.estimate_updated, s.estimate_expires, " +
   "s.official_color, s.official_updated, s.official_expires";
@@ -134,9 +134,9 @@ function liveChipRecord(color, updated, expires, nowEpoch) {
 // Row from a query that selected CHIP_STATE_SELECT (extra columns ignored), or
 // null. Returns { estimate, official }, each { color, updated } or null, under
 // the same expiry rule liveBeachState applies. These are deliberately partial
-// records: they carry what a chip and an OFFICIAL badge read and nothing else,
-// so a surface that renders a reason string, sources or a reading must select
-// BEACH_STATE_SELECT and use liveBeachState instead. Never throws.
+// records: exactly what displayFlag reads and nothing else, so a surface that
+// renders a reason string, sources or a reading must select BEACH_STATE_SELECT
+// and use liveBeachState instead. Never throws.
 export function liveChipState(row, nowMs) {
   const nowEpoch = Math.floor(nowMs / 1000);
   if (!row) {

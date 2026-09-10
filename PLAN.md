@@ -449,8 +449,8 @@ Written by the hourly cron at wqfloor_expires = writeEpoch + WQFLOOR_TTL_SECONDS
 only when a src/wqFloor source resolved an active advisory for the beach; a clean or absent
 reading writes nothing, leaves the stored column alone and lets it age out. Expiry is the
 only retraction path. This is a raise-only floor baked into the estimate (rules.js step 7,
-official:false), never an official override, and it never feeds render.js markerFlagColor /
-titleColor. handleDetail reads it on the same beach_state JOIN as the estimate, the official
+official:false), never an official override, and it never feeds displayFlag. handleDetail
+reads it on the same beach_state JOIN as the estimate, the official
 and the reading, and passes it to renderDetailPage as data.wqfloor, which renders it as a
 distinct wa-callout (warning for yellow, danger for red) directly under the estimate card:
 a "Water quality advisory" heading, the reason, the source as plain text and an
@@ -476,12 +476,12 @@ mapFeatureFromRow(row, nowIso, nowMs) in src/mapFeatures.js resolves one row to 
 or null. nowMs is the same instant as nowIso, handed down by a caller that already has it so
 the per-row loop parses nothing; omitting it derives the instant from nowIso, which is what
 keeps the two arguments from naming different clocks.
-It reads INGREDIENTS and never a stored marker color: markerFlagColor (section 9) — the
-displayFlagColor rule with double-red collapsed to red — decides the color at read time,
-the same function the detail page's title flag resolves through, so the two surfaces cannot
-disagree about one beach. Deciding at write time would also always under-report, because
-displayFlagColor is raise-only in time: while the official is fresher than STALE_MS it wins
-outright, and past that the gate becomes worst-of, which is never lower.
+It reads INGREDIENTS and never a stored marker color: displayFlag (section 9) decides at
+read time and the feature takes its keyword, the same call every surface that shows a
+beach's flag makes, so no two surfaces can disagree about one beach. Deciding at write time
+would also always under-report, because displayFlag is raise-only in time: while the
+official is fresher than STALE_MS it wins outright, and past that it wins only while
+strictly more severe, which is never lower.
 
 Each record honors its OWN lease. estimate_expires and official_expires are checked
 separately, and a record at or past its lease reads as null: the resolution is
@@ -730,9 +730,10 @@ writers, chunkStatements to keep a D1 batch at 200 statements.
 
 Readers come in two widths. A surface that renders a record — the detail page, /api/flag —
 selects BEACH_STATE_SELECT and resolves it with liveBeachState. A surface that renders only
-a chip color and an OFFICIAL badge — the home list, ?ids=, the nearby cards, the map
-features — selects CHIP_STATE_SELECT, the scalar mirror columns, and resolves it with
-liveChipState, which returns { estimate, official } as { color, updated } pairs. Those are
+a beach's display flag — the home list, ?ids=, the nearby cards, the map features — selects
+CHIP_STATE_SELECT, the scalar mirror columns, and resolves it with liveChipState, which
+returns { estimate, official } as { color, updated } pairs, exactly the fields displayFlag
+reads. Those are
 deliberately partial records: the list never parses a blob, which is what keeps the home
 proximity branch from shipping four JSON columns for the 400 ranked rows it discards.
 
@@ -2338,9 +2339,9 @@ ambiguous, stale or unrecognized-status sites omitted rather than given a guesse
 Full color semantics are in README.md's official-sources table.
 
 Registry scope is hazard, flag and closure sources only. An official color overrides the
-estimate everywhere it is shown (markerFlagColor / titleColor, subject only to the
-section-9 displayFlagColor raise-only rule once the reading has aged past the default 2 h
-STALE_MS; the official card is never affected), so water-quality monitoring sources are not
+estimate everywhere it is shown (every surface through the section-9 displayFlag, subject
+only to its raise-only rule once the reading has aged past the default 2 h STALE_MS; the
+official card is never affected), so water-quality monitoring sources are not
 registered: a clean-water "green" is a different axis from surf hazard and would mask a
 genuine hazard estimate such as a gale-driven red. Do not re-add a source whose "clean"
 reading would downgrade a hazard flag; water quality feeds the separate raise-only
@@ -2693,7 +2694,7 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    (nowEpoch + WQFLOOR_TTL_SECONDS) to that beach's descriptor, for the request path's
    water-quality callout. A clean reading contributes no field, so the COALESCE upsert
    leaves the stored advisory alone and it ages out — expiry stays the only retraction
-   path. It is not an official override and never feeds markerFlagColor / titleColor.
+   path. It is not an official override and never feeds displayFlag.
    The pool collects descriptors; step 7b writes them. estimatesByBeach.set(...) may run
    inside the pool, because the flag_history guarantee is enforced at step 9 against the
    set of beaches whose chunk actually committed, not against the pool's own bookkeeping.
@@ -2914,7 +2915,7 @@ alert means.
      unchanged row is written nothing, and a second run against an identical feed writes
      nothing at all.
    - The one lowering rail: when SEVERITY_RANK[next.color] < SEVERITY_RANK[standing.color]
-     and nowMs - Date.parse(signals.updated) >= STALE_MS (src/frontend/render.js, the same 2 h
+     and nowMs - Date.parse(signals.updated) >= STALE_MS (src/displayFlag.js, the same 2 h
      horizon the page marks stale), count skipStaleLower and write nothing. A clear-down
      decided on wave and wind inputs the page itself would flag as stale waits for the hourly.
      The rail is on the lowering direction only, since age can only understate a hazard.
@@ -3730,11 +3731,11 @@ Routing table (method GET only; anything else → 405):
 
 | Route                     | Handler        | Reads                                        | Returns |
 |---------------------------|----------------|----------------------------------------------|---------|
-| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT b.*, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: the same joined SELECT [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. No KV read at all: the chip's color and the OFFICIAL badge ride the join as scalar columns, resolved per row by liveChipState(row, nowMs) (section 2). A list row renders a color and a badge and nothing else, so it never selects a JSON blob: the proximity branch ranks 500 rows to render 100, and a blob here would cross the binding five times for every row a visitor sees. Only the sliced rows are resolved. HOME_LIST_LIMIT is 100 | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
+| GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT b.*, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: the same joined SELECT [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. No KV read at all: the two records displayFlag reads ride the join as scalar columns, resolved per row by liveChipState(row, nowMs) (section 2). A list row renders one displayFlag decision and nothing else, so it never selects a JSON blob: the proximity branch ranks 500 rows to render 100, and a blob here would cross the binding five times for every row a visitor sees. Only the sliced rows are resolved. HOME_LIST_LIMIT is 100 | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /?ids=id1,id2,...     | handleIdsList  | The same list page rendered for exactly the listed beaches, in the order given. parseBeachIds validates and dedupes the comma-separated value and caps it at 10 BEFORE any SQL; the ids are bound as parameters (D1: the same joined chip SELECT WHERE b.id IN (?1, ?2, ...) AND [flag-worthy gate] — no ORDER BY, since SQLite returns an IN-set in its own order and the caller's order is restored in JS by id), resolved through liveChipState like handleHome. Ids that do not match the id format, that name no row, or that name a non-flag-worthy row are skipped silently; an empty result reads no D1 at all. q, near and request.cf are ignored on this route, which is what makes the response fully URL-determined and therefore CACHEABLE. It writes no last_viewed stamp — only the two single-beach routes carry the demand signal. This is what the browser-side "Your Beaches" section (section 9) fetches for a visitor's saved and recently viewed ids; nothing about those lists reaches the server beyond the bounded id list in the URL. | HTML renderListPage with idsMode: true, query "", hasMore false and no location, so the page renders unsorted, un-filtered rows and never asserts data-complete. idsMode also owns the empty-state copy: a page with no rows reads "No beaches match those ids.", since an unrecognized id list is neither a search miss nor an empty database |
-| GET /beach/:beachId       | handleDetail   | D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, each honoring its own expiry); KV waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's chip and badge resolved from the joined scalar columns by liveChipState | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
-| GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which calls markerFlagColor(estimate, official, nowIso) on the same liveChipState resolution the list surfaces use, the section-9 displayFlagColor rule with double-red collapsed to red, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. |
-| GET /api/flag/:beachId    | handleApiFlag  | D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null } |
+| GET /beach/:beachId       | handleDetail   | D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, each honoring its own expiry); KV waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
+| GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which stamps displayFlag({ estimate, official }, nowIso).keyword (section 9) on the same liveChipState resolution the list surfaces use, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. |
+| GET /api/flag/:beachId    | handleApiFlag  | D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } }, with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -3746,8 +3747,7 @@ Routing table (method GET only; anything else → 405):
   two widths. A route that renders a record — the detail page and /api/flag — selects
   BEACH_STATE_SELECT and resolves the row with liveBeachState(row, nowMs), which returns
   { estimate, official, wqfloor, reading }, each parsed or null. A route that renders only a
-  chip color and an OFFICIAL badge — the home list, ?ids=, the nearby cards and the map
-  features — selects CHIP_STATE_SELECT and resolves the row with liveChipState(row, nowMs),
+  beach's display flag — the home list, ?ids=, the nearby cards and the map features — selects CHIP_STATE_SELECT and resolves the row with liveChipState(row, nowMs),
   which returns { estimate, official }, each { color, updated } or null, off the scalar
   mirror columns and never a blob. Both apply the same expiry rule per record: a NULL column,
   an expired lease, unparseable JSON or a non-object parse all read as null, and neither
@@ -3851,8 +3851,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // string|null -> string; escapes & < > " '.
 
     export function renderListPage(data)
-      // data = { entries: [ { beach: BeachRow, estimate: FlagEstimate|null,
-      //                       official: OfficialFlag|null,
+      // data = { entries: [ { beach: BeachRow,
+      //                       estimate: { color, updated }|FlagEstimate|null,
+      //                       official: { color, updated }|OfficialFlag|null,
       //                       distanceMi: number|null } ],
       //          nowIso: "2026-07-04T15:05:00.000Z",
       //          sortedByProximity: boolean (optional),
@@ -3868,6 +3869,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                 empty state reads "No beaches match those ids." rather than
       //                 the search-miss or empty-database copy) }
       // -> full HTML document string.
+      // Each row reads estimate and official only through displayFlag(entry, data.nowIso).
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite or
       // null renders nothing. sortedByProximity heads the main list with
       // <h2 id="nearby-heading" class="nearby-heading">Nearby</h2> and names the list
@@ -3882,9 +3884,10 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // your search.", not the empty-database copy.
       // The green-only control lives in a <div class="list-controls"> between the
       // active-query line and the live region, as <div class="list-filter"><wa-switch
-      // id="green-only-filter" size="s">Estimated green only</wa-switch></div> pushed to
-      // the end edge. styles.js hides an empty controls row. The label names the estimate because data-flag is the row's estimate
-      // chip, never a scraped official. The filter block is rendered only when the page
+      // id="green-only-filter" size="s">Green flags only</wa-switch></div> pushed to
+      // the end edge. styles.js hides an empty controls row. The label names no source:
+      // data-flag is the row's displayFlag keyword, which either record may supply. The
+      // filter block is rendered only when the page
       // has rows, so an empty list carries no control over nothing. The filter is purely
       // client-side — the server always renders every row, so with JS off the switch is
       // inert and nothing is hidden. searchScript.js applies it and the search term in
@@ -3892,7 +3895,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // state persists under the single localStorage key "swimreport:green-only" with
       // both the read and the write in try/catch, and a restored "1" runs the pass at
       // load, since a wa-switch fires "change" only on real interaction. While the switch
-      // is on it owns #beach-list-empty, showing "No estimated-green beaches match your
+      // is on it owns #beach-list-empty, showing "No green-flag beaches match your
       // search." when it has hidden every row the term matched, and restores the server's
       // own copy and visibility when switched off. A term that matched no row at all
       // leaves the server's copy standing, so the filter never takes the blame for a
@@ -4160,20 +4163,20 @@ exporting a CSS string); render.js is the sole module the router imports.
   the renderer is pure and never reads the request. renderErrorPage passes NO meta — a 404
   claims no canonical URL and offers no share card — and still gets the identity tags.
 - og:image is one of five committed 1200x630 PNGs, /og/<color>.png, one per
-  displayFlagColor value (green, yellow, red, double-red as two stacked flags, unknown).
+  displayFlag color (green, yellow, red, double-red as two stacked flags, unknown).
   They carry the flag graphic on a wave background and NO text, so the estimated-or-official
   wording lives only in the title and description and can never disagree with the picture.
 - The list page canonicalizes to SITE_ORIGIN + "/" whatever the ?q= or ?near= params are,
   since those are a filtered or geolocated view of the same page. Its description is the
   one-sentence site description and its card is the gray unknown flag: the index reports no
   one beach's color and must not imply one.
-- The detail page canonicalizes to "/beach/" + encodeURIComponent(beach.id) and takes both
-  its card and its description wording from displayFlagColor, the same rule as the title
-  flag. detailMetaDescription(beach, estimate, official, nowIso) reads
-  "<display name>: estimated YELLOW flag right now, 2.4 ft waves." — "official <COLOR>"
-  only when a non-stale official record is deciding that color (the displayFlagColor gate),
-  "flag status unknown right now" when there is no color, and the wave clause omitted
-  entirely rather than invented when estimate.waveHeightFt is not finite.
+- The detail page canonicalizes to "/beach/" + encodeURIComponent(beach.id) and takes its
+  card and its description wording from the page's displayFlag decision.
+  detailMetaDescription(beach, estimate, flag) reads
+  "<display name>: estimated YELLOW flag right now, 2.4 ft waves.": "official <COLOR>"
+  exactly when flag.source is "official", the field the hero badge reads; "flag status
+  unknown right now" when flag.source is "none"; and the wave clause omitted entirely rather
+  than invented when estimate.waveHeightFt is not finite.
 - Disclaimer in the footer of every page, exact text:
     "Estimated — not the official flag status. Always obey posted flags and lifeguards."
   The footer is one horizontally centered block (<p class="footer-lines">, three <small>
@@ -4206,7 +4209,8 @@ exporting a CSS string); render.js is the sole module the router imports.
   it live, so the renderer stays pure and only interpolates the ISO.
 - Estimate === null renders exactly like an unknown estimate with reason
   "No estimate available yet".
-- Official flags (detail page, and a small badge on list rows) must be visually distinct: a
+- Official flags (the detail page's official card, and an OFFICIAL badge on any row, nearby
+  card or hero whose displayed color the official record supplied) must be visually distinct: a
   separate card with a heavy border, an "OFFICIAL" badge with a circle-check Font Awesome
   icon, the source hostname ("www." stripped) linking to the scraped page, and its own
   updated time. The official card appears above the estimate card; when official is null no
@@ -4241,8 +4245,9 @@ exporting a CSS string); render.js is the sole module the router imports.
   escapeHtml(note) + " " + <wa-relative-time date=x.updated sync> + "."). Otherwise
   neither. The two callouts are mutually exclusive and the warning always wins — a source
   may never use readingNote to soften or suppress a genuine stale warning.
-  isStale(nowIso, updatedIso, thresholdMs) is the single shared age helper, defaulting to
-  STALE_MS; the wave strip passes WAVE_STALE_MS.
+  STALE_MS is defined in src/displayFlag.js, and isStale(nowIso, updatedIso, thresholdMs)
+  in src/displayFlag.js is the single shared age helper, defaulting to STALE_MS; the wave
+  strip passes WAVE_STALE_MS.
 - Park-name-first display (both pages): displayName = beach.park_name || beach.name, and a
   subtitle with beach.name renders only when park_name is set and differs from name.
   Unnamed park beaches have name === park_name, so no subtitle. List rows put the subtitle
@@ -4251,28 +4256,36 @@ exporting a CSS string); render.js is the sole module the router imports.
   The row's data-name search attribute is the lowercased park_name + " " + name, so search
   matches either.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
-  the display name, optional subtitle, the estimated flag chip, and an OFFICIAL badge when
-  official is non-null. The <li> also carries data-flag, the row's chip color through
-  collapseFlagColor (green|yellow|red|unknown, double-red -> red), which drives both the
-  flag-colored inline-start border in styles.js and the client-side green-only filter.
-  It mirrors the chip beside it, not markerFlagColor, so border and chip can never
-  disagree; unknown renders gray rather than being omitted. class="beach-row" stays the
-  first attribute and never gains a color class.
+  the display name, optional subtitle and the flag chip from displayFlag(entry, data.nowIso):
+  the icon and short label of flag.color, followed by an OFFICIAL badge only when
+  flag.source is "official" and by no ESTIMATE badge, so an unbadged chip is never a posted
+  flag. The <li> carries data-flag = flag.keyword (green|yellow|red|unknown), which drives
+  both the flag-colored inline-start border in styles.js and the client-side green-only
+  filter; chip, border, map marker and detail title are one decision. unknown renders gray
+  rather than being omitted. class="beach-row" stays the first attribute and never gains a
+  color class, and the chip stays the row's first wa-badge.
 - Color normalization (normalizeColor in rules.js) — coerces any value to one of the five
   flag colors, keyed by SEVERITY_RANK so the color set has one definition. render.js and
-  frontend/verdict.js both import it; anything SEVERITY_RANK does not name becomes unknown.
-- Display color (displayFlagColor in render.js) — the one rule behind both the detail
-  page's h1 title flag and the map/list marker keyword (markerFlagColor), so the two can
-  never disagree about one beach. displayFlagColor(estimate, official, nowIso) -> one of
-  green|yellow|red|double-red|unknown; markerFlagColor is the same value through
-  collapseFlagColor (double-red -> red).
-    1. No official record -> normalizeColor(estimate.color), gray unknown when absent.
-    2. Official record not stale by the default 2 h STALE_MS — which includes a record
-       carrying no parseable updated, since a legacy KV value reads as fresh —
-       -> normalizeColor(official.color). A posted official flag outranks the estimate.
-    3. Official record older than the default STALE_MS -> the more severe of
-       official.color and estimate.color by rules.js SEVERITY_RANK (exported for this;
-       unknown ranks 0, so it can neither lower a real color nor be raised to).
+  src/displayFlag.js both import it; anything SEVERITY_RANK does not name becomes unknown.
+- Display flag (displayFlag in src/displayFlag.js) — the only decision of which color a
+  surface shows as a beach's flag and which record supplied it. Every such surface calls it
+  once and reads nothing else: list, ?ids= and Your Beaches rows, nearby cards, the detail
+  hero (title icon, label, wash, badge, verdict branch), the share card and description,
+  the map feature keyword and /api/flag's display field. displayFlag({ estimate, official },
+  nowIso) -> a frozen { color, keyword, source }: color is one of
+  green|yellow|red|double-red|unknown, keyword is collapseFlagColor(color) (double-red ->
+  red), and source is official|estimate|none. It reads only each record's color and the
+  official's updated (a non-string updated reads as absent), so liveChipState pairs and
+  liveBeachState blobs resolve identically. First match wins:
+    1. An official whose color normalizes to unknown counts as absent.
+    2. Official not stale by the default 2 h STALE_MS (including no parseable updated or
+       nowIso) -> its color, source official, even below the estimate.
+    3. Official older than STALE_MS and strictly more severe than the estimate by rules.js
+       SEVERITY_RANK (unknown ranks 0) -> its color, source official.
+    4. Otherwise the estimate's color, source estimate; or unknown, source none, when that
+       color is unknown or there is no estimate.
+  color is always the named record's own normalized color, and source is none exactly when
+  color is unknown, so no surface can credit a record with a color it did not produce.
   "Official" is not the same as "current". Several sources are point-in-time readings on
   their own slow cadence — nws-omr-grr is a single morning observation carrying its own
   "may not be representative of conditions later in the day" disclaimer — and a Beach
@@ -4283,16 +4296,12 @@ exporting a CSS string); render.js is the sole module the router imports.
   means "this card is not yet misleading to show", not "this reading still outranks live
   hazard data". The official card is unaffected — renderOfficialCard always reports
   official.color verbatim with its own stale warning or reading note, so an estimate is
-  never presented as an official flag status. The list row chip likewise stays the estimate
-  color plus a colorless OFFICIAL badge; only the title flag and the marker take the
-  display color.
+  never presented as an official flag status.
 - Detail page, in order: the flag hero (section.detail-hero, a wa-stack wa-gap-s in the
   main stack) holding the back link; an h1 title with a colorized flag icon on the left
-  (displayFlagColor) plus the display name; an optional beach-name subtitle; the display
-  flag's FLAG_LABELS text with the ESTIMATE badge beside it, or the OFFICIAL badge when the
-  official record is what supplied that color — fresh at the 2 h default, or aged and still
-  more severe than the estimate, since displayFlagColor's weighing is raise-only; a
-  plain-language verdict line under that label (p.hero-verdict); a lat/lon meta line linking
+  (displayFlag's color) plus the display name; an optional beach-name subtitle; the display
+  flag's FLAG_LABELS text with the badge displayFlag's source names — OFFICIAL, ESTIMATE, or
+  none when the color is unknown; a plain-language verdict line under that label (p.hero-verdict); a lat/lon meta line linking
   to OpenStreetMap; and the share row. The badge follows the record the color came from,
   never freshness alone, so the hero can neither call an estimate official nor credit the
   estimate with a color it did not produce. The flag label text below the title is what
@@ -4302,14 +4311,15 @@ exporting a CSS string); render.js is the sole module the router imports.
   beach-flag) — see the motion bullet in "Page skeleton". The hero's
   background is
   color-mix(in oklab, <the display flag's palette token> 12%, var(--wa-color-surface-default)),
-  selected by a data-flag attribute carrying collapseFlagColor's keyword — green, yellow,
+  selected by a data-flag attribute carrying displayFlag's keyword — green, yellow,
   red or the gray unknown — so no color literal reaches the markup and the wash follows the
   surface token into wa-dark. The hero is a heading, not a third flag card: the two cards
   below keep the full verdicts and are never merged into it.
-  - Verdict line: one sentence from verdictSentence(estimate, official, displayIsOfficial,
-    waterClass) in src/frontend/verdict.js — pure, plain text out, escaped by the caller. It
-    takes the same displayIsOfficial the hero badge takes, so the sentence and the badge can
-    never disagree about which record decided the color. A sentence names a flag color only
+  - Verdict line: one sentence from verdictSentence(estimate, flag, waterClass) in
+    src/frontend/verdict.js — pure, plain text out, escaped by the caller. It takes the
+    hero's displayFlag decision: source official returns the posted-flag sentence for
+    flag.color, source none reads no data, and source estimate explains the estimate, so
+    the sentence and the badge read one field. A sentence names a flag color only
     alongside who decided it: the official branch always says the flag is posted ("Water
     closed by the posted flag."), and the estimated branch names no color at all, only its
     signals ("Calm water, no alerts." / "Beach Hazards Statement in effect; high rip current
@@ -4744,8 +4754,9 @@ test uses symbolically.
   pure parse functions against inline fixtures, including ambiguous and unknown-status rows
   being omitted, plus matches() with matching and non-matching BeachRow fixtures.
 - test/mapFeatures.test.js — mapFeatureFromRow: non-finite coords dropped, the
-  park_name/name/"" label fallback, [lon, lat] order, and PARITY against markerFlagColor
-  called directly on the same records across the whole displayFlagColor gate. Plus the
+  park_name/name/"" label fallback, [lon, lat] order, and PARITY against
+  displayFlag(...).keyword called directly on the same records across the whole gate. Plus
+  the
   expiry rules that decide a marker: an expired estimate reading unknown rather than its
   stored green, a NULL or non-numeric expiry reading expired, each column expiring on its
   own so a live official stands beside a dead estimate, an official whose updated is
@@ -4841,11 +4852,13 @@ test uses symbolically.
   the alert clause's precedence ordering (the deciding alert leads, never the feed's first),
   joining/counting/dedupe, the "no alerts" guards (caveat, unresolved fetch, sealless
   payload), the clauses an event-led red or double-red drops and the ones it keeps,
-  estimated double-red, the posted-flag branch for every color, and the honest fallbacks for
-  a null, unknown or legacy estimate.
+  estimated double-red, the posted-flag branch displayFlag's source selects for every color,
+  an unusable official color never reaching it, and the honest fallbacks for a null, unknown
+  or legacy estimate and a none or absent decision.
 - test/detailVerdict.test.js — the same line and the flag legend through renderDetailPage:
-  placement between the hero flag label and the coordinates line, fresh-official vs
-  aged-official-that-agrees crediting, escaping of an upstream alert name, omission for a
+  placement between the hero flag label and the coordinates line, crediting by
+  displayFlag's source (a fresh official, an aged official that only agrees, an aged
+  official that is more severe), escaping of an upstream alert name, omission for a
   legacy estimate, and the legend's exact markup, per-color lines and once-per-page
   placement between the tiles and the detail stack.
 - test/renderWaveForecast.test.js — the rendered section via renderDetailPage: detail-stack
@@ -4872,7 +4885,9 @@ test uses symbolically.
   and the empty string for absent, malformed and unknown-color records.
 - test/detailHero.test.js — the detail-page hero via renderDetailPage: the per-color wash
   keyword including the double-red collapse and the gray unknown, the ESTIMATE/OFFICIAL
-  badge across fresh and aged official records, the untouched flag cards below, the back
+  badge by displayFlag's source across fresh and aged official records, no badge when the
+  color is unknown, an unusable official color neither deciding nor earning OFFICIAL, the
+  untouched flag cards below, the back
   link and share controls, DETAIL_HERO_SCRIPT's referrer and navigator.share guards, the
   "at a glance" tiles with present, missing and never-checkable data — including the tile
   count when only some readings exist and the omitted section when none do — the shared
@@ -4887,7 +4902,8 @@ test uses symbolically.
   both ::view-transition-group durations inside the no-preference guard, the hero's two
   static names (including the double-red pair, named on the wrapper rather than on either
   icon), that no row or card carries a server-rendered name, the click-time naming script
-  on both pages and its claim/release/feature-gate lines, the per-segment --i stagger
+  on both pages and its claim/release/feature-gate lines, the flag chip staying the first
+  badge when an OFFICIAL badge follows it, the per-segment --i stagger
   index, the fill-in keyframe's placement inside the guard, and the strip's neutral "now"
   marker.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
@@ -4910,11 +4926,16 @@ test uses symbolically.
   scalar chip columns and no JSON blob, handleDetail reading the
   "waves:" and "watertemp:" KV keys and rendering the advisory callout from the joined
   wqfloor column, and /api/beaches.geojson in ONE D1 statement with parity against
-  markerFlagColor, builtAt as the newest live estimate_updated (null when none), and its
-  cache-control. It
+  displayFlag's keyword, /api/flag's additive display field, and the cross-surface matrix:
+  list, ?ids=, nearby card, hero, share meta, geojson and /api/flag showing one displayFlag
+  decision per fixture, plus builtAt as the newest live estimate_updated (null when none),
+  and its cache-control. It
   also covers the ?ids= list mode: parameter binding behind the flag-worthy gate, the
   caller's order restored over SQLite's, unknown and malformed ids skipped, the 10-id cap,
   the CACHEABLE header, the absent data-complete, and the absent last_viewed stamp.
+- test/displayFlag.test.js — the decision table, the invariant sweep, chip/blob shape
+  parity, reads-only and purity checks, and the source-scan guard against a second copy of
+  the rule.
 - test/favorites.test.js — the favorites enhancement's rendered surfaces and script text:
   the hidden detail-page toggle (exact markup, escaped id, position in the hero share row),
   the empty hidden "Your Beaches" shell, idsMode dropping data-complete and owning its own

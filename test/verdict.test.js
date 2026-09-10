@@ -1,11 +1,19 @@
 // test/verdict.test.js
 // The pure hero-verdict sentence (src/frontend/verdict.js): one branch per
-// rules.js trigger, the official-display branch, and the honest fallbacks for
-// unknown, absent and legacy estimates.
+// rules.js trigger, the posted-flag branch displayFlag's source selects, and the
+// honest fallbacks for unknown, absent and legacy estimates.
 
 import { describe, it, expect } from "vitest";
 import { verdictSentence } from "../src/frontend/verdict.js";
+import { displayFlag } from "../src/displayFlag.js";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
+
+// The sentence the hero renders: verdictSentence fed the displayFlag decision
+// over the same two records, at a fixed instant.
+function verdictFor(estimate, official, waterClass) {
+  return verdictSentence(estimate, displayFlag({ estimate: estimate, official: official },
+    "2026-07-05T12:00:00.000Z"), waterClass);
+}
 
 // A full estimate payload in the shape rules.js returns.
 function estimateWith(extra) {
@@ -43,7 +51,7 @@ function alert(event) {
 
 describe("verdictSentence: no estimate to explain", function () {
   it("answers honestly with no estimate at all", function () {
-    expect(verdictSentence(null, null, false, null)).toBe("No data yet for this beach.");
+    expect(verdictFor(null, null, null)).toBe("No data yet for this beach.");
   });
 
   it("answers honestly for an unknown estimate", function () {
@@ -53,7 +61,7 @@ describe("verdictSentence: no estimate to explain", function () {
       reason: "No wave or weather data is available for this beach yet",
       waveHeightFt: null
     });
-    expect(verdictSentence(estimate, null, false, null)).toBe("No data yet for this beach.");
+    expect(verdictFor(estimate, null, null)).toBe("No data yet for this beach.");
   });
 
   it("renders nothing for a legacy payload with no trigger or echoed signals", function () {
@@ -62,13 +70,13 @@ describe("verdictSentence: no estimate to explain", function () {
       reason: "Estimated wave height 1.2 ft",
       updated: "2026-07-05T11:30:00.000Z"
     };
-    expect(verdictSentence(legacy, null, false, null)).toBe("");
+    expect(verdictFor(legacy, null, null)).toBe("");
   });
 });
 
 describe("verdictSentence: wave height", function () {
   it("calls a below-threshold reading calm and confirms the clear alert check", function () {
-    expect(verdictSentence(estimateWith({}), null, false, null))
+    expect(verdictFor(estimateWith({}), null, null))
       .toBe("Calm water, no alerts.");
   });
 
@@ -78,7 +86,7 @@ describe("verdictSentence: wave height", function () {
       waveHeightFt: 2.6,
       reason: "Estimated wave height 2.6 ft (at or above 2 ft)"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Waves 2 to 4 ft, no alerts.");
   });
 
@@ -88,7 +96,7 @@ describe("verdictSentence: wave height", function () {
       waveHeightFt: 4.1,
       reason: "Estimated wave height 4.1 ft (at or above 3 ft)"
     });
-    expect(verdictSentence(estimate, null, false, "ocean"))
+    expect(verdictFor(estimate, null, "ocean"))
       .toBe("Waves 3 to 6 ft, no alerts.");
   });
 
@@ -98,7 +106,7 @@ describe("verdictSentence: wave height", function () {
       waveHeightFt: 5.4,
       reason: "Estimated wave height 5.4 ft (at or above 4 ft) (" + ALERTS_UNAVAILABLE_CAVEAT + ")"
     });
-    expect(verdictSentence(estimate, null, false, null)).toBe("Waves 4 ft or more.");
+    expect(verdictFor(estimate, null, null)).toBe("Waves 4 ft or more.");
   });
 
   it("stays silent about alerts when the national fetch never resolved", function () {
@@ -112,16 +120,16 @@ describe("verdictSentence: wave height", function () {
         signalSources: []
       }
     });
-    expect(verdictSentence(estimate, null, false, null)).toBe("Calm water.");
+    expect(verdictFor(estimate, null, null)).toBe("Calm water.");
   });
 
   it("stays silent about alerts for an estimate written before the seal", function () {
     const estimate = estimateWith({ estimateInputs: undefined });
-    expect(verdictSentence(estimate, null, false, null)).toBe("Calm water.");
+    expect(verdictFor(estimate, null, null)).toBe("Calm water.");
   });
 
   it("falls back to the wave clause for an unrecognized trigger", function () {
-    expect(verdictSentence(estimateWith({ trigger: "some-future-step" }), null, false, null))
+    expect(verdictFor(estimateWith({ trigger: "some-future-step" }), null, null))
       .toBe("Calm water, no alerts.");
   });
 });
@@ -135,7 +143,7 @@ describe("verdictSentence: rip current and wind", function () {
       waveHeightFt: null,
       ripCurrentRisk: "HIGH"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("High rip current risk, no alerts.");
   });
 
@@ -147,7 +155,7 @@ describe("verdictSentence: rip current and wind", function () {
       waveHeightFt: 2.6,
       ripCurrentRisk: "MODERATE"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Moderate rip current risk, waves 2 to 4 ft, no alerts.");
   });
 
@@ -158,7 +166,7 @@ describe("verdictSentence: rip current and wind", function () {
       reason: "Estimated wave height 2.6 ft (at or above 2 ft)",
       ripCurrentRisk: "MODERATE"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Waves 2 to 4 ft, moderate rip current risk, no alerts.");
   });
 
@@ -169,7 +177,7 @@ describe("verdictSentence: rip current and wind", function () {
       waveHeightFt: null,
       ripCurrentRisk: "LOW"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Low rip current risk, no alerts.");
   });
 
@@ -180,7 +188,7 @@ describe("verdictSentence: rip current and wind", function () {
       reason: "No wave data; wind 18 mph sustained, n/a mph gusts (at or above 15 mph sustained or 25 mph gust threshold)",
       waveHeightFt: null
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("No wave data, so this estimate is from wind alone, no alerts.");
   });
 });
@@ -195,7 +203,7 @@ describe("verdictSentence: alerts and floors", function () {
       alertDetails: [alert("Beach Hazards Statement")],
       ripCurrentRisk: "HIGH"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Beach Hazards Statement in effect; high rip current risk.");
   });
 
@@ -211,7 +219,7 @@ describe("verdictSentence: alerts and floors", function () {
         alert("Tsunami Warning")
       ]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Tsunami Warning and 2 more alerts in effect; stay out of the water.");
   });
 
@@ -223,7 +231,7 @@ describe("verdictSentence: alerts and floors", function () {
       waveHeightFt: null,
       alertDetails: [alert("Small Craft Advisory"), alert("Beach Hazards Statement")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Beach Hazards Statement and Small Craft Advisory in effect.");
   });
 
@@ -235,7 +243,7 @@ describe("verdictSentence: alerts and floors", function () {
       waveHeightFt: null,
       alertDetails: [alert("Dense Fog Advisory"), alert("Gale Warning")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Gale Warning and Dense Fog Advisory in effect.");
   });
 
@@ -247,7 +255,7 @@ describe("verdictSentence: alerts and floors", function () {
       waveHeightFt: null,
       alertDetails: [alert("wind warning"), alert("severe thunderstorm warning")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Severe thunderstorm warning and wind warning in effect.");
   });
 
@@ -264,7 +272,7 @@ describe("verdictSentence: alerts and floors", function () {
         alert("High Surf Warning")
       ]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("High Surf Warning and 2 more alerts in effect; stay out of the water.");
   });
 
@@ -275,7 +283,7 @@ describe("verdictSentence: alerts and floors", function () {
       reason: "Active NWS alert: Small Craft Advisory",
       alertDetails: [alert("Small Craft Advisory")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Small Craft Advisory in effect; calm water.");
   });
 
@@ -287,7 +295,7 @@ describe("verdictSentence: alerts and floors", function () {
       waveHeightFt: null,
       alertDetails: [alert("marine weather advisory")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Marine weather advisory in effect.");
   });
 
@@ -298,7 +306,7 @@ describe("verdictSentence: alerts and floors", function () {
       reason: "Active NWS alert: Beach Hazards Statement",
       updated: "2026-07-05T11:30:00.000Z"
     };
-    expect(verdictSentence(legacy, null, false, null)).toBe("A weather alert is in effect.");
+    expect(verdictFor(legacy, null, null)).toBe("A weather alert is in effect.");
   });
 
   it("names the water-quality advisory floor", function () {
@@ -308,7 +316,7 @@ describe("verdictSentence: alerts and floors", function () {
       reason: "Water-quality advisory (mn-beaches): E. coli advisory",
       waveHeightFt: null
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("A water-quality advisory covers this beach.");
   });
 
@@ -319,7 +327,7 @@ describe("verdictSentence: alerts and floors", function () {
       reason: "Water-quality advisory (mn-beaches): swimming not advised",
       alertDetails: [alert("Small Craft Advisory")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("A water-quality advisory covers this beach; Small Craft Advisory in effect, calm water.");
   });
 
@@ -331,7 +339,7 @@ describe("verdictSentence: alerts and floors", function () {
       waveHeightFt: null,
       alertDetails: [alert("Tsunami Warning")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Tsunami Warning in effect; stay out of the water.");
   });
 });
@@ -345,7 +353,7 @@ describe("verdictSentence: alerts published ahead of their onset", function () {
 
   it("names an upcoming alert as not yet in effect behind the calm-water lead", function () {
     const estimate = estimateWith({ alertDetails: [upcoming], alertsAt: AT });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Calm water, Beach Hazards Statement not yet in effect.");
   });
 
@@ -357,7 +365,7 @@ describe("verdictSentence: alerts published ahead of their onset", function () {
       alertDetails: [upcoming, live],
       alertsAt: AT
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Small Craft Advisory in effect; Beach Hazards Statement not yet in effect, calm water.");
   });
 
@@ -370,7 +378,7 @@ describe("verdictSentence: alerts published ahead of their onset", function () {
       alertDetails: [upcoming, { event: "Rip Current Statement", onset: null, ends: null }],
       alertsAt: AT
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Rip Current Statement in effect; Beach Hazards Statement not yet in effect.");
   });
 
@@ -383,7 +391,7 @@ describe("verdictSentence: alerts published ahead of their onset", function () {
       ],
       alertsAt: AT
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Calm water, Beach Hazards Statement and 2 more alerts not yet in effect.");
   });
 
@@ -395,7 +403,7 @@ describe("verdictSentence: alerts published ahead of their onset", function () {
       waveHeightFt: null,
       alertDetails: [upcoming]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Beach Hazards Statement in effect.");
   });
 });
@@ -409,7 +417,7 @@ describe("verdictSentence: an alert-decided red keeps only what reinforces it", 
       waveHeightFt: 1.2,
       alertDetails: [alert("Tsunami Warning")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Tsunami Warning in effect; stay out of the water.");
   });
 
@@ -422,7 +430,7 @@ describe("verdictSentence: an alert-decided red keeps only what reinforces it", 
       ripCurrentRisk: "LOW",
       alertDetails: [alert("Hurricane Warning")]
     });
-    expect(verdictSentence(estimate, null, false, "ocean"))
+    expect(verdictFor(estimate, null, "ocean"))
       .toBe("Hurricane Warning in effect; stay out of the water.");
   });
 
@@ -435,7 +443,7 @@ describe("verdictSentence: an alert-decided red keeps only what reinforces it", 
       ripCurrentRisk: "MODERATE",
       alertDetails: [alert("Tropical Storm Warning")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Tropical Storm Warning in effect.");
   });
 
@@ -447,7 +455,7 @@ describe("verdictSentence: an alert-decided red keeps only what reinforces it", 
       waveHeightFt: 5.4,
       alertDetails: [alert("Tropical Storm Warning")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Tropical Storm Warning in effect; waves 4 ft or more.");
   });
 
@@ -459,7 +467,7 @@ describe("verdictSentence: an alert-decided red keeps only what reinforces it", 
       ripCurrentRisk: "MODERATE",
       alertDetails: [alert("Small Craft Advisory")]
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Small Craft Advisory in effect; moderate rip current risk, calm water.");
   });
 
@@ -470,33 +478,54 @@ describe("verdictSentence: an alert-decided red keeps only what reinforces it", 
       reason: "Estimated wave height 5.4 ft (at or above 4 ft)",
       ripCurrentRisk: "LOW"
     });
-    expect(verdictSentence(estimate, null, false, null))
+    expect(verdictFor(estimate, null, null))
       .toBe("Waves 4 ft or more, low rip current risk, no alerts.");
   });
 });
 
 describe("verdictSentence: the posted flag", function () {
+  // With no updated stamp the official reads fresh, so it decides outright.
   it("credits the posted flag for each color it displays", function () {
-    expect(verdictSentence(estimateWith({}), { color: "green" }, true, null))
+    expect(verdictFor(estimateWith({}), { color: "green" }, null))
       .toBe("A green flag is posted at the beach.");
-    expect(verdictSentence(estimateWith({}), { color: "yellow" }, true, null))
+    expect(verdictFor(estimateWith({}), { color: "yellow" }, null))
       .toBe("A yellow flag is posted at the beach.");
-    expect(verdictSentence(estimateWith({}), { color: "red" }, true, null))
+    expect(verdictFor(estimateWith({}), { color: "red" }, null))
       .toBe("A red flag is posted at the beach.");
   });
 
   it("says the water is closed for a posted double red", function () {
-    expect(verdictSentence(estimateWith({}), { color: "double-red" }, true, null))
+    expect(verdictFor(estimateWith({}), { color: "double-red" }, null))
       .toBe("Water closed by the posted flag.");
   });
 
-  it("stays honest for an official record with an unusable color", function () {
-    expect(verdictSentence(estimateWith({}), { color: "chartreuse" }, true, null))
+  it("an official record with an unusable color never reaches the posted branch", function () {
+    expect(verdictFor(estimateWith({}), { color: "chartreuse" }, null))
+      .toBe("Calm water, no alerts.");
+  });
+
+  it("explains the estimate when an aged official record merely ties it", function () {
+    expect(verdictFor(estimateWith({}),
+      { color: "green", updated: "2026-07-05T08:00:00.000Z" }, null))
+      .toBe("Calm water, no alerts.");
+  });
+});
+
+describe("verdictSentence: the displayFlag contract", function () {
+  it("returns the posted sentence for source official, reading flag.color", function () {
+    expect(verdictSentence(estimateWith({}),
+      { color: "red", keyword: "red", source: "official" }, null))
+      .toBe("A red flag is posted at the beach.");
+  });
+
+  it("reads no data for source none, whatever the estimate says", function () {
+    expect(verdictSentence(estimateWith({}),
+      { color: "unknown", keyword: "unknown", source: "none" }, null))
       .toBe("No data yet for this beach.");
   });
 
-  it("explains the estimate when the official record did not decide the display", function () {
-    expect(verdictSentence(estimateWith({}), { color: "green" }, false, null))
-      .toBe("Calm water, no alerts.");
+  it("reads no data with no decision at all", function () {
+    expect(verdictSentence(estimateWith({}), null, null))
+      .toBe("No data yet for this beach.");
   });
 });

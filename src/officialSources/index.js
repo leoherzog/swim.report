@@ -25,10 +25,10 @@ import { nwsMarineBeachForecast } from "./nwsMarineBeachForecast.js";
 
 // This registry holds hazard flags (surf, rip, closure) — the authoritative
 // version of what src/rules.js estimates. An official color overrides the
-// estimate everywhere it is shown (render.js markerFlagColor / titleColor), with
-// one bounded exception: once a reading has aged past the 2 h STALE_MS horizon a
-// fresher estimate may raise the displayed color but never lower it (render.js
-// displayFlagColor). The official card always reports the scraped color verbatim.
+// estimate everywhere the beach's flag is shown (src/displayFlag.js displayFlag),
+// with one bounded exception: once a reading has aged past the 2 h STALE_MS
+// horizon a fresher estimate may raise the displayed color but never lower it.
+// The official card always reports the scraped color verbatim.
 //
 // Water-quality (E. coli, bacteria) monitoring belongs in src/wqFloor/, not here:
 // a clean-water reading is a different axis from surf hazard, and letting its

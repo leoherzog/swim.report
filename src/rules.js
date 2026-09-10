@@ -10,9 +10,9 @@ export const RULES_VERSION = "1.8.0";
 // color down. unknown ranks below green so an advisory can also lift a no-data
 // unknown to yellow or red, matching how the NWS floor treats unknown.
 //
-// Exported because the frontend's displayFlagColor (src/frontend/render.js)
-// applies the same raise-only comparison when a point-in-time official reading
-// has aged past the recompute horizon. One severity ordering, one place.
+// Exported because displayFlag (src/displayFlag.js) applies the same raise-only
+// comparison when a point-in-time official reading has aged past STALE_MS. One
+// severity ordering, one place.
 export const SEVERITY_RANK = { unknown: 0, green: 1, yellow: 2, red: 3, "double-red": 4 };
 
 /**

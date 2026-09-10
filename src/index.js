@@ -1,5 +1,6 @@
 import { handleRequest } from "./router.js";
-import { renderErrorPage, STALE_MS } from "./frontend/render.js";
+import { renderErrorPage } from "./frontend/render.js";
+import { STALE_MS } from "./displayFlag.js";
 import { estimateFlag, SEVERITY_RANK, alertsInEffect } from "./rules.js";
 import {
   fetchAllActiveAlerts,
@@ -96,7 +97,7 @@ const MAX_BEACHES_PER_RUN = 3000;
 // rotation-old color reads there exactly like a fresh one.
 //
 // The official record shares this lease by default. The two are the operands of
-// displayFlagColor, so the estimate must never outlive the posted flag it is
+// displayFlag, so the estimate must never outlive the posted flag it is
 // weighed against; a scraper on a reduced cadence may opt into a longer one
 // through officialTtlSeconds, which every reader honors on its own column.
 //
@@ -737,7 +738,7 @@ async function runFlagRecompute(env) {
         // The advisory rides the same descriptor on its own shorter lease, and
         // only when this run resolved one: a clean reading writes nothing and
         // the standing advisory ages out. It is display-only — never an official
-        // override, and it never feeds markerFlagColor or titleColor.
+        // override, and it never feeds displayFlag.
         estimateWrites.push({
           beachId: beach.id,
           estimate: stored,
@@ -851,9 +852,9 @@ async function runFlagRecompute(env) {
         for (const beach of group.beaches) {
           const flag = scrapeOfficialFlagFromResult(beach, group.scraper, result);
           if (flag !== null) {
-            // The default matches the estimate's lease: displayFlagColor weighs
+            // The default matches the estimate's lease: displayFlag weighs
             // this record against the estimate, so an official that lapses first
-            // hands a posted red to a stale green. Past the renderer's 2 h gate
+            // hands a posted red to a stale green. Past displayFlag's 2 h gate
             // the surviving record is raise-only and its card carries the stale
             // warning, so ageing together costs no safety. A scraper on a
             // reduced cadence may opt into a longer lease via
