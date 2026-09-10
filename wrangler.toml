@@ -31,7 +31,8 @@ enabled = true
 [assets]
 directory = "public"
 
-# 7 * * * *        — hourly flag recompute (estimates + official scrapes -> KV).
+# 7 * * * *        — hourly flag recompute (estimates + official scrapes -> the
+#                    beach_state D1 table, one row per beach, batched 200 at a time).
 #                    Offset off the congested top-of-hour :00 slot the repo's own
 #                    GH workflows deliberately avoid. It READS (never fetches) the
 #                    waveinput: KV that .github/workflows/waves.yml writes out of
@@ -43,11 +44,11 @@ directory = "public"
 #                    required or implied: a late or missing pipeline run ages a beach
 #                    out to unknown instead of serving stale data.
 # 3-53/10 * * * * — level-triggered alerts refresh, every 10 minutes. Four national
-#                    fetches, no per-beach upstream call, and a "flag:" rewrite only
-#                    for beaches whose alert event set moved against the set their
-#                    standing estimate used. Offset off :07 so it never fires inside
-#                    the hourly recompute's measured wall-clock window, and off every
-#                    other minute already in this list.
+#                    fetches, no per-beach upstream call, and a compare-and-set on
+#                    beach_state.estimate only for beaches whose alert event set moved
+#                    against the set their standing estimate used. Offset off :07 so it
+#                    never fires inside the hourly recompute's measured wall-clock
+#                    window, and off every other minute already in this list.
 # 15 */6 * * *     — 6-hourly water-temperature refresh. Sole writer of watertemp:,
 #                    and sole writer and reader of the wave_updated rotation cursor.
 #

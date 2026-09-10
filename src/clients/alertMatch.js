@@ -20,10 +20,10 @@ export function pickIsoString(primary, fallback) {
   return null;
 }
 
-// Per-field caps on the free text carried into details. A "flag:" value holds one
-// entry per matched alert and the refresh cron reads every beach's value every
-// ten minutes, so the long-tail product whose description runs past 8 KB is a
-// cost paid across the whole table. 4000 clears the longest description any
+// Per-field caps on the free text carried into details. A stored estimate holds
+// one entry per matched alert and the refresh cron reads every beach's estimate
+// every ten minutes, so the long-tail product whose description runs past 8 KB is
+// a cost paid across the whole table. 4000 clears the longest description any
 // event rules.js keys on — the Hurricane and Tropical Storm Warnings, where the
 // full text is exactly what a swimmer needs — so the cap only bites on events
 // that decide no color.

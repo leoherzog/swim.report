@@ -1,6 +1,9 @@
 // test/router.test.js
-// Pure-function coverage for the proximity-sorting helpers in src/router.js
-// and the distance/sort-note rendering in src/frontend/render.js.
+// The request path end to end, against real SQLite through test/helpers/d1.js:
+// every route reads its beach rows and their derived state from seeded tables,
+// so the assertions are about what renders, not about the SQL that fetched it.
+// Also covers the pure helpers in src/router.js and the rendering invariants in
+// src/frontend/render.js.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -11,54 +14,98 @@ import {
   handleRequest
 } from "../src/router.js";
 import { renderListPage, renderDetailPage, markerFlagColor } from "../src/frontend/render.js";
-import {
-  MAP_DIRECTORY_KEY,
-  mapDirectoryEntry,
-  buildMapDirectory
-} from "../src/mapDirectory.js";
-import { FLAG_TTL_MS } from "../src/flagTtl.js";
+import { makeD1 } from "./helpers/d1.js";
 import { PAGE_STYLES } from "../src/frontend/styles.js";
 import { COLOR_SCHEME_SCRIPT } from "../src/frontend/colorSchemeScript.js";
 
-// Minimal D1/KV stand-in: records every prepared statement (sql + bound params)
-// so tests can assert on the query the router built. all()/first() resolve to
-// the supplied rows; KV always returns null (a bulk get with an array of keys
-// resolves to a Map of key -> null, matching the Workers KV binding).
-function nullFlags() {
+const NOW_EPOCH = Math.floor(Date.now() / 1000);
+// Every seeded record leases an hour out unless the fixture names its own epoch.
+const LIVE_EXPIRES = NOW_EPOCH + 3600;
+
+// KV stand-in for the two keys the request path still reads, waves: and
+// watertemp:. Every requested key is recorded, so a test can assert that the
+// four state records never go back to KV.
+function makeFlags(values) {
+  const store = values || {};
+  const keys = [];
   return {
+    keys: keys,
     get: function (key) {
-      if (Array.isArray(key)) {
-        return Promise.resolve(new Map(key.map(function (k) { return [k, null]; })));
-      }
-      return Promise.resolve(null);
+      keys.push(key);
+      return Promise.resolve(
+        Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null
+      );
     }
   };
 }
 
-function makeEnv(rows, flags) {
-  const statements = [];
-  const db = {
-    prepare: function (sql) {
-      const st = {
-        sql: sql,
-        params: null,
-        bind: function () {
-          st.params = Array.prototype.slice.call(arguments);
-          return st;
-        },
-        all: function () {
-          statements.push(st);
-          return Promise.resolve({ results: rows });
-        },
-        first: function () {
-          statements.push(st);
-          return Promise.resolve(rows[0] || null);
-        }
-      };
-      return st;
+// beach_state column values for a fixture's records. Each record's blob, color,
+// updated stamp and expiry are seeded together, exactly as the cron upsert
+// writes them; pass estimateExpires / officialExpires (etc.) to age one out.
+function stateFields(records) {
+  const fields = {};
+  if (records.estimate) {
+    fields.estimate = records.estimate;
+    fields.estimate_color = records.estimate.color;
+    fields.estimate_updated = records.estimate.updated;
+    fields.estimate_expires = records.estimateExpires === undefined
+      ? LIVE_EXPIRES : records.estimateExpires;
+  }
+  if (records.official) {
+    fields.official = records.official;
+    fields.official_color = records.official.color;
+    fields.official_updated = records.official.updated;
+    fields.official_expires = records.officialExpires === undefined
+      ? LIVE_EXPIRES : records.officialExpires;
+  }
+  if (records.wqfloor) {
+    fields.wqfloor = records.wqfloor;
+    fields.wqfloor_expires = records.wqfloorExpires === undefined
+      ? LIVE_EXPIRES : records.wqfloorExpires;
+  }
+  if (records.reading) {
+    fields.reading = records.reading;
+    fields.reading_expires = records.readingExpires === undefined
+      ? LIVE_EXPIRES : records.readingExpires;
+  }
+  return fields;
+}
+
+// The request-path env, backed by real SQLite through the migrations.
+//   beaches: fixture rows for the beaches table
+//   state:   beachId -> the records stateFields() turns into columns
+//   kv:      the remaining KV keys, by full key name
+// Returns the env plus the D1 fake itself, whose statements array and sqlite
+// handle back the few assertions that are about the read happening at all.
+function makeEnv(options) {
+  const opts = options || {};
+  const db = makeD1({ beaches: opts.beaches || [] });
+  const state = opts.state || {};
+  for (const beachId of Object.keys(state)) {
+    db.seedState(beachId, stateFields(state[beachId]));
+  }
+  const flags = makeFlags(opts.kv);
+  return { env: { DB: db, FLAGS: flags }, db: db, flags: flags, statements: db.statements };
+}
+
+// Rendered beach rows, in document order, as their beach ids.
+function renderedIds(html) {
+  const ids = [];
+  const pattern = /href="\/beach\/([^"]+)"/g;
+  let match = pattern.exec(html);
+  while (match !== null) {
+    if (ids.indexOf(match[1]) === -1) {
+      ids.push(match[1]);
     }
-  };
-  return { env: { DB: db, FLAGS: flags || nullFlags() }, statements: statements };
+    match = pattern.exec(html);
+  }
+  return ids;
+}
+
+async function renderedIdsFor(request, env) {
+  const res = await handleRequest(request, env);
+  expect(res.status).toBe(200);
+  return renderedIds(await res.text());
 }
 
 function homeRequest(search) {
@@ -127,83 +174,92 @@ describe("escapeLike", () => {
 });
 
 describe("handleHome ?q= search over the full table", () => {
-  const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
+  const beaches = [
+    { id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 },
+    { id: "b2", name: "Ottawa Beach", park_name: "Holland State Park", lat: 42.77, lon: -86.21 }
+  ];
 
-  it("filters D1 with a LIKE on both names when q is present (no location)", async () => {
-    const { env, statements } = makeEnv(rows);
-    const res = await handleRequest(homeRequest("?q=oval"), env);
-    const stmt = statements[0];
-    expect(stmt.sql).toContain("COALESCE(park_name, name) LIKE ?1 ESCAPE '\\'");
-    expect(stmt.sql).toContain("OR name LIKE ?1 ESCAPE '\\'");
-    expect(stmt.sql).toContain("ORDER BY COALESCE(park_name, name), name");
-    expect(stmt.params).toEqual(["%oval%"]);
+  it("matches on the display name and on the beach's own name", async () => {
+    // COALESCE(park_name, name) is the display name, so a term hitting only the
+    // park still returns its beach, and one hitting only the beach name does too.
+    expect(await renderedIdsFor(homeRequest("?q=oval"), makeEnv({ beaches: beaches }).env))
+      .toEqual(["b1"]);
+    expect(await renderedIdsFor(homeRequest("?q=holland"), makeEnv({ beaches: beaches }).env))
+      .toEqual(["b2"]);
+    expect(await renderedIdsFor(homeRequest("?q=ottawa"), makeEnv({ beaches: beaches }).env))
+      .toEqual(["b2"]);
+  });
+
+  it("echoes the active query into the search form", async () => {
+    const res = await handleRequest(homeRequest("?q=oval"), makeEnv({ beaches: beaches }).env);
     const html = await res.text();
     expect(html).toContain("value=\"oval\"");
     expect(html).toContain("Showing results for <strong>oval</strong>");
   });
 
-  it("escapes LIKE wildcards in the bound pattern", async () => {
-    const { env, statements } = makeEnv(rows);
-    await handleRequest(homeRequest("?q=50%25_x"), env);
-    // %25 decodes to "%", so the raw term is "50%_x".
-    expect(statements[0].params).toEqual(["%50\\%\\_x%"]);
+  it("matches a term's LIKE wildcards literally", async () => {
+    // %25 decodes to "%", so the raw term is "50%_x". Unescaped it would read as
+    // "50, anything, any one character, x" and match the second beach too.
+    const wildcards = [
+      { id: "literal", name: "50%_x Cove", lat: 42.6, lon: -86.2 },
+      { id: "wildcard", name: "50 miles ax", lat: 42.6, lon: -86.2 }
+    ];
+    expect(await renderedIdsFor(homeRequest("?q=50%25_x"), makeEnv({ beaches: wildcards }).env))
+      .toEqual(["literal"]);
   });
 
-  it("combines q with near: filters first, then keeps the proximity query shape", async () => {
-    const { env, statements } = makeEnv(rows);
-    const res = await handleRequest(homeRequest("?q=oval&near=42.4,-86.28"), env);
-    const stmt = statements[0];
-    expect(stmt.sql).toContain("LIKE ?1 ESCAPE '\\'");
-    expect(stmt.sql).toContain("LIMIT 500");
-    // The proximity ORDER BY makes the LIMIT slice by distance, not scan order.
-    expect(stmt.sql).toContain("ORDER BY (lat - (42.4)) * (lat - (42.4)) + ");
-    expect(stmt.sql).toContain("(lon - (-86.28)) * (lon - (-86.28)) * ");
-    expect(stmt.params).toEqual(["%oval%"]);
+  it("combines q with near: filters first, then sorts the matches by distance", async () => {
+    const matches = [
+      { id: "far", name: "Oval Beach North", lat: 43.5, lon: -86.28 },
+      { id: "near", name: "Oval Beach South", lat: 42.41, lon: -86.28 },
+      { id: "other", name: "Ottawa Beach", lat: 42.4, lon: -86.28 }
+    ];
+    const res = await handleRequest(
+      homeRequest("?q=oval&near=42.4,-86.28"), makeEnv({ beaches: matches }).env
+    );
     const html = await res.text();
+    expect(renderedIds(html)).toEqual(["near", "far"]);
     // The near param rides along in a hidden input so proximity survives submit.
     expect(html).toContain("<input type=\"hidden\" name=\"near\" value=\"42.4,-86.28\">");
   });
 
-  it("ignores an empty or whitespace-only q (no LIKE clause, no bound pattern)", async () => {
-    const blank = makeEnv(rows);
-    await handleRequest(homeRequest("?q=%20%20"), blank.env);
-    expect(blank.statements[0].sql).not.toContain("LIKE");
-    expect(blank.statements[0].params).toBeNull();
-
-    const missing = makeEnv(rows);
-    await handleRequest(homeRequest(""), missing.env);
-    expect(missing.statements[0].sql).not.toContain("LIKE");
-    expect(missing.statements[0].params).toBeNull();
+  it("ignores an empty or whitespace-only q, listing every beach by display name", async () => {
+    // "Holland State Park" is b2's display name, so it sorts ahead of "Oval Beach".
+    expect(await renderedIdsFor(homeRequest("?q=%20%20"), makeEnv({ beaches: beaches }).env))
+      .toEqual(["b2", "b1"]);
+    expect(await renderedIdsFor(homeRequest(""), makeEnv({ beaches: beaches }).env))
+      .toEqual(["b2", "b1"]);
   });
 });
 
 describe("flag-worthy water gate", () => {
-  const GATE = "water_class IN ('ocean','great_lake')";
+  // One of each classification state: two keepers, a still-pending NULL row, a
+  // confirmed-inland row and a NULL row parked at the attempts cap.
+  const mixed = [
+    { id: "b-ocean", name: "Ocean Beach", lat: 42.1, lon: -86.2, water_class: "ocean", water_class_attempts: 0 },
+    { id: "b-gl", name: "Great Lake Beach", lat: 42.2, lon: -86.2, water_class: "great_lake", water_class_attempts: 0 },
+    { id: "b-pending", name: "Pending Beach", lat: 42.3, lon: -86.2, water_class: null, water_class_attempts: 0 },
+    { id: "b-inland", name: "Inland Beach", lat: 42.4, lon: -86.2, water_class: "inland", water_class_attempts: 0 },
+    { id: "b-parked", name: "Parked Beach", lat: 42.5, lon: -86.2, water_class: null, water_class_attempts: 5 }
+  ];
 
-  it("composes the gate into the home-list WHERE (no query)", async () => {
-    const { env, statements } = makeEnv([]);
-    await handleRequest(homeRequest(""), env);
-    expect(statements[0].sql).toContain(GATE);
-    expect(statements[0].sql).toContain("water_class IS NULL AND water_class_attempts < 5");
+  it("hides confirmed-inland and parked rows from the home list", async () => {
+    expect(await renderedIdsFor(homeRequest(""), makeEnv({ beaches: mixed }).env))
+      .toEqual(["b-gl", "b-ocean", "b-pending"]);
   });
 
-  it("ANDs the gate after the LIKE clause on a ?q= search", async () => {
-    const { env, statements } = makeEnv([]);
-    await handleRequest(homeRequest("?q=oval"), env);
-    expect(statements[0].sql).toContain("LIKE ?1 ESCAPE '\\'");
-    expect(statements[0].sql).toContain(" AND " + "(water_class IN ('ocean','great_lake')");
+  it("applies the same gate to a ?q= search", async () => {
+    expect(await renderedIdsFor(homeRequest("?q=beach"), makeEnv({ beaches: mixed }).env))
+      .toEqual(["b-gl", "b-ocean", "b-pending"]);
   });
 
-  it("ANDs the gate into the /api/beaches.geojson degraded SELECT (no bbox predicate)", async () => {
-    // With no map directory in KV the endpoint serves its degraded branch, whose
-    // D1 read is the only one this route makes. It carries the same flag-worthy
-    // gate, still takes no bbox, and is bounded so a dead builder cannot turn
-    // every revalidation into an unbounded full-table scan.
-    const { env, statements } = makeEnv([]);
-    await handleRequest(getRequest("/api/beaches.geojson"), env);
-    expect(statements[0].sql).toContain(GATE);
-    expect(statements[0].sql).not.toContain("lon >=");
-    expect(statements[0].sql).toContain("ORDER BY id LIMIT 5000");
+  it("applies the same gate to /api/beaches.geojson", async () => {
+    const res = await handleRequest(
+      getRequest("/api/beaches.geojson"), makeEnv({ beaches: mixed }).env
+    );
+    const body = await res.json();
+    expect(body.features.map(function (f) { return f.properties.id; }).sort())
+      .toEqual(["b-gl", "b-ocean", "b-pending"]);
   });
 
   it("404s the detail page for a confirmed-inland beach", async () => {
@@ -245,62 +301,99 @@ describe("flag-worthy water gate", () => {
   });
 });
 
-describe("handleHome bulk KV wiring", () => {
-  // Regression pin for the bulk-get plumbing: the flag: map must feed the
-  // estimate slot (the row's flag chip color) and the official: map the
-  // official slot (the OFFICIAL badge). The two values carry DIFFERENT colors
-  // so swapping maps[0]/maps[1] — which would render a scraped official color
-  // as an estimate — fails the chip-color assertions below.
-  it("renders the flag: value as the estimate chip and the official: value as the official badge", async () => {
-    const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
-    const requestedKeyLists = [];
-    const kvValues = {
-      "flag:b1": {
-        color: "yellow",
-        reason: "Estimated wave height 2.5 ft (2–4 ft)",
-        rules_version: "1.1.0",
-        official: false,
-        sources: [],
-        updated: "2026-07-05T12:00:00.000Z"
-      },
-      "official:b1": {
-        color: "red",
-        reason: "Official flag reported by Example Beach Program",
-        official: true,
-        source: "https://example.gov/flags",
-        sources: ["https://example.gov/flags"],
-        updated: "2026-07-05T12:00:00.000Z"
-      }
-    };
-    const flags = {
-      get: function (key) {
-        if (Array.isArray(key)) {
-          requestedKeyLists.push(key);
-          return Promise.resolve(new Map(key.map(function (k) {
-            return [k, kvValues[k] || null];
-          })));
-        }
-        return Promise.resolve(kvValues[key] || null);
-      }
-    };
-    const { env } = makeEnv(rows, flags);
-    const res = await handleRequest(homeRequest(""), env);
+describe("handleHome reads the list's flags from beach_state", () => {
+  const beaches = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
+  const ESTIMATE = {
+    color: "yellow",
+    reason: "Estimated wave height 2.5 ft (2–4 ft)",
+    rules_version: "1.1.0",
+    official: false,
+    sources: [],
+    updated: "2026-07-05T12:00:00.000Z"
+  };
+  const OFFICIAL = {
+    color: "red",
+    reason: "Official flag reported by Example Beach Program",
+    official: true,
+    source: "https://example.gov/flags",
+    sources: ["https://example.gov/flags"],
+    updated: "2026-07-05T12:00:00.000Z"
+  };
+
+  async function rowFor(state) {
+    const made = makeEnv({ beaches: beaches, state: { b1: state } });
+    const res = await handleRequest(homeRequest(""), made.env);
     expect(res.status).toBe(200);
-    // Both key families were requested as bulk arrays, flag: first.
-    expect(requestedKeyLists).toEqual([["flag:b1"], ["official:b1"]]);
     const html = await res.text();
     // Scope to the beach row: the embedded stylesheet legitimately mentions
     // every flag-icon-* class, so assertions must target the rendered markup.
-    const rowStart = html.indexOf("<li class=\"beach-row\"");
-    expect(rowStart).toBeGreaterThan(-1);
-    const row = html.slice(rowStart, html.indexOf("</li>", rowStart));
-    // The estimate slot drives the chip: yellow, never the official's red.
-    expect(row).toContain("flag-icon-yellow");
-    expect(row).toContain(">YELLOW</wa-badge>");
-    expect(row).not.toContain("flag-icon-red");
-    expect(row).not.toContain(">RED</wa-badge>");
-    // The official slot drives the OFFICIAL badge on the row.
-    expect(row).toContain(">OFFICIAL</wa-badge>");
+    return { row: beachRowOf(html), keys: made.flags.keys };
+  }
+
+  // The two records carry DIFFERENT colors, so crossing the estimate and official
+  // slots — which would render a scraped official color as an estimate — fails
+  // the chip-color assertions below.
+  it("renders the estimate column as the chip and the official column as the badge", async () => {
+    const out = await rowFor({ estimate: ESTIMATE, official: OFFICIAL });
+    expect(out.row).toContain("flag-icon-yellow");
+    expect(out.row).toContain(">YELLOW</wa-badge>");
+    expect(out.row).not.toContain("flag-icon-red");
+    expect(out.row).not.toContain(">RED</wa-badge>");
+    expect(out.row).toContain(">OFFICIAL</wa-badge>");
+    // The list page reads no KV at all: both records rode in on the row.
+    expect(out.keys).toEqual([]);
+  });
+
+  it("renders an expired estimate as unknown rather than its stored yellow", async () => {
+    const out = await rowFor({ estimate: ESTIMATE, estimateExpires: NOW_EPOCH });
+    expect(out.row).toContain("flag-icon-unknown");
+    expect(out.row).toContain(">UNKNOWN</wa-badge>");
+    expect(out.row).not.toContain("flag-icon-yellow");
+  });
+
+  it("drops the OFFICIAL badge once the official column expires, keeping the estimate", async () => {
+    const out = await rowFor({
+      estimate: ESTIMATE,
+      official: OFFICIAL,
+      officialExpires: NOW_EPOCH
+    });
+    expect(out.row).toContain(">YELLOW</wa-badge>");
+    expect(out.row).not.toContain(">OFFICIAL</wa-badge>");
+  });
+
+  it("renders unknown for a beach with no beach_state row at all", async () => {
+    const made = makeEnv({ beaches: beaches });
+    const html = await (await handleRequest(homeRequest(""), made.env)).text();
+    const row = beachRowOf(html);
+    expect(row).toContain("flag-icon-unknown");
+    expect(row).not.toContain("flag-icon-green");
+  });
+
+  // The list renders a chip color and an OFFICIAL badge, so it reads the scalar
+  // mirror columns. The proximity branch ranks five times the rows it renders,
+  // and an alert-bearing estimate blob runs kilobytes, so a blob on this select
+  // would cross the binding five times per rendered row.
+  it("selects the scalar chip columns and none of the JSON blobs", async () => {
+    const made = makeEnv({ beaches: beaches, state: { b1: { estimate: ESTIMATE } } });
+    // With a location: the proximity branch, the one that over-fetches.
+    const request = {
+      method: "GET",
+      url: "https://swim.report/",
+      cf: { latitude: "42.6", longitude: "-86.2" }
+    };
+    expect((await handleRequest(request, made.env)).status).toBe(200);
+    const listSql = made.db.statements
+      .map(function (st) { return st.sql; })
+      .filter(function (sql) { return sql.indexOf("FROM beaches b") !== -1; });
+    expect(listSql.length).toBeGreaterThan(0);
+    for (const sql of listSql) {
+      expect(sql).toContain("s.estimate_color");
+      expect(sql).toContain("s.official_color");
+      expect(sql).not.toContain("s.estimate,");
+      expect(sql).not.toContain("s.official,");
+      expect(sql).not.toContain("s.wqfloor");
+      expect(sql).not.toContain("s.reading");
+    }
   });
 });
 
@@ -604,70 +697,70 @@ describe("renderListPage proximity output", () => {
   });
 });
 
-describe("handleDetail waves: KV read", () => {
-  // DB stand-in whose first() always yields the beach row; FLAGS records every
-  // requested key. 'wavesValue' is returned for the "waves:" key and
-  // 'wqfloorValue' for the "wqfloor:" key (null else).
-  function detailEnv(beach, wavesValue, wqfloorValue) {
-    const keys = [];
-    const db = {
-      prepare: function () {
-        const st = {
-          bind: function () { return st; },
-          first: function () { return Promise.resolve(beach); },
-          all: function () { return Promise.resolve({ results: [] }); }
-        };
-        return st;
-      }
-    };
-    const flags = {
-      get: function (key) {
-        keys.push(key);
-        if (Array.isArray(key)) {
-          return Promise.resolve(new Map(key.map(function (k) { return [k, null]; })));
-        }
-        if (key.indexOf("waves:") === 0) {
-          return Promise.resolve(wavesValue || null);
-        }
-        if (key.indexOf("wqfloor:") === 0) {
-          return Promise.resolve(wqfloorValue || null);
-        }
-        return Promise.resolve(null);
-      }
-    };
-    return { env: { DB: db, FLAGS: flags }, keys: keys };
+describe("handleDetail: state from the row, waves and water temperature from KV", () => {
+  const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
+
+  function detailEnv(options) {
+    const opts = options || {};
+    return makeEnv({
+      beaches: [beach],
+      state: opts.state ? { "b-1": opts.state } : {},
+      kv: opts.kv
+    });
   }
 
   function detailRequest(id) {
     return { method: "GET", url: "https://swim.report/beach/" + id, cf: {} };
   }
 
-  const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
+  const ADVISORY = {
+    beachId: "b-1",
+    color: "red",
+    reason: "beach posted for elevated E. coli",
+    source: "Lake County General Health District Beach Water Quality Program",
+    updated: "2026-07-15T13:00:00.000Z"
+  };
+  // A morning reading is dropped by render.js once it is READING_MAX_AGE_MS old,
+  // so the fixture's observation is an hour before the request instant.
+  const READING = {
+    beachId: "b-1",
+    waterTempF: 68,
+    observedIso: new Date(Date.now() - 3600000).toISOString(),
+    siteName: "Grand Haven Pier",
+    sourceLabel: "NWS Grand Rapids"
+  };
 
-  it("requests the waves: series alongside the flag/official keys", async () => {
-    const { env, keys } = detailEnv(beach, null);
-    const res = await handleRequest(detailRequest("b-1"), env);
+  it("reads only waves: and watertemp: from KV — the four state records ride on the row", async () => {
+    const made = detailEnv({ state: { estimate: { color: "green", updated: NOW_ISO } } });
+    const res = await handleRequest(detailRequest("b-1"), made.env);
     expect(res.status).toBe(200);
-    expect(keys).toContain("waves:b-1");
-    expect(keys).toContain("flag:b-1");
-    expect(keys).toContain("official:b-1");
-    expect(keys).toContain("wqfloor:b-1");
+    expect(made.flags.keys.sort()).toEqual(["watertemp:b-1", "waves:b-1"]);
   });
 
-  it("renders the water-quality advisory callout from the wqfloor: value", async () => {
-    const advisory = {
-      beachId: "b-1",
-      color: "red",
-      reason: "beach posted for elevated E. coli",
-      source: "Lake County General Health District Beach Water Quality Program",
-      updated: "2026-07-15T13:00:00.000Z"
-    };
-    const { env } = detailEnv(beach, null, advisory);
-    const res = await handleRequest(detailRequest("b-1"), env);
+  it("renders the water-quality advisory callout from the wqfloor column", async () => {
+    const made = detailEnv({ state: { wqfloor: ADVISORY } });
+    const res = await handleRequest(detailRequest("b-1"), made.env);
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("<wa-callout class=\"wq-advisory\" variant=\"danger\" size=\"s\">");
     expect(html).toContain("beach posted for elevated E. coli");
+  });
+
+  it("drops the advisory once its own column expires", async () => {
+    const made = detailEnv({ state: { wqfloor: ADVISORY, wqfloorExpires: NOW_EPOCH } });
+    const html = await (await handleRequest(detailRequest("b-1"), made.env)).text();
+    expect(html).not.toContain("beach posted for elevated E. coli");
+  });
+
+  it("renders the scraped reading from the reading column, and drops it when expired", async () => {
+    const made = detailEnv({ state: { reading: READING } });
+    const html = await (await handleRequest(detailRequest("b-1"), made.env)).text();
+    expect(html).toContain("68°F");
+    expect(html).toContain("Grand Haven Pier");
+
+    const expired = detailEnv({ state: { reading: READING, readingExpires: NOW_EPOCH } });
+    const goneHtml = await (await handleRequest(detailRequest("b-1"), expired.env)).text();
+    expect(goneHtml).not.toContain("Grand Haven Pier");
   });
 
   it("still renders 200 when a WaveSeries is present", async () => {
@@ -679,81 +772,68 @@ describe("handleDetail waves: KV read", () => {
       sources: [{ label: "NOAA Great Lakes Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }],
       updated: "2026-07-15T16:20:33.000Z"
     };
-    const { env } = detailEnv(beach, series);
-    const res = await handleRequest(detailRequest("b-1"), env);
+    const made = detailEnv({ kv: { "waves:b-1": series } });
+    const res = await handleRequest(detailRequest("b-1"), made.env);
     expect(res.status).toBe(200);
+  });
+
+  it("renders an expired estimate as UNKNOWN rather than its stored green", async () => {
+    const estimate = { color: "green", reason: "calm", official: false, sources: [], updated: NOW_ISO };
+    const made = detailEnv({ state: { estimate: estimate, estimateExpires: NOW_EPOCH } });
+    const card = estimateCardOf(await (await handleRequest(detailRequest("b-1"), made.env)).text());
+    expect(card).toContain(">UNKNOWN</span>");
+    expect(card).toContain("No estimate available yet");
+    expect(card).not.toContain("flag-icon-green");
+  });
+
+  it("keeps an expired official out of the title flag and off the card", async () => {
+    // The estimate is live and green; the expired official red must neither
+    // render its own card nor raise the title flag.
+    const made = detailEnv({
+      state: {
+        estimate: { color: "green", reason: "calm", official: false, sources: [], updated: NOW_ISO },
+        official: { color: "red", reason: "posted", official: true, source: "https://ex.gov/f", updated: NOW_ISO },
+        officialExpires: NOW_EPOCH
+      }
+    });
+    const html = await (await handleRequest(detailRequest("b-1"), made.env)).text();
+    const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
+    expect(h1).toContain("flag-icon-green");
+    expect(h1).not.toContain("flag-icon-red");
+    expect(html).not.toContain("class=\"official-card\"");
   });
 });
 
 describe("handleDetail nearby beaches", () => {
   const self = { id: "b-self", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
-  // Candidates deliberately out of distance order, with the beach itself and a
-  // far row the SQL cap would already have dropped in production.
+  // Candidates deliberately out of distance order, with a far row past the 50 mi
+  // cap and an inland row the flag-worthy gate must drop.
   const candidates = [
-    { id: "b-far", name: "Far Beach", lat: 44.5, lon: -86.2, water_class: "great_lake" },
-    { id: "b-3", name: "Third", lat: 42.70, lon: -86.21, water_class: "great_lake" },
-    { id: "b-self", name: "Oval Beach", lat: 42.6579, lon: -86.2114, water_class: "great_lake" },
-    { id: "b-1", name: "Nearest", park_name: "Dune Park", lat: 42.66, lon: -86.21, water_class: "great_lake" },
-    { id: "b-4", name: "Fourth", lat: 42.75, lon: -86.21, water_class: "great_lake" },
-    { id: "b-2", name: "Second", lat: 42.68, lon: -86.21, water_class: "great_lake" }
+    self,
+    { id: "b-far", name: "Far Beach", lat: 44.5, lon: -86.2 },
+    { id: "b-3", name: "Third", lat: 42.70, lon: -86.21 },
+    { id: "b-1", name: "Nearest", park_name: "Dune Park", lat: 42.66, lon: -86.21 },
+    { id: "b-4", name: "Fourth", lat: 42.75, lon: -86.21 },
+    { id: "b-2", name: "Second", lat: 42.68, lon: -86.21 },
+    { id: "b-inland", name: "Inland", lat: 42.659, lon: -86.212, water_class: "inland", water_class_attempts: 0 }
   ];
+  const NEARBY_STATE = {
+    "b-2": { estimate: { color: "red", reason: "x", official: false, updated: "2026-07-05T11:00:00.000Z" } },
+    "b-1": { official: { color: "green", official: true, source: "s", updated: "2026-07-05T11:00:00.000Z" } }
+  };
 
-  function nearbyEnv(rows) {
-    const statements = [];
-    const bulkKeys = [];
-    const db = {
-      prepare: function (sql) {
-        const st = {
-          sql: sql,
-          params: null,
-          bind: function () { st.params = Array.prototype.slice.call(arguments); return st; },
-          first: function () { statements.push(st); return Promise.resolve(self); },
-          all: function () { statements.push(st); return Promise.resolve({ results: rows }); },
-          run: function () { return Promise.resolve({ success: true }); }
-        };
-        return st;
-      }
-    };
-    const flags = {
-      get: function (key) {
-        if (Array.isArray(key)) {
-          bulkKeys.push(key);
-          const map = new Map(key.map(function (k) { return [k, null]; }));
-          if (map.has("flag:b-2")) {
-            map.set("flag:b-2", { color: "red", reason: "x", official: false, updated: "2026-07-05T11:00:00.000Z" });
-          }
-          if (map.has("official:b-1")) {
-            map.set("official:b-1", { color: "green", official: true, source: "s", updated: "2026-07-05T11:00:00.000Z" });
-          }
-          return Promise.resolve(map);
-        }
-        return Promise.resolve(null);
-      }
-    };
-    return { env: { DB: db, FLAGS: flags }, statements: statements, bulkKeys: bulkKeys };
+  function nearbyEnv(beaches, state) {
+    return makeEnv({ beaches: beaches, state: state || {} });
   }
 
   function detailRequest(id) {
     return { method: "GET", url: "https://swim.report/beach/" + id, cf: {} };
   }
 
-  it("selects flag-worthy candidates nearest-first, excluding the beach itself", async () => {
-    const { env, statements } = nearbyEnv(candidates);
+  it("renders the three nearest as cards in distance order, dropping self, inland and the far row", async () => {
+    const { env } = nearbyEnv(candidates, NEARBY_STATE);
     const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
     expect(res.status).toBe(200);
-    const nearbySql = statements.map(function (s) { return s.sql; })
-      .find(function (sql) { return sql.indexOf("id <> ?1") !== -1; });
-    expect(nearbySql).toBeDefined();
-    expect(nearbySql).toContain("water_class");
-    expect(nearbySql).toContain("ORDER BY (lat - (42.6579))");
-    expect(nearbySql).toContain("LIMIT 12");
-    const bound = statements.find(function (s) { return s.sql === nearbySql; });
-    expect(bound.params).toEqual(["b-self"]);
-  });
-
-  it("renders the three nearest as cards in distance order, dropping self and the far row", async () => {
-    const { env, bulkKeys } = nearbyEnv(candidates);
-    const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
     const html = await res.text();
     const section = sliceBetween(html, "<section class=\"nearby", "</section>");
     expect(section).toContain("Nearby beaches");
@@ -763,12 +843,9 @@ describe("handleDetail nearby beaches", () => {
     expect(section).not.toContain("/beach/b-4");
     expect(section).not.toContain("/beach/b-far");
     expect(section).not.toContain("/beach/b-self");
-    // Distance-sorted ids drive the bulk gets, one per key family.
-    expect(bulkKeys).toEqual([
-      ["flag:b-1", "flag:b-2", "flag:b-3"],
-      ["official:b-1", "official:b-2", "official:b-3"]
-    ]);
-    // The estimate chip and OFFICIAL badge read exactly as a list row's do.
+    expect(section).not.toContain("/beach/b-inland");
+    // Each card's estimate chip and OFFICIAL badge come off its own joined row,
+    // and read exactly as a list row's do.
     const first = sliceBetween(section, "<wa-card class=\"nearby-card\"", "</wa-card>");
     expect(first).toContain("Dune Park");
     expect(first).toContain("OFFICIAL");
@@ -776,16 +853,32 @@ describe("handleDetail nearby beaches", () => {
     expect(section).toContain("RED");
   });
 
+  it("reads an expired nearby estimate as unknown", async () => {
+    const { env } = nearbyEnv(candidates, {
+      "b-1": {
+        estimate: { color: "green", reason: "calm", official: false, updated: "2026-07-05T11:00:00.000Z" },
+        estimateExpires: NOW_EPOCH
+      }
+    });
+    const html = await (await handleRequest(detailRequest("b-self"), env, makeCtx())).text();
+    const first = sliceBetween(
+      sliceBetween(html, "<section class=\"nearby", "</section>"),
+      "<wa-card class=\"nearby-card\"", "</wa-card>"
+    );
+    expect(first).toContain("UNKNOWN");
+    expect(first).not.toContain("GREEN");
+  });
+
   it("renders no section when nothing flag-worthy is nearby", async () => {
-    const { env } = nearbyEnv([]);
+    const { env } = nearbyEnv([self]);
     const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
     const html = await res.text();
     expect(html).not.toContain("<section class=\"nearby");
     expect(html).not.toContain("Nearby beaches");
   });
 
-  it("drops candidates beyond the 50 mi cap even when the SQL returned them", async () => {
-    const { env } = nearbyEnv([candidates[0]]);
+  it("drops candidates beyond the 50 mi cap", async () => {
+    const { env } = nearbyEnv([self, candidates[1]]);
     const res = await handleRequest(detailRequest("b-self"), env, makeCtx());
     const html = await res.text();
     expect(html).not.toContain("<section class=\"nearby");
@@ -819,37 +912,10 @@ describe("renderDetailPage nearby section placement", () => {
   });
 });
 
-// D1/KV stand-in for the cache-header and last_viewed tests: every prepared
-// statement is recorded (sql + params) and first()/all()/run() all resolve.
-// first() yields 'beach' (or null), all() yields it as the only row.
+// The single-beach env the cache-header and last_viewed tests use: one seeded
+// row, or an empty table when the fixture is null.
 function viewEnv(beach) {
-  const statements = [];
-  const db = {
-    prepare: function (sql) {
-      const st = {
-        sql: sql,
-        params: null,
-        bind: function () {
-          st.params = Array.prototype.slice.call(arguments);
-          return st;
-        },
-        first: function () {
-          statements.push(st);
-          return Promise.resolve(beach || null);
-        },
-        all: function () {
-          statements.push(st);
-          return Promise.resolve({ results: beach ? [beach] : [] });
-        },
-        run: function () {
-          statements.push(st);
-          return Promise.resolve({ success: true });
-        }
-      };
-      return st;
-    }
-  };
-  return { env: { DB: db, FLAGS: nullFlags() }, statements: statements };
+  return makeEnv({ beaches: beach ? [beach] : [] });
 }
 
 function makeCtx() {
@@ -868,7 +934,6 @@ function getRequest(path) {
 
 const CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
 const MAP_DIRECTORY_CACHE = "public, max-age=60, stale-while-revalidate=60, stale-if-error=600";
-const MAP_DEGRADED_CACHE = "public, max-age=60, stale-if-error=600";
 
 describe("cache-control policy (Workers Cache)", () => {
   const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1", last_viewed: null };
@@ -920,13 +985,12 @@ describe("cache-control policy (Workers Cache)", () => {
     expect(flag404.headers.get("cache-control")).toBe("public, max-age=60");
 
     // /api/beaches.geojson has its own policy, not the shared CACHEABLE one:
-    // its origin is a single KV read, so the long stale-while-revalidate would
-    // only add latency to a flag flip. This env has no directory, so it is the
-    // degraded policy that lands here.
+    // its origin is one scan of scalar columns, so the long stale-while-revalidate
+    // would only add latency to a flag flip.
     const geoRes = await handleRequest(
       getRequest("/api/beaches.geojson"), viewEnv(beach).env
     );
-    expect(geoRes.headers.get("cache-control")).toBe(MAP_DEGRADED_CACHE);
+    expect(geoRes.headers.get("cache-control")).toBe(MAP_DIRECTORY_CACHE);
     expect(geoRes.headers.get("content-type")).toContain("application/geo+json");
   });
 
@@ -943,58 +1007,53 @@ describe("last_viewed demand stamping", () => {
     return { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1", last_viewed: lastViewed };
   }
 
-  function updateStatements(statements) {
-    return statements.filter(function (st) {
-      return st.sql.indexOf("UPDATE beaches SET last_viewed") === 0;
-    });
+  // The stamp as it landed in D1, or null when none was written.
+  function stampOf(db) {
+    return db.sqlite.prepare("SELECT last_viewed FROM beaches WHERE id = ?1")
+      .get("b-1").last_viewed;
   }
 
   it("stamps a never-viewed beach via ctx.waitUntil on the detail page", async () => {
-    const { env, statements } = viewEnv(beachViewed(null));
+    const { env, db } = viewEnv(beachViewed(null));
     const ctx = makeCtx();
     const res = await handleRequest(getRequest("/beach/b-1"), env, ctx);
     expect(res.status).toBe(200);
     expect(ctx.promises.length).toBe(1);
     await Promise.all(ctx.promises);
-    const updates = updateStatements(statements);
-    expect(updates.length).toBe(1);
-    expect(updates[0].params[1]).toBe("b-1");
-    // Param 1 is a fresh ISO timestamp.
-    expect(Number.isFinite(Date.parse(updates[0].params[0]))).toBe(true);
+    expect(Number.isFinite(Date.parse(stampOf(db)))).toBe(true);
   });
 
-  it("stamps on /api/flag too, selecting last_viewed for the throttle check", async () => {
-    const { env, statements } = viewEnv(beachViewed(null));
+  it("stamps on /api/flag too, reading last_viewed for the throttle check", async () => {
+    const { env, db } = viewEnv(beachViewed(null));
     const ctx = makeCtx();
     await handleRequest(getRequest("/api/flag/b-1"), env, ctx);
-    expect(statements[0].sql).toContain("SELECT id, last_viewed, water_class, water_class_attempts FROM beaches");
     await Promise.all(ctx.promises);
-    expect(updateStatements(statements).length).toBe(1);
+    expect(Number.isFinite(Date.parse(stampOf(db)))).toBe(true);
   });
 
   it("throttles: a stamp within the last hour is not repeated", async () => {
     const fresh = new Date(Date.now() - 60000).toISOString();
-    const { env, statements } = viewEnv(beachViewed(fresh));
+    const { env, db } = viewEnv(beachViewed(fresh));
     const ctx = makeCtx();
     await handleRequest(getRequest("/beach/b-1"), env, ctx);
     expect(ctx.promises.length).toBe(0);
-    expect(updateStatements(statements).length).toBe(0);
+    expect(stampOf(db)).toBe(fresh);
   });
 
   it("re-stamps once the previous view is over an hour old", async () => {
     const stale = new Date(Date.now() - 7200000).toISOString();
-    const { env, statements } = viewEnv(beachViewed(stale));
+    const { env, db } = viewEnv(beachViewed(stale));
     const ctx = makeCtx();
     await handleRequest(getRequest("/beach/b-1"), env, ctx);
     await Promise.all(ctx.promises);
-    expect(updateStatements(statements).length).toBe(1);
+    expect(stampOf(db)).not.toBe(stale);
   });
 
   it("no-ops without ctx (render is unaffected)", async () => {
-    const { env, statements } = viewEnv(beachViewed(null));
+    const { env, db } = viewEnv(beachViewed(null));
     const res = await handleRequest(getRequest("/beach/b-1"), env);
     expect(res.status).toBe(200);
-    expect(updateStatements(statements).length).toBe(0);
+    expect(stampOf(db)).toBe(null);
   });
 });
 
@@ -1024,7 +1083,7 @@ function throwingEnv() {
         throw new Error("boom");
       }
     },
-    FLAGS: nullFlags()
+    FLAGS: makeFlags(null)
   };
 }
 
@@ -1136,7 +1195,7 @@ describe("router guards: method validation", () => {
   });
 });
 
-describe("GET /api/beaches.geojson (precomputed map directory)", () => {
+describe("GET /api/beaches.geojson", () => {
   const NOW_MS = Date.now();
 
   function agoIso(ms) {
@@ -1154,43 +1213,27 @@ describe("GET /api/beaches.geojson (precomputed map directory)", () => {
     return base;
   }
 
-  // KV stub that answers ONLY the directory key. Every call is recorded, so a
-  // test can assert the route makes exactly one KV read and never falls back to
-  // a per-beach bulk read.
-  function directoryFlags(value) {
-    const calls = [];
-    return {
-      calls: calls,
-      get: function (key) {
-        calls.push(key);
-        if (Array.isArray(key)) {
-          return Promise.resolve(new Map(key.map(function (k) { return [k, null]; })));
-        }
-        return Promise.resolve(key === MAP_DIRECTORY_KEY ? value : null);
-      }
-    };
-  }
-
   function geojson(env) {
     return handleRequest(getRequest("/api/beaches.geojson"), env);
   }
 
-  it("serves the directory in one KV read and no D1 statement at all", async () => {
-    const entries = [
-      mapDirectoryEntry(beachRow("b1", { park_name: "Big Park" }), { color: "green", updated: agoIso(600000) }, null)
-    ];
-    const flags = directoryFlags(buildMapDirectory(entries, agoIso(60000)));
-    const made = makeEnv([], flags);
+  async function bodyFor(beaches, state) {
+    const made = makeEnv({ beaches: beaches, state: state || {} });
     const res = await geojson(made.env);
     expect(res.status).toBe(200);
-    expect(flags.calls).toEqual([MAP_DIRECTORY_KEY]);
-    expect(made.statements.length).toBe(0);
-    const body = await res.json();
-    expect(body.type).toBe("FeatureCollection");
-    expect(body.builtAt).toBe(agoIso(60000));
-    expect(body.degraded).toBeUndefined();
-    expect(body.features.length).toBe(1);
-    const f = body.features[0];
+    return { body: await res.json(), made: made };
+  }
+
+  it("emits one Feature per flag-worthy beach, reading no KV at all", async () => {
+    const out = await bodyFor(
+      [beachRow("b1", { park_name: "Big Park" })],
+      { b1: { estimate: { color: "green", updated: agoIso(600000) } } }
+    );
+    expect(out.made.flags.keys).toEqual([]);
+    expect(out.body.type).toBe("FeatureCollection");
+    expect(out.body.degraded).toBeUndefined();
+    expect(out.body.features.length).toBe(1);
+    const f = out.body.features[0];
     expect(f.type).toBe("Feature");
     // GeoJSON coordinate order is [lon, lat], NOT [lat, lon].
     expect(f.geometry.coordinates).toEqual([-86, 42]);
@@ -1200,8 +1243,8 @@ describe("GET /api/beaches.geojson (precomputed map directory)", () => {
   });
 
   it("resolves every feature exactly as markerFlagColor does at read time", async () => {
-    // Parity is the whole reason the artifact stores ingredients: the map marker
-    // and the detail page's title flag resolve through the same function object.
+    // Parity is the whole reason the row stores ingredients: the map marker and
+    // the detail page's title flag resolve through the same function object.
     const fixtures = [
       { id: "est-only", estimate: { color: "yellow", updated: agoIso(600000) }, official: null },
       {
@@ -1223,20 +1266,20 @@ describe("GET /api/beaches.geojson (precomputed map directory)", () => {
       { id: "garbage", estimate: null, official: { color: "magenta", updated: agoIso(600000) } },
       { id: "nothing", estimate: null, official: null }
     ];
-    const entries = fixtures.map(function (f) {
-      return mapDirectoryEntry(beachRow(f.id), f.estimate, f.official);
-    });
-    const flags = directoryFlags(buildMapDirectory(entries, agoIso(60000)));
-    const body = await (await geojson(makeEnv([], flags).env)).json();
+    const beaches = fixtures.map(function (f) { return beachRow(f.id); });
+    const state = {};
+    for (const fixture of fixtures) {
+      state[fixture.id] = { estimate: fixture.estimate, official: fixture.official };
+    }
+    const out = await bodyFor(beaches, state);
     const nowIso = new Date().toISOString();
-    for (let i = 0; i < fixtures.length; i = i + 1) {
-      expect(body.features[i].properties.id).toBe(fixtures[i].id);
-      expect(body.features[i].properties.flag).toBe(
-        markerFlagColor(fixtures[i].estimate, fixtures[i].official, nowIso)
+    const byId = {};
+    out.body.features.forEach(function (f) { byId[f.properties.id] = f.properties.flag; });
+    for (const fixture of fixtures) {
+      expect(byId[fixture.id]).toBe(
+        markerFlagColor(fixture.estimate, fixture.official, nowIso)
       );
     }
-    const byId = {};
-    body.features.forEach(function (f) { byId[f.properties.id] = f.properties.flag; });
     expect(byId["est-only"]).toBe("yellow");
     expect(byId["fresh-official"]).toBe("yellow");
     expect(byId["aged-official"]).toBe("red");
@@ -1247,88 +1290,59 @@ describe("GET /api/beaches.geojson (precomputed map directory)", () => {
     expect(byId.nothing).toBe("unknown");
   });
 
-  it("reads an entry whose estimate outlived its KV lease as unknown, not its stored green", async () => {
-    // The live path reaches this state by the key simply being gone; the
-    // artifact reproduces the same expiry from the estimate's own timestamp, so
-    // both surfaces go unknown at the same instant instead of the map showing a
-    // green that no longer exists.
-    const entries = [
-      mapDirectoryEntry(
-        beachRow("expired"),
-        { color: "green", updated: agoIso(FLAG_TTL_MS + 1000) },
-        { color: "green", updated: agoIso(FLAG_TTL_MS + 1000) }
-      )
-    ];
-    const flags = directoryFlags(buildMapDirectory(entries, agoIso(60000)));
-    const body = await (await geojson(makeEnv([], flags).env)).json();
-    expect(body.features[0].properties.flag).toBe("unknown");
+  it("reads a beach whose estimate outlived its lease as unknown, not its stored green", async () => {
+    const out = await bodyFor([beachRow("expired")], {
+      expired: {
+        estimate: { color: "green", updated: agoIso(600000) },
+        estimateExpires: NOW_EPOCH
+      }
+    });
+    expect(out.body.features[0].properties.flag).toBe("unknown");
   });
 
-  it("carries the directory cache policy and the geo+json content type", async () => {
-    const entries = [mapDirectoryEntry(beachRow("b1"), null, null)];
-    const flags = directoryFlags(buildMapDirectory(entries, agoIso(60000)));
-    const res = await geojson(makeEnv([], flags).env);
+  it("expires the official on its own column, without dropping a live estimate", async () => {
+    const out = await bodyFor([beachRow("b1")], {
+      b1: {
+        estimate: { color: "yellow", updated: agoIso(600000) },
+        official: { color: "red", updated: agoIso(600000) },
+        officialExpires: NOW_EPOCH
+      }
+    });
+    expect(out.body.features[0].properties.flag).toBe("yellow");
+  });
+
+  it("dates the collection by the freshest live estimate, and null when none is live", async () => {
+    const beaches = [beachRow("old"), beachRow("new", { lat: 43 }), beachRow("bare", { lat: 44 })];
+    const out = await bodyFor(beaches, {
+      old: { estimate: { color: "green", updated: agoIso(3600000) } },
+      new: { estimate: { color: "green", updated: agoIso(60000) } }
+    });
+    expect(out.body.builtAt).toBe(agoIso(60000));
+
+    const expired = await bodyFor(beaches, {
+      old: { estimate: { color: "green", updated: agoIso(60000) }, estimateExpires: NOW_EPOCH }
+    });
+    expect(expired.body.builtAt).toBe(null);
+
+    const empty = await bodyFor([]);
+    expect(empty.body.builtAt).toBe(null);
+    expect(empty.body.features).toEqual([]);
+  });
+
+  it("drops rows whose coordinates are not finite rather than emitting NaN geometry", async () => {
+    const made = makeEnv({ beaches: [beachRow("b1"), beachRow("b2", { lat: 43, lon: -85 })] });
+    // lat is NOT NULL in the schema, so the unusable coordinate is written past
+    // the fixture seeder.
+    made.db.sqlite.exec("UPDATE beaches SET lat = 'nope' WHERE id = 'b2'");
+    const body = await (await geojson(made.env)).json();
+    expect(body.features.map(function (f) { return f.properties.id; })).toEqual(["b1"]);
+  });
+
+  it("carries the map cache policy and the geo+json content type", async () => {
+    const made = makeEnv({ beaches: [beachRow("b1")] });
+    const res = await geojson(made.env);
     expect(res.headers.get("cache-control")).toBe(MAP_DIRECTORY_CACHE);
     expect(res.headers.get("content-type")).toContain("application/geo+json");
-  });
-
-  it("serves an all-unknown degraded response when the directory key is missing", async () => {
-    const rows = [
-      beachRow("b1"),
-      beachRow("b2", { lat: 43, lon: -85 }),
-      beachRow("bad", { lat: null })
-    ];
-    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
-    try {
-      const flags = directoryFlags(null);
-      const made = makeEnv(rows, flags);
-      const res = await geojson(made.env);
-      expect(res.status).toBe(200);
-      expect(res.headers.get("cache-control")).toBe(MAP_DEGRADED_CACHE);
-      expect(res.headers.get("cache-control")).not.toContain("stale-while-revalidate");
-      // One KV read (the directory key itself), no per-beach bulk fallback.
-      expect(flags.calls).toEqual([MAP_DIRECTORY_KEY]);
-      expect(made.statements.length).toBe(1);
-      expect(made.statements[0].sql).toContain("ORDER BY id LIMIT 5000");
-      const body = await res.json();
-      expect(body.builtAt).toBe(null);
-      expect(body.degraded).toBe(true);
-      // Non-finite coordinates are still dropped rather than emitted as NaN.
-      expect(body.features.length).toBe(2);
-      body.features.forEach(function (f) { expect(f.properties.flag).toBe("unknown"); });
-      const logged = logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n");
-      expect(logged).toContain("router: map directory missing; serving 2 unknown features");
-    } finally {
-      logSpy.mockRestore();
-    }
-  });
-
-  it("takes the degraded branch for a version-mismatched directory", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
-    try {
-      const stale = buildMapDirectory([mapDirectoryEntry(beachRow("b1"), { color: "green" }, null)], "x");
-      stale.v = 2;
-      const made = makeEnv([beachRow("b1")], directoryFlags(stale));
-      const body = await (await geojson(made.env)).json();
-      expect(body.degraded).toBe(true);
-      expect(body.features[0].properties.flag).toBe("unknown");
-    } finally {
-      logSpy.mockRestore();
-    }
-  });
-
-  it("takes the degraded branch for an unparseable directory value without throwing", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
-    try {
-      const made = makeEnv([beachRow("b1")], directoryFlags("not-an-object"));
-      const res = await geojson(made.env);
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.degraded).toBe(true);
-      expect(body.features[0].properties.flag).toBe("unknown");
-    } finally {
-      logSpy.mockRestore();
-    }
   });
 });
 
@@ -1337,27 +1351,17 @@ describe("handleHome proximity branch: in-memory distance sort", () => {
     return { id: id, name: name, park_name: null, lat: lat, lon: lon };
   }
 
-  it("fetches LIMIT 500 ordered by planar distance, then sorts rows by distance in JS", async () => {
-    // DB order is deliberately farthest-first: only the in-memory sort can put
-    // Near Beach ahead of Far Beach in the rendered page.
+  it("orders the rendered rows by distance from the resolved location", async () => {
+    // Alphabetical order is deliberately the reverse of distance order, so only
+    // proximity sorting can put Near Beach ahead of Far Beach.
     const rows = [
-      rowNamed("b-far", "Far Beach", 43.5, -86.28),
-      rowNamed("b-near", "Near Beach", 42.41, -86.28)
+      rowNamed("b-far", "A Far Beach", 43.5, -86.28),
+      rowNamed("b-near", "Z Near Beach", 42.41, -86.28)
     ];
-    const { env, statements } = makeEnv(rows);
-    const res = await handleRequest(homeRequest("?near=42.4,-86.28"), env);
-    expect(res.status).toBe(200);
-    expect(statements[0].sql).toContain("LIMIT 500");
-    // SQL narrows to the 500 NEAREST candidates; JS still decides the top-100.
-    expect(statements[0].sql).toContain(
-      "ORDER BY (lat - (42.4)) * (lat - (42.4)) + (lon - (-86.28)) * (lon - (-86.28)) * "
+    const ids = await renderedIdsFor(
+      homeRequest("?near=42.4,-86.28"), makeEnv({ beaches: rows }).env
     );
-    const html = await res.text();
-    const nearAt = html.indexOf("Near Beach");
-    const farAt = html.indexOf("Far Beach");
-    expect(nearAt).toBeGreaterThan(-1);
-    expect(farAt).toBeGreaterThan(-1);
-    expect(nearAt).toBeLessThan(farAt);
+    expect(ids).toEqual(["b-near", "b-far"]);
   });
 
   it("slices the sorted rows to 100 rendered beach rows", async () => {
@@ -1365,24 +1369,27 @@ describe("handleHome proximity branch: in-memory distance sort", () => {
     for (let i = 0; i < 101; i++) {
       rows.push(rowNamed("b-" + String(i), "Beach " + String(i), 42.4 + i * 0.01, -86.28));
     }
-    const { env } = makeEnv(rows);
+    const { env } = makeEnv({ beaches: rows });
     const res = await handleRequest(homeRequest("?near=42.4,-86.28"), env);
     const html = await res.text();
     expect(html.split("<li class=\"beach-row\"").length - 1).toBe(100);
+    // Nearest-first, so the row the cap dropped is the farthest one.
+    expect(html).not.toContain("/beach/b-100");
   });
 
   it("never interpolates raw near text into the ORDER BY (injection guard)", async () => {
     const hostile = "42.4);DROP TABLE beaches;--,-86.28";
-    const { env, statements } = makeEnv([rowNamed("b-1", "Oval Beach", 42.41, -86.28)]);
+    const { env, db } = makeEnv({
+      beaches: [rowNamed("b-1", "Oval Beach", 42.41, -86.28), rowNamed("b-2", "Ash Beach", 43.5, -86.28)]
+    });
     const res = await handleRequest(
       homeRequest("?near=" + encodeURIComponent(hostile)), env
     );
     expect(res.status).toBe(200);
     // resolveUserLocation rejects the value outright, so the page falls back to
-    // the alphabetical branch and no fragment of the raw text reaches SQL.
-    expect(statements[0].sql).not.toContain("DROP TABLE");
-    expect(statements[0].sql).not.toContain(";");
-    expect(statements[0].sql).toContain("ORDER BY COALESCE(park_name, name), name");
+    // the alphabetical branch and the table is still there afterwards.
+    expect(renderedIds(await res.text())).toEqual(["b-2", "b-1"]);
+    expect(db.sqlite.prepare("SELECT COUNT(*) AS c FROM beaches").get().c).toBe(2);
   });
 });
 
@@ -2069,11 +2076,11 @@ describe("renderListPage green-only filter and distance origin", () => {
 
   it("heads the list with Nearby whenever the router resolved a location", async () => {
     const rows = [{ id: "b1", name: "Oval Beach", park_name: null, lat: 42.6, lon: -86.2 }];
-    const { env } = makeEnv(rows, nullFlags());
+    const { env } = makeEnv({ beaches: rows });
     const located = await handleRequest(homeRequest("?near=42.6,-86.2"), env);
     expect(await located.text()).toContain(">Nearby</h2>");
     // With no near param and no request.cf coordinates the rows are alphabetical.
-    const { env: env2 } = makeEnv(rows, nullFlags());
+    const { env: env2 } = makeEnv({ beaches: rows });
     expect(await (await handleRequest(homeRequest(), env2)).text())
       .not.toContain(">Nearby</h2>");
   });
@@ -2089,62 +2096,69 @@ describe("GET /?ids= list mode", () => {
     return { method: "GET", url: "https://swim.report/?ids=" + search, cf: {} };
   }
 
-  function selectStatements(statements) {
+  // Statements this route prepared against the beaches table, whatever their
+  // shape: the point of the assertions below is whether the read happened.
+  function beachReads(statements) {
     return statements.filter(function (st) {
-      return st.sql.indexOf("SELECT * FROM beaches") === 0;
+      return st.sql.indexOf("FROM beaches") !== -1;
     });
   }
 
-  it("binds every id as a parameter behind the flag-worthy gate", async () => {
-    const { env, statements } = makeEnv([ONE, TWO]);
-    const res = await handleRequest(idsRequest("osm-way-1,osm-node-2"), env);
-    expect(res.status).toBe(200);
-    const selects = selectStatements(statements);
-    expect(selects.length).toBe(1);
-    expect(selects[0].sql).toContain("WHERE id IN (?1, ?2) AND ");
-    expect(selects[0].sql).toContain("water_class");
-    expect(selects[0].params).toEqual(["osm-way-1", "osm-node-2"]);
-    // No proximity ordering, no LIKE clause: q and near are ignored here.
-    expect(selects[0].sql).not.toContain("ORDER BY");
-    expect(selects[0].sql).not.toContain("LIKE");
+  it("renders the listed beaches behind the flag-worthy gate", async () => {
+    const inland = { id: "osm-way-3", name: "Fremont Lake", lat: 43.4, lon: -85.9, water_class: "inland", water_class_attempts: 0 };
+    const ids = await renderedIdsFor(
+      idsRequest("osm-way-1,osm-node-2,osm-way-3"),
+      makeEnv({ beaches: [ONE, TWO, inland] }).env
+    );
+    expect(ids).toEqual(["osm-way-1", "osm-node-2"]);
+  });
+
+  it("carries each beach's own estimate and official from its joined row", async () => {
+    const made = makeEnv({
+      beaches: [ONE, TWO],
+      state: {
+        "osm-way-1": {
+          estimate: { color: "red", reason: "x", official: false, updated: "2026-07-05T11:00:00.000Z" }
+        },
+        "osm-node-2": {
+          official: { color: "green", official: true, source: "s", updated: "2026-07-05T11:00:00.000Z" }
+        }
+      }
+    });
+    const html = await (await handleRequest(idsRequest("osm-way-1,osm-node-2"), made.env)).text();
+    const first = beachRowOf(html);
+    expect(first).toContain(">RED</wa-badge>");
+    expect(first).not.toContain(">OFFICIAL</wa-badge>");
+    const second = html.slice(html.indexOf("<li class=\"beach-row\"", html.indexOf("</li>")));
+    expect(second).toContain(">OFFICIAL</wa-badge>");
   });
 
   it("renders the rows in the requested order, not the order SQLite returned", async () => {
-    const { env } = makeEnv([TWO, ONE]);
-    const res = await handleRequest(idsRequest("osm-way-1,osm-node-2"), env);
-    const html = await res.text();
-    expect(html.indexOf("/beach/osm-way-1")).toBeLessThan(html.indexOf("/beach/osm-node-2"));
-
-    const reversed = await handleRequest(idsRequest("osm-node-2,osm-way-1"), makeEnv([TWO, ONE]).env);
-    const reversedHtml = await reversed.text();
-    expect(reversedHtml.indexOf("/beach/osm-node-2"))
-      .toBeLessThan(reversedHtml.indexOf("/beach/osm-way-1"));
+    expect(await renderedIdsFor(idsRequest("osm-way-1,osm-node-2"), makeEnv({ beaches: [TWO, ONE] }).env))
+      .toEqual(["osm-way-1", "osm-node-2"]);
+    expect(await renderedIdsFor(idsRequest("osm-node-2,osm-way-1"), makeEnv({ beaches: [TWO, ONE] }).env))
+      .toEqual(["osm-node-2", "osm-way-1"]);
   });
 
   it("skips ids with no matching row and renders the rest", async () => {
-    const { env } = makeEnv([ONE]);
-    const res = await handleRequest(idsRequest("osm-way-1,osm-way-999"), env);
-    const html = await res.text();
-    expect(html).toContain("/beach/osm-way-1");
-    expect(html).not.toContain("/beach/osm-way-999");
+    expect(await renderedIdsFor(idsRequest("osm-way-1,osm-way-999"), makeEnv({ beaches: [ONE] }).env))
+      .toEqual(["osm-way-1"]);
   });
 
   it("drops malformed ids before they reach SQL and skips the read entirely when none survive", async () => {
-    const { env, statements } = makeEnv([ONE]);
-    const res = await handleRequest(idsRequest("osm-way-1,osm-boat-3,12345,osm-way-x"), env);
-    expect(res.status).toBe(200);
-    const selects = selectStatements(statements);
-    expect(selects[0].params).toEqual(["osm-way-1"]);
+    expect(await renderedIdsFor(
+      idsRequest("osm-way-1,osm-boat-3,12345,osm-way-x"), makeEnv({ beaches: [ONE] }).env
+    )).toEqual(["osm-way-1"]);
 
-    const none = makeEnv([ONE]);
+    const none = makeEnv({ beaches: [ONE] });
     const empty = await handleRequest(idsRequest("nope,%2E%2E%2F"), none.env);
     expect(empty.status).toBe(200);
-    expect(selectStatements(none.statements).length).toBe(0);
+    expect(beachReads(none.statements).length).toBe(0);
     expect(await empty.text()).not.toContain("class=\"beach-row\"");
   });
 
   it("names the ids rather than claiming the database is empty", async () => {
-    const { env } = makeEnv([ONE]);
+    const { env } = makeEnv({ beaches: [ONE] });
     const res = await handleRequest(idsRequest("osm-way-999"), env);
     const html = await res.text();
     expect(html).toContain("No beaches match those ids.");
@@ -2154,20 +2168,19 @@ describe("GET /?ids= list mode", () => {
 
   it("caps the list at 10 ids", async () => {
     const many = [];
+    const beaches = [];
     for (let i = 1; i <= 14; i = i + 1) {
       many.push("osm-way-" + i);
+      beaches.push({ id: "osm-way-" + i, name: "Beach " + i, lat: 42.6, lon: -86.2 });
     }
-    const { env, statements } = makeEnv([ONE]);
-    await handleRequest(idsRequest(many.join(",")), env);
-    const selects = selectStatements(statements);
-    expect(selects[0].params.length).toBe(10);
-    expect(selects[0].params[9]).toBe("osm-way-10");
-    expect(selects[0].sql).toContain("?10)");
-    expect(selects[0].sql).not.toContain("?11");
+    const ids = await renderedIdsFor(idsRequest(many.join(",")), makeEnv({ beaches: beaches }).env);
+    expect(ids.length).toBe(10);
+    expect(ids[9]).toBe("osm-way-10");
+    expect(ids).not.toContain("osm-way-11");
   });
 
   it("is cacheable and never asserts data-complete", async () => {
-    const { env } = makeEnv([ONE]);
+    const { env } = makeEnv({ beaches: [ONE] });
     const res = await handleRequest(idsRequest("osm-way-1"), env);
     expect(res.headers.get("cache-control")).toBe(CACHEABLE);
     expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -2178,14 +2191,12 @@ describe("GET /?ids= list mode", () => {
   });
 
   it("writes no last_viewed stamp for the listed beaches", async () => {
-    const { env, statements } = makeEnv([ONE, TWO]);
+    const { env, db } = makeEnv({ beaches: [ONE, TWO] });
     const ctx = makeCtx();
     await handleRequest(idsRequest("osm-way-1,osm-node-2"), env, ctx);
     expect(ctx.promises.length).toBe(0);
-    const updates = statements.filter(function (st) {
-      return st.sql.indexOf("UPDATE") === 0;
-    });
-    expect(updates.length).toBe(0);
+    expect(db.sqlite.prepare("SELECT COUNT(*) AS c FROM beaches WHERE last_viewed IS NOT NULL").get().c)
+      .toBe(0);
   });
 });
 

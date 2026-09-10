@@ -400,8 +400,8 @@ describe("at a glance tiles", () => {
 });
 
 // An official source's morning water-temperature and wave-height observation
-// ("reading:" KV). Display-only: it adds tiles and outranks the buoy, and never
-// touches a flag color.
+// (beach_state.reading). Display-only: it adds tiles and outranks the buoy, and
+// never touches a flag color.
 describe("at a glance: the official morning reading", () => {
   // 1 h before NOW_ISO — inside READING_MAX_AGE_MS.
   const OBSERVED = "2026-07-05T11:00:00.000Z";

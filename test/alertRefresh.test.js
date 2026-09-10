@@ -7,13 +7,13 @@
 // asserts the recomputed color still carries the rip-current risk, the wave
 // height, the wind fallback or the water-quality advisory the estimate was
 // originally decided from — all of which come back from the estimateInputs seal
-// inside the same "flag:" value, never from a second key and never from a
+// inside the same estimate blob, never from a second record and never from a
 // refetch.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { estimateFlag, alertsInEffect } from "../src/rules.js";
 import { buildEstimateInputs, sealFromSignals } from "../src/flagInputs.js";
-import { MAP_DIRECTORY_KEY } from "../src/mapDirectory.js";
 import { runScheduledCron } from "./helpers/cron.js";
+import { makeD1 } from "./helpers/d1.js";
 
 const NOW = "2026-07-15T16:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -54,7 +54,7 @@ function beachRow(overrides) {
   return row;
 }
 
-// A standing "flag:" value exactly as runFlagRecompute writes it: estimateFlag
+// A standing estimate exactly as runFlagRecompute writes it: estimateFlag
 // over the same bundle, with the seal spread on afterwards. Built through the
 // real functions so these fixtures cannot drift from what the hourly stores.
 // alertEvents entries are event names (in effect since 06:00, open-ended) or
@@ -96,50 +96,48 @@ function standingFlag(beach, alertEvents, signalOverrides, updatedIso, legacy) {
   return Object.assign({}, estimate, { estimateInputs: sealFromSignals(signals, alertPart) });
 }
 
-function makeEnv(rows, kvSeed) {
-  const kvPuts = new Map();
-  const kvGets = new Map(Object.entries(kvSeed || {}));
-  const preparedSql = [];
-  const batchCalls = [];
-  const env = {
-    DB: {
-      prepare: function (sql) {
-        preparedSql.push(sql);
-        return {
-          all: function () {
-            return Promise.resolve({ results: rows });
-          },
-          bind: function () {
-            return {
-              all: function () { return Promise.resolve({ results: rows }); },
-              run: function () { return Promise.resolve({ success: true }); }
-            };
-          }
-        };
-      },
-      batch: function (statements) {
-        batchCalls.push(statements);
-        return Promise.resolve([]);
-      }
-    },
-    FLAGS: {
-      // Both get forms, as the Workers binding implements them: a string key
-      // resolves to the value, an array to a Map. The scan reads in bulk.
-      get: function (key) {
-        if (Array.isArray(key)) {
-          return Promise.resolve(new Map(key.map(function (k) {
-            return [k, kvGets.has(k) ? kvGets.get(k) : null];
-          })));
-        }
-        return Promise.resolve(kvGets.has(key) ? kvGets.get(key) : null);
-      },
-      put: function (key, value, opts) {
-        kvPuts.set(key, { value: value, opts: opts });
-        return Promise.resolve();
-      }
-    }
-  };
-  return { env: env, kvPuts: kvPuts, preparedSql: preparedSql, batchCalls: batchCalls };
+// Real in-memory SQLite with migrations/ applied. standings maps a beach id to
+// the estimate the hourly left behind, seeded into beach_state the way the hourly
+// writes it: the blob, its color, the instant it was decided at (both the CAS
+// token and the stale-lower rail's clock) and an absolute expiry a full lease
+// past that instant. leases overrides estimate_expires per beach, for the cases
+// that turn on the remaining lease rather than on the alert set.
+//
+// This cron reads and writes D1 only, so the env carries no KV binding at all.
+function makeEnv(rows, standings, leases) {
+  const db = makeD1({ beaches: rows });
+  const seeded = new Map();
+  const byLease = leases || {};
+  for (const id of Object.keys(standings || {})) {
+    const standing = standings[id];
+    const blob = JSON.stringify(standing);
+    const updated = standing.updated;
+    const expires = Object.prototype.hasOwnProperty.call(byLease, id)
+      ? byLease[id]
+      : Math.floor(Date.parse(updated) / 1000) + FLAG_TTL;
+    db.seedState(id, {
+      estimate: blob,
+      estimate_color: standing.color,
+      estimate_updated: updated,
+      estimate_expires: Number.isFinite(expires) ? expires : null
+    });
+    seeded.set(id, blob);
+  }
+  return { env: { DB: db }, db: db, seeded: seeded };
+}
+
+// The estimate blob as it stands now, parsed, or null when the beach has no row.
+function storedEstimate(made, id) {
+  const row = made.db.stateOf(id);
+  return row && row.estimate ? JSON.parse(row.estimate) : null;
+}
+
+// True when this run rewrote the beach: the CAS touches the blob and its color
+// and nothing else, so a byte-identical blob means the beach was skipped.
+function rewrote(made, id) {
+  const row = made.db.stateOf(id);
+  const blob = row ? row.estimate : null;
+  return blob !== null && blob !== made.seeded.get(id);
 }
 
 function runAlertCron(env) {
@@ -252,9 +250,8 @@ function minutesAgo(n) {
   return new Date(NOW_MS - n * 60000).toISOString();
 }
 
-function writtenFlag(kvPuts, id) {
-  const put = kvPuts.get("flag:" + id);
-  return put === undefined ? null : JSON.parse(put.value);
+function writtenFlag(made, id) {
+  return rewrote(made, id) ? storedEstimate(made, id) : null;
 }
 
 afterEach(function () {
@@ -270,42 +267,42 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const otherZone = beachRow({ id: "osm-node-b", nws_zone: "MIZ049" });
     const marineOnly = beachRow({ id: "osm-node-c", nws_zone: null, marine_zone: "LHZ441" });
     const made = makeEnv([inZone, otherZone, marineOnly], {
-      "flag:osm-node-a": standingFlag(inZone, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-b": standingFlag(otherZone, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-c": standingFlag(marineOnly, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-a": standingFlag(inZone, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-b": standingFlag(otherZone, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-c": standingFlag(marineOnly, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("double-red");
-    expect(made.kvPuts.has("flag:osm-node-b")).toBe(false);
-    expect(made.kvPuts.has("flag:osm-node-c")).toBe(false);
+    expect(writtenFlag(made, "osm-node-a").color).toBe("double-red");
+    expect(rewrote(made, "osm-node-b")).toBe(false);
+    expect(rewrote(made, "osm-node-c")).toBe(false);
   });
 
   it("matches a marine_zone from the same national feed", async function () {
     freezeClock();
     const marineOnly = beachRow({ id: "osm-node-c", nws_zone: null, marine_zone: "LHZ441" });
     const made = makeEnv([marineOnly], {
-      "flag:osm-node-c": standingFlag(marineOnly, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-c": standingFlag(marineOnly, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [nwsFeature("Gale Warning", ["LHZ441"])] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-c").color).toBe("red");
+    expect(writtenFlag(made, "osm-node-c").color).toBe("red");
   });
 
   it("walks a beach back down when its standing alert is no longer in the feed", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(
+      "osm-node-a": standingFlag(
         beach, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)
       )
     });
     stubFetch({ features: [] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("green");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("green");
   });
 
   it("selects a zone that swapped Small Craft Advisory for Gale Warning", async function () {
@@ -313,25 +310,25 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const beach = beachRow({ id: "osm-node-a" });
     const standing = standingFlag(beach, ["Small Craft Advisory"], { waveHeightFt: 0.5 }, minutesAgo(10));
     expect(standing.color).toBe("yellow");
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    const made = makeEnv([beach], { "osm-node-a": standing });
     stubFetch({ features: [nwsFeature("Gale Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("red");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("red");
   });
 
   it("selects a zone that lost one of two alerts and kept the other", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(
+      "osm-node-a": standingFlag(
         beach, ["Gale Warning", "Small Craft Advisory"], { waveHeightFt: 0.5 }, minutesAgo(10)
       )
     });
     stubFetch({ features: [nwsFeature("Gale Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    const written = writtenFlag(made, "osm-node-a");
     // The color did not move, but the payload's alert provenance did, which is
     // why the write is unconditional for a selected beach.
     expect(written.color).toBe("red");
@@ -342,28 +339,28 @@ describe("runAlertRefresh selection (level trigger)", function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(
+      "osm-node-a": standingFlag(
         beach, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)
       )
     });
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(made, "osm-node-a")).toBe(false);
   });
 
   it("does not raise on an alert published ahead of its onset", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: minutesAhead(120) })] });
     await runAlertCron(made.env);
 
     // In effect now: nothing, on both sides. The statement is a forecast until
     // its onset, so the standing green stands.
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(made, "osm-node-a")).toBe(false);
   });
 
   it("raises once the onset arrives, with no change to the feed itself", async function () {
@@ -374,11 +371,11 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const standing = standingFlag(beach, [statement], { waveHeightFt: 0.5 }, minutesAgo(10));
     expect(standing.color).toBe("green");
     expect(standing.alertDetails.length).toBe(1);
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    const made = makeEnv([beach], { "osm-node-a": standing });
     stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: statement.onset, ends: statement.ends })] });
     await runAlertCron(made.env);
 
-    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    const written = writtenFlag(made, "osm-node-a");
     expect(written.color).toBe("red");
     expect(written.alertsAt).toBe(NOW);
     // updated stays the standing instant: alertsAt is what records when the
@@ -397,11 +394,11 @@ describe("runAlertRefresh selection (level trigger)", function () {
     previous.updated = minutesAgo(40);
     previous.estimateInputs = Object.assign({}, previous.estimateInputs);
     expect(previous.color).toBe("red");
-    const made = makeEnv([beach], { "flag:osm-node-a": previous });
+    const made = makeEnv([beach], { "osm-node-a": previous });
     stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: statement.onset, ends: statement.ends })] });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(made, "osm-node-a")).toBe(false);
   });
 
   it("walks a beach back down once its standing alert's ends has passed, feed unchanged", async function () {
@@ -410,12 +407,12 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const gale = { event: "Gale Warning", onset: minutesAgo(300), ends: minutesAgo(5) };
     const standing = standingFlag(beach, [gale], { waveHeightFt: 0.5 }, minutesAgo(10));
     expect(standing.color).toBe("red");
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    const made = makeEnv([beach], { "osm-node-a": standing });
     // Still in the active feed: the product has not expired, only ended.
     stubFetch({ features: [nwsFeature("Gale Warning", ["MIZ071"], { onset: gale.onset, ends: gale.ends })] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("green");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("green");
   });
 
   it("lowers a legacy payload that a not-yet-effective alert colored", async function () {
@@ -425,13 +422,13 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const legacy = standingFlag(beach, [statement], { waveHeightFt: 0.5 }, minutesAgo(10), true);
     expect(legacy.color).toBe("red");
     expect(legacy.alertsAt).toBeNull();
-    const made = makeEnv([beach], { "flag:osm-node-a": legacy });
+    const made = makeEnv([beach], { "osm-node-a": legacy });
     stubFetch({ features: [nwsFeature("Beach Hazards Statement", ["MIZ071"], { onset: statement.onset, ends: statement.ends })] });
     await runAlertCron(made.env);
 
     // The legacy value was decided against every echoed entry, the current
     // in-effect set is empty, so the beach is selected and walked down.
-    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    const written = writtenFlag(made, "osm-node-a");
     expect(written.color).toBe("green");
     expect(written.alertDetails.map(function (d) { return d.event; })).toEqual(["Beach Hazards Statement"]);
   });
@@ -441,11 +438,11 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const beach = beachRow({ id: "osm-node-a" });
     const standing = standingFlag(beach, null, { waveHeightFt: 0.5 }, minutesAgo(10));
     expect(standing.estimateInputs.alertsResolved).toBe(false);
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    const made = makeEnv([beach], { "osm-node-a": standing });
     stubFetch({ features: [] });
     await runAlertCron(made.env);
 
-    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    const written = writtenFlag(made, "osm-node-a");
     expect(written).not.toBeNull();
     expect(written.estimateInputs.alertsResolved).toBe(true);
   });
@@ -454,12 +451,12 @@ describe("runAlertRefresh selection (level trigger)", function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-ca", nws_zone: null, eccc_zone: "Alpena", lat: 45.5, lon: -83 });
     const made = makeEnv([beach], {
-      "flag:osm-node-ca": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-ca": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ ecccFeatures: [ecccFeature("wind warning")], ecccMarineFeatures: [] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-ca").color).toBe("red");
+    expect(writtenFlag(made, "osm-node-ca").color).toBe("red");
   });
 
   it("restores the yellow floor a failed hourly alert fetch lost", async function () {
@@ -467,27 +464,39 @@ describe("runAlertRefresh selection (level trigger)", function () {
     const beach = beachRow({ id: "osm-node-a" });
     const standing = standingFlag(beach, null, { waveHeightFt: 0.5 }, minutesAgo(10));
     expect(standing.color).toBe("green");
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    const made = makeEnv([beach], { "osm-node-a": standing });
     stubFetch({ features: [nwsFeature("Small Craft Advisory", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("yellow");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("yellow");
   });
 });
 
 describe("runAlertRefresh guards leave the standing value untouched", function () {
-  function guardCase(kvSeed) {
+  function guardCase(standings, leases) {
     const beach = beachRow({ id: "osm-node-a" });
-    const made = makeEnv([beach], kvSeed);
+    const made = makeEnv([beach], standings, leases);
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     return { made: made, beach: beach };
   }
 
-  it("skips a beach with no standing value (the hourly publishes the first estimate)", async function () {
+  it("never visits a beach with no state row (the hourly publishes the first estimate)", async function () {
     freezeClock();
     const c = guardCase({});
     await runAlertCron(c.made.env);
-    expect(c.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    // The join drops it: there is no standing alert set to compare against.
+    expect(c.made.db.stateOf("osm-node-a")).toBeNull();
+    expect(c.made.db.batchCalls.length).toBe(0);
+  });
+
+  it("never visits a beach whose estimate has already expired", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const standing = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
+    // Expiry is inclusive: a row expiring exactly now is already gone.
+    const c = guardCase({ "osm-node-a": standing }, { "osm-node-a": Math.floor(NOW_MS / 1000) });
+    await runAlertCron(c.made.env);
+    expect(rewrote(c.made, "osm-node-a")).toBe(false);
   });
 
   it("skips a standing value with no seal", async function () {
@@ -495,9 +504,9 @@ describe("runAlertRefresh guards leave the standing value untouched", function (
     const beach = beachRow({ id: "osm-node-a" });
     const standing = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
     delete standing.estimateInputs;
-    const c = guardCase({ "flag:osm-node-a": standing });
+    const c = guardCase({ "osm-node-a": standing });
     await runAlertCron(c.made.env);
-    expect(c.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(c.made, "osm-node-a")).toBe(false);
   });
 
   it("skips a standing value carrying another seal version", async function () {
@@ -505,87 +514,100 @@ describe("runAlertRefresh guards leave the standing value untouched", function (
     const beach = beachRow({ id: "osm-node-a" });
     const standing = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
     standing.estimateInputs.v = 2;
-    const c = guardCase({ "flag:osm-node-a": standing });
+    const c = guardCase({ "osm-node-a": standing });
     await runAlertCron(c.made.env);
-    expect(c.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(c.made, "osm-node-a")).toBe(false);
   });
 
   it("skips a standing value with a missing or unparseable updated", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
+    const lease = { "osm-node-a": Math.floor(NOW_MS / 1000) + FLAG_TTL };
     const missing = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
     missing.updated = null;
-    const a = guardCase({ "flag:osm-node-a": missing });
+    const a = guardCase({ "osm-node-a": missing }, lease);
     await runAlertCron(a.made.env);
-    expect(a.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(a.made, "osm-node-a")).toBe(false);
 
     const unparseable = standingFlag(beach, [], { waveHeightFt: 0.5 }, "not-a-timestamp");
-    const b = guardCase({ "flag:osm-node-a": unparseable });
+    const b = guardCase({ "osm-node-a": unparseable }, lease);
     await runAlertCron(b.made.env);
-    expect(b.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(b.made, "osm-node-a")).toBe(false);
+  });
+
+  it("skips a state row whose estimate blob does not parse", async function () {
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-a" });
+    const made = makeEnv([beach], {});
+    made.db.seedState("osm-node-a", {
+      estimate: "not-json{{",
+      estimate_color: "green",
+      estimate_updated: minutesAgo(10),
+      estimate_expires: Math.floor(NOW_MS / 1000) + FLAG_TTL
+    });
+    stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
+    await runAlertCron(made.env);
+    expect(made.db.stateOf("osm-node-a").estimate).toBe("not-json{{");
   });
 
   it("skips a standing value stamped in the future", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const c = guardCase({
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(-10))
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(-10))
     });
     await runAlertCron(c.made.env);
-    expect(c.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(c.made, "osm-node-a")).toBe(false);
   });
 
   it("skips a standing value with under five minutes of lease left", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
-    const nearlyExpired = new Date(NOW_MS - (FLAG_TTL - 200) * 1000).toISOString();
-    const c = guardCase({
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, nearlyExpired)
-    });
+    // The lease comes off estimate_expires, and this cron never extends it, so a
+    // beach inside the five-minute window belongs to the hourly.
+    const c = guardCase(
+      { "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10)) },
+      { "osm-node-a": Math.floor(NOW_MS / 1000) + 200 }
+    );
     await runAlertCron(c.made.env);
-    expect(c.made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(c.made, "osm-node-a")).toBe(false);
   });
 
-  it("skips a standing value the hourly has already superseded in D1", async function () {
+  it("loses the compare-and-set to an hourly run that rewrote the beach mid-flight", async function () {
     freezeClock();
     const logs = [];
     vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(line); });
-    // The KV read returned a replica from the previous hourly run; D1's stamp
-    // says this beach was recomputed since. Recomputing the replica would
-    // republish an hour-old bundle over the hourly's newer decision.
-    const beach = beachRow({ id: "osm-node-a", recompute_updated: minutesAgo(5) });
+    const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(65))
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
+    // The hourly lands between this run's read and its write, moving the CAS
+    // token. Its decision is the newer one, so this write must match no row.
+    const realBatch = made.db.batch;
+    made.db.batch = function (statements) {
+      made.db.sqlite
+        .prepare("UPDATE beach_state SET estimate_updated = ?1 WHERE beach_id = ?2")
+        .run(NOW, "osm-node-a");
+      return realBatch(statements);
+    };
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(made, "osm-node-a")).toBe(false);
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
     expect(line.indexOf(" skipSuperseded=1 ")).toBeGreaterThan(-1);
-  });
-
-  it("recomputes a standing value whose stamp matches the hourly run that wrote it", async function () {
-    freezeClock();
-    const beach = beachRow({ id: "osm-node-a", recompute_updated: minutesAgo(10) });
-    const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
-    });
-    stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
-    await runAlertCron(made.env);
-
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("double-red");
+    expect(line.indexOf(" written=0 ")).toBeGreaterThan(-1);
   });
 
   it("skips a beach enriched for neither authority", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a", nws_zone: null });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(made, "osm-node-a")).toBe(false);
   });
 });
 
@@ -596,14 +618,14 @@ describe("runAlertRefresh degraded feeds", function () {
     freezeClock();
     const us = beachRow({ id: "osm-node-us" });
     const made = makeEnv([us, caBeach], {
-      "flag:osm-node-us": standingFlag(us, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-ca": standingFlag(caBeach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-us": standingFlag(us, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-ca": standingFlag(caBeach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ nwsFail: true, ecccMarineFeatures: [ecccMarineFeature("Storm Warning")] });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-us")).toBe(false);
-    expect(writtenFlag(made.kvPuts, "osm-node-ca").color).toBe("double-red");
+    expect(rewrote(made, "osm-node-us")).toBe(false);
+    expect(writtenFlag(made, "osm-node-ca").color).toBe("double-red");
   });
 
   it("refuses a US lowering when the count endpoint is unavailable, but still raises", async function () {
@@ -613,14 +635,14 @@ describe("runAlertRefresh degraded feeds", function () {
     const clearing = beachRow({ id: "osm-node-clear" });
     const gaining = beachRow({ id: "osm-node-gain", nws_zone: "MIZ049" });
     const made = makeEnv([clearing, gaining], {
-      "flag:osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-gain": standingFlag(gaining, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-gain": standingFlag(gaining, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ countFail: true, features: [nwsFeature("High Surf Warning", ["MIZ049"])] });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-clear")).toBe(false);
-    expect(writtenFlag(made.kvPuts, "osm-node-gain").color).toBe("double-red");
+    expect(rewrote(made, "osm-node-clear")).toBe(false);
+    expect(writtenFlag(made, "osm-node-gain").color).toBe("double-red");
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
     expect(line.indexOf(" feed=unverified ")).toBeGreaterThan(-1);
     expect(line.indexOf(" skipFeedLower=1 ")).toBeGreaterThan(-1);
@@ -630,12 +652,12 @@ describe("runAlertRefresh degraded feeds", function () {
     freezeClock();
     const clearing = beachRow({ id: "osm-node-clear" });
     const made = makeEnv([clearing], {
-      "flag:osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [], countTotal: 183 });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-clear")).toBe(false);
+    expect(rewrote(made, "osm-node-clear")).toBe(false);
   });
 
   it("refuses a US lowering when the whole feed arrived but nothing in it parsed", async function () {
@@ -645,8 +667,8 @@ describe("runAlertRefresh degraded feeds", function () {
     const clearing = beachRow({ id: "osm-node-clear" });
     const gaining = beachRow({ id: "osm-node-gain", nws_zone: "MIZ049" });
     const made = makeEnv([clearing, gaining], {
-      "flag:osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-gain": standingFlag(gaining, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-gain": standingFlag(gaining, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     // Schema drift: every feature arrives and the count endpoint agrees, but the
     // per-feature shape no longer carries an event name, so the parse yields one
@@ -659,8 +681,8 @@ describe("runAlertRefresh degraded feeds", function () {
     stubFetch({ features: drifted, countTotal: 12 });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-clear")).toBe(false);
-    expect(writtenFlag(made.kvPuts, "osm-node-gain").color).toBe("double-red");
+    expect(rewrote(made, "osm-node-clear")).toBe(false);
+    expect(writtenFlag(made, "osm-node-gain").color).toBe("double-red");
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
     expect(line.indexOf(" feed=unverified ")).toBeGreaterThan(-1);
     expect(line.indexOf(" features=12 ")).toBeGreaterThan(-1);
@@ -671,33 +693,33 @@ describe("runAlertRefresh degraded feeds", function () {
     freezeClock();
     const clearing = beachRow({ id: "osm-node-clear" });
     const made = makeEnv([clearing], {
-      "flag:osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     // One feature in the feed, for another zone, and the total agrees.
     stubFetch({ features: [nwsFeature("Gale Warning", ["LMZ221"])], countTotal: 1 });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-clear").color).toBe("green");
+    expect(writtenFlag(made, "osm-node-clear").color).toBe("green");
   });
 
   it("refuses a lowering from a paginated feed even when the counts agree", async function () {
     freezeClock();
     const clearing = beachRow({ id: "osm-node-clear" });
     const made = makeEnv([clearing], {
-      "flag:osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-clear": standingFlag(clearing, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [], countTotal: 0, pagination: true });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-clear")).toBe(false);
+    expect(rewrote(made, "osm-node-clear")).toBe(false);
   });
 
   it("writes no Canadian beach when only the marine collection failed", async function () {
     freezeClock();
     const us = beachRow({ id: "osm-node-us" });
     const made = makeEnv([us, caBeach], {
-      "flag:osm-node-us": standingFlag(us, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-ca": standingFlag(caBeach, ["gale warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-us": standingFlag(us, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-ca": standingFlag(caBeach, ["gale warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({
       features: [nwsFeature("High Surf Warning", ["MIZ071"])],
@@ -708,8 +730,8 @@ describe("runAlertRefresh degraded feeds", function () {
 
     // Without both collections a live "gale warning" red would recompute to a
     // wave-height green every ten minutes.
-    expect(made.kvPuts.has("flag:osm-node-ca")).toBe(false);
-    expect(writtenFlag(made.kvPuts, "osm-node-us").color).toBe("double-red");
+    expect(rewrote(made, "osm-node-ca")).toBe(false);
+    expect(writtenFlag(made, "osm-node-us").color).toBe("double-red");
   });
 });
 
@@ -722,7 +744,7 @@ describe("runAlertRefresh cannot lower a flag by losing a non-alert input", func
     const beach = beachRow({ id: "osm-node-a" });
     const standing = standingFlag(beach, ["High Surf Warning"], signalOverrides, minutesAgo(10));
     expect(standing.color).toBe("double-red");
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
+    const made = makeEnv([beach], { "osm-node-a": standing });
     stubFetch({ features: [] });
     return made;
   }
@@ -735,19 +757,19 @@ describe("runAlertRefresh cannot lower a flag by losing a non-alert input", func
       windSpeedMph: 3
     });
     await runAlertCron(made.env);
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("red");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("red");
   });
 
   it("keeps a HIGH rip-current risk", async function () {
     const made = clearedWarning({ ripCurrentRisk: "HIGH", waveHeightFt: 0.5, windSpeedMph: 3 });
     await runAlertCron(made.env);
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("red");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("red");
   });
 
   it("keeps a 4.5 ft wave reading rather than falling through to the wind branch", async function () {
     const made = clearedWarning({ waveHeightFt: 4.5, windSpeedMph: 3 });
     await runAlertCron(made.env);
-    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    const written = writtenFlag(made, "osm-node-a");
     expect(written.color).toBe("red");
     expect(written.trigger).toBe("wave-height");
   });
@@ -755,7 +777,7 @@ describe("runAlertRefresh cannot lower a flag by losing a non-alert input", func
   it("keeps a 40 mph wind fallback rather than dropping to unknown", async function () {
     const made = clearedWarning({ waveHeightFt: null, windSpeedMph: 40 });
     await runAlertCron(made.env);
-    const written = writtenFlag(made.kvPuts, "osm-node-a");
+    const written = writtenFlag(made, "osm-node-a");
     expect(written.color).toBe("red");
     expect(written.trigger).toBe("wind");
   });
@@ -766,7 +788,7 @@ describe("runAlertRefresh cannot lower a flag by losing a non-alert input", func
       signalSources: [{ label: "NOAA GFS Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }]
     });
     await runAlertCron(made.env);
-    expect(writtenFlag(made.kvPuts, "osm-node-a").sources.map(function (s) { return s.label; }))
+    expect(writtenFlag(made, "osm-node-a").sources.map(function (s) { return s.label; }))
       .toEqual(["NWS Alerts", "NOAA GFS Wave Model"]);
   });
 });
@@ -781,15 +803,15 @@ describe("runAlertRefresh lowering rails", function () {
     const clearing = beachRow({ id: "osm-node-ca1", nws_zone: null, eccc_zone: "Alpena", lat: 44.2, lon: -83.6 });
     const gaining = beachRow({ id: "osm-node-ca2", nws_zone: null, eccc_zone: "Alpena", lat: 45.5, lon: -83 });
     const made = makeEnv([clearing, gaining], {
-      "flag:osm-node-ca1": standingFlag(clearing, ["gale warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "flag:osm-node-ca2": standingFlag(gaining, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-ca1": standingFlag(clearing, ["gale warning"], { waveHeightFt: 0.5 }, minutesAgo(10)),
+      "osm-node-ca2": standingFlag(gaining, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ ecccFeatures: [], ecccMarineFeatures: [ecccMarineFeature("Storm Warning")] });
     await runAlertCron(made.env);
 
     // ca1's standing gale warning is gone; ca2 gains the marine storm warning.
-    expect(made.kvPuts.has("flag:osm-node-ca1")).toBe(false);
-    expect(writtenFlag(made.kvPuts, "osm-node-ca2").color).toBe("double-red");
+    expect(rewrote(made, "osm-node-ca1")).toBe(false);
+    expect(writtenFlag(made, "osm-node-ca2").color).toBe("double-red");
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
     expect(line.indexOf(" skipCanadaLower=1 ")).toBeGreaterThan(-1);
   });
@@ -800,12 +822,12 @@ describe("runAlertRefresh lowering rails", function () {
     vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(line); });
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(180))
+      "osm-node-a": standingFlag(beach, ["High Surf Warning"], { waveHeightFt: 0.5 }, minutesAgo(180))
     });
     stubFetch({ features: [] });
     await runAlertCron(made.env);
 
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
+    expect(rewrote(made, "osm-node-a")).toBe(false);
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
     expect(line.indexOf(" skipStaleLower=1 ")).toBeGreaterThan(-1);
   });
@@ -814,114 +836,126 @@ describe("runAlertRefresh lowering rails", function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(180))
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(180))
     });
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(writtenFlag(made.kvPuts, "osm-node-a").color).toBe("double-red");
+    expect(writtenFlag(made, "osm-node-a").color).toBe("double-red");
   });
 });
 
 describe("runAlertRefresh write mechanics", function () {
-  it("republishes with the remaining lease and never restamps updated", async function () {
+  it("moves the color and nothing else: updated and the lease survive", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const standingUpdated = minutesAgo(10);
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, standingUpdated)
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, standingUpdated)
     });
+    const before = made.db.stateOf("osm-node-a");
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    const put = made.kvPuts.get("flag:osm-node-a");
-    expect(put.opts).toEqual({ expirationTtl: FLAG_TTL - 600 });
-    expect(put.opts.expirationTtl).toBeLessThan(FLAG_TTL);
-    const written = JSON.parse(put.value);
+    const after = made.db.stateOf("osm-node-a");
+    const written = storedEstimate(made, "osm-node-a");
+    expect(written.color).toBe("double-red");
+    expect(after.estimate_color).toBe("double-red");
+    // The CAS omits both columns from its SET list, so the standing instant
+    // (the token and the stale-lower clock) and the original lease stand.
+    expect(after.estimate_updated).toBe(standingUpdated);
+    expect(after.estimate_expires).toBe(before.estimate_expires);
     expect(written.updated).toBe(standingUpdated);
     expect(written.estimateInputs.v).toBe(1);
   });
 
-  it("writes nothing but flag: and the map directory", async function () {
+  it("writes the estimate columns and nothing else", async function () {
     freezeClock();
     const beach = beachRow({ id: "osm-node-a" });
     const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
+      "osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
     });
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(Array.from(made.kvPuts.keys()).sort())
-      .toEqual([MAP_DIRECTORY_KEY, "flag:osm-node-a"].sort());
-    // No rotation cursor, no flag_history: recompute_updated belongs to the
+    const row = made.db.stateOf("osm-node-a");
+    // Never the wqfloor column (the hourly stays its single writer, so expiry is
+    // the only retraction path), never official, never reading.
+    expect(row.wqfloor).toBeNull();
+    expect(row.official).toBeNull();
+    expect(row.reading).toBeNull();
+    // No rotation cursor and no flag_history: recompute_updated belongs to the
     // hourly alone, and this cron scrapes no officials to pair against.
-    expect(made.batchCalls.length).toBe(0);
-    const updates = made.preparedSql.filter(function (sql) { return sql.indexOf("UPDATE") !== -1; });
-    expect(updates).toEqual([]);
+    const other = made.db.statements.filter(function (st) {
+      return st.sql.indexOf("UPDATE beaches") === 0 ||
+        st.sql.indexOf("INSERT INTO flag_history") === 0 ||
+        st.sql.indexOf("INSERT INTO beach_state") === 0;
+    });
+    expect(other).toEqual([]);
+    // One batch, carrying the run's compare-and-set statements.
+    expect(made.db.batchCalls.length).toBe(1);
   });
 
-  it("patches the artifact entry it just raised, and publishes once", async function () {
+  it("pages the whole table and chunks the writes at 200 statements", async function () {
     freezeClock();
-    const beach = beachRow({ id: "osm-node-a", name: "Test Beach" });
-    const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10)),
-      "official:osm-node-a": null
+    const rows = [];
+    const standings = {};
+    for (let i = 0; i < 520; i = i + 1) {
+      const id = "osm-node-" + String(1000 + i);
+      const beach = beachRow({ id: id });
+      rows.push(beach);
+      standings[id] = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
+    }
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(line); });
+    const made = makeEnv(rows, standings);
+    stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
+    await runAlertCron(made.env);
+
+    // Keyset paging at 500 a page: every beach past the first page is reached.
+    for (const beach of rows) {
+      expect(storedEstimate(made, beach.id).color).toBe("double-red");
+    }
+    expect(made.db.batchCalls.map(function (c) { return c.length; })).toEqual([200, 200, 120]);
+    const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
+    expect(line.indexOf(" rows=520 ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" written=520 ")).toBeGreaterThan(-1);
+  });
+
+  it("a rejected chunk costs its own beaches only and the run still reports", async function () {
+    // Each chunk is its own batch inside its own try/catch: a D1 rejection
+    // leaves that chunk's beaches on their standing color and the remaining
+    // chunks are still attempted, so one transient failure costs ten minutes
+    // for 200 beaches rather than for every selected one.
+    freezeClock();
+    const rows = [];
+    const standings = {};
+    for (let i = 0; i < 520; i = i + 1) {
+      const id = "osm-node-" + String(1000 + i);
+      const beach = beachRow({ id: id });
+      rows.push(beach);
+      standings[id] = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
+    }
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(line); });
+    const made = makeEnv(rows, standings);
+    // The first chunk: its statements carry the first 200 ids in id order.
+    made.db.failWhen(function (sql, args) {
+      return sql.indexOf("UPDATE beach_state") === 0 && args[2] === "osm-node-1000";
     });
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    const directory = JSON.parse(made.kvPuts.get(MAP_DIRECTORY_KEY).value);
-    expect(directory.count).toBe(1);
-    expect(directory.entries[0].estColor).toBe("double-red");
-    // The standing instant, not the run's clock: the artifact carries the same
-    // timestamp the republished key does.
-    expect(directory.entries[0].estUpdated).toBe(minutesAgo(10));
-  });
-
-  it("writes no flag: key when the write deadline has already passed, but still rebuilds the artifact", async function () {
-    freezeClock();
-    const beach = beachRow({ id: "osm-node-a" });
-    const standing = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
-    const made = makeEnv([beach], { "flag:osm-node-a": standing });
-    made.env.FAST_WRITE_DEADLINE_MS = 0;
-    stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
-    await runAlertCron(made.env);
-
-    expect(made.kvPuts.has("flag:osm-node-a")).toBe(false);
-    const directory = JSON.parse(made.kvPuts.get(MAP_DIRECTORY_KEY).value);
-    expect(directory.entries[0].estColor).toBe(standing.color);
-  });
-
-  it("publishes no directory at all when the flag-worthy read comes back empty", async function () {
-    freezeClock();
-    const logs = [];
-    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(line); });
-    const made = makeEnv([], {});
-    stubFetch({ features: [] });
-    await runAlertCron(made.env);
-
-    // An empty directory is the maximal partial: the request path would serve it
-    // as an authoritative, non-degraded, zero-feature map for three hours.
-    expect(made.kvPuts.has(MAP_DIRECTORY_KEY)).toBe(false);
+    expect(made.db.batchCalls.map(function (c) { return c.length; })).toEqual([200, 200, 120]);
+    for (let i = 0; i < 520; i = i + 1) {
+      const id = "osm-node-" + String(1000 + i);
+      expect(storedEstimate(made, id).color).toBe(i < 200 ? "green" : "double-red");
+    }
+    expect(logs.filter(function (l) {
+      return l.indexOf("index: alert refresh chunk of 200 failed") === 0;
+    }).length).toBe(1);
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
-    expect(line.indexOf(" mapdir=failed ")).toBeGreaterThan(-1);
-  });
-
-  it("writes nothing at all when the scan deadline trips", async function () {
-    freezeClock();
-    const logs = [];
-    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(line); });
-    const beach = beachRow({ id: "osm-node-a" });
-    const made = makeEnv([beach], {
-      "flag:osm-node-a": standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10))
-    });
-    made.env.MAP_SCAN_DEADLINE_MS = 0;
-    stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
-    await runAlertCron(made.env);
-
-    expect(made.kvPuts.size).toBe(0);
-    const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
-    expect(line.indexOf(" candidates=0 ")).toBeGreaterThan(-1);
-    expect(line.indexOf(" mapdir=truncated ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" written=320 ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" skipSuperseded=0 ")).toBeGreaterThan(-1);
   });
 });

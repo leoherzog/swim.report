@@ -31,8 +31,9 @@ actual authority, not this site.
 ## API
 
 The HTTP request path never calls any upstream API. It reads only pre-computed data from D1
-(the beach directory) and KV (flag estimates and official readings), kept fresh by the
-scheduled crons and the offline NOAA wave cycle.
+(the beach directory, and the estimates, official readings, advisories and observations
+beside it in `beach_state`) and KV (the wave forecast series and buoy water temperatures),
+kept fresh by the scheduled crons and the offline NOAA wave cycle.
 
 ### `GET /api/beaches.geojson`
 
@@ -58,13 +59,12 @@ Example response:    {
       ]
     }
 
-The response is assembled by the crons into a single precomputed KV directory, so serving it
-costs one KV read no matter how many beaches the table holds. `builtAt` is the instant that
-directory was built, carried as a top-level GeoJSON foreign member so a stalled builder is
-visible from the endpoint itself. If the directory is missing the endpoint answers with every
-feature's `flag` set to `unknown`, `builtAt` `null` and `degraded` `true`, rather than a
-partial response or a green default; geometry is preserved, so the map is degraded rather
-than broken.
+The response is one D1 statement over scalar columns — each beach's coordinates beside the
+color, timestamp and expiry of its estimate and its official record — so serving it costs one
+read no matter how many beaches the table holds, and the color is decided per row at read
+time by the same rule the detail page uses. `builtAt` is the newest live estimate timestamp
+in the response, or `null` when no beach carries one, carried as a top-level GeoJSON foreign
+member so a stalled recompute is visible from the endpoint itself.
 
 Each feature's geometry is a `Point` in GeoJSON `[longitude, latitude]` order — lon first.
 `properties.name` is the beach's display name: the containing park name from OpenStreetMap
@@ -81,9 +81,9 @@ coordinates are omitted.
 
 ### `GET /api/flag/:beachId`
 
-Returns the cached estimate and official reading (if any) for one beach, read
-straight from KV. Either field may be `null` if no value is cached (missing/expired
-key just means "no data").
+Returns the stored estimate and official reading (if any) for one beach, read straight from
+D1. Either field may be `null` if there is no live record (a missing or expired one just
+means "no data").
 
 Example request:
 
@@ -287,10 +287,9 @@ Responses are cached at Cloudflare's edge (Workers Cache, `[cache]` in `wrangler
 an explicit per-route policy: successful API, beach-detail and `?ids=` responses send
 `cache-control: public, max-age=60, stale-while-revalidate=600, stale-if-error=600`;
 `GET /api/beaches.geojson` sends `public, max-age=60, stale-while-revalidate=60,
-stale-if-error=600` on a served directory and `public, max-age=60, stale-if-error=600` (no
-stale-while-revalidate at all) on the degraded response, because its origin is a single KV
-read and a longer stale window would only add to the flag-flip latency the map exists to
-show; the `/api/flag` 404 sends plain `public, max-age=60`; the home page, `/health` and error
+stale-if-error=600`, a shorter revalidate window than the rest because its origin is a single
+D1 scan and a longer one would only add to the flag-flip latency the map exists to show; the
+`/api/flag` 404 sends plain `public, max-age=60`; the home page, `/health` and error
 responses send `no-store`, because the home page is personalized by IP-derived location and
 must never be shared across visitors. The `near=` and `ids=` modes are the exceptions: neither
 reads that location, so both are fully determined by the URL.
@@ -446,11 +445,11 @@ classification (offline)](#discovery-and-classification-offline)).
 - `7 * * * *` (hourly) — `runFlagRecompute`: reads up to `MAX_BEACHES_PER_RUN = 3000` beaches
   from D1, ordered hot-first then oldest-`recompute_updated`-first. A beach viewed within
   `HOT_VIEW_WINDOW_MS` (7 days, tracked by the `last_viewed` demand stamp) is covered every
-  run; cold rows rotate through the remaining budget, and the `flag:` key's 25200 second TTL
-  spans several rotation turns plus a lost run, so a cold beach keeps showing its last reading
-  rather than dropping to "no data". The detail page marks that reading stale past 2 h; the
-  list chip and the map marker carry no age signal, so a rotation-old color reads there like a
-  fresh one. It fetches the
+  run; cold rows rotate through the remaining budget, and the stored estimate's 25200 second
+  lease spans several rotation turns plus a lost run, so a cold beach keeps showing its last
+  reading rather than dropping to "no data". The detail page marks that reading stale past
+  2 h; the list chip and the map marker carry no age signal, so a rotation-old color reads
+  there like a fresh one. It fetches the
   fast-changing safety signals (alerts and SRF rip-current risk) and reads each beach's wave
   inputs from the `waveinput:` key the offline wave cycle writes, indexing that record's
   24-hour series at the hour it is estimating — it performs **no** wave or wind fetch itself. Both alert authorities are fetched nationally once per run and matched
@@ -458,21 +457,25 @@ classification (offline)](#discovery-and-classification-offline)).
   `api.weather.gov/alerts/active` fetch matched by `nws_zone` and `marine_zone`, and one GeoMet
   `weather-alerts` fetch matched by alert-region polygon. It runs the inputs through
   `estimateFlag`, runs the official-source scrapers once per distinct matched scraper with
-  KV-backed health monitoring, and writes `flag:` and `official:` keys at a 25200 second TTL
-  through a bounded-concurrency write pool (`KV_WRITE_CONCURRENCY`, `src/pool.js`) — the two
-  share a TTL so an estimate can never outlive the posted flag it is weighed against. A
-  scraper's optional `officialTtlSeconds` extends its own official-KV TTL, while its `staleMs`
-  and `readingNote`, plus the resolver's `reportedFor`, ride along as display-side hints, not
-  TTLs. A scraped point-in-time observation is written separately to `reading:`, expiring on
-  an absolute schedule 4 h past the observation instant. `waveinput:` keys expire on an
+  KV-backed health monitoring, and writes each beach's estimate and official record into its
+  `beach_state` row at a 25200 second lease. The rows go out as `env.DB.batch` calls of 200
+  statements rather than a write per beach, so a full 3000-beach run costs 15 round trips.
+  The estimates are flushed the moment the per-beach pass finishes, before the scrapers run,
+  so a run killed inside an upstream fetch still keeps every estimate it computed; the
+  officials and readings follow after the scrape pass, onto the same rows. A rejected batch
+  is logged and its beaches are left out of the calibration history, so a history row can
+  never claim an estimate that was not stored. A scraper's optional
+  `officialTtlSeconds` sets its own `official_expires` and may run past the estimate's,
+  because every reader checks each record's lease on its own; its `staleMs` and `readingNote`,
+  plus the resolver's `reportedFor`, ride along as display-side hints rather than leases. A
+  scraped point-in-time observation lands in the same row's `reading` column, expiring on an
+  absolute schedule 4 h past the observation instant, and the water-quality advisory in
+  `wqfloor` at a 2 h lease. A run that resolved no scrape, no observation or no advisory
+  writes no value for it and leaves the stored one to age out: expiry is the only retraction
+  path. `waveinput:` keys expire on an
   absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
   required, and a missing key — or one whose series is spent — just means the estimate falls
-  back to wind or `unknown`. As its
-  last step it rebuilds the map directory `GET /api/beaches.geojson` serves, from KV truth
-  plus the estimates and officials it wrote in the same run — KV offers no read-your-own-writes
-  guarantee, so a rebuild that read those keys back would publish the previous hour's colors.
-  A rebuild that fails or runs out of time writes nothing and leaves the last directory in
-  place, because a partial one would drop beaches from the map entirely. Each `flag:` value it
+  back to wind or `unknown`. Each estimate it
   writes also carries an `estimateInputs` seal — the non-alert inputs that estimate was decided
   from — which is what lets the alerts refresh below recompute a beach without refetching or
   losing any of them.
@@ -486,9 +489,11 @@ classification (offline)](#discovery-and-classification-offline)).
   feed whose completeness it verified against `api.weather.gov/alerts/active/count` and whose
   features it could actually parse, so a quiet nation and a feed whose shape changed under it
   are never confused; Canadian beaches, which have no equivalent count endpoint, are
-  raise-only. It never restamps
-  a reading's timestamp, never extends a key's life, and writes nothing but `flag:` and the map
-  directory.
+  raise-only. It writes nothing but the estimate column, and only through a compare-and-set on
+  the standing timestamp: the row keeps its original `estimate_updated` and
+  `estimate_expires`, so it can neither restamp the age the detail page reports for the data
+  behind a color nor keep a flag alive past the hourly rotation meant to judge it, and a beach
+  the hourly rewrote underneath it is skipped rather than clobbered.
 - `15 */6 * * *` (6-hourly) — `runWaterTempRefresh`: the sole writer of `watertemp:` + beachId,
   the WTMP water temperature from the nearest station able to serve that reading (see "Water
   temperature stations"), deduped by station id so each file is fetched once and fanned to
@@ -703,7 +708,9 @@ ceiling; the paid plan allows 10,000 per invocation. `TODO.md` records a free-pl
 fallback (a lower `MAX_BEACHES_PER_RUN`). Wall clock, not subrequest count, is the binding
 limit: a scheduled invocation gets 900 s, and Cloudflare caps an invocation at **six
 simultaneous open connections** with KV `get`/`put` counting toward that cap, so a write pool
-wider than ~6 buys no throughput and all wall-clock sizing here is done at 6.
+wider than ~6 buys no throughput and all wall-clock sizing here is done at 6. The per-beach
+flag writes escape that cap entirely by not being a fan-out: they are batched into
+`env.DB.batch` calls of 200 statements, a handful of round trips for a whole run.
 
 ## Deployment
 
@@ -753,7 +760,7 @@ returns the first scraper whose `matches(beach)` is true:
 | South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version") | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data. A beach naming no pole resolves to the nearest one and carries `reportedFor`, so the card names the pole it borrowed |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion, never an inferred green |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red; records >36 h old dropped; a beach reports green only when its own Surf row is fresh, so a green resting solely on a water-quality row is no data rather than a false green |
-| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading:` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
+| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
 | Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
 | PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only |
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | Zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
@@ -832,10 +839,10 @@ nothing to report must never return null, or it would raise a false alert.
          // OPTIONAL, see "Staleness horizons" below:
          staleMs: 108000000,         // this source's own staleness horizon (ms)
          readingNote: "Morning reading — conditions may have changed since it was posted",
-         // OPTIONAL, unrelated to the two above: extends this scraper's own
-         // official-KV TTL when it fetches on a reduced cadence. Never longer than
-         // the estimate's 25200 s without teaching the map directory to carry this
-         // record's own expiry instant.
+         // OPTIONAL, unrelated to the two above: extends this record's own
+         // official_expires when the source fetches on a reduced cadence. Free to
+         // run past the estimate's 25200 s — every reader checks each record's
+         // lease on its own.
          // officialTtlSeconds: 21600,
          matches: function (beach) {
            // BeachRow -> boolean, pure. Match by name regex and/or a lat/lon
@@ -875,11 +882,11 @@ nothing to report must never return null, or it would raise a false alert.
 
    **Observed readings (`waterTempF`, `waveHeightFt`).** A source that publishes point-in-time
    observations alongside its posted flag puts them on the site, in °F and feet.
-   `scrapeReadingFromResult` resolves them independently of the color into the `reading:` KV
-   record, so a site reporting no flag still publishes its numbers. The detail page renders
-   them as "at a glance" tiles: the wave height beside the estimate's modeled "Waves now", and
-   the water temperature ahead of the NDBC buoy reading, since an observation taken at the
-   beach beats one from a station up to 25 km offshore. Both disappear four hours after the
+   `scrapeReadingFromResult` resolves them independently of the color into the beach's
+   `reading` record, so a site reporting no flag still publishes its numbers. The detail page
+   renders them as "at a glance" tiles: the wave height beside the estimate's modeled "Waves
+   now", and the water temperature ahead of the NDBC buoy reading, since an observation taken
+   at the beach beats one from a station up to 25 km offshore. Both disappear four hours after the
    observation rather than carrying a stale warning — a morning water temperature is not a
    claim about the afternoon. They are display-only: they reach no rule and bump no
    `RULES_VERSION`. Range-check them in the scraper, so a shifted column cannot render a
@@ -946,10 +953,10 @@ nothing to report must never return null, or it would raise a false alert.
    always wins, so a `readingNote` can never suppress a real stale warning. Both fields are
    validated when the record is written (`staleMs` a finite number > 0, `readingNote` a
    non-empty string) and are otherwise omitted. Neither has anything to do with
-   `officialTtlSeconds`, which governs how long the KV value itself lives. Keep
-   `officialTtlSeconds` at or below the estimate's 25200 s: the precomputed map directory
-   infers an official's expiry from its paired estimate, so a longer-lived official would show
-   as `unknown` on the map while the detail page still renders its color.
+   `officialTtlSeconds`, which governs how long the stored record itself lives. That lease is
+   independent: `official_expires` is checked on its own everywhere, the map endpoint
+   included, so an official outliving its paired estimate keeps its color on the marker and on
+   the detail page alike.
 
    `staleMs` is an addition to honest `updated` stamping, never a substitute: stamping `nowIso`
    on a days-old reading and covering it with a long horizon is exactly the failure the honesty
@@ -965,8 +972,8 @@ nothing to report must never return null, or it would raise a false alert.
 
 4. That's it. The hourly cron discovers every beach your scraper matches, calls
    `scrape(nowIso)` **once per distinct scraper per run**, resolves the shared result per
-   beach, and writes `official:` + beachId for every beach that resolved. Health monitoring
+   beach, and writes the `official` record for every beach that resolved. Health monitoring
    picks the new scraper up automatically.
 
-Official scrapes, like estimates, run cron-side only and are cached in KV — the
+Official scrapes, like estimates, run cron-side only and are stored in D1 — the
 request path never scrapes a page live.

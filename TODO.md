@@ -49,7 +49,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     card until it drains. Under the decisive classifier nothing can newly reach the cap, so a
     rising parked count means the classifier regressed to a pending state.
   - **Orphaned `flag_history` / `last_viewed`** for reclassified-inland beaches
-    linger in D1 (their KV flags self-expire at the 25200 s TTL). Harmless and
+    linger in D1 (their `beach_state` records expire on their own leases, and the row
+    itself waits on the retention follow-up under Scale-out). Harmless and
     cheap — left in place.
   - **The `ocean` branch has no live rows until the first coastal layer set publishes.** It
     is implemented and tested (`coastlinePresent` decides ahead of the wikidata check), but
@@ -136,7 +137,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   it `skipped_unnamed`. Follow-up: merge their geometries, or derive richer locality labels.
 - **Numbered sibling labels shift when OSM gains a beach.** A park's colliding compass labels are
   numbered in `(osmType, osmId)` scan order, so a new lower-id beach in the same direction
-  renumbers its later siblings' display names. Ids and KV flags are unaffected.
+  renumbers its later siblings' display names. Ids and stored flags are unaffected.
 - **A long beach way spanning several real parks gets one name.** Association picks a single
   park per beach element, so a multi-kilometre `natural=beach` way crossing several named state
   beaches is named by whichever holds the most vertices. The fix is upstream way-splitting.
@@ -258,25 +259,27 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 - **`flag_history` records only hourly-vintage pairs.** `runAlertRefresh` scrapes no officials,
   so it logs nothing, and a color served between hourly runs may differ from the logged one.
   Calibration should say so.
-- **Map directory scale ceiling.** The binding constraint on `mapdirectory:v1` is the 128 MB
-  isolate, not KV's 25 MiB value cap (190 B/entry measured, so the cap is ~139k entries away)
-  and not the read-time CPU. Measured against the real `mapDirectoryFeatures` with the
-  directory string, the parsed directory, the feature array and the response body all live at
-  once, which is what `handleBeachesGeojson` holds: 10k → 1.8 MiB artifact, 17 MiB heap, 72 ms
-  (parse 27 + resolve 20 + stringify 25); 40k → 7.3 MiB, 56 MiB, 255 ms; 100k → 18.1 MiB,
-  151 MiB, 590 ms. A single 100k request exceeds the isolate on its own, so the endpoint OOMs
-  somewhere near 85k features with no concurrency at all, and near 42k with two concurrent
-  cache misses. The practical ceiling is roughly 40k features, and the single-fetch map model
-  wants bbox or tile sharding well before that. The artifact does not scale to 100k, and
-  nothing here should pretend it does.
-- **The refresh cron's KV read volume is the Worker's one recurring O(N) cost.** Its scan
-  reads both key families for every flag-worthy beach on every run, and KV bills a bulk read
-  per key, so 144 runs a day is 288N key-reads a day: about 320k at today's 1,102 rows, 2.9M
-  at 10k (~87M/month, past the Paid plan's 10M included reads) and 29M at 100k. It buys the
-  standing alert set for a median of a few dozen beaches whose alerts actually moved. There is
-  no cheaper level-triggered selection while the standing set lives inside the `"flag:"` value;
-  the ways out are a shorter cadence for the artifact rebuild than for selection, or the same
-  bbox/tile sharding the ceiling above wants.
+- **Map endpoint scale ceiling.** `handleBeachesGeojson` holds the whole flag-worthy set at
+  once — the D1 rows, the feature array and the response body — so the 128 MB isolate is the
+  binding constraint, and a single request is the whole cost. The rows are scalar columns with
+  no JSON blob to parse, which makes the per-feature cost much smaller than the KV artifact's
+  was; it does not make the growth sublinear. Re-measure against the real scan before quoting
+  a ceiling. Whatever it turns out to be, the single-fetch map model wants bbox or tile
+  sharding well before it, and no cache policy hides an OOM on a cache miss.
+- **Both beach-walking crons are O(N) in D1 rows read.** The alerts refresh pages every beach
+  carrying a live estimate, 144 runs a day, each row carrying that estimate's JSON blob; the
+  hourly reads up to `MAX_BEACHES_PER_RUN` rows and writes one row per beach. That is the
+  Worker's one recurring per-beach cost, and it buys the standing alert set for the few dozen
+  beaches whose alerts actually moved. Cheaper selection needs the standing alert set outside
+  the estimate blob — a column or a digest the refresh can filter on in SQL — which is a
+  schema change, not a tuning knob. Watch D1 rows-read billing as the table grows, and add an
+  index on `beach_state.estimate_expires` only if the paging plan shows it wanting one: the
+  keyset orders on `b.id`, so today it does not.
+- **Orphan `beach_state` rows are never pruned.** Migration 0014 carries no foreign key, so a
+  beach the offline reconciliation deletes leaves its state row behind; it is invisible to
+  every JOIN and costs only storage. Add `DELETE FROM beach_state WHERE beach_id NOT IN
+  (SELECT id FROM beaches)` to the discovery batch's retention sweep, beside the
+  `flag_history` prune, so the two aged-row deletions live in one place.
 - **NDBC `latest_obs.txt` would replace the hardcoded water-temp table.** One ~106 KB file
   carries 886 stations, against today's 72 committed rows and 72 per-station Range fetches.
   Display-only and a separate change, because it feeds a different key family on a
@@ -326,7 +329,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     fractions once the first coastal row count is known. `REGION_RECONCILE_MIN_DELETES = 2`
     goes vestigial (no coastal box has a single-digit candidate tail).
   - **Homepage list and map.** `GET /` is capped at 100 rows with no pagination, and the map
-    directory's practical ceiling is ~40k features (below).
+    endpoint serves the whole flag-worthy set in one response (below).
   The Worker-side constraint that predates all of this:
   - **`MAX_BEACHES_PER_RUN = 3000` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
     constraint, not two. Hot rows are covered every run; a cold row waits
@@ -337,17 +340,17 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     ten and half the cold coast read gray between turns. The 1,102-row run took about a
     minute of wall clock, so 3000 budgets roughly three; the next raise wants the run's
     own timestamps read first. A run
-    truncated at the 900 s ceiling is a different failure and the TTL only delays it:
-    neither write pool takes a deadline and the `recompute_updated` batch is
+    truncated at the 900 s ceiling is a different failure and the lease only delays it:
+    the run takes no write deadline and the `recompute_updated` batch is
     all-or-nothing, so an hourly truncation dies at the same point in the same selection
     order and the same tail is never written. The residual is
     growth: at ~520 hot the inequality fails near 12,900 flag-worthy rows, and once the hot
     tier alone fills the run the cold tier gets no slots at all, which no TTL rescues. The hourly summary logs `oldest=`, the oldest cursor
     stamp the run selected, so the wait is readable from the observability API. Past those
     sizes the knob is a larger `MAX_BEACHES_PER_RUN`, bounded by the 900 s wall clock on a
-    cron that passes no deadline to either write pool, or real pagination.
+    cron that passes no deadline to its gather pools, or real pagination.
     The alerts refresh cron inherits that reach rather than extending it: a seal and a
-    standing `flag:` value exist only for the rows a run covered, so
+    standing estimate exist only for the rows a run covered, so
     `MAX_BEACHES_PER_RUN × (FLAG_TTL_SECONDS / 3600)` beaches — 21,000 — can hold a live
     seal at any time. At 7,219 rows that is the whole table; past 21k
     real pagination is the prerequisite, and `skipNoSeal=` in the refresh cron's completion log
@@ -545,7 +548,7 @@ remains partnership-gated.
 
 - The cron subrequest budgets assume the Workers **Paid** plan (10,000 subrequests per
   invocation, no daily KV-write cap). The hourly `runFlagRecompute` runs alert, SRF and scraper
-  fetches plus its `flag:`/`official:` KV writes, and does not fetch waves; the 6-hourly
+  fetches plus its batched `beach_state` writes, and does not fetch waves; the 6-hourly
   `runWaterTempRefresh` runs one Range-limited read per distinct station plus its `watertemp:`
   writes (PLAN.md section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
   quota are not sufficient at this cadence and beach count. For a free-plan demo, drop
@@ -575,8 +578,8 @@ remains partnership-gated.
   param; the server-side `?q=` search is the way to reach beaches past the cap. Real pagination
   is needed once nationwide scale-out lands. The homepage map is already the whole-directory
   view — it fetches every flag-worthy beach once from the cacheable `GET /api/beaches.geojson`,
-  now a single KV read of the cron-built map directory rather than a full-table D1 scan plus
-  `ceil(N/100) × 2` bulk KV gets, and renders them as a coast highlight under flag icons — and
+  one D1 statement over scalar columns with no KV read at all, and renders them as a coast
+  highlight under flag icons — and
   that single-fetch model is comfortable to roughly 5–10k features. It is now serving 9,068 in
   1.7 MB, so it is inside that band but no longer far inside it; beyond it the GeoJSON endpoint
   itself needs server-side clustering or tiling. Cross-reference, out of scope here: a browser-fetched static tiled

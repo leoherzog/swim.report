@@ -9,7 +9,7 @@
 
 // 4 h. These readings are taken once, in the morning, at the beach itself; past
 // this horizon the tile is removed rather than shown with a warning, because a
-// morning water temperature is not a claim about the afternoon. The cron writes
-// "reading:" with an absolute expiry at the same horizon, so the key normally
-// lapses on its own and this check is the render-side guarantee.
+// morning water temperature is not a claim about the afternoon. The cron stamps
+// beach_state.reading_expires at the same horizon, so the record normally lapses
+// on its own and this check is the render-side guarantee.
 export const READING_MAX_AGE_MS = 4 * 60 * 60 * 1000;

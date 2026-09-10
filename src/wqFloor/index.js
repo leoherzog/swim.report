@@ -11,7 +11,7 @@
 // (official: false) and lifts only.
 //
 // Cron-side only. The fetch handler never calls any source.scrape(); the request
-// path reads the already-computed "wqfloor:" + beachId KV.
+// path reads the already-computed beach_state.wqfloor.
 //
 // Registering a source: author the module, import it here, and append it to
 // wqFloorSources. The cron gather in src/index.js and the rules.js step-7 floor do

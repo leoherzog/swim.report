@@ -3,26 +3,10 @@
 // exercised against seeded rows.
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { MARINE_ZONE_PREFIXES } from "../src/clients/nws.js";
-
-const MIGRATIONS_DIR = join(process.cwd(), "migrations");
-
-function migrationFiles() {
-  return readdirSync(MIGRATIONS_DIR)
-    .filter(function (f) { return /^\d{4}_.*\.sql$/.test(f); })
-    .sort();
-}
-
-function applyMigrations(db, upTo) {
-  for (const file of migrationFiles()) {
-    if (upTo && file > upTo) {
-      break;
-    }
-    db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
-  }
-}
+import { MIGRATIONS_DIR, applyMigrations } from "./helpers/migrations.js";
 
 describe("migrations", function () {
   it("apply in order without error", function () {
@@ -31,6 +15,29 @@ describe("migrations", function () {
     const cols = db.prepare("PRAGMA table_info(beaches)").all().map(function (c) { return c.name; });
     expect(cols).toContain("nws_zone");
     expect(cols).toContain("marine_zone");
+  });
+
+  it("0014 creates beach_state with every derived-record column", function () {
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db);
+    const cols = db.prepare("PRAGMA table_info(beach_state)").all();
+    const names = cols.map(function (c) { return c.name; });
+    expect(names).toEqual([
+      "beach_id",
+      "estimate", "estimate_color", "estimate_updated", "estimate_expires",
+      "official", "official_color", "official_updated", "official_expires",
+      "wqfloor", "wqfloor_expires",
+      "reading", "reading_expires"
+    ]);
+    const byName = {};
+    for (const c of cols) {
+      byName[c.name] = c;
+    }
+    expect(byName.beach_id.pk).toBe(1);
+    expect(byName.estimate_expires.type).toBe("INTEGER");
+    expect(byName.official_expires.type).toBe("INTEGER");
+    expect(byName.wqfloor_expires.type).toBe("INTEGER");
+    expect(byName.reading_expires.type).toBe("INTEGER");
   });
 
   it("0013 requeues marine nws_zone rows and leaves land rows and marine_zone alone", function () {

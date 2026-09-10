@@ -2,11 +2,14 @@ import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/re
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 import { IDS_LIST_LIMIT } from "./idsListLimit.js";
+import { mapFeatureFromRow } from "./mapFeatures.js";
 import {
-  MAP_DIRECTORY_KEY,
-  MAP_DIRECTORY_VERSION,
-  mapDirectoryFeatures
-} from "./mapDirectory.js";
+  BEACH_STATE_SELECT,
+  CHIP_STATE_SELECT,
+  BEACH_STATE_JOIN,
+  liveBeachState,
+  liveChipState
+} from "./beachState.js";
 
 // Re-exported so existing importers keep working.
 export { distanceMi };
@@ -33,21 +36,13 @@ const BEACH_ID_PATTERN = /^osm-(node|way|relation)-\d+$/;
 const CACHE_CONTROL_CACHEABLE =
   "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
 const CACHE_CONTROL_NO_STORE = "no-store";
-// /api/beaches.geojson has its own policy. Its origin is now one KV read plus a
-// few milliseconds of CPU, where the 600 s stale-while-revalidate above was
-// sized to hide a multi-second cache-miss origin; keeping it would add up to ten
-// minutes to the very flip latency the read-time color gate exists to preserve.
-// 60 s still gives single-request-per-colo-per-minute herd protection.
+// /api/beaches.geojson has its own policy. Its origin is one scalar-column scan
+// plus a few milliseconds of CPU, where the 600 s stale-while-revalidate above
+// was sized to hide a multi-second cache-miss origin; keeping it would add up to
+// ten minutes to the very flip latency the read-time color gate exists to
+// preserve. 60 s still gives single-request-per-colo-per-minute herd protection.
 const CACHE_CONTROL_MAP_DIRECTORY =
   "public, max-age=60, stale-while-revalidate=60, stale-if-error=600";
-// The degraded branch drops stale-while-revalidate entirely so the map recovers
-// within a minute of the builder returning, and keeps stale-if-error for the
-// reason the comment above gives.
-const CACHE_CONTROL_MAP_DEGRADED = "public, max-age=60, stale-if-error=600";
-// Cap on the degraded branch's D1 read. A dead builder must not turn every
-// colo's 60 s revalidation into an unbounded full-table scan; crossing this
-// limit is itself the signal that the builder needs fixing.
-const MAP_DEGRADED_MAX_FEATURES = 5000;
 
 // Throttle for the last_viewed demand stamp: at most one D1 write per beach per
 // hour. The enrichment crons order their candidate queues with last_viewed as a
@@ -151,14 +146,6 @@ function touchLastViewed(env, ctx, beach) {
   );
 }
 
-async function readFlagAndOfficial(env, beachId) {
-  const results = await Promise.all([
-    env.FLAGS.get("flag:" + beachId, { type: "json" }),
-    env.FLAGS.get("official:" + beachId, { type: "json" })
-  ]);
-  return { estimate: results[0], official: results[1] };
-}
-
 // Optional ?q= search covers the entire beaches table, not just the rendered
 // rows: a case-insensitive LIKE against both the display name
 // (COALESCE(park_name, name)) and the beach's own name, with user wildcards
@@ -167,10 +154,23 @@ async function readFlagAndOfficial(env, beachId) {
 const LIKE_WHERE =
   " WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\\' OR name LIKE ?1 ESCAPE '\\')";
 
-// Builds the "SELECT * FROM beaches ..." statement shared by both home-page
-// branches: an optional LIKE_WHERE clause, an optional ORDER BY clause, and a
-// caller-supplied LIMIT. Resulting SQL strings are byte-identical to the
-// hand-written per-branch queries this replaces.
+// The beach row plus its derived state in one read. beach_state's column names
+// are all distinct from beaches', so every WHERE, ORDER BY and LIKE clause below
+// stays unqualified; only the splat needs the alias.
+const BEACH_WITH_STATE_FROM =
+  "SELECT b.*, " + BEACH_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN;
+
+// The same read for the list surfaces, which render one chip color and an
+// OFFICIAL badge per row: scalar mirror columns instead of the four JSON blobs.
+// The proximity branch ranks HOME_GEO_FETCH_LIMIT rows to render
+// HOME_LIST_LIMIT of them, so a blob here would cross the binding five times for
+// every row a visitor sees.
+const BEACH_WITH_CHIP_FROM =
+  "SELECT b.*, " + CHIP_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN;
+
+// Builds the beach-plus-state statement shared by both home-page branches: an
+// optional LIKE_WHERE clause, an optional ORDER BY clause, and a caller-supplied
+// LIMIT.
 function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
   // Every home-page branch hides confirmed-inland (and parked-unresolved)
   // beaches via the canonical flag-worthy gate: AND it after the LIKE clause
@@ -180,7 +180,7 @@ function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
     : " WHERE " + FLAG_WORTHY_WATER_SQL;
   const order = orderByClause ? " ORDER BY " + orderByClause : "";
   const stmt = env.DB.prepare(
-    "SELECT * FROM beaches" + where + order + " LIMIT " + String(limit)
+    BEACH_WITH_CHIP_FROM + where + order + " LIMIT " + String(limit)
   );
   return hasQuery ? stmt.bind(pattern) : stmt;
 }
@@ -252,27 +252,20 @@ async function handleHome(env, location, rawQuery, nearParam) {
       rows = rows.slice(0, HOME_LIST_LIMIT);
     }
   }
-  // Bulk KV read: one get() per key family instead of two round-trips per
-  // beach. rows is capped at HOME_LIST_LIMIT (100), which is exactly the
-  // bulk-get key limit, so a single call per family always suffices.
+  // Resolved after the slice above: the proximity branch ranks five times what
+  // it renders, and only the rendered rows need a chip.
+  const nowMs = Date.now();
   const entries = [];
-  if (rows.length > 0) {
-    const flagKeys = rows.map(function (beach) { return "flag:" + beach.id; });
-    const officialKeys = rows.map(function (beach) { return "official:" + beach.id; });
-    const maps = await Promise.all([
-      env.FLAGS.get(flagKeys, { type: "json" }),
-      env.FLAGS.get(officialKeys, { type: "json" })
-    ]);
-    for (const beach of rows) {
-      entries.push({
-        beach: beach,
-        estimate: maps[0].get("flag:" + beach.id) || null,
-        official: maps[1].get("official:" + beach.id) || null,
-        distanceMi: location ? beach.distance_mi : null
-      });
-    }
+  for (const beach of rows) {
+    const state = liveChipState(beach, nowMs);
+    entries.push({
+      beach: beach,
+      estimate: state.estimate,
+      official: state.official,
+      distanceMi: location ? beach.distance_mi : null
+    });
   }
-  const nowIso = new Date().toISOString();
+  const nowIso = new Date(nowMs).toISOString();
   const html = renderListPage({
     entries: entries,
     nowIso: nowIso,
@@ -289,9 +282,9 @@ async function handleHome(env, location, rawQuery, nearParam) {
   // resolveUserLocation short-circuits on it and never reads request.cf, so the
   // response is location-independent per its cache key and safe for the Workers
   // Cache. That is exactly the path live search and the geo upgrade hammer, which
-  // would otherwise cost one D1 LIKE plus a KV bulk read per keystroke. Without a
-  // near param the page is personalized by request.cf, which is not in the cache
-  // key and not expressible via Vary, so it must stay no-store.
+  // would otherwise cost one D1 read per keystroke. Without a near param the page
+  // is personalized by request.cf, which is not in the cache key and not
+  // expressible via Vary, so it must stay no-store.
   const cacheControl = (nearParam !== null && nearParam !== undefined)
     ? CACHE_CONTROL_CACHEABLE
     : CACHE_CONTROL_NO_STORE;
@@ -312,7 +305,7 @@ async function handleIdsList(env, idsParam) {
   if (ids.length > 0) {
     const placeholders = ids.map(function (id, index) { return "?" + String(index + 1); });
     const stmt = env.DB.prepare(
-      "SELECT * FROM beaches WHERE id IN (" + placeholders.join(", ") + ") AND " +
+      BEACH_WITH_CHIP_FROM + " WHERE id IN (" + placeholders.join(", ") + ") AND " +
       FLAG_WORTHY_WATER_SQL
     );
     const result = await stmt.bind.apply(stmt, ids).all();
@@ -330,26 +323,20 @@ async function handleIdsList(env, idsParam) {
       }
     }
   }
+  const nowMs = Date.now();
   const entries = [];
-  if (ordered.length > 0) {
-    const flagKeys = ordered.map(function (beach) { return "flag:" + beach.id; });
-    const officialKeys = ordered.map(function (beach) { return "official:" + beach.id; });
-    const maps = await Promise.all([
-      env.FLAGS.get(flagKeys, { type: "json" }),
-      env.FLAGS.get(officialKeys, { type: "json" })
-    ]);
-    for (const beach of ordered) {
-      entries.push({
-        beach: beach,
-        estimate: maps[0].get("flag:" + beach.id) || null,
-        official: maps[1].get("official:" + beach.id) || null,
-        distanceMi: null
-      });
-    }
+  for (const beach of ordered) {
+    const state = liveChipState(beach, nowMs);
+    entries.push({
+      beach: beach,
+      estimate: state.estimate,
+      official: state.official,
+      distanceMi: null
+    });
   }
   const html = renderListPage({
     entries: entries,
-    nowIso: new Date().toISOString(),
+    nowIso: new Date(nowMs).toISOString(),
     sortedByProximity: false,
     location: null,
     query: "",
@@ -369,17 +356,19 @@ const NEARBY_FETCH_LIMIT = 12;
 const NEARBY_LIMIT = 3;
 const NEARBY_MAX_MI = 50;
 
-// The NEARBY_LIMIT nearest flag-worthy beaches to `beach`, each carrying its
-// distance, or [] when none lies within NEARBY_MAX_MI or the coordinates are
+// The NEARBY_LIMIT nearest flag-worthy beaches to the beach, each carrying its
+// distance and its own estimate and official so the cards read exactly as a list
+// row does, or [] when none lies within NEARBY_MAX_MI or the coordinates are
 // unusable. The beach's own row is excluded in SQL and again here, since the
 // second guard costs nothing and keeps a stale id-less row out.
-async function nearbyBeaches(env, beach) {
+async function nearbyBeaches(env, beach, nowMs) {
   const orderBy = proximityOrderByClause({ lat: beach.lat, lon: beach.lon });
   if (orderBy === null) {
     return [];
   }
   const stmt = env.DB.prepare(
-    "SELECT id, name, park_name, lat, lon, water_class, water_class_attempts FROM beaches WHERE " +
+    "SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, " +
+    CHIP_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN + " WHERE " +
     FLAG_WORTHY_WATER_SQL + " AND id <> ?1 ORDER BY " + orderBy +
     " LIMIT " + String(NEARBY_FETCH_LIMIT)
   ).bind(beach.id);
@@ -397,30 +386,19 @@ async function nearbyBeaches(env, beach) {
     scored.push({ beach: row, distanceMi: miles });
   }
   scored.sort(function (a, b) { return a.distanceMi - b.distanceMi; });
-  return scored.slice(0, NEARBY_LIMIT);
-}
-
-// One bulk get per key family for the nearby rows, the same shape the home list
-// uses, so the cards carry the same estimate chip and OFFICIAL badge a row does.
-async function attachNearbyFlags(env, nearby) {
-  if (nearby.length === 0) {
-    return nearby;
+  const nearest = scored.slice(0, NEARBY_LIMIT);
+  for (const entry of nearest) {
+    const state = liveChipState(entry.beach, nowMs);
+    entry.estimate = state.estimate;
+    entry.official = state.official;
   }
-  const flagKeys = nearby.map(function (entry) { return "flag:" + entry.beach.id; });
-  const officialKeys = nearby.map(function (entry) { return "official:" + entry.beach.id; });
-  const maps = await Promise.all([
-    env.FLAGS.get(flagKeys, { type: "json" }),
-    env.FLAGS.get(officialKeys, { type: "json" })
-  ]);
-  for (const entry of nearby) {
-    entry.estimate = (maps[0] && maps[0].get("flag:" + entry.beach.id)) || null;
-    entry.official = (maps[1] && maps[1].get("official:" + entry.beach.id)) || null;
-  }
-  return nearby;
+  return nearest;
 }
 
 async function handleDetail(env, ctx, beachId) {
-  const beach = await env.DB.prepare("SELECT * FROM beaches WHERE id = ?1").bind(beachId).first();
+  const beach = await env.DB.prepare(
+    BEACH_WITH_STATE_FROM + " WHERE b.id = ?1"
+  ).bind(beachId).first();
   // A confirmed-inland beach (or a parked-unresolved one) is not flag-worthy,
   // so it 404s exactly like a missing row — the same gate the home list uses.
   if (!beach || !isFlagWorthyWater(beach)) {
@@ -428,96 +406,78 @@ async function handleDetail(env, ctx, beachId) {
     return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
   }
   touchLastViewed(env, ctx, beach);
-  // The 24 h wave-forecast series, the NDBC water-temperature reading, the
-  // official morning reading, the water-quality advisory and the nearby-beach
-  // rows are all detail-page-only reads (the list page must never gain a per-row
-  // KV get, and /api/flag must not gain the advisory). Fetched alongside the
-  // flag/official reads so the extra keys cost no added latency; the nearby rows'
-  // own flags are one more bulk get per family behind them.
+  const nowMs = Date.now();
+  // The estimate, the official flag, the water-quality advisory and the
+  // point-in-time reading all came back on the row above. The 24 h wave-forecast
+  // series, the NDBC water temperature and the nearby-beach rows are
+  // detail-page-only reads: the list page must never gain a per-row KV get, and
+  // /api/flag must not gain the advisory.
   const results = await Promise.all([
-    readFlagAndOfficial(env, beachId),
     env.FLAGS.get("waves:" + beachId, { type: "json" }),
     env.FLAGS.get("watertemp:" + beachId, { type: "json" }),
-    nearbyBeaches(env, beach),
-    env.FLAGS.get("wqfloor:" + beachId, { type: "json" }),
-    env.FLAGS.get("reading:" + beachId, { type: "json" })
+    nearbyBeaches(env, beach, nowMs)
   ]);
-  const data = results[0];
-  const waves = results[1];
-  const waterTemp = results[2];
-  const wqfloor = results[4];
-  const reading = results[5];
-  const nearby = await attachNearbyFlags(env, results[3]);
-  const nowIso = new Date().toISOString();
+  const state = liveBeachState(beach, nowMs);
   const html = renderDetailPage({
     beach: beach,
-    estimate: data.estimate,
-    official: data.official,
-    waves: waves,
-    waterTemp: waterTemp,
-    reading: reading,
-    wqfloor: wqfloor,
-    nearby: nearby,
-    nowIso: nowIso
+    estimate: state.estimate,
+    official: state.official,
+    waves: results[0],
+    waterTemp: results[1],
+    reading: state.reading,
+    wqfloor: state.wqfloor,
+    nearby: results[2],
+    nowIso: new Date(nowMs).toISOString()
   });
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
 }
+
+// Scalar columns only: the marker color is resolved from the estimate's and the
+// official's color, updated stamp and expiry, never from their JSON blobs.
+const MAP_FEATURE_SQL =
+  "SELECT b.id, b.name, b.park_name, b.lat, b.lon, " + CHIP_STATE_SELECT +
+  " FROM beaches b" + BEACH_STATE_JOIN + " WHERE " + FLAG_WORTHY_WATER_SQL;
 
 // Cacheable GeoJSON directory of every flag-worthy beach: the homepage map
 // fetches it once on load and hands it to one MapLibre GeoJSON source, drawn as
 // a coast highlight when zoomed out and as flag icons from zoom 9 up.
 // Location-independent, so fully cacheable.
 //
-// One KV read. The cron path precomputes "mapdirectory:v1" (src/mapDirectory.js)
-// and this route resolves it into features against one nowIso, through the same
-// markerFlagColor the detail page's title flag uses, so the artifact stores
-// ingredients rather than a baked color and the two surfaces cannot disagree.
-// builtAt rides along as a top-level GeoJSON foreign member (RFC 7946 section
-// 6.1) so a dead builder is visible to anyone hitting the endpoint.
-//
-// A missing, unparseable or version-mismatched directory takes the degraded
-// branch below: every feature honest-unknown, geometry preserved, zero KV reads.
-// There is deliberately no fallback to a per-beach bulk read — that would keep
-// the map quietly working while the builder had been dead for days, and it is
-// exactly the shape that cannot run in the request path at nationwide scale.
+// One D1 read, resolved per row through the same markerFlagColor the detail
+// page's title flag uses, so the map marker and the title flag cannot disagree
+// about a beach. builtAt — the freshest live estimate on the map — rides along
+// as a top-level GeoJSON foreign member (RFC 7946 section 6.1) so a dead hourly
+// is visible to anyone hitting the endpoint. A D1 failure surfaces as the error
+// boundary's 500, never as a silently all-unknown map.
 async function handleBeachesGeojson(env) {
-  const nowIso = new Date().toISOString();
-  const directory = await env.FLAGS.get(MAP_DIRECTORY_KEY, { type: "json" });
-  if (directory && typeof directory === "object" &&
-      directory.v === MAP_DIRECTORY_VERSION && Array.isArray(directory.entries)) {
-    const features = mapDirectoryFeatures(directory, nowIso);
-    return geojsonResponse(
-      { type: "FeatureCollection", builtAt: directory.builtAt, features: features },
-      CACHE_CONTROL_MAP_DIRECTORY
-    );
-  }
-  const result = await env.DB.prepare(
-    "SELECT id, name, park_name, lat, lon FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
-    " ORDER BY id LIMIT " + String(MAP_DEGRADED_MAX_FEATURES)
-  ).all();
-  const rows = result.results || [];
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const nowEpoch = Math.floor(nowMs / 1000);
+  const result = await env.DB.prepare(MAP_FEATURE_SQL).all();
+  const rows = (result && result.results) || [];
   const features = [];
+  let builtAt = null;
+  let builtAtMs = -Infinity;
   for (let i = 0; i < rows.length; i = i + 1) {
     const row = rows[i];
-    const lat = (row.lat === null || row.lat === undefined) ? NaN : Number(row.lat);
-    const lon = (row.lon === null || row.lon === undefined) ? NaN : Number(row.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    const feature = mapFeatureFromRow(row, nowIso, nowMs);
+    if (feature === null) {
       continue;
     }
-    features.push({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [lon, lat] },
-      properties: {
-        id: row.id,
-        name: row.park_name || row.name || "",
-        flag: "unknown"
-      }
-    });
+    features.push(feature);
+    // Only an unexpired estimate dates the collection: an expired one resolved
+    // to unknown above and says nothing about how fresh the map is.
+    const expires = row.estimate_expires;
+    const updatedMs = Date.parse(row.estimate_updated);
+    if (typeof expires === "number" && expires > nowEpoch &&
+        Number.isFinite(updatedMs) && updatedMs > builtAtMs) {
+      builtAtMs = updatedMs;
+      builtAt = row.estimate_updated;
+    }
   }
-  console.log("router: map directory missing; serving " + String(features.length) + " unknown features");
   return geojsonResponse(
-    { type: "FeatureCollection", builtAt: null, degraded: true, features: features },
-    CACHE_CONTROL_MAP_DEGRADED
+    { type: "FeatureCollection", builtAt: builtAt, features: features },
+    CACHE_CONTROL_MAP_DIRECTORY
   );
 }
 
@@ -536,7 +496,8 @@ function geojsonResponse(payload, cacheControl) {
 
 async function handleApiFlag(env, ctx, beachId) {
   const beach = await env.DB.prepare(
-    "SELECT id, last_viewed, water_class, water_class_attempts FROM beaches WHERE id = ?1"
+    "SELECT b.id, b.last_viewed, b.water_class, b.water_class_attempts, " +
+    BEACH_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN + " WHERE b.id = ?1"
   ).bind(beachId).first();
   // A confirmed-inland (or parked-unresolved) beach 404s like a missing row,
   // matching the detail page and the flag-worthy gate on the list/map.
@@ -549,9 +510,9 @@ async function handleApiFlag(env, ctx, beachId) {
     );
   }
   touchLastViewed(env, ctx, beach);
-  const data = await readFlagAndOfficial(env, beachId);
+  const state = liveBeachState(beach, Date.now());
   return Response.json(
-    { beachId: beachId, estimate: data.estimate, official: data.official },
+    { beachId: beachId, estimate: state.estimate, official: state.official },
     { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
   );
 }

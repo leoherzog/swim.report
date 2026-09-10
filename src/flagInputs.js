@@ -8,10 +8,10 @@
 // seal cannot omit a field the estimate consumed. test/flagInputs.test.js
 // enforces that as a round-trip property rather than leaving it to discipline.
 //
-// The seal rides inside the "flag:" value, in the same put, with the same expiry
-// instant as the color it explains. A null in it means "the hourly checked and
-// found nothing", never "I do not know" — which is exactly what reassembling the
-// advisory from the shorter-lived "wqfloor:" key could not say.
+// The seal rides inside the stored estimate, under the same expiry instant as
+// the color it explains. A null in it means "the hourly checked and found
+// nothing", never "I do not know" — which is exactly what reassembling the
+// advisory from the shorter-lived wqfloor column cannot say.
 //
 // alertsCheckable and waterClass are deliberately NOT sealed: each is read
 // straight from D1 columns both crons hold, so recomputing them is cheaper and
@@ -148,7 +148,7 @@ export function buildEstimateInputs(beach, alertPart, signals) {
   };
 }
 
-// The seal spread onto the "flag:" value after estimateFlag returns. It carries
+// The seal spread onto the estimate after estimateFlag returns. It carries
 // only what the FlagEstimate does not already echo: ripCurrentRisk, waveHeightFt,
 // sources and updated are echoed by rules.js, so repeating them here would be
 // two sources of truth for one field.

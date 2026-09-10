@@ -909,12 +909,11 @@ function waterTempProvenance(waterTemp) {
 const READING_TEMP_TOOLTIP_ID = "reading-temp";
 const READING_WAVE_TOOLTIP_ID = "reading-wave";
 
-// Pure. The official point-in-time reading a source scraped this morning
-// ("reading:" KV), or null when there is none to show. The cron gives the key an
-// absolute expiry at READING_MAX_AGE_MS past the observation, so this check
-// normally never fires; it is what guarantees a key that outlived its horizon —
-// a KV expiry runs late, an old record is replayed — is dropped rather than
-// presented as this afternoon's water. A missing or unparseable observedIso
+// Pure. The official point-in-time reading a source scraped this morning, or null
+// when there is none to show. The cron stamps the record an absolute expiry at
+// READING_MAX_AGE_MS past the observation, so this check normally never fires; it
+// is what guarantees a record that outlived its horizon — an old one replayed — is
+// dropped rather than presented as this afternoon's water. A missing or unparseable observedIso
 // yields null for the same reason it does for the buoy reading.
 function usableReading(reading, nowIso) {
   if (!reading || typeof reading !== "object") {
@@ -1780,9 +1779,8 @@ export function renderDetailPage(data) {
   // until the water-temperature cron writes it, so default to null; the tile
   // reads "No data" when it is null or stale.
   const waterTemp = (data.waterTemp === undefined || data.waterTemp === null) ? null : data.waterTemp;
-  // An official source's morning water-temperature and wave-height observation
-  // ("reading:" KV). Display-only and never a flag input, like the buoy reading
-  // it outranks. Absent for every beach no scraper reports observations for.
+  // An official source's morning water-temperature and wave-height observation.
+  // Display-only and never a flag input, like the buoy reading it outranks. Absent for every beach no scraper reports observations for.
   const reading = (data.reading === undefined || data.reading === null) ? null : data.reading;
   // Active water-quality advisory written by the hourly cron. Absent means no
   // advisory stands, never a clean reading.
