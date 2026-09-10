@@ -20,9 +20,7 @@ import {
   buildAlertInputs,
   buildEstimateInputs,
   sealFromSignals,
-  signalsFromStanding,
-  standingAlertEvents,
-  eventKey
+  signalsFromStanding
 } from "../src/flagInputs.js";
 import { ECCC_ALERTS_INFO_URL } from "../src/clients/eccc.js";
 import { ECCC_MARINE_INFO_URL } from "../src/clients/ecccMarine.js";
@@ -468,48 +466,5 @@ describe("buildAlertInputs branches", function () {
     expect(bundle.alertsAt).toBe(UPDATED);
     expect(estimateFlag(bundle).alertsAt).toBe(UPDATED);
     expect(buildEstimateInputs(beachRow({}), null, { signalSources: [] }).alertsAt).toBeNull();
-  });
-});
-
-describe("eventKey and standingAlertEvents", function () {
-  it("is order-independent and dedupes", function () {
-    expect(eventKey(["Gale Warning", "Small Craft Advisory"]))
-      .toBe(eventKey(["Small Craft Advisory", "Gale Warning"]));
-    expect(eventKey(["Gale Warning", "Gale Warning"])).toBe("Gale Warning");
-    expect(eventKey(null)).toBe("");
-    expect(eventKey([])).toBe("");
-  });
-
-  it("distinguishes a swap and a partial loss, which a count test would miss", function () {
-    expect(eventKey(["Small Craft Advisory"])).not.toBe(eventKey(["Gale Warning"]));
-    expect(eventKey(["Gale Warning", "Small Craft Advisory"])).not.toBe(eventKey(["Gale Warning"]));
-  });
-
-  it("reads the standing event set off alertDetails, [] when malformed", function () {
-    expect(standingAlertEvents({ alertDetails: [{ event: "Gale Warning" }, { onset: "x" }] }))
-      .toEqual(["Gale Warning"]);
-    expect(standingAlertEvents({})).toEqual([]);
-    expect(standingAlertEvents(null)).toEqual([]);
-  });
-
-  it("evaluates the standing set at the instant the standing color was decided", function () {
-    const details = [
-      { event: "Beach Hazards Statement", onset: "2026-07-16T07:00:00.000Z", ends: null },
-      { event: "Gale Warning", onset: "2026-07-15T10:00:00.000Z", ends: "2026-07-15T15:00:00.000Z" },
-      { event: "Small Craft Advisory", onset: null, ends: null }
-    ];
-    // Decided at UPDATED: the statement was still upcoming and the gale had
-    // ended, so neither was in the set the color came from.
-    expect(standingAlertEvents({ alertDetails: details, alertsAt: UPDATED, updated: UPDATED }))
-      .toEqual(["Small Craft Advisory"]);
-    // Decided after the onset: the statement was in effect then, so it stays
-    // in the standing set even though nothing about the details changed.
-    expect(standingAlertEvents({ alertDetails: details, alertsAt: "2026-07-16T08:00:00.000Z", updated: UPDATED }))
-      .toEqual(["Beach Hazards Statement", "Small Craft Advisory"]);
-    // A payload written before alertsAt existed was decided against every
-    // echoed entry, so the refresh compares against all of them and re-selects
-    // a beach a future alert wrongly colored.
-    expect(standingAlertEvents({ alertDetails: details, updated: UPDATED }))
-      .toEqual(["Beach Hazards Statement", "Gale Warning", "Small Craft Advisory"]);
   });
 });

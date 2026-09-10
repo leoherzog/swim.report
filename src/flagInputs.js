@@ -20,7 +20,7 @@
 // thresholds.
 
 import { alertsCheckable } from "./alertsCheckable.js";
-import { alertsInEffect, decidedAlertDetails } from "./rules.js";
+import { alertsInEffect } from "./rules.js";
 import { ecccAlertsForPoint, ECCC_ALERTS_INFO_URL } from "./clients/eccc.js";
 import { ecccMarineAlertsForPoint, ECCC_MARINE_INFO_URL } from "./clients/ecccMarine.js";
 
@@ -195,39 +195,4 @@ export function signalsFromStanding(standing) {
     signalSources: seal.signalSources,
     updated: typeof standing.updated === "string" ? standing.updated : null
   };
-}
-
-// The event names a standing estimate's color was decided against: the echoed
-// alertDetails in effect at its alertsAt (rules.js decidedAlertDetails), or every
-// echoed entry for a payload written before alertsAt existed. Comparing this
-// against the current in-effect set is what lets the refresh see an onset
-// arriving or an ends passing, since neither changes the matched name set.
-// [] for a malformed or missing echo.
-export function standingAlertEvents(standing) {
-  const decided = decidedAlertDetails(standing);
-  const events = [];
-  for (let i = 0; i < decided.length; i = i + 1) {
-    events.push(decided[i].event);
-  }
-  return events;
-}
-
-// The selection comparison: deduped, sorted, "|"-joined event names. Sets, not
-// order and not timestamps, because estimateFlag only ever does indexOf over the
-// four precedence lists — so only the in-effect name set can change a color,
-// while onset/ends churn within that set would otherwise select thousands of
-// beaches for no change.
-export function eventKey(events) {
-  if (!Array.isArray(events)) {
-    return "";
-  }
-  const seen = [];
-  for (let i = 0; i < events.length; i = i + 1) {
-    const name = events[i];
-    if (typeof name === "string" && seen.indexOf(name) === -1) {
-      seen.push(name);
-    }
-  }
-  seen.sort();
-  return seen.join("|");
 }

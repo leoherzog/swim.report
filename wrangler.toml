@@ -43,10 +43,10 @@ directory = "public"
 #                    so no schedule ordering between this cron and that workflow is
 #                    required or implied: a late or missing pipeline run ages a beach
 #                    out to unknown instead of serving stale data.
-# 3-53/10 * * * * — level-triggered alerts refresh, every 10 minutes. Four national
+# 3-53/10 * * * * — recompute-and-diff alerts refresh, every 10 minutes. Three national
 #                    fetches, no per-beach upstream call, and a compare-and-set on
-#                    beach_state.estimate only for beaches whose alert event set moved
-#                    against the set their standing estimate used. Offset off :07 so it
+#                    beach_state.estimate only for beaches whose recomputed payload
+#                    differs from the one they are standing on. Offset off :07 so it
 #                    never fires inside the hourly recompute's measured wall-clock
 #                    window, and off every other minute already in this list.
 # 15 */6 * * *     — 6-hourly water-temperature refresh. Sole writer of watertemp:,
@@ -57,8 +57,8 @@ directory = "public"
 # 30 seconds instead of 15 minutes, while wall clock stays 15 minutes either way.
 # The full 3000-beach hourly run measures 1.0-2.7 s of CPU, so CPU is not what
 # keeps it hourly — its WALL clock is, and wall clock is what a beach-walking
-# fan-out consumes. The alerts refresh above makes four national fetches and
-# writes only the beaches whose alert set moved, so it fits.
+# fan-out consumes. The alerts refresh above makes three national fetches and
+# writes only the beaches whose recomputed payload moved, so it fits.
 # Changing a cron string is a FIVE-file edit (this file, package.json's seed:*
 # URLs, CRON_JOBS in src/index.js, the cron strings hard-coded in the tests, and
 # whichever docs quote the schedule). test/cronTriggers.test.js catches a

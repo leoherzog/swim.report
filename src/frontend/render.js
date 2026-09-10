@@ -32,7 +32,10 @@ import {
 // a scraper may override it per official record with its own staleMs when its
 // source publishes on a slower schedule. WAVE_STALE_MS is 8 h because the wave
 // cycle publishes on its own slower cadence.
-const STALE_MS = 7200000;
+//
+// Exported because the alerts refresh refuses to lower a flag from inputs this
+// page would mark stale, and the two horizons must be one value.
+export const STALE_MS = 7200000;
 const WAVE_STALE_MS = 28800000;
 // The water-temperature tile shows a reading only when it is this fresh;
 // matches the parser window (NDBC_WATER_TEMP_MAX_OBS_AGE_MS) — water temp is

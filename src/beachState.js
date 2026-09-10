@@ -72,6 +72,10 @@ const UPSERT_SQL = buildUpsertSql();
 // estimate_updated out of the SET list keeps the standing instant, which is both
 // the remaining lease's anchor and the CAS token; leaving estimate_expires out
 // keeps the original lease so a refreshed estimate never outlives it.
+//
+// Adding either column to the SET list breaks both that lifetime neutrality and
+// the safety of writing while the refresh is still paging, since the paging
+// SELECT filters on estimate_expires.
 const CAS_SQL =
   "UPDATE beach_state SET estimate = ?1, estimate_color = ?2 " +
   "WHERE beach_id = ?3 AND estimate_updated = ?4";

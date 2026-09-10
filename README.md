@@ -481,19 +481,17 @@ classification (offline)](#discovery-and-classification-offline)).
   losing any of them.
 - `3-53/10 * * * *` (every 10 min) — `runAlertRefresh`. NWS alerts are the one event-driven
   input, so this cron closes the gap between a warning being issued and the flag moving from
-  up to an hour to about ten minutes. It makes four national fetches whose cost does not grow
-  with the beach table, compares each beach's current alert set against the set its standing
-  estimate used, and recomputes only the beaches whose alert situation actually changed —
-  reusing the sealed non-alert inputs so a recompute can never lower a flag by losing a wave
-  reading, a rip-current risk or a water-quality advisory. It publishes a lowering only from a
-  feed whose completeness it verified against `api.weather.gov/alerts/active/count` and whose
-  features it could actually parse, so a quiet nation and a feed whose shape changed under it
-  are never confused; Canadian beaches, which have no equivalent count endpoint, are
-  raise-only. It writes nothing but the estimate column, and only through a compare-and-set on
-  the standing timestamp: the row keeps its original `estimate_updated` and
-  `estimate_expires`, so it can neither restamp the age the detail page reports for the data
-  behind a color nor keep a flag alive past the hourly rotation meant to judge it, and a beach
-  the hourly rewrote underneath it is skipped rather than clobbered.
+  up to an hour to about ten minutes. It makes three national fetches whose cost does not grow
+  with the beach table, re-estimates every beach holding a live estimate against the current
+  alerts using the same functions the hourly uses, and writes only the beaches whose payload
+  actually moved. The recompute reads the sealed non-alert inputs out of the stored estimate,
+  so it can never lower a flag by losing a wave reading, a rip-current risk or a
+  water-quality advisory. A lowering decided from sealed inputs the detail page would already
+  mark stale is left to the hourly instead. It writes nothing but the estimate column, and
+  only through a compare-and-set on the standing timestamp: the row keeps its original
+  `estimate_updated` and `estimate_expires`, so it can neither restamp the age the detail page
+  reports for the data behind a color nor keep a flag alive past the hourly rotation meant to
+  judge it, and a beach the hourly rewrote underneath it is skipped rather than clobbered.
 - `15 */6 * * *` (6-hourly) — `runWaterTempRefresh`: the sole writer of `watertemp:` + beachId,
   the WTMP water temperature from the nearest station able to serve that reading (see "Water
   temperature stations"), deduped by station id so each file is fetched once and fanned to

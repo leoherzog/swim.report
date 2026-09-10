@@ -1322,7 +1322,11 @@ shapes it walks are the clients' wire shapes, not general geography.
       // regardless of zone count; per-zone filtering happens locally in nwsAlertsForZone.
       // Success -> { alerts: [{ event, onset, ends, description, instruction, area,
       //                         sender, zones: [zone ids] }],
-      //              sourceUrl: NWS_ACTIVE_ALERTS_URL }
+      //              sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount, truncated }
+      //   featureCount is the RAW feature count before the event/zone filter below and
+      //   truncated says the response carried a pagination cursor; the alerts refresh
+      //   logs featureCount against alerts.length, where a large gap is the visible
+      //   signature of a schema drift rather than a quiet nation.
       //   event = properties.event; onset falls back properties.onset ->
       //   properties.effective -> null, ends falls back properties.ends ->
       //   properties.expires -> null (non-empty strings only); description, instruction,
@@ -2537,9 +2541,9 @@ matched job; an unrecognized cron is logged and ignored. The table:
                          repo's own workflows avoid. No ordering against the offline wave
                          cycle is required, because "waveinput:" keys carry an absolute
                          expiration derived from the model valid time.
-- "3-53/10 * * * *"    → runAlertRefresh(env). Level-triggered alerts refresh, every 10
-                         minutes. Four national fetches, no per-beach upstream call; writes
-                         only beach_state.estimate. Offset off the hourly's measured
+- "3-53/10 * * * *"    → runAlertRefresh(env). Recompute-and-diff alerts refresh, every
+                         10 minutes. Three national fetches, no per-beach upstream call;
+                         writes only beach_state.estimate. Offset off the hourly's measured
                          22-147 s window starting at :07, and off every other minute in this
                          table — a plain "*/10" would fire at :10, inside a slow hourly run.
 - "15 */6 * * *"       → runWaterTempRefresh(env). Sole writer of "watertemp:", and sole
@@ -2829,19 +2833,35 @@ reaches src/rules.js, so it can never change a flag color and never bumps RULES_
 
 ### runAlertRefresh (every 10 min: "3-53/10 * * * *")
 
-Constants: FAST_MIN_REMAINING_TTL_SECONDS = 300, FAST_LOWER_MAX_SEAL_AGE_MS = 7200000,
-FAST_MAX_BEACHES_PER_RUN = 2000, ALERT_COUNT_SLACK = 5, ALERT_PARSE_DROP_MAX = 5,
-ALERT_REFRESH_PAGE_SIZE = 500. There is no write-pool deadline: the writes are D1 batches of
-at most 200 CAS statements, not a per-beach fan-out, so the run's wall clock is the four
-fetches (45 s each at their client timeouts) plus the keyset pages plus a handful of
-batches, comfortably inside the 600 s cadence.
+Constant: ALERT_REFRESH_PAGE_SIZE = 500, the cron's only one. There is no write-pool
+deadline: the writes are D1 batches of at most 200 CAS statements, not a per-beach fan-out,
+so the run's wall clock is three fetches (45 s each at their client timeouts) plus the keyset
+pages plus a handful of batches, comfortably inside the 600 s cadence.
 
 NWS alerts are the only event-driven input in the system, so this cron closes the gap
 between a warning being issued and the flag moving from up to an hour to about ten minutes.
-Its upstream cost is flat in the beach table; its per-beach cost is paid only for beaches
-whose alert situation actually changed.
+Its upstream cost is flat in the beach table. The mechanism is recompute-and-diff: every live
+estimate is re-estimated against the current alerts through the hourly's own functions, and
+only the rows whose alert-derived payload moved are written. There is no alert-set comparison
+of its own to keep in step with rules.js, so the two crons cannot disagree about what an
+alert means.
 
-1. Page through the beaches that HAVE a live standing estimate, keyset on b.id:
+1. Three national fetches, issued concurrently with Promise.all over individually caught
+   promises, each bounded by its client's timeoutMs (NWS_TIMEOUT_MS 45000, ECCC_TIMEOUT_MS
+   45000): fetchAllActiveAlerts(), fetchActiveEcccAlerts(nowIso),
+   fetchActiveEcccMarineAlerts(nowIso).
+
+       nwsOk  = nationalAlerts !== null
+       ecccOk = ecccAlerts !== null && ecccMarineAlerts !== null
+
+   Both ECCC collections are required, stricter than the hourly's deliberate
+   proceed-on-partial-success, because at 6x cadence a marine-collection outage would
+   repeatedly drop a live "gale warning" red to a wave-height green. With neither authority
+   up, log the completion line with rows=0 and return without touching D1. Nothing else is
+   fetched — no SRF, no wqFloor scrape, no official scrape, no "waveinput:" read — so a
+   10-minute cadence costs third-party sites nothing and there is no second source of truth
+   for any non-alert input.
+2. Page through the beaches that HAVE a live standing estimate, keyset on b.id:
 
        SELECT b.id, b.lat, b.lon, b.nws_zone, b.marine_zone, b.eccc_zone, b.water_class,
               s.estimate, s.estimate_updated, s.estimate_expires
@@ -2851,129 +2871,94 @@ whose alert situation actually changed.
        ORDER BY b.id LIMIT 500
 
    The INNER join and the expiry predicate do the first guard's work in SQL: a beach with no
-   live estimate has nothing to compare a current alert set against, and the hourly owns
-   publishing its first one, so it is never read. No zone IN list, no bind chunking and no
-   marine_zone index: zone matching is a Map lookup per beach in memory, over a Set built by
-   a plain loop — the concat reduce the hourly uses is quadratic, and this cron walks the
-   whole table against a sub-hourly 30 s CPU allowance. water_class rides along because the
-   recompute re-evaluates rules.js step 3 against the row's own thresholds. Selection happens
-   per page while the standing estimate is still in hand, so no row is read twice and no page
-   is retained past its own loop.
-2. Four national fetches, each in its own try/catch and each bounded by its client's
-   timeoutMs (NWS_TIMEOUT_MS 45000, ECCC_TIMEOUT_MS 45000): fetchAllActiveAlerts(),
-   fetchActiveAlertCount(), fetchActiveEcccAlerts(nowIso), fetchActiveEcccMarineAlerts(nowIso).
-   Nothing else is fetched — no SRF, no wqFloor scrape, no official scrape, no "waveinput:"
-   read — so a 10-minute cadence costs third-party sites nothing and there is no second
-   source of truth for any non-alert input.
-3. Feed integrity gate, entirely intra-run, with no persisted feed state and no absolute
-   feature floor:
-
-       usFeedUsable  = nationalAlerts !== null
-       usLowerAllowed = usFeedUsable && nationalAlerts.truncated === false &&
-                        alertCount !== null &&
-                        nationalAlerts.featureCount + ALERT_COUNT_SLACK >= alertCount.total &&
-                        nationalAlerts.featureCount - nationalAlerts.alerts.length
-                          <= ALERT_PARSE_DROP_MAX
-       ecccUsable    = ecccAlerts !== null && ecccMarineAlerts !== null
-
-   fetchAllActiveAlerts cannot distinguish a genuinely quiet nation from a 200 whose schema
-   drifted — both yield alerts: [] — so the count endpoint is an independent view of the same
-   population produced by a different upstream code path, and a parse materially short of the
-   API's own total is truncation or drift whatever its magnitude. That is the gap every
-   fraction-based rail leaves open. ALERT_COUNT_SLACK covers only the skew between two fetches
-   taken about a second apart.
-   The two clauses answer different questions, and both are needed. The count proves the whole
-   population ARRIVED; the parse-drop clause proves the parse UNDERSTOOD it. featureCount is
-   the raw pre-filter count — it has to be, to stay comparable to the count endpoint — so a
-   drift that renames properties.event or restructures geocode.UGC / affectedZones yields
-   alerts: [] with featureCount still equal to total, and the count clause alone would license
-   a nationwide clear-down. A healthy feed drops almost nothing at that filter, since an active
-   alert carries an event name and at least one zone id, so a drop above ALERT_PARSE_DROP_MAX
-   is drift rather than routine loss. Consequences: nationalAlerts null excludes every US beach (a
-   missing feed is not evidence of clearing); an unusable count, a short parse or a pagination
-   cursor leaves US raises at 10-minute latency and sends US lowerings back to the hourly,
-   logged feed=unverified; either ECCC collection null excludes every Canadian beach, stricter
-   than the hourly's deliberate proceed-on-partial-success because at 6x cadence a
-   marine-collection outage would repeatedly drop a live "gale warning" red to a wave-height
-   green.
-4. Select per page, synchronously, while the standing estimate is still in hand. Three
-   guards, each a SKIP that leaves the standing value untouched — there is no code path in
-   which estimateFlag is called with a null substituted for a sealed input:
-   (1) the standing estimate is unusable — the blob does not parse to an object,
-   signalsFromStanding returns null (no seal, another seal version, or a malformed
-   signalSources), or updated is missing, unparseable or future-dated, which makes it
-   useless as both the stale-lower clock and the CAS token. Counted skipNoSeal;
-   (2) authority eligibility, against usFeedUsable / ecccUsable, counted skipAuthority;
-   (3) lease — a non-numeric estimate_expires, or under FAST_MIN_REMAINING_TTL_SECONDS
-   (evaluated as estimate_expires - nowEpoch < 300) left, which belongs to the hourly.
-   Counted skipLease.
-   There is no supersession guard here. D1 is strongly consistent, so the row read at step 1
-   IS the standing value, and the race with a concurrent hourly is closed at the write instead
-   — the CAS in step 5 matches on the estimate_updated this guard read (section 2).
-   A surviving beach is selected when the alert half failed to resolve this run, when the
-   seal records that it failed for the hourly (alertsResolved false — the repair for a failed
-   national fetch, whose echoed alertDetails is [] and otherwise indistinguishable from
-   "checked, none active"), or when eventKey(current) !== eventKey(standing). Both sides are
-   IN-EFFECT sets: current is buildAlertInputs' alerts at this run's clock, standing is
-   standingAlertEvents — decidedAlertDetails at the standing value's alertsAt, or every echoed
-   entry for a pre-alertsAt payload, which was decided against all of them. So an alert whose
-   onset arrived or whose ends passed since the standing decision selects the beach exactly as
-   a new issuance does, while a payload the refresh itself wrote at an onset (alertsAt its own
-   clock, updated still the hourly's) is not re-selected every run. Sets, not order, not
-   timestamps within the set and never severity: comparing severities would reimplement
-   ALERT_PRECEDENCE outside rules.js, and set inequality is what catches a zone swapping Small
-   Craft Advisory for Gale Warning or losing one of two alerts.
-   A candidate keeps the row's scalar columns, the standing COLOR and its updated stamp, and
-   the two derived input halves; the standing estimate is released with its page — parsed and
-   raw, the row's blob column nulled at the moment the candidate is retained — and the list
-   itself is capped at FAST_MAX_BEACHES_PER_RUN. Both keep the paging streaming: a nationwide
-   event moves most zones' alert sets at once, every affected estimate echoes that event's
-   capped alert text, and one retained payload per row would carry the whole table into the
-   128 MB isolate long before the write cap could bound anything.
-   There is deliberately no persisted alert baseline and no run lock. The standing set is
-   free, because the page carries every standing estimate anyway. Level triggering also
-   repairs the hourly/fast race automatically: a fast raise clobbered by a slow hourly's older
-   snapshot reverts alertDetails to the pre-alert set, which differs from current, so the next
-   run re-selects and re-raises it.
-5. Recompute per candidate: estimateFlag(buildEstimateInputs(row, alertPart, signals)), then
-   three rails on the LOWERING direction only, since age can only understate a hazard — Canada
-   is raise-only (neither GeoMet collection has a count endpoint, so a Canadian lowering
-   cannot come from a feed whose completeness was verified), usLowerAllowed must hold for US
-   beaches, and no lowering may be decided by inputs older than FAST_LOWER_MAX_SEAL_AGE_MS,
-   which is exactly render.js STALE_MS. next.updated stays the standing instant and the seal
-   is spread back on.
-   FAST_MAX_BEACHES_PER_RUN caps WRITES, not reads. A capped run is self-continuing: uncapped
-   beaches keep their old standing alert set, so the next run re-selects them.
-   The write is unconditional for a selected beach that clears its rails, not gated on a
-   strict color change: selection already means the alert set moved, so the reason string,
-   alertDetails and sources are stale by definition.
-6. Write, through estimateCasStatement(env.DB, id, stored, standingUpdated) per candidate,
-   chunked at 200 and applied as sequential env.DB.batch calls, each in its own try/catch
-   that logs and moves to the next chunk: a rejected chunk costs its own beaches one
-   ten-minute cadence, never the chunks behind it. The UPDATE sets estimate and
-   estimate_color only, matching on the standing estimate_updated: the row keeps its original
-   estimate_updated and estimate_expires, so this cron can neither restamp the age the detail
-   page reports for the wave and rip data behind the color nor keep a flag alive past the
-   rotation meant to judge it. A statement whose meta.changes is 0 lost the race to an hourly
-   rewrite and is counted skipSuperseded, not written; the rest count written, plus raised or
-   lowered by rank against the standing color.
-7. What it never writes: beach_state.wqfloor (the hourly stays its single writer, so expiry
+   live estimate has nothing to recompute from, and the hourly owns publishing its first one,
+   so it is never read. The walk ends only on an empty page, never on a short one. No zone IN
+   list, no bind chunking and no marine_zone index: zone matching is a per-beach lookup into an
+   alertsMap built by a plain loop — the concat reduce the hourly uses is quadratic,
+   and this cron walks the whole table against a sub-hourly 30 s CPU allowance. water_class
+   rides along because the recompute re-evaluates rules.js step 3 against the row's own
+   thresholds. The SELECT carries the estimate blob, so a page holds at most 500 estimates
+   each carrying capped alert text (TEXT_CAPS in src/clients/alertMatch.js); that is the
+   memory bound of the run, and it holds only because nothing is retained past its own page.
+3. Recompute per row, synchronously, while the standing estimate is still in hand:
+   - standing = JSON.parse(row.estimate). A blob that does not parse to an object,
+     signalsFromStanding returning null (no seal, another seal version, or a malformed
+     signalSources), or an updated that is not a parseable instant — useless as the
+     stale-lower clock, and an age the rail cannot compute is not a fresh one — counts
+     skipNoSeal and leaves the standing value untouched.
+   - Authority comes from the row's own columns, never from the recompute: a row with
+     nws_zone or marine_zone is US and needs nwsOk; a row with eccc_zone and neither NWS zone
+     is Canadian and needs ecccOk; a row with no zone at all, or whose authority's feed did
+     not arrive, counts skipAuthority. Reading eligibility off alertPart.alertsResolved
+     instead would conflate a beach the feed covered but matched no zone for with a beach
+     whose feed never landed.
+   - alertPart = buildAlertInputs(row, alertCtx, nowIso), then
+     next = estimateFlag(buildEstimateInputs(row, alertPart, signals)), next.updated set back
+     to the standing instant, and stored = next with sealFromSignals(signals, alertPart)
+     spread on as estimateInputs. estimateFlag is never called with a null substituted for a
+     sealed input, which is what stops a recompute lowering a flag by losing a wave height, a
+     rip risk or a water-quality advisory.
+   - changed = signals.alertsResolved === false || comparable(stored) !== comparable(standing),
+     where comparable(e) is JSON.stringify over the estimate with estimateInputs nulled and
+     alertsAt replaced by alertsInEffect(e.alertDetails, e.alertsAt).join("|"). The seal's
+     non-alert half is identical by construction, so discarding it makes the comparison a test
+     of the alert-derived payload alone; replacing rather than nulling alertsAt drops this
+     run's clock while keeping the set that clock decides, so an onset arriving or an ends
+     lapsing selects the beach for every event name, not only the ones a precedence list
+     colors. alertsResolved false is the explicit first clause: it is the repair for an
+     estimate the hourly sealed after a failed national fetch, whose echoed
+     alertDetails is [] and otherwise indistinguishable from "checked, none active". Diffing
+     the whole payload rather than the color is deliberate — the reason string, the
+     alertDetails echo and the sources list all move when the alert set does, including when
+     an alert published ahead of its onset joins the echo without deciding a color. An
+     unchanged row is written nothing, and a second run against an identical feed writes
+     nothing at all.
+   - The one lowering rail: when SEVERITY_RANK[next.color] < SEVERITY_RANK[standing.color]
+     and nowMs - Date.parse(signals.updated) >= STALE_MS (src/frontend/render.js, the same 2 h
+     horizon the page marks stale), count skipStaleLower and write nothing. A clear-down
+     decided on wave and wind inputs the page itself would flag as stale waits for the hourly.
+     The rail is on the lowering direction only, since age can only understate a hazard.
+   - Otherwise push estimateCasStatement(env.DB, row.id, stored, row.estimate_updated) with
+     its rank pair.
+   There is no supersession guard and no lease guard here. D1 is strongly consistent, so the
+   row read at step 2 IS the standing value, and the race with a concurrent hourly is closed
+   at the write — the CAS matches on the estimate_updated that read returned (section 2). A
+   lease guard would only restate arithmetic that already holds: estimate_expires is always
+   updated + FLAG_TTL_SECONDS, so a row minutes from expiry carries a seal hours past
+   STALE_MS and the stale rail already refuses to lower it.
+4. Write at the end of each page, through chunkStatements at 200 and batchWithRetry(env,
+   group, "alert refresh"), each chunk in its own try/catch that logs and moves to the next:
+   a rejected chunk costs its own beaches one ten-minute cadence, never the chunks behind it.
+   The UPDATE sets estimate and estimate_color only, matching on the standing
+   estimate_updated: the row keeps its original estimate_updated and estimate_expires, so this
+   cron can neither restamp the age the detail page reports for the wave and rip data behind
+   the color nor keep a flag alive past the rotation meant to judge it. Adding either column
+   to the SET list would also break the safety of writing while paging, which holds because
+   the CAS touches only rows at or before the cursor. A statement whose meta.changes is 0 lost
+   the race to an hourly rewrite and is counted skipSuperseded, not written; the rest count
+   written, plus raised or lowered by rank against the standing color. Each page's statement
+   and rank arrays are cleared before the next page is read; the counters accumulate across
+   pages and the completion line reports run totals.
+5. What it never writes: beach_state.wqfloor (the hourly stays its single writer, so expiry
    remains the only way a cleared advisory is withdrawn), beach_state.official, beach_state
    .reading, a flag_history row (it scrapes no officials, so it has no estimate/official pair
    to log), any KV key at all, and above all recompute_updated, which is runFlagRecompute's
-   rotation cursor and single-writer by contract. This cron needs no cursor because it is
-   level-triggered over the whole table.
+   rotation cursor and single-writer by contract. This cron needs no cursor because it
+   re-estimates the whole live set every run.
 
-Completion log fields, in order: rows, candidates, written, raised, lowered, skipNoSeal,
-skipAuthority, skipLease, skipStaleLower, skipFeedLower, skipCanadaLower, skipSuperseded,
-capped, feed ("complete" | "unverified" | "down"), features, parsed, count,
-eccc ("ok" | "down"), elapsedMs. rows counts the rows the keyset paging read, which is the
-beaches carrying a live estimate rather than the whole flag-worthy set. features is
-the raw feature count and parsed the number the client could read, so the two together say
-which half of the gate refused a clear-down. skipStaleLower= and feed=unverified are
-the two operator trip-wires: the first means the hourly rotation has fallen behind, the second
-that the count cross-check is failing and US clear-down has silently reverted to hourly
-latency.
+Completion log fields, in order: rows, written, raised, lowered, skipNoSeal, skipAuthority,
+skipStaleLower, skipSuperseded, staleWritten, nws ("ok" | "down"), eccc ("ok" | "down"),
+features, parsed, elapsedMs. rows counts the rows the keyset paging read, which is the
+beaches carrying a live estimate rather than the whole flag-worthy set. staleWritten counts
+writes whose sealed inputs were already at or past STALE_MS. The rail keeps lowerings out of
+it, so it is raises plus the same-rank rewrites an alertDetails or reason change selects, and
+it routinely exceeds raised plus lowered. features and parsed are pure observation of the NWS
+parse and gate nothing: features high with parsed 0 is the visible signature of a schema
+drift that renamed properties.event or restructured geocode.UGC. skipStaleLower is cold-tier
+steady state, not an alarm — the hourly rotation is sized at about four runs, so a cold
+beach's seal is routinely older than the page's 2 h stale horizon and a clear-down it would
+decide simply waits its turn. The operator trip-wires are the line's absence, nws=down or
+eccc=down persisting across runs, and features high with parsed 0.
 
 ### Run budgets and write pools (src/pool.js)
 
@@ -3015,13 +3000,13 @@ WAVE_WRITE_DEADLINE_MS (840000), plus the WAVE_CURSOR_FLUSH_SIZE (100) flush gra
 for the write pool's cursor. The two deadlines are numeric-env-overridable via
 runBudget(env).
 
-The alerts refresh cron takes no write deadline and no write pool. Its worst case — four
+The alerts refresh cron takes no write deadline and no write pool. Its worst case — three
 fetches bounded at 45 s each, the keyset pages, and one D1 batch per 200 CAS statements —
 sits comfortably inside the 600 s cadence, so two runs cannot overlap in practice. Nothing in
 the design depends on that: the CAS on estimate_updated is what settles a race, whether the
-other writer is a second refresh run or the hourly. FAST_MAX_BEACHES_PER_RUN (2000) caps
-writes rather than reads, and an uncapped beach keeps its old standing alert set, so the next
-run re-selects it.
+other writer is a second refresh run or the hourly. It caps neither reads nor writes, because
+a run that writes nothing for a beach leaves that beach's standing estimate to be recomputed
+again ten minutes later.
 
 Truncation contract. A run that trips a deadline is a successful partial run, not a failure:
 every beach the write pool reached has its KV written and its wave_updated stamped; every
@@ -4787,26 +4772,26 @@ test uses symbolically.
   JSON.stringify emits null for NaN and Infinity alike. Plus a coverage assertion against a
   literal field list, so adding an input to rules.js without adding it to the seal fails here;
   signalsFromStanding's four rejections; buildEstimateInputs' normalizations and
-  alertsCheckable; buildAlertInputs parity with the pre-refactor hourly branches, its
+  alertsCheckable; buildAlertInputs parity with the hourly's own alert branches, its
   onset rule (an upcoming or ended alert stays in alertDetails and out of alerts, for both
-  authorities) and alertsAt; and standingAlertEvents at alertsAt versus the every-entry
-  reading of a pre-alertsAt payload.
-- test/alertRefresh.test.js — runAlertRefresh through the scheduled handler: the level
-  trigger (gain, clear, swap, partial loss, equal sets, alertsResolved false, an alert
-  published ahead of its onset not raising, the same alert raising once its onset arrives
-  with the feed unchanged and not re-selecting on the next run, a standing alert walking
-  down once its ends passes, a pre-alertsAt payload a future alert colored walking down),
-  every guard
-  asserting the stored estimate is untouched, the degraded-feed matrix
-  (national fetch null, count null, short parse, a full feed that parsed to nothing,
-  agreeing counts, pagination, ECCC marine null), the LOWERING
-  regression set — a cleared warning must still land red from a sealed water-quality
-  advisory, rip risk, wave height or wind fallback, never green — the Canada raise-only and
-  stale-seal rails, and the write mechanics: only estimate and estimate_color change, the
-  original estimate_expires and estimate_updated survive the write, the seal is present, an
-  expired or absent row is never a candidate, a row the hourly rewrote between the read and
-  the write counts skipSuperseded and lands nothing, a rejected chunk leaving its own
-  beaches on their standing color while the chunks behind it still land, and no wqfloor,
+  authorities) and alertsAt.
+- test/alertRefresh.test.js — runAlertRefresh through the scheduled handler: the diff
+  (a raise on a new in-effect alert, a lowering when an alert ends, an alert published ahead
+  of its onset moving alertDetails without moving the color, the alertsResolved repair
+  rewriting a beach once the feed resolves even with no alerts in effect, and convergence —
+  a second run against an unchanged feed writes nothing at all); every skip asserting the
+  stored estimate is untouched (skipNoSeal on an unparseable blob or a missing seal,
+  skipAuthority on a beach enriched for neither authority, skipStaleLower on a seal past
+  STALE_MS that permits a raise and refuses a lowering, skipSuperseded on a row the hourly
+  rewrote between the read and the write); the feed matrix — NWS down skips US rows and still
+  serves Canadian ones and the reverse, both down touches D1 zero times; the LOWERING
+  regression set, where a cleared warning must still land red from a sealed water-quality
+  advisory, rip risk, wave height or wind fallback, never green; paging, where a short page
+  does not end the walk and only an empty one does, writes flush per page, and a rejected
+  chunk leaves its own beaches on their standing color while the chunks behind it still land;
+  and the write mechanics: only estimate and estimate_color change, the original
+  estimate_expires and estimate_updated survive the write, the seal is present, an expired or
+  absent row is never read, the completion log carries its documented fields, and no wqfloor,
   official, flag_history or recompute_updated write happens on this path.
 - test/scraperHealth.test.js — updateScraperHealth (increment/reset, 23-vs-24 boundary,
   exact alert strings, "never" fallback).

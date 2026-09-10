@@ -20,13 +20,6 @@ const NWS_TIMEOUT_MS = 45000;
 // matching happens locally in nwsAlertsForZone.
 export const NWS_ACTIVE_ALERTS_URL = "https://api.weather.gov/alerts/active";
 
-// The count view of the same active-alert population, produced by a different
-// code path upstream. The alerts refresh cron cross-checks one against the other:
-// fetchAllActiveAlerts cannot tell a genuinely quiet nation from a 200 whose
-// schema drifted, because both parse to zero alerts, and a parse materially short
-// of the API's own total is truncation or drift whatever its magnitude.
-export const NWS_ACTIVE_ALERTS_COUNT_URL = "https://api.weather.gov/alerts/active/count";
-
 // Per-zone provenance URL for FlagEstimate source entries. The cron fetches
 // NWS_ACTIVE_ALERTS_URL; the zone-scoped view is the more useful pointer for a
 // given beach's payload.
@@ -129,32 +122,14 @@ export async function fetchAllActiveAlerts() {
   return {
     alerts: alerts,
     sourceUrl: NWS_ACTIVE_ALERTS_URL,
-    // The RAW feature count, before the event/zone filter above, because that is
-    // the only figure comparable to the count endpoint's total: this parse
-    // legitimately drops features with no event name and features with no
-    // resolvable zone.
+    // The RAW feature count, before the event/zone filter above: a parse that
+    // understood the feed drops only features with no event name and features
+    // with no resolvable zone, so featureCount far above alerts.length is the
+    // visible signature of a schema drift.
     featureCount: features.length,
-    // A paginated response is a partial view of the population, so the refusal
-    // it drives is the same one a short parse drives.
+    // A paginated response is a partial view of the population.
     truncated: json.pagination ? true : false
   };
-}
-
-// Total active alerts nationwide in one small fetch. Success -> { total },
-// failure -> null. A response whose total is not a finite non-negative number is
-// a failure: an unusable cross-check must read as "unverified", never as a
-// license to clear flags.
-export async function fetchActiveAlertCount() {
-  const json = await fetchNwsJson(NWS_ACTIVE_ALERTS_COUNT_URL, "active alert count");
-  if (json === null) {
-    return null;
-  }
-  const total = json.total;
-  if (typeof total !== "number" || !isFinite(total) || total < 0) {
-    console.log("nws: active alert count missing total");
-    return null;
-  }
-  return { total: total };
 }
 
 // Pure, exported for tests — the NWS counterpart of ecccAlertsForPoint.

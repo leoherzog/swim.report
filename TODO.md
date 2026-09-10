@@ -232,13 +232,18 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   Cache means cache hits do not run the Worker, so `last_viewed` undercounts popular beaches
   slightly, which is fine for a coarse priority signal.
 - **Alerts-only fast cron — shipped as `runAlertRefresh` (`"3-53/10 * * * *"`).** It closes
-  the warning-to-flag gap from up to an hour to about ten minutes on four national fetches
+  the warning-to-flag gap from up to an hour to about ten minutes on three national fetches
   whose cost is flat in the beach table. Residue: a queue-based stale-refresh (request path
   enqueues, consumer fetches), only if flagless gaps show up in practice.
-- **Canadian clear-down is still hourly.** `runAlertRefresh` is raise-only for Canada, because
-  neither GeoMet collection has an `/alerts/active/count` equivalent and the cron publishes a
-  lowering only from a feed whose completeness it verified. It becomes 10-minute the moment
-  GeoMet exposes a count or the two collections gain an independent completeness signal.
+- **No feed-completeness gate on the national alert fetches.** Both crons treat a 200 that
+  parsed to zero alerts as a quiet nation, so a schema drift that renamed `properties.event`
+  would clear alert-driven colors nationwide within an hour. If a gate is wanted, its home is
+  inside `fetchAllActiveAlerts` — returning `null` on a response it cannot vouch for, so the
+  hourly and the refresh inherit the same verdict and neither reimplements it. A count
+  cross-check against `api.weather.gov/alerts/active/count` plus a parse-drop bound is the
+  obvious shape; the ECCC collections have no count equivalent, so a Canadian gate needs a
+  different signal. The refresh's own `features` and `parsed` log fields are the current
+  detection: `features` high with `parsed` 0 is drift.
 - **Marine-zone `nws_zone` rows are requeued, not yet re-drained.** Migration 0013 NULLed
   `nws_zone` on every row whose id carried a marine prefix (336 at the time) and
   `runNwsEnrichment` now rejects a marine `forecastZone` and re-probes 16 nudged points for the
@@ -266,15 +271,16 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   was; it does not make the growth sublinear. Re-measure against the real scan before quoting
   a ceiling. Whatever it turns out to be, the single-fetch map model wants bbox or tile
   sharding well before it, and no cache policy hides an OOM on a cache miss.
-- **Both beach-walking crons are O(N) in D1 rows read.** The alerts refresh pages every beach
-  carrying a live estimate, 144 runs a day, each row carrying that estimate's JSON blob; the
-  hourly reads up to `MAX_BEACHES_PER_RUN` rows and writes one row per beach. That is the
-  Worker's one recurring per-beach cost, and it buys the standing alert set for the few dozen
-  beaches whose alerts actually moved. Cheaper selection needs the standing alert set outside
-  the estimate blob — a column or a digest the refresh can filter on in SQL — which is a
-  schema change, not a tuning knob. Watch D1 rows-read billing as the table grows, and add an
-  index on `beach_state.estimate_expires` only if the paging plan shows it wanting one: the
-  keyset orders on `b.id`, so today it does not.
+- **Both beach-walking crons are O(N) in D1 rows read.** The alerts refresh reads every live
+  estimate blob 144 times a day, since a recompute needs the whole sealed payload, and writes
+  only the few dozen beaches whose alerts moved; the hourly reads up to `MAX_BEACHES_PER_RUN`
+  rows and writes one row per beach. That is the Worker's one recurring per-beach cost, and it
+  is the price of holding no alert state outside the estimate. The lever is a stored alert key
+  — a column or digest on `beach_state`, written by whichever cron last estimated the beach,
+  that the refresh can filter on in SQL to read only rows whose alert set could have moved —
+  which is a schema change, not a tuning knob. Watch D1 rows-read billing as the table grows,
+  and add an index on `beach_state.estimate_expires` only if the paging plan shows it wanting
+  one: the keyset orders on `b.id`, so today it does not.
 - **Orphan `beach_state` rows are never pruned.** Migration 0014 carries no foreign key, so a
   beach the offline reconciliation deletes leaves its state row behind; it is invisible to
   every JOIN and costs only storage. Add `DELETE FROM beach_state WHERE beach_id NOT IN

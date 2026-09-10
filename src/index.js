@@ -1,9 +1,8 @@
 import { handleRequest } from "./router.js";
-import { renderErrorPage } from "./frontend/render.js";
-import { estimateFlag, SEVERITY_RANK } from "./rules.js";
+import { renderErrorPage, STALE_MS } from "./frontend/render.js";
+import { estimateFlag, SEVERITY_RANK, alertsInEffect } from "./rules.js";
 import {
   fetchAllActiveAlerts,
-  fetchActiveAlertCount,
   nwsAlertsForZone,
   alertsUrlForZone,
   wfoFromGridUrl,
@@ -44,9 +43,7 @@ import {
   buildAlertInputs,
   buildEstimateInputs,
   sealFromSignals,
-  signalsFromStanding,
-  standingAlertEvents,
-  eventKey
+  signalsFromStanding
 } from "./flagInputs.js";
 import {
   WQFLOOR_TTL_SECONDS,
@@ -145,39 +142,6 @@ const SRF_GATHER_DEADLINE_MS = 120000;
 // after the loop never runs when the invocation is killed mid-loop, so the cursor
 // never moves and the same prefix of beaches is reprocessed every run forever.
 const WAVE_CURSOR_FLUSH_SIZE = 100;
-// Alerts refresh cron ("3-53/10 * * * *"). It fetches four national endpoints
-// bounded at 45 s each, pages the live-estimate join, and writes only the beaches
-// whose alert set moved, so the worst case sits well inside the 600 s cadence.
-//
-// FAST_MIN_REMAINING_TTL_SECONDS: a beach within five minutes of its lease
-// expiring belongs to the hourly. The refresh never extends a lease, so
-// rewriting a nearly-dead estimate buys nothing.
-// FAST_LOWER_MAX_SEAL_AGE_MS: this cron will not publish a LOWERING decided by
-// inputs the product itself would render with a stale-data warning. 7200000 is
-// render.js STALE_MS. Raises are never gated on age, because age can only
-// understate a hazard.
-// FAST_MAX_BEACHES_PER_RUN caps the candidate list, so a nationwide event that
-// moves every zone's alert set cannot materialize one retained candidate per
-// table row against the 128 MB isolate; beyond the cap the run is
-// self-continuing, because the beaches past it keep their standing alert set and
-// the next run re-selects them.
-// ALERT_COUNT_SLACK covers only the skew between two fetches taken about a second
-// apart — the national issue rate is a few alerts per ten minutes — so a shortfall
-// larger than this is truncation or schema drift, not timing.
-// ALERT_PARSE_DROP_MAX is the second half of that cross-check and answers a
-// different question: the count endpoint proves the whole population arrived,
-// this proves the parse UNDERSTOOD it. featureCount is the raw pre-filter count,
-// so a schema drift that renames properties.event or restructures the zone fields
-// yields alerts: [] with featureCount still equal to the count endpoint's total —
-// a nationwide clear-down licensed by a feed nobody could read. A healthy feed
-// drops almost nothing at that filter, since an active alert carries an event
-// name and at least one UGC or affectedZones id, so a larger drop is drift rather
-// than routine loss.
-const FAST_MIN_REMAINING_TTL_SECONDS = 300;
-const FAST_LOWER_MAX_SEAL_AGE_MS = 7200000;
-const FAST_MAX_BEACHES_PER_RUN = 2000;
-const ALERT_COUNT_SLACK = 5;
-const ALERT_PARSE_DROP_MAX = 5;
 // Rotation cursor per cron. A column name cannot be a bind parameter, so the
 // value is concatenated into the SQL as a literal: it must stay a lookup in this
 // two-entry whitelist and must never be caller-derived text.
@@ -360,6 +324,10 @@ function makeWaveCursorStamper(env, nowIso, flushSize) {
 // water_class rides along because this cron recomputes rules.js step 3 against
 // the row's own thresholds; lat/lon and the three zone columns are what
 // buildAlertInputs matches on.
+//
+// The SELECT carries the estimate blob, so a page is at most 500 estimates each
+// holding capped alert text (TEXT_CAPS in src/clients/alertMatch.js); that is
+// the memory bound of the run. The page size is this cron's only constant.
 const ALERT_REFRESH_PAGE_SIZE = 500;
 const ALERT_REFRESH_SQL =
   "SELECT b.id, b.lat, b.lon, b.nws_zone, b.marine_zone, b.eccc_zone, b.water_class, " +
@@ -1029,123 +997,121 @@ async function runFlagRecompute(env) {
 // being issued, taking effect or ending and the flag moving from up to an hour to
 // about ten minutes.
 //
-// Its upstream cost does not scale with the beach table: four national fetches,
-// matched to beaches locally. Its per-beach cost is paid only for beaches whose
-// alert situation actually changed, which it detects by comparing each beach's
-// CURRENT alert event set against the set its STANDING estimate was decided
-// against — echoed into the stored estimate as alertDetails by rules.js. That is
+// Its upstream cost does not scale with the beach table: three national fetches,
+// matched to beaches locally. It recomputes every live estimate against those
+// fetches through the hourly's own buildAlertInputs, buildEstimateInputs and
+// estimateFlag, rebuilding the non-alert half from the estimateInputs seal inside
+// the same blob, and writes only the rows whose recomputed payload moved. That is
 // why there is no persisted baseline, no zone digest, no gained/changed/cleared
-// classification and no first-run semantics: the standing set arrives on the same
-// row the selection reads.
+// classification and no first-run semantics: the standing payload arrives on the
+// same row the recompute reads.
 //
-// Level-triggering is also what removes the hourly/fast interlock at the level of
-// which beaches get looked at, and the compare-and-set closes the write race
-// underneath it: the UPDATE lands only while estimate_updated is still the
-// instant this run decided against, so an hourly run that rewrote the beach in
-// between wins and this one reports no change. If the hourly clobbers a raise
-// with an older snapshot, the clobbered value's alertDetails reverts to the old
-// set, which differs from current, so the next run re-selects the beach and
-// re-raises it. Repair is automatic and bounded at one cadence.
+// The compare-and-set closes the write race with the hourly underneath: the
+// UPDATE lands only while estimate_updated is still the instant this run
+// recomputed against, so an hourly run that rewrote the beach in between wins and
+// this one reports no change. If the hourly clobbers a raise with an older
+// snapshot, the clobbered value recomputes to the raise again on the next
+// cadence. Repair is automatic and bounded at one cadence.
 //
 // It writes exactly one thing: the estimate blob and its color, for the beaches
-// it recomputed. Never the wqfloor column (the hourly stays its single writer, so
-// expiry remains the only way a cleared advisory is withdrawn), never the
-// official or reading columns, never estimate_updated or estimate_expires (the
-// standing instant is the CAS token and the original lease must not be extended),
-// never a flag_history row (it scrapes no officials, so it has no pair to log),
-// and above all never recompute_updated, which is runFlagRecompute's rotation
-// cursor and single-writer by contract.
+// whose payload moved. Never the wqfloor column (the hourly stays its single
+// writer, so expiry remains the only way a cleared advisory is withdrawn), never
+// the official or reading columns, never estimate_updated or estimate_expires
+// (the standing instant is the CAS token and the original lease must not be
+// extended), never a flag_history row (it scrapes no officials, so it has no pair
+// to log), never a KV key, and above all never recompute_updated, which is
+// runFlagRecompute's rotation cursor and single-writer by contract.
 async function runAlertRefresh(env) {
   const startedMs = Date.now();
   const nowIso = new Date().toISOString();
   const nowMs = Date.parse(nowIso);
   const nowEpoch = Math.floor(nowMs / 1000);
-  const candidates = [];
   let rowCount = 0;
   let written = 0;
   let raised = 0;
   let lowered = 0;
   let skipNoSeal = 0;
   let skipAuthority = 0;
-  let skipLease = 0;
   let skipStaleLower = 0;
-  let skipFeedLower = 0;
-  let skipCanadaLower = 0;
   let skipSuperseded = 0;
-  let capped = false;
+  let staleWritten = 0;
+  let nationalAlerts = null;
+  let nwsOk = false;
+  let ecccOk = false;
+
+  // skipStaleLower is cold-tier steady state, not an alarm: the hourly rotation
+  // is sized at four runs, so a beach whose turn is further back than STALE_MS
+  // keeps its color until that turn comes. features high with parsed 0 is the
+  // visible signature of an NWS schema drift, which is why both are logged raw.
+  function logComplete() {
+    console.log(
+      "index: alert refresh complete, rows=" + String(rowCount) +
+      " written=" + String(written) +
+      " raised=" + String(raised) +
+      " lowered=" + String(lowered) +
+      " skipNoSeal=" + String(skipNoSeal) +
+      " skipAuthority=" + String(skipAuthority) +
+      " skipStaleLower=" + String(skipStaleLower) +
+      " skipSuperseded=" + String(skipSuperseded) +
+      " staleWritten=" + String(staleWritten) +
+      " nws=" + (nwsOk ? "ok" : "down") +
+      " eccc=" + (ecccOk ? "ok" : "down") +
+      " features=" + String(nationalAlerts === null ? "none" : nationalAlerts.featureCount) +
+      " parsed=" + String(nationalAlerts === null ? "none" : nationalAlerts.alerts.length) +
+      " elapsedMs=" + String(Date.now() - startedMs)
+    );
+  }
 
   try {
-    // Step 1: four national fetches, each in its own try/catch and each already
-    // bounded by its client's timeoutMs. Nothing else is fetched — no SRF, no
-    // wqFloor scrape, no official scrape, no "waveinput:" read — so a 10-minute
-    // cadence costs county health departments and Ontario Parks nothing, and
-    // there is no second source of truth for any non-alert input.
-    let nationalAlerts = null;
-    try {
-      nationalAlerts = await fetchAllActiveAlerts();
-    } catch (err) {
-      console.log("index: alert refresh nws alerts fetch threw: " + err.message);
-      nationalAlerts = null;
+    // Step 1: three national fetches, issued concurrently, each caught on its own
+    // and each already bounded by its client's timeoutMs. Nothing else is fetched
+    // — no SRF, no wqFloor scrape, no official scrape, no "waveinput:" read — so a
+    // 10-minute cadence costs county health departments and Ontario Parks nothing,
+    // and there is no second source of truth for any non-alert input.
+    const fetched = await Promise.all([
+      fetchAllActiveAlerts().catch(function (err) {
+        console.log("index: alert refresh nws alerts fetch threw: " + err.message);
+        return null;
+      }),
+      fetchActiveEcccAlerts(nowIso).catch(function (err) {
+        console.log("index: alert refresh eccc alerts fetch threw: " + err.message);
+        return null;
+      }),
+      fetchActiveEcccMarineAlerts(nowIso).catch(function (err) {
+        console.log("index: alert refresh eccc marine alerts fetch threw: " + err.message);
+        return null;
+      })
+    ]);
+    nationalAlerts = fetched[0];
+    const ecccAlerts = fetched[1];
+    const ecccMarineAlerts = fetched[2];
+    // A paginated /alerts/active response is a partial view of the population, so
+    // it reads as no feed at all: recomputing against it would clear every zone
+    // past the page boundary.
+    nwsOk = nationalAlerts !== null && nationalAlerts.truncated !== true;
+    // Stricter than the hourly's deliberate proceed-on-partial-success: at 6x
+    // cadence a marine-collection outage would repeatedly recompute Canadian
+    // beaches with the marine events missing and drop a live "gale warning" red to
+    // a wave-height green.
+    ecccOk = ecccAlerts !== null && ecccMarineAlerts !== null;
+    if (!nwsOk && !ecccOk) {
+      // No authority answered, so no row could be recomputed from evidence.
+      logComplete();
+      return;
     }
-    let alertCount = null;
-    try {
-      alertCount = await fetchActiveAlertCount();
-    } catch (err) {
-      console.log("index: alert refresh nws alert count fetch threw: " + err.message);
-      alertCount = null;
-    }
-    let ecccAlerts = null;
-    try {
-      ecccAlerts = await fetchActiveEcccAlerts(nowIso);
-    } catch (err) {
-      console.log("index: alert refresh eccc alerts fetch threw: " + err.message);
-      ecccAlerts = null;
-    }
-    let ecccMarineAlerts = null;
-    try {
-      ecccMarineAlerts = await fetchActiveEcccMarineAlerts(nowIso);
-    } catch (err) {
-      console.log("index: alert refresh eccc marine alerts fetch threw: " + err.message);
-      ecccMarineAlerts = null;
-    }
-
-    // Step 2: the feed integrity gate, entirely intra-run. fetchAllActiveAlerts
-    // cannot distinguish a genuinely quiet nation from a 200 whose schema drifted
-    // — both yield alerts: [] — so the count endpoint is the independent view
-    // that separates them. A parse materially short of the API's own total is
-    // truncation or drift whatever its magnitude, which is the gap every
-    // fraction-based rail leaves open.
-    //
-    // A missing feed is never evidence of clearing: usFeedUsable false excludes
-    // every US beach outright, and usLowerAllowed false keeps raises at
-    // 10-minute latency while lowerings wait for the hourly, which is the status
-    // quo. The ECCC rule is stricter than the hourly's deliberate
-    // proceed-on-partial-success, because at 6x cadence a marine-collection
-    // outage would repeatedly recompute Canadian beaches with the marine events
-    // missing and drop a live "gale warning" red to a wave-height green.
-    //
-    // The count check alone proves only that the whole population arrived. The
-    // parse-drop check is what proves the parse understood it: featureCount is
-    // raw, so a drift that renames properties.event or restructures the zone
-    // fields would otherwise pass the count check with alerts: [] and license a
-    // nationwide clear-down.
-    const usFeedUsable = nationalAlerts !== null;
-    const usLowerAllowed =
-      usFeedUsable &&
-      nationalAlerts.truncated === false &&
-      alertCount !== null &&
-      nationalAlerts.featureCount + ALERT_COUNT_SLACK >= alertCount.total &&
-      nationalAlerts.featureCount - nationalAlerts.alerts.length <= ALERT_PARSE_DROP_MAX;
-    const ecccUsable = ecccAlerts !== null && ecccMarineAlerts !== null;
 
     // Zone matches are memoized across pages: a zone is walked against the
     // national feed once per run however many beaches carry it. A plain loop,
     // never a concat reduce — this walks the whole flag-worthy table rather than
-    // one capped run, and the quadratic form costs seconds of a sub-hourly
-    // cron's 30 s CPU allowance past 20k rows.
+    // one capped run, and the quadratic form costs seconds of a sub-hourly cron's
+    // 30 s CPU allowance past 20k rows.
+    //
+    // Invariant: an alertsMap entry is inserted for every non-null nws_zone and
+    // marine_zone on the page, so buildAlertInputs takes its US branch for every
+    // US row whenever the national fetch landed.
     const alertsMap = new Map();
     function resolveZones(pageRows) {
-      if (!usFeedUsable) {
+      if (!nwsOk) {
         return;
       }
       for (const row of pageRows) {
@@ -1168,14 +1134,34 @@ async function runAlertRefresh(env) {
       ecccMarineAlerts: ecccMarineAlerts
     };
 
-    // Step 3: selection, one row at a time as the pages arrive. Every rejection
+    // The diff projection: the whole decided payload, with the seal discarded and
+    // alertsAt replaced by the set it decides. The seal's non-alert half is
+    // identical because it is rebuilt from the standing blob — its alertsResolved
+    // is the explicit first clause of the change test instead. Replacing rather
+    // than nulling alertsAt is what makes an onset arriving or an ends lapsing
+    // select the beach for every event name, not only the ones a precedence list
+    // colors, while raw timestamp churn inside an unchanged set still does not:
+    // for the recomputed payload the set resolves at this run's clock, and for the
+    // standing one at the instant it was decided, which is what the detail page
+    // renders through decidedAlertDetails.
+    function comparable(estimate) {
+      return JSON.stringify(
+        Object.assign({}, estimate, {
+          alertsAt: alertsInEffect(estimate.alertDetails, estimate.alertsAt).join("|"),
+          estimateInputs: null
+        })
+      );
+    }
+
+    // This page's compare-and-set writes, index-aligned: casWrites[i] carries the
+    // rank pair and seal age the completion counters need for casStatements[i].
+    const casStatements = [];
+    const casWrites = [];
+
+    // Recompute one row and queue it only if its payload moved. Every rejection
     // is a SKIP that leaves the standing value untouched — there is no path here
     // in which estimateFlag is called with a null substituted for a sealed input.
-    // A retained candidate keeps the row's scalar columns, the standing color,
-    // the CAS token and the two derived input halves; the standing estimate,
-    // parsed and raw, is released with its page, so peak memory is one page plus
-    // the capped candidate list of scalars.
-    function selectRow(row) {
+    function recomputeRow(row) {
       let standing = null;
       try {
         standing = JSON.parse(row.estimate);
@@ -1187,76 +1173,114 @@ async function runAlertRefresh(env) {
         return;
       }
       const signals = signalsFromStanding(standing);
-      if (signals === null) {
-        // Written before the seal shipped, or carrying another seal version.
+      const standingMs = signals === null ? NaN : Date.parse(signals.updated);
+      if (signals === null || typeof signals.updated !== "string" ||
+          !Number.isFinite(standingMs)) {
+        // Written before the seal shipped, carrying another seal version, or
+        // missing the standing instant the stale rail ages the seal against. An
+        // instant the rail cannot age is not a fresh one, so it is a skip rather
+        // than an unrailed lowering.
         skipNoSeal = skipNoSeal + 1;
         return;
       }
+      // Authority comes off the row's own zone columns rather than from the alert
+      // half: buildAlertInputs reports an unenriched beach and an authority whose
+      // fetch failed with the same alertsResolved false, and a beach must never be
+      // recomputed against a feed that did not arrive.
       const isUs = (row.nws_zone || row.marine_zone) ? true : false;
       const isCa = !isUs && row.eccc_zone ? true : false;
-      if ((!isUs && !isCa) || (isUs && !usFeedUsable) || (isCa && !ecccUsable)) {
+      if ((!isUs && !isCa) || (isUs && !nwsOk) || (isCa && !ecccOk)) {
         skipAuthority = skipAuthority + 1;
         return;
       }
-      // The standing instant is both the stale-lower rail's clock and the CAS
-      // token, so a missing, unparseable or future-dated one is unusable.
-      const updatedMs = Date.parse(standing.updated);
-      if (Number.isNaN(updatedMs) || updatedMs > nowMs) {
-        skipNoSeal = skipNoSeal + 1;
-        return;
-      }
-      // The lease comes off the row, not from the payload: this cron never
-      // extends estimate_expires, so a beach inside five minutes of expiry
-      // belongs to the hourly.
-      const remaining = typeof row.estimate_expires === "number"
-        ? row.estimate_expires - nowEpoch
-        : NaN;
-      if (!Number.isFinite(remaining) || remaining < FAST_MIN_REMAINING_TTL_SECONDS) {
-        skipLease = skipLease + 1;
-        return;
-      }
       const alertPart = buildAlertInputs(row, alertCtx, nowIso);
-      // Set inequality selects; estimateFlag decides. Comparing severities here
-      // would reimplement ALERT_PRECEDENCE outside rules.js, and a "has any
-      // alert" test would miss a zone swapping Small Craft Advisory for Gale
-      // Warning, or losing one of two alerts. Both sides are in-effect sets:
-      // the current one at this run's clock, the standing one at the alertsAt
-      // it was decided at, so an alert whose onset arrived or whose ends passed
-      // since selects the beach exactly as a new issuance does.
-      //
-      // signals.alertsResolved false is the repair for a failed hourly alert
+      const next = estimateFlag(buildEstimateInputs(row, alertPart, signals));
+      // The standing instant, never this run's clock: with estimate_updated and
+      // estimate_expires left out of the CAS, the rewrite is lifetime-neutral and
+      // staleness-neutral, so it can move a color and nothing else.
+      next.updated = standing.updated;
+      const stored = Object.assign({}, next, {
+        estimateInputs: sealFromSignals(signals, alertPart)
+      });
+      // A sealed alertsResolved false is the repair for a failed hourly alert
       // fetch: that run passed alerts null, losing both the short-circuit and the
       // floors, and its echoed alertDetails is [] — indistinguishable from
       // "checked, none active" without the sealed boolean.
-      const selected =
-        alertPart.alertsResolved === false ||
-        signals.alertsResolved === false ||
-        eventKey(alertPart.alerts) !== eventKey(standingAlertEvents(standing));
-      if (!selected) {
+      const changed = signals.alertsResolved === false ||
+        comparable(stored) !== comparable(standing);
+      if (!changed) {
         return;
       }
-      if (candidates.length >= FAST_MAX_BEACHES_PER_RUN) {
-        capped = true;
+      const standingRank = SEVERITY_RANK[standing.color] !== undefined
+        ? SEVERITY_RANK[standing.color] : 0;
+      const nextRank = SEVERITY_RANK[next.color] !== undefined
+        ? SEVERITY_RANK[next.color] : 0;
+      const sealAgeMs = nowMs - standingMs;
+      const stale = sealAgeMs >= STALE_MS;
+      // The one lowering rail: a clear-down decided on wave and wind inputs the
+      // page itself would render with a stale-data warning waits for the hourly.
+      // Raises are never gated on age, because age can only understate a hazard.
+      if (nextRank < standingRank && stale) {
+        skipStaleLower = skipStaleLower + 1;
         return;
       }
-      // Dead past this point: nothing below reads the blob, and holding
-      // FAST_MAX_BEACHES_PER_RUN of them is what would make the cap fictional
-      // under a warning that puts kilobytes of alert text in every estimate.
-      row.estimate = null;
-      candidates.push({
-        row: row,
-        standingColor: standing.color,
-        standingUpdated: row.estimate_updated,
-        signals: signals,
-        alertPart: alertPart,
-        updatedMs: updatedMs,
-        isCa: isCa
-      });
+      casStatements.push(
+        estimateCasStatement(env.DB, row.id, stored, row.estimate_updated)
+      );
+      casWrites.push({ nextRank: nextRank, standingRank: standingRank, stale: stale });
     }
 
-    // Step 4: keyset paging over the live-estimate join. The cursor is the last
-    // id of the page just read, so a run walks the table in id order at a bounded
-    // page size and never re-reads a row.
+    // Flushes one page's writes, each chunk its own D1 batch inside its own
+    // try/catch, so a rejected chunk costs only its own beaches and the run still
+    // reaches the rest of the table. Writing while paging is safe because the CAS
+    // touches only rows at or before the cursor and sets estimate and
+    // estimate_color only.
+    async function flushPage() {
+      let casIndex = 0;
+      for (const group of chunkStatements(casStatements)) {
+        const base = casIndex;
+        casIndex = casIndex + group.length;
+        let results = null;
+        try {
+          results = await batchWithRetry(env, group, "alert refresh");
+        } catch (err) {
+          console.log(
+            "index: alert refresh chunk of " + String(group.length) +
+            " failed: " + err.message
+          );
+          continue;
+        }
+        for (let i = 0; i < group.length; i = i + 1) {
+          const result = results && results[i];
+          const changes = result && result.meta ? result.meta.changes : 0;
+          if (!changes) {
+            // A statement that matched no row lost the CAS to an hourly run that
+            // rewrote the beach after this one read it; the hourly's decision
+            // stands.
+            skipSuperseded = skipSuperseded + 1;
+            continue;
+          }
+          written = written + 1;
+          const ranks = casWrites[base + i];
+          if (ranks.nextRank > ranks.standingRank) {
+            raised = raised + 1;
+          } else if (ranks.nextRank < ranks.standingRank) {
+            lowered = lowered + 1;
+          }
+          if (ranks.stale) {
+            staleWritten = staleWritten + 1;
+          }
+        }
+      }
+      casStatements.length = 0;
+      casWrites.length = 0;
+    }
+
+    // Keyset paging over the live-estimate join. The cursor is the last id of the
+    // page just read, so a run walks the table in id order at a bounded page size
+    // and never re-reads a row. Only an empty page ends the walk: an estimate
+    // expiring between two reads shortens a page, and treating a short page as the
+    // end would abandon every beach past it.
     let cursor = "";
     for (;;) {
       const pageResult = await env.DB.prepare(ALERT_REFRESH_SQL).bind(nowEpoch, cursor).all();
@@ -1267,120 +1291,13 @@ async function runAlertRefresh(env) {
       rowCount = rowCount + pageRows.length;
       resolveZones(pageRows);
       for (const row of pageRows) {
-        selectRow(row);
+        recomputeRow(row);
       }
       cursor = pageRows[pageRows.length - 1].id;
-      if (pageRows.length < ALERT_REFRESH_PAGE_SIZE) {
-        break;
-      }
+      await flushPage();
     }
 
-    // Step 5: recompute and write. Unconditional for a selected beach that
-    // clears its rails, not gated on a strict color change: selection already
-    // means the alert set moved, so the reason string, alertDetails and sources
-    // are stale by definition, and a color-only gate would leave the detail
-    // page citing an expired alert for up to an hour.
-    const casStatements = [];
-    const casRanks = [];
-    for (const candidate of candidates) {
-      const row = candidate.row;
-      const next = estimateFlag(
-        buildEstimateInputs(row, candidate.alertPart, candidate.signals)
-      );
-      const standingRank = SEVERITY_RANK[candidate.standingColor] !== undefined
-        ? SEVERITY_RANK[candidate.standingColor] : 0;
-      const nextRank = SEVERITY_RANK[next.color] !== undefined
-        ? SEVERITY_RANK[next.color] : 0;
-      // Three rails, on the lowering direction only. A lowering is published
-      // only from evidence this run could verify: Canada is raise-only for want
-      // of a count endpoint on either GeoMet collection, the US needs the count
-      // cross-check, and neither authority may lower on inputs old enough that
-      // the product itself would mark them stale.
-      if (nextRank < standingRank) {
-        if (candidate.isCa) {
-          skipCanadaLower = skipCanadaLower + 1;
-          continue;
-        }
-        if (!usLowerAllowed) {
-          skipFeedLower = skipFeedLower + 1;
-          continue;
-        }
-        if (nowMs - candidate.updatedMs >= FAST_LOWER_MAX_SEAL_AGE_MS) {
-          skipStaleLower = skipStaleLower + 1;
-          continue;
-        }
-      }
-      // next.updated carries the standing instant rather than this run's clock,
-      // and the CAS leaves estimate_updated and estimate_expires alone, so the
-      // rewrite is lifetime-neutral and staleness-neutral: it can move a color
-      // and nothing else.
-      const stored = Object.assign({}, next, {
-        estimateInputs: sealFromSignals(candidate.signals, candidate.alertPart)
-      });
-      casStatements.push(
-        estimateCasStatement(env.DB, row.id, stored, candidate.standingUpdated)
-      );
-      casRanks.push({ nextRank: nextRank, standingRank: standingRank });
-    }
-
-    // A batch whose statement matched no row lost the CAS to an hourly run that
-    // rewrote the beach after this one read it; the hourly's decision stands.
-    let casIndex = 0;
-    for (const group of chunkStatements(casStatements)) {
-      const base = casIndex;
-      casIndex = casIndex + group.length;
-      let results = null;
-      try {
-        results = await batchWithRetry(env, group, "alert refresh");
-      } catch (err) {
-        console.log(
-          "index: alert refresh chunk of " + String(group.length) +
-          " failed: " + err.message
-        );
-        continue;
-      }
-      for (let i = 0; i < group.length; i = i + 1) {
-        const result = results && results[i];
-        const changes = result && result.meta ? result.meta.changes : 0;
-        if (!changes) {
-          skipSuperseded = skipSuperseded + 1;
-          continue;
-        }
-        written = written + 1;
-        if (casRanks[base + i].nextRank > casRanks[base + i].standingRank) {
-          raised = raised + 1;
-        } else if (casRanks[base + i].nextRank < casRanks[base + i].standingRank) {
-          lowered = lowered + 1;
-        }
-      }
-    }
-
-    // skipStaleLower= and feed=unverified are the operator trip-wires: the first
-    // means the hourly rotation has fallen behind, the second that the count
-    // cross-check is failing and US clear-down has silently reverted to hourly
-    // latency.
-    const feedState = usFeedUsable ? (usLowerAllowed ? "complete" : "unverified") : "down";
-    console.log(
-      "index: alert refresh complete, rows=" + String(rowCount) +
-      " candidates=" + String(candidates.length) +
-      " written=" + String(written) +
-      " raised=" + String(raised) +
-      " lowered=" + String(lowered) +
-      " skipNoSeal=" + String(skipNoSeal) +
-      " skipAuthority=" + String(skipAuthority) +
-      " skipLease=" + String(skipLease) +
-      " skipStaleLower=" + String(skipStaleLower) +
-      " skipFeedLower=" + String(skipFeedLower) +
-      " skipCanadaLower=" + String(skipCanadaLower) +
-      " skipSuperseded=" + String(skipSuperseded) +
-      " capped=" + (capped ? "1" : "0") +
-      " feed=" + feedState +
-      " features=" + String(nationalAlerts === null ? "none" : nationalAlerts.featureCount) +
-      " parsed=" + String(nationalAlerts === null ? "none" : nationalAlerts.alerts.length) +
-      " count=" + String(alertCount === null ? "none" : alertCount.total) +
-      " eccc=" + (ecccUsable ? "ok" : "down") +
-      " elapsedMs=" + String(Date.now() - startedMs)
-    );
+    logComplete();
   } catch (err) {
     console.log("index: alert refresh failed: " + err.message);
   }
