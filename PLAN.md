@@ -1927,7 +1927,7 @@ scripts/discovery-batch.js passes it as classifyQueue's opts.fetchSignals.
       // that cut it. A mismatch means the layers were clipped to a different scope than
       // this code reconciles against, which is a delete-unsafe condition.
 
-### scripts/lib/fgbReader.js (the only module in the repo with an npm dependency)
+### scripts/lib/fgbReader.js (the only offline module with an npm dependency)
 
 Deep-imports flatgeobuf. It is a vitest devDependency, resolved under Deno through the
 committed deno.json import map ("flatgeobuf/": "npm:/flatgeobuf@4.4.0/" — note the leading
@@ -2518,7 +2518,7 @@ src/discovery.js, src/waterClass.js, src/geo.js, src/regions.js and src/marineZo
 plus the offline-only pure modules src/osmSelect.js, src/layerGrid.js,
 src/layerDiscovery.js, src/layerSignals.js and src/layerManifest.js, all imported verbatim
 by the batch. One module is not importable here and must never become so:
-scripts/lib/fgbReader.js, the only module in the repo with an npm dependency (flatgeobuf).
+scripts/lib/fgbReader.js, whose npm dependency (flatgeobuf) resolves only under Deno.
 The D1 schema (section 2) and the KV shapes (sections 1 and 3) are unaffected: the batch
 writes the same D1 rows out-of-band, the request path still reads only D1 and KV, and the
 prebuilt layer set in R2 is read by the offline batch alone — wrangler.toml deliberately
@@ -4376,10 +4376,11 @@ exporting a CSS string); render.js is the sole module the router imports.
     with the first upcoming event "not yet in effect" as its source line); and the next
     sun event. A reading with no data renders no tile at all, and a beach with no
     readings renders no section: the row carries only answers, never a placeholder.
-    The sun tile is computed, not stored: src/frontend/sun.js (pure NOAA solar position,
-    no Date.now and no upstream) takes the BeachRow's lat/lon plus nowIso and returns the
-    next sunrise and sunset as whole-minute ISO strings, choosing the beach's solar day by
-    a longitude offset (lon / 15 hours) rather than a timezone lookup. The caption is
+    The sun tile is computed, not stored: src/frontend/sun.js (SunCalc's Meeus solar math
+    through the exact-pinned suncalc npm dependency, no Date.now and no upstream) takes the
+    BeachRow's lat/lon plus nowIso and returns the next sunrise and sunset as whole-minute
+    ISO strings, choosing the beach's solar day by its longitude's mean solar noon rather
+    than a timezone lookup. The caption is
     "Sunset" or "Sunrise" for whichever comes first; the value is a <wa-format-date
     date=iso hour="numeric" minute="numeric"> wrapping a <time datetime=iso> whose text is
     the instant in UTC ("01:26 UTC"). The component renders the viewer's own clock and

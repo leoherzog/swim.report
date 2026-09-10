@@ -146,8 +146,9 @@ tests.
   streamed and the retained counts per layer.
 - **`src/layerSignals.js`** — the water-class **signal provider**.
 - **`src/layerManifest.js`** — manifest verification and the delete gate.
-- **`scripts/lib/fgbReader.js`** — the FlatGeobuf reader, and the **only module in this repo
-  with an npm dependency** (`flatgeobuf`, a devDependency). It is never reachable from
+- **`scripts/lib/fgbReader.js`** — the FlatGeobuf reader, and the **only offline module
+  with an npm dependency** (`flatgeobuf`, a devDependency; the Worker's own npm import is
+  `suncalc` in `src/frontend/sun.js`). It is never reachable from
   `src/index.js`, and a test asserts that.
 
 Note on the Deno setup, because it bites: `deno.json` and `deno.lock` are **committed**.

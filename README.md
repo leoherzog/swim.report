@@ -169,7 +169,7 @@ with no readings at all shows no section. The full official and estimate cards f
 unchanged.
 
 The sun tile is computed in the Worker from the beach's coordinates (`src/frontend/sun.js`,
-the NOAA solar position algorithm, no upstream call), and shown on the viewer's own clock by
+delegating to the `suncalc` library, no upstream call), and shown on the viewer's own clock by
 `<wa-format-date>`. Until that component upgrades, the served `<time>` element shows the same
 instant in UTC, because a beach's longitude fixes its solar day but not the clock posted
 there. Inside the polar circles, where there is no next event, the tile is omitted.

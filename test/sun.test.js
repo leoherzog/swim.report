@@ -1,5 +1,5 @@
 // test/sun.test.js
-// Covers src/frontend/sun.js: the NOAA sunrise/sunset math against published
+// Covers src/frontend/sun.js: the SunCalc-backed sunrise/sunset math against published
 // times for known places and dates, the polar day and night nulls, the
 // next-event choice either side of a sunset, and the UTC fallback label.
 
