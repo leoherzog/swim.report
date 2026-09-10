@@ -1953,6 +1953,34 @@ describe("runFlagRecompute pooled estimates and the beach_state flush", function
     }
     expect(loggedLines(logSpy)).toContain(" stateRows=120 stateFailures=120");
   });
+
+  it("retries a chunk once, so a transient D1 rejection costs nothing", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
+    vi.stubGlobal("fetch", southHavenFetch());
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = southHavenBeaches(120);
+    const made = makeEnv(rows);
+    let rejected = 0;
+    // The estimate flush's first chunk rejects exactly once; the retry lands.
+    made.db.failWhen(function (sql, args) {
+      if (rejected === 0 && sql.indexOf("INSERT INTO beach_state") === 0 && args[1] !== null) {
+        rejected = rejected + 1;
+        return true;
+      }
+      return false;
+    });
+    await runHourlyCron(made.env);
+
+    expect(rejected).toBe(1);
+    for (const row of rows) {
+      expect(estimateOf(made, row.id)).not.toBeNull();
+    }
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain("beach_state chunk of 120 failed, retrying once");
+    expect(lines).toContain(" stateRows=240 stateFailures=0");
+  });
 });
 
 describe("runFlagRecompute wave input finite guards", function () {

@@ -368,6 +368,24 @@ const ALERT_REFRESH_SQL =
   " AND s.estimate IS NOT NULL AND s.estimate_expires > ?1 AND b.id > ?2 " +
   "ORDER BY b.id LIMIT " + String(ALERT_REFRESH_PAGE_SIZE);
 
+// D1 answers a transient "Connection closed" or "overloaded" by asking the
+// caller to retry, so every state batch gets exactly one second try; a second
+// rejection is the chunk's final answer.
+const STATE_BATCH_RETRY_DELAY_MS = 1000;
+
+async function batchWithRetry(env, group, label) {
+  try {
+    return await env.DB.batch(group);
+  } catch (err) {
+    console.log(
+      "index: " + label + " chunk of " + String(group.length) +
+      " failed, retrying once: " + err.message
+    );
+  }
+  await sleep(STATE_BATCH_RETRY_DELAY_MS);
+  return await env.DB.batch(group);
+}
+
 // Flushes one pass's beach_state descriptors and reports which beaches actually
 // landed. Chunks are applied sequentially and each is its own D1 batch, so a
 // rejected chunk costs only its own rows: they are absent from the returned id
@@ -405,7 +423,7 @@ async function flushBeachState(env, writes) {
     const groupIds = ids.slice(offset, offset + group.length);
     offset = offset + group.length;
     try {
-      await env.DB.batch(group);
+      await batchWithRetry(env, group, "beach_state");
       for (const id of groupIds) {
         persisted.add(id);
       }
@@ -1313,7 +1331,7 @@ async function runAlertRefresh(env) {
       casIndex = casIndex + group.length;
       let results = null;
       try {
-        results = await env.DB.batch(group);
+        results = await batchWithRetry(env, group, "alert refresh");
       } catch (err) {
         console.log(
           "index: alert refresh chunk of " + String(group.length) +

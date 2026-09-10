@@ -946,13 +946,17 @@ describe("runAlertRefresh write mechanics", function () {
     stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
     await runAlertCron(made.env);
 
-    expect(made.db.batchCalls.map(function (c) { return c.length; })).toEqual([200, 200, 120]);
+    expect(made.db.batchCalls.map(function (c) { return c.length; })).toEqual([200, 200, 200, 120]);
     for (let i = 0; i < 520; i = i + 1) {
       const id = "osm-node-" + String(1000 + i);
       expect(storedEstimate(made, id).color).toBe(i < 200 ? "green" : "double-red");
     }
+    // One retry line, then one final rejection.
     expect(logs.filter(function (l) {
-      return l.indexOf("index: alert refresh chunk of 200 failed") === 0;
+      return l.indexOf("index: alert refresh chunk of 200 failed, retrying once") === 0;
+    }).length).toBe(1);
+    expect(logs.filter(function (l) {
+      return l.indexOf("index: alert refresh chunk of 200 failed: ") === 0;
     }).length).toBe(1);
     const line = logs.filter(function (l) { return l.indexOf("alert refresh complete") !== -1; })[0];
     expect(line.indexOf(" written=320 ")).toBeGreaterThan(-1);
