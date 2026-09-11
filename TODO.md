@@ -41,8 +41,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     rail (`CLASSIFY_MAX_HIDE_FLIPS` / `CLASSIFY_MAX_HIDE_FRACTION`) before it lands.
   - **Parked rows** sit at `WATER_CLASS_MAX_ATTEMPTS = 5`, matching the enrichment caps. A
     version bump does **not** un-park them: `buildClassifyQueue` ANDs the version clause with
-    `attempts < cap`, so the cap, not the version, is the gate. Rows the pre-decisive classifier
-    parked are re-drained once by the `water_class_version IS NULL` legacy marker, deliberately
+    `attempts < cap`, so the cap, not the version, is the gate. Rows parked with no stamped
+    `water_class_version` are re-drained once by that `IS NULL` check, deliberately
     without resetting attempts so they stay hidden while they re-decide. Do **not** reach for
     `UPDATE beaches SET water_class_attempts = 0 WHERE water_class IS NULL`: it un-parks them
     into the fail-open gate and republishes every one as a visible beach with an estimated flag
@@ -52,12 +52,6 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     linger in D1 (their `beach_state` records expire on their own leases, and the row
     itself waits on the retention follow-up under Scale-out). Harmless and
     cheap — left in place.
-  - **The `ocean` branch has no live rows until the first coastal layer set publishes.** It
-    is implemented and tested (`coastlinePresent` decides ahead of the wikidata check), but
-    the served table is still the Great Lakes set, where shorelines are relation member ways
-    rather than `natural=coastline`. Harmless either way: ocean and great_lake are both
-    flag-worthy and pass the gate identically — only inland versus {ocean, great_lake} must
-    be reliable.
 - **A grid that sampled but under-covers its seeded per-grid floor still refuses the whole
   cycle**, so a present-but-under-covering GLWU takes the ocean down with it. Dropping that
   grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside the
@@ -204,9 +198,10 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     classification flip rail. Every one of those numbers was calibrated against a 1669-row
     table; re-derive them when the table changes scale.
   - **Layer-set size at North America scale.** The published set is O(beaches) because of the
-    ~1.1 km proximity clip, but the pre-clip intermediate is not, and the build's peak disk
-    (~13.3 GB) sits inside a runner's budget with less headroom than is comfortable. Measure
-    before adding coasts.
+    ~1.1 km proximity clip, but the pre-clip intermediate is not, and the North America coastal
+    build's peak disk lands near 47 GB on a 145 GB runner (11 GB of it the raw stage), so disk
+    was not the constraint for that build; re-measure before adding a coast large enough to
+    threaten that headroom.
   - **`beaches-line` and `water-line` may be droppable.** If they contribute nothing to
     discovery or classification, dropping them shrinks the set and the download. Decide from a
     real build's manifest, not from reasoning.
@@ -228,9 +223,10 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   throttled to 1/h per beach, `ctx.waitUntil`). `runFlagRecompute` and `runWaterTempRefresh`
   split their rotation into a hot tier (`last_viewed` within `HOT_VIEW_WINDOW_MS`, always
   fully covered) and a cold tier rotating through the remaining `MAX_BEACHES_PER_RUN` budget;
-  the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue tiebreak. At
-  pilot scale both tiers fit inside one run, so the split only starts mattering once beach
-  count approaches `MAX_BEACHES_PER_RUN`. Deferred residue: (1) stamping `last_viewed` from the
+  the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue tiebreak.
+  Beach count exceeds `MAX_BEACHES_PER_RUN`, so the split governs coverage: a cold-tier beach
+  waits several runs for its turn (see the `MAX_BEACHES_PER_RUN` / `FLAG_TTL_SECONDS`
+  accounting below). Deferred residue: (1) stamping `last_viewed` from the
   home list view too, since only the two single-beach routes stamp it today; (2) a real
   split-query implementation — today's is a single ORDER BY guard, not two queries — plus the
   migration 0012-class indexes real pagination will need; (3) real pagination itself. Workers
@@ -249,14 +245,13 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   obvious shape; the ECCC collections have no count equivalent, so a Canadian gate needs a
   different signal. The refresh's own `features` and `parsed` log fields are the current
   detection: `features` high with `parsed` 0 is drift.
-- **Marine-zone `nws_zone` rows are requeued, not yet re-drained.** Migration 0013 NULLed
-  `nws_zone` on every row whose id carried a marine prefix (336 at the time) and
-  `runNwsEnrichment` now rejects a marine `forecastZone` and re-probes 16 nudged points for the
-  land zone. The first coastal run showed 199 of 200 selected rows answering marine, at a mean
-  of 3.25 probes each (all 20 recovered), so the run is bounded by a 780 s deadline rather than
-  a per-run count: ~300 marine beaches per run, ~5-6 days for the 6,465-row coastal queue,
-  during which those rows read `alertsCheckable` false (marine_zone alone no longer counts),
-  carry the alerts-unavailable caveat, and skip SRF until `nws_grid_url` is restored. Watch
+- **Marine-zone `nws_zone` rows are requeued, not yet re-drained.** A row whose id carries a
+  marine prefix has `nws_zone` NULL, and `runNwsEnrichment` rejects a marine `forecastZone`,
+  re-probing 16 nudged points for the land zone; recovery needs a few probes each
+  (mean ~3.25), so the run is bounded by a 780 s deadline rather than a per-run count: ~300
+  marine beaches per run, ~5-6 days for the 6,465-row coastal queue, during which those rows
+  read `alertsCheckable` false (marine_zone alone is not enough), carry the
+  alerts-unavailable caveat, and skip SRF until `nws_grid_url` is restored. Watch
   `marineUnrecovered=` in the completion log: a beach whose 1 km ring finds no land zone parks
   at the attempts cap, and a large count means the rings need a third radius.
 - **`rules.js` step 3's else branch still has no finite check**, so any future caller passing a
@@ -297,7 +292,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   per-station time basis. Once it lands in Actions, `"15 */6 * * *"`,
   `runWaterTempRefresh`, `beaches.wave_updated`, `ROTATION_COLUMNS.wave` and the rest of
   `src/waveSources/ndbcBuoys.js` all become removable together in one coherent commit, and
-  `migrations/0013_drop_wave_updated.sql` becomes the honest follow-up.
+  a migration dropping the column becomes the honest follow-up.
 - **NWS marine-zone shapefile refresh (~biannual chore).** `beaches.marine_zone` is derived
   offline from `data/marine-zones.json`, generated from the NWS coastal
   marine-zone shapefile. NWS republishes it ~1–2×/year on a schedule announced on
@@ -307,20 +302,19 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   `scripts/build-marine-zones.js`, regenerate, diff per-prefix counts, `npm test`, commit).
   `COASTAL_ZONE_PREFIXES` carries every prefix in the coastal shapefile; a prefix a new release
   adds is logged as SKIPPED rather than dropped silently, so read the log.
-- **North America coastal expansion — live since build `20260906T003648Z-445753f`.**
+- **North America coastal expansion — live.**
   `src/regions.js` carries 26 coastal boxes (US and Canadian Pacific, Gulf, Atlantic, Alaska
   east of 180°, Hawaii, Puerto Rico + USVI) beside the nine Great Lakes boxes; the floors for
-  digest `sha256:6e29be94…` are seeded. Measured on the first coastal build and discovery run:
-  the build peaks at 47 GB used on a 145 GB runner (raw stage +11 GB) in 49 min, so disk is not
-  a constraint; the batch loads 24,123 beaches, 47,654 coastline and 123,041 water features
-  into 17.4M indexed segments in 15 s, classifies 7,899 rows in 38 s, and finishes in 7:31 at
-  6.57 GB RSS, above the 6000 MB early-warning line in `discovery.yml` and inside the 12 GB
-  heap. The table went from 1,102 to 7,219 flag-worthy rows (6,131 ocean), 2,417 hidden
-  inland. What is still open, in order:
-  - **Wave floors are seeded for the ocean grids** from cycle `20260906T0400Z` (gfswave 4,816
-    resolved, arctic 107, 1,208 ocean rows unresolved inside masked bays). `gridsDigest` covers
-    the grid set, not the beach set, so a further coast prompts no refusal; re-seed by hand when
-    the resolved counts step up.
+  digest `sha256:6e29be94…` are seeded. The table holds 9,070 flag-worthy rows (7,395 ocean,
+  1,675 great_lake). The layer build (`build-layers.yml`, 180-minute timeout) stays well
+  inside a 145 GB runner's disk, peaking near 47 GB; the discovery batch (`discovery.yml`,
+  45-minute timeout) stays under its 6000 MB early-warning line and 12 GB heap ceiling. What
+  is still open, in order:
+  - **Wave floors are seeded for the ocean grids**, digest `sha256:2df3c650…` covering the
+    grid set including `noaa_nwps_sew` (gfswave 5,849 resolved, arctic 225, `noaa_nwps_sew`
+    553, 768 ocean rows unresolved inside masked bays). `gridsDigest` covers the grid set, not
+    the beach set, so a further coast prompts no refusal; re-seed by hand when the resolved
+    counts step up.
   - **Enrichment drain rate.** A `/points` 404 parks a row on the first touch, so the ~1,200
     Canadian rows in the coastal queue cost one request each rather than five before the ECCC
     cron takes them. Each run walks the 400 rows it selects until
@@ -337,7 +331,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     52.58°N on the east side), Arctic Alaska and Canada, Greenland.
   - **Delete-rail blast radius.** The rails are proportional, so 5 % of a 50k table is 2,500
     deletes and `CLASSIFY_MAX_HIDE_FRACTION` 0.10 is 5,000 hides in one delta; re-derive the
-    fractions once the first coastal row count is known. `REGION_RECONCILE_MIN_DELETES = 2`
+    fractions from the first coastal build's counts given above, not this illustrative 50k.
+    `REGION_RECONCILE_MIN_DELETES = 2`
     goes vestigial (no coastal box has a single-digit candidate tail).
   - **Homepage list and map.** `GET /` is capped at 100 rows with no pagination, and the map
     endpoint serves the whole flag-worthy set in one response (below).
@@ -422,10 +417,10 @@ gaps, not wrong-color risks.
 - **Three wqFloor sources are authored, tested and deliberately unregistered** —
   `chautauqua-county-ny`, `erie-county-pa-kml` (fetch URL still `""`) and
   `illinois-beachguard` (`ILLINOIS_BEACHGUARD_CONFIRMED === false`, placeholder BeachIDs). All
-  three fail closed before fetching, so while sitting ahead of working sources in the
-  first-match-wins `wqFloorSources` registry they were permanently inert — and because the cron
-  resolves exactly **one** source per beach, an inert source silently **suppressed** the working
-  source behind it: `erie-county-pa-kml`'s `ERIE_BOX` is strictly inside
+  three fail closed before fetching. Because the cron resolves exactly **one** source per
+  beach in the first-match-wins `wqFloorSources` registry, registering one of these ahead of a
+  working source would silently **suppress** that working source:
+  `erie-county-pa-kml`'s `ERIE_BOX` is strictly inside
   `usgs-great-lakes-nowcast`'s region bbox, and `illinois-beachguard`'s box overlaps
   `kenosha-beach-conditions` coverage around lat 42.517–42.55. The modules remain on disk with
   their full test suites. **When a gate is confirmed**, re-insert that source into
@@ -449,10 +444,12 @@ gaps, not wrong-color risks.
   in place. Note also that a `staleMs` that never trips makes a silently-dead source
   indistinguishable from a healthy one — the `scraperhealth:` counter, not the horizon, is what
   catches that.
-- **Water-temp coverage is 47%, and 14% in winter** — 519 of 1102 beaches have a
-  `CAP_WATER_TEMP` station inside the 25 km cap, falling to ~153 when the seasonal buoys are
-  pulled and only the year-round NOS gauges remain. The gap is a real sensor-density limit on
-  the Great Lakes, not a list problem: even at a 75 km cap winter coverage only reaches ~36%.
+- **Water-temp coverage is a Great Lakes sensor-density limit, not a list problem.** 519
+  beaches have a `CAP_WATER_TEMP` station inside the 25 km cap, falling to ~153 when the
+  seasonal buoys are pulled and only the year-round NOS gauges remain; even at a 75 km cap,
+  winter coverage still reaches only ~36% of the Great Lakes beach count. This figure counts
+  only Great Lakes beaches; the beaches table also spans the Pacific, Gulf, Atlantic and
+  Alaskan coasts, so the coverage fraction needs recomputing against the full table.
   GLOS Seagull exposes `sea_water_temperature` on a denser network and is the obvious next
   source; it would need the same siting review this list got.
 - **Station-list rot is visible only to a log reader.** The water-temp completion line
@@ -467,10 +464,8 @@ Seven scrapers are registered in `src/officialSources/index.js` (contract v2, mu
 test file each) — hazard, flag and closure sources only. An official color overrides the
 estimate wherever shown, so water-quality (E. coli / bacteria) sources are deliberately
 excluded: a clean-water green is a different axis from surf hazard and would mask a genuine
-hazard estimate such as a gale-driven red. Six water-quality scrapers were removed for this
-reason (`lenawee-mi`, `michigan-city-in`, `ohio-beachguard`, `hdnw-michigan`, `bldhd-mi`,
-`wisconsin-dnr`) — modules, tests and doc entries deleted. Do not re-add a source whose clean
-reading would downgrade a hazard flag. Caveats for the registered set:
+hazard estimate such as a gale-driven red. Do not re-add a source whose clean reading would
+downgrade a hazard flag. Caveats for the registered set:
 
 - **South Haven CSV** (`south-haven-mi`) — the CSV URL is re-discovered from the flag page each
   run, with a hardcoded fallback; Gray means unmonitored, so no data; colored output is gated to
@@ -560,9 +555,9 @@ remains partnership-gated.
 - The cron subrequest budgets assume the Workers **Paid** plan (10,000 subrequests per
   invocation, no daily KV-write cap). The hourly `runFlagRecompute` runs alert, SRF and scraper
   fetches plus its batched `beach_state` writes, does not fetch waves and issues no per-beach
-  KV read; the 6-hourly
-  `runWaterTempRefresh` runs one Range-limited read per distinct station plus its `watertemp:`
-  writes (PLAN.md section 7), which is the whole of the KV-write argument. The **Free** plan's
+  KV read, though it does one `scraperhealth:` KV get and put per matched scraper per run
+  (not per beach); the 6-hourly `runWaterTempRefresh` adds one Range-limited read per distinct
+  station plus its `watertemp:` writes (PLAN.md section 7). The **Free** plan's
   50-subrequest ceiling and 1000 KV-writes/day
   quota are not sufficient at this cadence and beach count. The wave cycle's own write cost is
   D1 rows, not KV. For a free-plan demo, drop
@@ -572,12 +567,18 @@ remains partnership-gated.
 
 ## Frontend
 
-- **Wave-forecast strip: no hover tooltips.** Chart.js tooltip callbacks are functions, which
-  the slotted-JSON config cannot encode, and a slotted config shadows the element's `config`
-  property, so the two cannot mix. If per-hour hover values are wanted: move the JSON to an
-  adjacent `<script type="application/json" id=…>`, add a small `waveChartScript.js` that
-  parses it, attaches callbacks and assigns `el.config` before upgrade. That trades away
-  works-without-our-JS, which is why v1 ships `without-tooltip` plus `events: []`.
+- **Wave model-comparison chart: no per-hour hover-value callbacks.** `renderWaveModelCompare`
+  slots its Chart.js config as an adjacent `<script type="application/json">`
+  (`chartScriptAndFallback`), and `wa-line-chart` uses that slotted script's JSON in place of
+  its `config` property outright when one is present, so a tooltip callback — a function — can
+  never ride along in it. The chart still shows Chart.js's default hover tooltip
+  (unformatted); reaching a custom per-hour label needs a small companion script that parses
+  the JSON separately, attaches the callback, and assigns `el.config` before upgrade, which
+  trades away the works-without-JS fallback the slotted-script pattern gives for free. Stays
+  undone while the chart itself is dormant — `renderWaveModelCompare` renders only when two or
+  more wave models report data for the trimmed window. The wave-forecast strip
+  (`renderWaveStrip`) is unrelated and unaffected: it is plain HTML segments, each already
+  wired to a `<wa-tooltip>` (hover and keyboard focus both work).
 - **"Your Beaches" rows can duplicate rows in the main list, and its heading survives an
   empty section.** The saved and recently viewed rows are copies of the server's own
   `.beach-row` markup inserted above the list, so a beach in both places renders twice; every
@@ -594,8 +595,9 @@ remains partnership-gated.
   view — it fetches every flag-worthy beach once from the cacheable `GET /api/beaches.geojson`,
   one D1 statement over scalar columns with no KV read at all, and renders them as a coast
   highlight under flag icons — and
-  that single-fetch model is comfortable to roughly 5–10k features. It is now serving 9,068 in
-  1.7 MB, so it is inside that band but no longer far inside it; beyond it the GeoJSON endpoint
+  that single-fetch model is comfortable to roughly 5–10k features. It currently serves 9,068
+  features in 1.7 MB — inside that band, though closer to its upper edge than its lower one;
+  beyond it the GeoJSON endpoint
   itself needs server-side clustering or tiling. Cross-reference, out of scope here: a browser-fetched static tiled
   artifact in the R2 bucket the layer build already writes would solve both this and the map's
   scale problem without the Worker ever touching R2. Such an artifact **must** be generated from

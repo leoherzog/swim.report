@@ -11,15 +11,16 @@
 // "To Be Resampled" — that degrades to using nowIso for "updated", it does not
 // invalidate the row's status.
 //
-// FETCH URL CONFIRMED LIVE 2026-07 (fetched via WebFetch to confirm the table
-// contents and column order: Beach Name | E.coli Result | Condition |
-// Sampling Date). The exact underlying HTML tag/class structure was not
-// directly observable through the fetch tool (it returns rendered/markdown
-// content, not raw markup), so parseKenoshaBeachConditions is written
-// defensively against the STANDARD <table>/<tr>/<td> shape a CivicPlus-style
-// county site is expected to serve, and degrades to null (never a wrong
-// color) if that structural assumption breaks. Re-verify the raw HTML if this
-// source starts returning null in production.
+// The table contents and column order (Beach Name | E.coli Result | Condition |
+// Sampling Date) are confirmed live. The underlying HTML tag/class structure
+// has not been directly confirmed: inspecting this page through an agent
+// web-fetch tool returns rendered/markdown content rather than raw markup,
+// unlike fetchText's own runtime fetch, which reads the raw response body.
+// parseKenoshaBeachConditions is therefore written defensively against the
+// standard <table>/<tr>/<td> shape a CivicPlus-style county site is expected
+// to serve, and degrades to null (never a wrong color) if that structural
+// assumption breaks. Re-verify the raw HTML if this source starts returning
+// null in production.
 //
 // CURATION: Kenosha County's table lists ~20+ INLAND lake beaches (Silver
 // Lake, Camp Lake, Lake George, etc.) alongside the ~6 LAKE MICHIGAN beaches

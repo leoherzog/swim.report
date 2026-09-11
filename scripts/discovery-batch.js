@@ -793,15 +793,15 @@ export function marineZoneSql(snapshotRows, deletedIds, index) {
 // AND attempts < WATER_CLASS_MAX_ATTEMPTS gate. New and moved rows enter as
 // unclassified.
 //
-// Plus a one-time legacy re-drain: rows left unclassified at or above the attempts
-// cap by the pre-decisive classifier (see the clean-but-empty note in
-// src/waterClass.js) are admitted despite the cap, identified by
-// water_class_version IS NULL, since a row that ever reached a decision carries a
-// stamped version. Their attempts are deliberately not reset: at the cap they stay
+// Separately, rows stuck unclassified at or above the attempts cap with
+// water_class_version IS NULL are admitted despite the cap (see the clean-but-empty
+// note in src/waterClass.js): a row that ever reached a decision carries a stamped
+// version, so an unstamped row at the cap is distinguishable from an ordinary
+// parked row. Their attempts are deliberately not reset: at the cap they stay
 // hidden by FLAG_WORTHY_WATER_SQL, so they re-decide quietly instead of all
 // reappearing on the live site with estimated flag cards while they drain. The set
-// drains to empty and cannot refill, because the decisive classifier never returns
-// null for a complete probe.
+// drains to empty and cannot refill, because the classifier never returns null for
+// a complete probe.
 // Pure; exported for tests. Whole-table classification visibility, logged every
 // classify run because a NULL-hide with no metric is silent product loss (PLAN.md
 // section 7 requires these counts):
@@ -883,7 +883,7 @@ export function buildClassifyQueue(snapshotRows, mergedRows, deletedIds) {
     const staleVersion = typeof b.water_class_version === "number" &&
       b.water_class_version < WATER_CLASS_VERSION;
     const underCap = b.water_class_attempts < WATER_CLASS_MAX_ATTEMPTS;
-    // Legacy park marker: unclassified, at or above the cap, never versioned.
+    // Never decided: unclassified, at or above the cap, and carrying no water_class_version stamp.
     const parkedPreDecisive = unclassified && !underCap &&
       (b.water_class_version === null || b.water_class_version === undefined);
     const needs = ((unclassified || staleVersion) && underCap) || parkedPreDecisive;

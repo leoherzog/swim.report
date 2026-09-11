@@ -375,12 +375,12 @@ describe("southHaven.matches", function() {
 });
 
 describe("Van Buren State Park name trap (wrong-beach guard)", function() {
-  // Van Buren State Park is a SEPARATE DNR-monitored beach ~3 mi south of the
+  // Van Buren State Park is a separate DNR-monitored beach ~3 mi south of the
   // city, but its coordinates fall inside the South Haven matches() bbox. Its
-  // name contains "van buren", which used to be a Brown Stairs (Van Buren St.)
-  // name substring — so the park's beach would inherit the city stairway's
-  // flag color. It must NOT resolve to any site: not by name (substring
-  // removed) and not by proximity (>1.5 mi from every site).
+  // name contains "van buren", the same substring as the Brown Stairs (Van
+  // Buren St.) label; names[] deliberately omits it, so the park's beach must
+  // not resolve to any site: not by name and not by proximity (>1.5 mi from
+  // every site).
   const vanBurenSp = makeBeach({
     name: "Van Buren State Park",
     park_name: "Van Buren State Park",

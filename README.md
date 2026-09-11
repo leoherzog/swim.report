@@ -528,8 +528,7 @@ classification (offline)](#discovery-and-classification-offline)).
   land zone and its grid URL; nearly every ocean centroid takes this path at a mean of ~3
   probes, which is why the run is bounded by time rather than by count. A row the deadline
   leaves unreached is untouched and re-selects; an unrecoverable point fails like any other.
-  Migration 0013 requeued every row
-  that already held a marine id. Queue order is fewest failed attempts first, then
+  Queue order is fewest failed attempts first, then
   `last_viewed DESC`, then `RANDOM()`. A `404` from `/points` means the point is outside the
   NWS domain and parks the row immediately, so Canadian rows reach the ECCC cron on their first
   touch; other failures bump `enrichment_attempts` (migration 0003) and park after 5.

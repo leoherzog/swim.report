@@ -233,8 +233,8 @@ describe("fetchLatestSrfText", function () {
     expect(callCount).toBe(1);
     expect(requestedUrl).toBe(latestUrl);
     expect(requestedInit.headers["User-Agent"]).toBe(NWS_USER_AGENT);
-    // Shape consumed by parseRipCurrentRisk and the hourly cron is preserved,
-    // with sourceUrl now pointing at the /latest URL.
+    // The shape matches what parseRipCurrentRisk and the hourly cron consume;
+    // sourceUrl is the /latest URL.
     expect(result).toEqual({
       text: "SURF ZONE FORECAST\nRIP CURRENT RISK...HIGH",
       productId: "SRF MFL",

@@ -171,11 +171,11 @@ describe("parseMetroparksHtml", function() {
 });
 
 describe("metroparks site resolution (no proximity misattribution)", function() {
-  // Regression: the two beaches in a park share the same lake and (previously)
-  // the same park-centroid coordinates with a 3 mi site radius. When one beach
-  // was closed and the sibling open, resolveSiteForBeach's proximity pass would
-  // resolve the OPEN sibling to the CLOSED beach's red site — a false red on the
-  // wrong beach. Sites are now name-only, so this can never happen.
+  // Guard: the two beaches in a park can share the same lake and nearly the
+  // same coordinates. The sites parsed here carry no lat/lon/radiusMi, so
+  // resolveSiteForBeach's proximity pass never applies to them and only its
+  // name pass can match — a closed beach's site can never bleed onto its open
+  // sibling by distance alone.
   const oneClosedOneOpen =
     "<div class=\"vc_tta-panel\" id=\"KensingtonMetropark\" data-vc-content=\".vc_tta-panel-body\">" +
     "<div class=\"vc_tta-panel-body\">" +

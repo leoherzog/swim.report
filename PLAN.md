@@ -82,9 +82,9 @@ cross-module interface.
                                      // classification probes; rows at
                                      // WATER_CLASS_MAX_ATTEMPTS park (hidden). A local
                                      // spatial join has no transient-failure mode, so
-                                     // nothing bumps this column; it is retained for rows
-                                     // parked before the layers migration, which the
-                                     // legacy re-drain marker re-decides in place.
+                                     // nothing bumps this column; it is retained to gate rows
+                                     // parked with no stamped water_class_version, which the
+                                     // version-IS-NULL re-drain re-decides in place.
       water_class_version: 1         // number or null: the WATER_CLASS_VERSION under which
                                      // water_class was decided; bumping the constant
                                      // re-drains rows below it. Independent of RULES_VERSION.
@@ -627,12 +627,12 @@ migrations/0009_water_class.sql:
   Any complete probe decides: a clean-but-empty result classifies 'inland' rather than
   leaving the row NULL, so an unclassified row means "not in the layer set at all",
   never "joined and inconclusive". water_class_attempts is therefore vestigial, though
-  the cap stays in the gate for rows parked before the layers migration.
+  the cap stays in the gate for rows parked with no stamped water_class_version.
 
   water_class_version is the WATER_CLASS_VERSION under which the row was decided.
   Bumping the constant re-drains rows below it, but the version clause is ANDed with
   attempts < WATER_CLASS_MAX_ATTEMPTS in buildClassifyQueue, so a bump can never reach
-  rows parked at the cap — those re-drain via the version-IS-NULL legacy marker (see
+  rows parked at the cap — those re-drain via the version-IS-NULL check instead (see
   "Water classification (local layer join, offline batch)" in section 7). Bump the
   version only when an already-stored decision could change; a predicate change
   confined to the old null path does not qualify. Independent of RULES_VERSION: this
@@ -664,10 +664,10 @@ migrations/0012_wave_updated.sql:
   path reads it.
 
   NULL is required (SQLite ADD COLUMN forbids NOT NULL without a DEFAULT) and sorts
-  first under ASC, so the first post-migration run ordered identically to the previous
-  one and rotation began from run 2 with no backfill. Offline discovery's UPSERTs
-  enumerate columns explicitly, so newly discovered rows arrive NULL and are picked up
-  first. No index, matching recompute_updated.
+  first under ASC, so a beach with no wave_updated value lands at the front of the
+  rotation. Offline discovery's UPSERTs enumerate columns explicitly, so newly
+  discovered rows arrive NULL and are picked up first. No index, matching
+  recompute_updated.
 
 migrations/0013_requeue_marine_nws_zone.sql:
 
@@ -852,7 +852,7 @@ water-temperature tile reads "No data", and a scraper starts its failure streak 
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.7.0";
+    export const RULES_VERSION = "1.8.0";
 
     export const ALERTS_UNAVAILABLE_CAVEAT = "weather alerts are not checked here yet";
       // Appended to the reason (see the caveat rule after step 5) when the cron
@@ -1531,7 +1531,7 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
 ### src/waveSources/ndbcBuoys.js (NDBC water temperature, cron-side)
 
 The water-temperature half of the NDBC client, and the only module under
-src/waveSources/ — a directory name that predates the wave lane's removal. Read by
+src/waveSources/. Read by
 runWaterTempRefresh (section 7) and nothing else. Display-only: its output reaches the
 detail page's water-temperature tile and never src/rules.js.
 
@@ -3143,11 +3143,6 @@ The nothingToDo(args) guard errors only when discovery, classify and the marine 
 all off. Discovery and classification run in the same pass over the same layer set, so a
 beach is classified in the run that discovers it.
 
-`budgetExhausted` (a pure wall-clock predicate with other callers) and `pondWaterSeeds`
-survive from the tiled transport; the two reconciliation constants kept their meaning under
-new names, `RECONCILE_MAX_DELETES` and `RECONCILE_MAX_DELETE_FRACTION`, and everything else
-that managed a public mirror's failure modes is gone.
-
 Offline marine_zone pass (`--marine-zones <path>`, discovery.yml) — pure local math over
 repo-committed geometry, deriving beaches.marine_zone with no upstream requests. It runs
 against the `--snapshot` rows only, so a beach discovered this run resolves on the next
@@ -3382,8 +3377,7 @@ attempts cap stops permanent failures — non-US points swept in by the discover
 that api.weather.gov 404s forever — from occupying the batch and starving US beaches; after
 5 attempts a row is parked and no longer requeued. The per-run summary log reports
 selected / attempted / enriched / failures / marineRecovered / marineUnrecovered / notFound /
-deferred / elapsedMs / parked (nws_zone IS NULL AND enrichment_attempts >= 5). Migration 0013 sent every row whose
-nws_zone carried a marine id back through this path.
+deferred / elapsedMs / parked (nws_zone IS NULL AND enrichment_attempts >= 5).
 
 ### runEcccEnrichment (4x daily: "29 4,10,16,22 * * *")
 
@@ -3482,16 +3476,16 @@ a delete rail. When the number of flag-worthy -> hidden flips exceeds
 max(10, ceil(0.10 * flag-worthy rows)), the whole water_class block is refused rather than
 partially applied. The run logs the full before/after transition matrix either way.
 
-The queue, the version/attempts gate and the legacy re-drain marker:
+The queue and the version/attempts gate:
 
 SELECT id, osm_id, lat, lon FROM beaches WHERE (water_class IS NULL OR
 water_class_version < WATER_CLASS_VERSION) AND water_class_attempts < 5 ORDER BY
 water_class_attempts ASC, RANDOM() LIMIT <classifyQueue's limit option, unbounded by default>
-(fresh-first then random; re-drain on a version bump; skip parked), UNION the legacy
-re-drain set: rows left unclassified at or above the cap by the pre-decisive classifier,
-identified by water_class_version IS NULL AND water_class IS NULL AND
+(fresh-first then random; re-drain on a version bump; skip parked), UNION a second branch for
+rows with no stamped version at all: water_class_version IS NULL AND water_class IS NULL AND
 water_class_attempts >= 5. A row that ever reached a decision carries a stamped version, so
-the marker matches only pre-change parks; their attempts are deliberately not reset,
+this branch matches only rows that hit the attempts cap without one; their attempts are
+deliberately not reset,
 because at the cap they stay hidden by FLAG_WORTHY_WATER_SQL and so re-decide quietly
 instead of hundreds of confirmed-inland beaches reappearing on the live site while they
 drain. Attempts-ASC ordering puts them behind fresh rows, the ones visible under the
@@ -3507,8 +3501,8 @@ signals = waterClassSignals(index, beach);
   `bumped` should read 0 in every run log. A nonzero bumped means the classifier regressed
   to a pending state, or the layer set is missing beaches, which is reported separately as
   absent_from_layers.
-water_class_attempts is therefore vestigial, retained only for rows parked before this
-migration; the column can be retired once those are confirmed drained (TODO.md).
+water_class_attempts exists only to gate this queue and the no-version re-drain branch
+above; the column can be retired once no unversioned parked rows remain (TODO.md).
 
 Summary log reports attempted / classified / ocean / great_lake / inland (with a no_water=N
 subset count — the rows decided by the clean-but-empty branch rather than a real adjacent
@@ -3769,8 +3763,8 @@ src/router.js:
       // demand stamp below; when absent the stamp silently no-ops.
 
     export { distanceMi }  // re-exported from src/geo.js (section 5): pure haversine
-      // great-circle distance in statute miles. Router no longer defines it locally;
-      // the re-export keeps existing importers (tests) working.
+      // great-circle distance in statute miles, kept here so importers — tests
+      // included — can pull it from src/router.js directly.
 
     export function escapeLike(term)
       // Pure; exported for tests. Escapes the LIKE wildcards % and _ plus the
@@ -4094,13 +4088,13 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // every other failure path in that script is. Everything before startMap only
       // defines helpers; startMap constructs the map, so readCenter() runs at
       // construction and a geolocation swap landing while the module is in flight is
-      // still honored. Two v6 API consequences: styleimagemissing is notify-only — a
-      // listener can no longer supply the image it is told about — so the
+      // still honored. Two v6 API traits matter here: styleimagemissing is
+      // notify-only — a listener cannot supply the image it is told about — so the
       // 1px-transparent placeholder net is registered with
       // map.setMissingStyleImageResolver(id => ...), which MapLibre awaits before giving
       // the image up; and a failed GPU/WebGL2 context throws GPUInitializationError out
-      // of the constructor (6.7.0 changed this from an 'error' event), so the
-      // construction try/catch is the browser-cannot-render path and logs it. The
+      // of the constructor, so the construction try/catch is the browser-cannot-render
+      // path and logs it. The
       // 'error' listener stays for every tile, source and style failure after
       // construction, which never throws there.
 
@@ -4407,7 +4401,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     is present and empty, the estimateInputs seal (section 1) reports alertsResolved true,
     and the reason carries no ALERTS_UNAVAILABLE_CAVEAT — an empty echo alone cannot tell a
     clear check from a failed national fetch. A missing estimate, an unknown color and an
-    unusable official color all read "No data yet for this beach."; a legacy payload with no
+    unusable official color all read "No data yet for this beach."; a payload with no
     trigger and no echoed signals returns "" and the line is omitted entirely.
   - Share row: a <wa-copy-button> whose value is the absolute canonical URL (SITE_ORIGIN
     plus "/beach/" + encodeURIComponent(beach.id), a constant so the renderer stays pure)
@@ -4498,7 +4492,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   the reader should see — and a paragraph in the NWS "* WHAT...text" section form leads with
   its sentence-cased label in <strong>; anything that does not parse, ECCC's unlabelled
   alert_text_en included, stays a plain paragraph. An entry carrying none of the four text
-  fields (every estimate written before they shipped) renders as
+  fields renders as
   <div class="alert-detail alert-detail-bare"> — the same header row without a toggle —
   rather than an expander onto an empty panel. All upstream text is escaped. "" when the
   echo is missing or empty.
@@ -4513,7 +4507,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   per-water-class wave thresholds, the band labels built from them, and the alert/rip color
   mappings are never restated in the frontend; computeWaveRuns takes the beach's water_class):
   - The "Wave forecast" section heading names the section and nothing more: the ESTIMATE
-    badge stays on the "now" stat line, and when the stat is absent (a legacy payload
+    badge stays on the "now" stat line, and when the stat is absent (a payload
     without waveHeightFt) a badge-only wa-cluster row still renders, so the section always
     carries the estimated framing from its own content rather than its heading.
   - "Now" stat: estimate.waveHeightFt as toFixed(1) + " ft" with a quiet "waves now"
@@ -4550,7 +4544,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     tabindex="0"), the hazard name as a CSS-ellipsized visible label, and a sibling
     wa-tooltip whose text — identical to the band's aria-label — is the issuing body
     (alertAuthorityForEvent) plus name plus period, e.g. "NWS alert: Beach Hazards Statement
-    — now through +14 h". Legacy payloads without the echo fields render no lane.
+    — now through +14 h". A payload without the echo fields renders no lane.
   - Strip: a plain flex row, Dark Sky style — <div class="wave-strip" role="list"
     aria-label="Wave height forecast for the next N hours"> of colored segment divs
     (renderWaveStrip). One segment per run from computeWaveRuns over waveColorForHeight
@@ -4658,8 +4652,8 @@ exporting a CSS string); render.js is the sole module the router imports.
 - Nearby-webcam section (detail page only): rendered after the wave map and before the
   nearby beaches — a live picture of the beach is the most engaging element on the page, so
   it precedes the links away from it — when beach.webcam_player_url is a non-empty string,
-  and nothing otherwise, including pre-migration rows where the webcam fields are
-  undefined. Embeds the Windy player URL in a
+  and nothing otherwise, including rows where the webcam fields are undefined. Embeds the
+  Windy player URL in a
   plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> wrapped in the same
   framed-embed container as the wave map, its title attribute the webcam title or "Nearby
   webcam" when untitled, 16:9 responsive, fetched by the browser. The section is
@@ -4946,7 +4940,7 @@ test uses symbolically.
   rendered with a sentence-cased label, the reflow of the product's fixed-width wrapping
   with its blank-line breaks kept, unlabelled ECCC prose as plain paragraphs, the window
   phrased against onset with in-effect entries ordered first, the UTC fallback stamp, the
-  bare row for a legacy entry carrying no text, the empty string with no echo, escaping of
+  bare row for an entry carrying no text, the empty string with no echo, escaping of
   the office's own words, and the stale warning staying above the disclosures.
 - test/renderWqFloor.test.js — the water-quality advisory callout via renderDetailPage:
   the danger/warning variant per color, the reason/source/updated lines, its place between

@@ -26,11 +26,14 @@
 // spec for this source explicitly calls out the green-flag image as an
 // unreliable/secondary signal versus the advisory/closure panel state.
 //
-// The live markup is unconfirmed. The exact BeachDetail.aspx panel ids for the
-// active advisory and closure states, and the real numeric BeachIDs for each
-// curated Lake Michigan site below, could not be confirmed against a live,
-// currently-monitored page: every fetch returned an off-season "no monitoring
-// information for this year" placeholder or an unrelated inland beach record.
+// The live markup is unconfirmed: the real BeachID for each curated site and
+// the BeachDetail.aspx panel ids for the active advisory and closure states
+// are not verified against a live, currently-monitored page. An off-season or
+// unmonitored BeachID returns a "no monitoring information for this year"
+// placeholder or an unrelated inland beach record instead of the panels this
+// parser targets. Confirming the BeachID needs any currently-monitored page;
+// confirming the advisory/closure panel markup needs one during an active
+// advisory or closure.
 // The parser is written defensively and degrades to null on anything it cannot
 // positively recognize. Before enabling this source in the wqFloor registry:
 //   1. Confirm the real BeachID for each SITE_DEFS entry; the placeholders below
@@ -154,12 +157,12 @@ function slicePanelById(html, panelId) {
 // closed — never guess). Defensive: matches on documented panel id + text
 // shapes, not brittle DOM structure.
 //
-// FAIL CLOSED: a color is emitted only when a POSITIVE, scoped advisory/closure
+// A color is emitted only when a positive, scoped advisory/closure
 // container is matched (the id="Main_pnlClosure" / id="Main_pnlAdvisory" panels,
-// each confirmed by its own body text). The earlier unscoped whole-page
-// /\bclosed\b/ etc. fallback was removed — it red-flagged off-season placeholder
-// pages (the only thing live probing ever returned), which is the worst-possible
-// wrong-color bug. A page matching neither the clean panel nor a confirmed
+// each confirmed by its own body text). An unscoped whole-page /\bclosed\b/
+// style match would red-flag an off-season placeholder page, the
+// worst-possible wrong-color bug, so every match stays scoped to its own
+// confirmed panel. A page matching neither the clean panel nor a confirmed
 // advisory/closure panel returns null.
 export function parseIllinoisBeachGuardDetail(html) {
   if (typeof html !== "string" || html.length === 0) {

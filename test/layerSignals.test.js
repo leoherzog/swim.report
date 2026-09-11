@@ -456,8 +456,8 @@ describe("distance is measured from member VERTICES, never the centroid (the Sle
 describe("transient null vs clean signals (ported from fetchWaterClassSignals)", () => {
   // null = transient: the caller must not bump water_class_attempts and the row
   // stays queued. A signals object — including the all-empty one — is a CLEAN,
-  // complete answer that decides. This is the one place the migration can
-  // silently regress the Locklin Pines fix.
+  // complete answer that decides. Confusing the two silently regresses the
+  // Locklin Pines case below.
 
   it("an unparseable osm_id -> null", () => {
     const index = buildSignalsIndex({ beaches: [beachAt("node/1")] });
@@ -474,7 +474,8 @@ describe("transient null vs clean signals (ported from fetchWaterClassSignals)",
 
   it("a successfully indexed beach with NOTHING in range -> the ALL-EMPTY OBJECT, not null", () => {
     // The Locklin Pines shape: a real, indexed beach set back from its water. A
-    // complete probe found nothing, and saying so once is the whole fix.
+    // complete probe that finds nothing must return the empty object, or the
+    // beach requeues forever instead of deciding inland once.
     const index = buildSignalsIndex({
       beaches: [beachAt("way/123")],
       coastline: [coastlineAt(400)],

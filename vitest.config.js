@@ -1,6 +1,6 @@
 // Coverage configuration only. Everything else — test discovery, pool, environment —
-// stays on vitest's defaults so a plain "vitest run" behaves exactly as it did before
-// this file existed; coverage is opt-in through "npm run test:coverage" and CI does not
+// stays on vitest's defaults, so a plain "vitest run" is unaffected by this file;
+// coverage is opt-in through "npm run test:coverage" and CI does not
 // pay for it.
 import { defineConfig } from "vitest/config";
 
@@ -14,7 +14,7 @@ export default defineConfig({
 
       // Load-bearing. Coverage reports only files a test imported unless include names
       // them, which would silently omit exactly the zero-coverage files the report
-      // exists to surface. There is no `all` option any more; include replaced it.
+      // exists to surface. There is no "all" option; "include" is what scopes coverage to these files.
       include: ["src/**/*.js", "scripts/**/*.js"],
 
       exclude: [

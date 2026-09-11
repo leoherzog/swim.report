@@ -481,9 +481,9 @@ describe("parksLayerHealthy is the hasPark valve", function () {
 
   // GDAL routes every closed area-tagged way to multipolygons, so only UNCLOSED
   // ways reach its lines layer. Great Lakes parks are closed ways or relations,
-  // and the first real build measured parks-line 0 against parks-polygon 6457.
-  // Treating that as a refusal meant park_name never refreshed and — because
-  // reconciliation requires this valve — deletes could never run at all.
+  // so their parks-line count is legitimately zero. Treating that as a refusal
+  // would freeze park_name forever and — because reconciliation requires this
+  // valve — block every delete too.
   it("is TRUE when parks-line is legitimately zero against a zero floor and zero history", function () {
     const zeroLine = makeReport({
       parks: makeParks({ lineCount: 0, lineFloor: 0, previousLineCount: 0 })

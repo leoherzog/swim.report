@@ -167,9 +167,9 @@ describe("station capabilities", function () {
   });
 
   it("admits the whole table for water temperature, NOS gauges included", function () {
-    // The NOS water-level network reports WTMP and no WVHT, so an admission rule
-    // shaped around wave height excluded all of it. Eligibility is per-reading
-    // now, and this is the count that rule produces.
+    // The NOS water-level network reports WTMP and no WVHT; eligibility for
+    // water temperature is decided per-reading rather than by an admission rule
+    // keyed to wave height, so the whole station table qualifies.
     expect(stationsWithCapability(CAP_WATER_TEMP).length).toBe(72);
     expect(stationsWithCapability(CAP_WATER_TEMP).length).toBe(NDBC_STATIONS.length);
   });

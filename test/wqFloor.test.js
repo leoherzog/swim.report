@@ -1,6 +1,6 @@
 // test/wqFloor.test.js
 // Unit tests for the raise-only water-quality floor registry
-// (src/wqFloor/index.js). The registry now ships POPULATED with the curated
+// (src/wqFloor/index.js). The registry ships populated with the curated
 // per-region sources; these tests lock the source-object contract every
 // registered source must satisfy and the resolver behavior (floorColor ->
 // advisory shape, invalid-color rejection) shared across them, not any one

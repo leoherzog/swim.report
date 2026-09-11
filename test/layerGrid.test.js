@@ -467,11 +467,12 @@ describe("segment grid — the megapolygon an envelope index cannot prune", func
   });
 
   it("examines a bounded slice of the ring per probe, never the whole ring", function () {
-    // THE REGRESSION GUARD. Revision 1 of this migration assumed an envelope grid
-    // would do; against this shape it degenerates to a full scan — 1,669 beaches
-    // x ~40 vertices x ~3e6 lake segments is ~1e11 evaluations, hours of work
-    // rather than seconds. The deterministic symptom is segments-examined per
-    // probe, so that is what is asserted; wall clock is the secondary check
+    // THE REGRESSION GUARD. An envelope grid cannot prune this shape: its
+    // envelope contains every query point, so it degenerates to a full ring
+    // scan — 1,669 beaches x ~40 vertices x ~3e6 lake segments is ~1e11
+    // evaluations, hours of work rather than seconds. The deterministic
+    // symptom is segments-examined per probe, so that is what is asserted;
+    // wall clock is the secondary check
     // because a loaded CI box can be slow without being wrong.
     const segGrid = segmentGridOf([lake]);
     const before = segmentGridStats(segGrid);

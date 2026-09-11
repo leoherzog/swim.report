@@ -27,7 +27,7 @@
 // What a bump does not reach: buildClassifyQueue in scripts/discovery-batch.js
 // ANDs the version clause with attempts < WATER_CLASS_MAX_ATTEMPTS, so rows
 // parked at the cap are excluded however high the version goes. Those are
-// re-drained by the version-IS-NULL legacy marker there instead.
+// re-drained separately, by the version-IS-NULL marker for unversioned rows.
 export const WATER_CLASS_VERSION = 2;
 
 // Data-driven allowlist: wikidata QID -> lake name. Editing this table plus

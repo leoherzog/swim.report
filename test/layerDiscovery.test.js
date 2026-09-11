@@ -5,8 +5,8 @@
 // outside every REGIONS bbox is permanently undeletable, because
 // reconcileStaleRows scopes its delete candidates with pointInAnyRegion, so the
 // blanket assertion is that no emitted row fails pointInAnyRegion. And
-// "osm-" + osmType + "-" + osmId is the primary key every KV flag and enriched
-// column hangs off, so a known production id is threaded end to end through
+// "osm-" + osmType + "-" + osmId is the D1 primary key every enriched column
+// hangs off, so a known production id is threaded end to end through
 // mergeBeachRows. Park membership is parks-polygon only; naming is the wider
 // tier.
 
@@ -1039,8 +1039,8 @@ describe("composed: layer features -> discoverFromLayers -> mergeBeachRows -> ro
   it("threads a known production id end to end and applies the merge policy", () => {
     // way/505668572 is Ottawa Beach, Holland MI — a real production row. The
     // "osm-" + osmType + "-" + osmId round trip is the single highest-value
-    // parity assertion in the migration: getting it wrong silently orphans
-    // every KV flag and every enriched column on every beach.
+    // parity assertion here: getting it wrong silently orphans every stored
+    // flag and every enriched column on every beach.
     const hollandStatePark = polyFeature("parks-polygon", "relation", 1976237,
       { leisure: "park", name: "Holland State Park" }, box(42.76, -86.23, 42.79, -86.20));
     const layers = layersOf({

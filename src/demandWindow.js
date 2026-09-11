@@ -7,15 +7,15 @@
 //   Uncaught TypeError: Incorrect type for map entry 'HOT_VIEW_WINDOW_MS':
 //   the provided value is not of type 'function or ExportedHandler'.
 //
-// which neither `wrangler deploy --dry-run` nor the test suite can see; it only
+// which neither "wrangler deploy --dry-run" nor the test suite can see; it only
 // surfaces when the runtime boots the Worker. Any constant the cron path shares
 // with tests belongs in a plain module like this one, imported by src/index.js.
 // Never re-add a non-function named export to src/index.js;
 // test/workerExports.test.js guards this.
 //
-// 7 days: far longer than the flag KV TTL (FLAG_TTL_SECONDS in src/index.js,
-// 7 h), so hotness never flaps with the flag lifecycle, and long enough to span
-// weekly visit periodicity. Both
+// 7 days: far longer than the estimate and official lease (FLAG_TTL_SECONDS in
+// src/flagTtl.js, 7 h), so hotness never flaps with the flag lifecycle, and long
+// enough to span weekly visit periodicity. Both
 // beach-walking crons order their reads hot-first, so a beach with a last_viewed
 // stamp inside this window is covered every run, ahead of the cold remainder
 // rotating on the run's own cursor column.

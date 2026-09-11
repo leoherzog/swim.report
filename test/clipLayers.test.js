@@ -340,7 +340,8 @@ describe("layerPropertyKeys / toGeoJsonFeature", () => {
   });
 
   // osm_id vs osm_way_id is the way/relation discriminator, and it feeds
-  // "osm-" + osmType + "-" + osmId, the D1 primary key AND the KV flag key.
+  // "osm-" + osmType + "-" + osmId, the D1 primary key that every enriched
+  // column and stored flag hangs off.
   it("routes a way to osm_way_id and a relation to osm_id on a polygon layer", () => {
     const keys = layerPropertyKeys(LAYER_PLAN.find((e) => e.key === "beaches-polygon.fgb"));
     const way = toGeoJsonFeature(layerFeature({ osmType: "way", osmId: 7 }), keys);

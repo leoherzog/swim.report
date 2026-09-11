@@ -4,7 +4,7 @@
 //
 // That indexing is what lets one landed cycle color FORECAST_HOURS of hourly runs
 // instead of one, so the offline NOAA pipeline can publish a few times a day
-// rather than every three hours. It is also why a series-bearing record's lease
+// rather than hourly. It is also why a series-bearing record's lease
 // is the length of the series it carries (WAVE_SERIES_LEASE_SECONDS) rather than
 // one pipeline interval.
 //

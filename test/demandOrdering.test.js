@@ -154,11 +154,10 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite", function (
     });
 
     it("a NULL wave_updated row sorts AHEAD of every stamped row (no backfill needed)", function () {
-      // This is why migration 0012 ships the column nullable with no backfill:
-      // never-refreshed rows (and every beach offline discovery inserts, since
-      // its UPSERTs enumerate columns explicitly) sort to the FRONT of the
-      // rotation on their own, and the first post-migration run — where every
-      // row is NULL — orders identically to the pre-migration id ASC sweep.
+      // wave_updated ships nullable with no backfill: never-refreshed rows (and
+      // every beach offline discovery inserts, since its UPSERTs enumerate
+      // columns explicitly) sort to the FRONT of the rotation on their own, so a
+      // run over an all-NULL column orders identically to a plain id ASC sweep.
       const db = makeBeachesDb([
         { id: "b-stamped-early", wave_updated: "2026-07-01T00:00:00.000Z", last_viewed: null },
         { id: "a-never-refreshed", wave_updated: null, last_viewed: null },
@@ -169,11 +168,11 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite", function (
     });
 
     it("is INSENSITIVE to recompute_updated — the hourly cron flattening its own cursor cannot reorder this queue", function () {
-      // The production bug in one assertion: runFlagRecompute stamps
-      // recompute_updated with one shared nowIso for the whole table every hour,
-      // so under the OLD shared clause both rows below tied and the sort fell
-      // through to id ASC forever, starving a fixed tail. On wave_updated the
-      // 6-hourly cron's own rotation still decides.
+      // This clause must stay insensitive to recompute_updated: runFlagRecompute
+      // stamps that column with one shared nowIso for the whole table every hour,
+      // so keying off it would tie every row and the sort would fall through to
+      // id ASC forever, starving a fixed tail. On wave_updated the 6-hourly
+      // cron's own rotation still decides.
       const db = makeBeachesDb([
         {
           id: "a-recently-waved",

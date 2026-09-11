@@ -166,7 +166,7 @@ variable.
 
 ## Faithful to the Worker's semantics
 
-The emitted SQL preserves every invariant the previous pipeline established
+The emitted SQL satisfies the invariants the Worker depends on
 (`test/discoveryBatch.test.js` locks this down):
 
 - **Enrichment columns are preserved.** The upsert is
@@ -218,7 +218,7 @@ The emitted SQL preserves every invariant the previous pipeline established
   (snapshot ∪ newly discovered, minus reconcile-deletes) where `water_class IS NULL OR
   water_class_version < WATER_CLASS_VERSION` and
   `water_class_attempts < WATER_CLASS_MAX_ATTEMPTS`, plus a one-time re-drain of rows left
-  unclassified at or above the cap by the pre-decisive classifier (`water_class_version IS
+  unclassified at or above the cap with no stamped version (`water_class_version IS
   NULL`, attempts deliberately **not** reset so they stay hidden while they re-decide).
   Decisions reset attempts to 0. `water_class_attempts` is otherwise vestigial: a local join
   has no transient-failure mode.

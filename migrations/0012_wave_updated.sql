@@ -2,11 +2,11 @@
 -- (runWaterTempRefresh): ISO timestamp of the last run that reached a write
 -- DECISION for this beach.
 --
--- THE NAME IS WIDER THAN THE WRITER. Wave data is bulk-written into KV by the
--- offline NOAA GRIB pipeline, not by any Worker cron. This column stays the
--- water-temp cron's cursor because that cron walks the same beach set on the
--- same cadence; TODO.md tracks retiring the column when the water-temp pass
--- moves offline too.
+-- THE NAME IS WIDER THAN THE WRITER. Wave data is written into beach_state by
+-- the offline NOAA wave cycle as a SQL delta, not by any Worker cron. This
+-- column stays the water-temp cron's cursor because that cron walks the same
+-- beach set on the same cadence; TODO.md tracks retiring the column when the
+-- water-temp pass moves offline too.
 --
 -- WHY IT CANNOT SHARE recompute_updated. runFlagRecompute rewrites
 -- recompute_updated to a single shared nowIso for its ENTIRE run's beach set

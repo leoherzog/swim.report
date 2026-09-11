@@ -55,12 +55,12 @@ describe("classifyWaterBody", () => {
 
   it("all-empty signals -> inland: a COMPLETE probe finding no water is a decision, not a pending row", () => {
     // Regression (Locklin Pines Beach Park, way/1545732724): nearest water way
-    // ~150 m out and pond-sized, Cross Lake ~300 m, so all three probes come back
-    // empty. This used to return null, which bumped attempts and left the row
-    // unclassified — and therefore VISIBLE under the FLAG_WORTHY_WATER_SQL
-    // fail-open, showing an estimated flag card for an inland lake beach across
-    // all 5 attempts. The probe is deterministic, so those retries could only
-    // reach the same answer; decide it once.
+    // ~150 m out and pond-sized, Cross Lake ~300 m, so all three probes come
+    // back empty. A complete probe finding no water is a decision, not a
+    // pending row: the probe is deterministic, so a null answer here would
+    // only bump attempts toward the same empty result, while
+    // FLAG_WORTHY_WATER_SQL's fail-open would keep showing an estimated flag
+    // card for an inland lake beach.
     expect(classifyWaterBody({})).toBe("inland");
     expect(classifyWaterBody({ coastlinePresent: false, nearbyLakeQids: [], nearbyWayWater: false })).toBe("inland");
   });
@@ -85,13 +85,10 @@ describe("classifyWaterBody", () => {
   });
 
   it("pins the decision layer's version integer", () => {
-    // Relocated here from the query-text block: WATER_CLASS_VERSION versions
-    // the DECISION this describe block covers, not the probe transport, and a
-    // bump is what re-drains every already-classified row. Its home is beside
-    // the rules it versions.
-    //
-    // A bump makes every already-classified row re-decide once against the
-    // current evidence, even when the rules themselves are unchanged.
+    // WATER_CLASS_VERSION versions the DECISION this describe block covers, not
+    // the probe transport: a bump makes every already-classified row re-decide
+    // once against current evidence, even when the rules themselves are
+    // unchanged.
     expect(WATER_CLASS_VERSION).toBe(2);
   });
 });

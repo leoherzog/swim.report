@@ -33,12 +33,10 @@
 // counts as healthy when it has nothing to say.
 //
 // *** LIVE-MARKUP CONFIRMATION NEEDED ***
-// A live fetch of https://www.lcghd.org/beaches/ during this build was
-// blocked by the site's Mod_Security WAF ("Not Acceptable!", HTTP request
-// rejected before any markup was served) -- the exact surrounding HTML
-// structure (tag/class/id around each beach's prediction line) could not be
-// confirmed. The wording "Water Bacteria Quality Prediction: GOOD/POOR" is
-// per the task spec. The parser below therefore works on VISIBLE TEXT
+// The site's Mod_Security WAF can reject an automated fetch outright ("Not
+// Acceptable!", no markup served), so the exact HTML structure around each
+// beach's prediction line is unconfirmed. "Water Bacteria Quality
+// Prediction: GOOD/POOR" is the assumed vocabulary, per the task spec. The parser below therefore works on VISIBLE TEXT
 // (tag-stripped), not brittle selectors, and is written to fail closed to
 // null/no-site on anything it cannot positively recognize. Before this
 // source is registered live, an integrator should re-confirm the exact

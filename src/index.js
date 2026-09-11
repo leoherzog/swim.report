@@ -928,7 +928,7 @@ async function runFlagRecompute(env) {
 
     // Step 9: calibration history (migration 0006). One row per beach with both
     // a fresh estimate and a scraped official color this run — the paired signal
-    // used to tune wave/wind thresholds in src/rules.js. Estimate-only beaches
+    // for tuning wave/wind thresholds in src/rules.js. Estimate-only beaches
     // are skipped so the table does not grow by the whole beach set hourly.
     // Written in a single D1 batch to stay within the subrequest budget (PLAN.md
     // section 7); a failure here never poisons the run.

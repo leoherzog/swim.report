@@ -373,8 +373,9 @@ describe("end-to-end read of a synthetic published layer", function () {
         records.push(record);
       }
     }
-    // The id form below is the D1 primary key AND the KV flag key; getting the
-    // node/way/relation split wrong here orphans every stored flag.
+    // The id form below is the D1 primary key that every stored flag and
+    // enriched column hangs off; getting the node/way/relation split wrong
+    // here orphans every one of them.
     const ids = records.map(function (r) { return "osm-" + r.osmType + "-" + r.osmId; });
     expect(ids).toEqual([
       "osm-node-1001",

@@ -134,9 +134,9 @@ export function mergeBeachRows(namedRows, parkBeaches) {
   }
 
   for (const group of unnamedByPark.values()) {
-    // Primary = largest by bbox area, first-seen winning ties (matches the
-    // previous single-row policy exactly so its id/name — and its KV flag —
-    // stay stable).
+    // Primary = largest by bbox area, first-seen winning ties, so the primary
+    // beach keeps a stable id and name — every downstream record keyed by
+    // beach id (beach_state, flag_history) stays attached to the right row.
     let primary = group[0];
     for (const beach of group) {
       if (beach.areaDeg2 > primary.areaDeg2) {

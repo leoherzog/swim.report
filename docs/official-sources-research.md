@@ -1,14 +1,14 @@
 # swim.report — Official Source Scraper Prioritization Report
 
-> **Historical survey — partially superseded.** This is the original web-survey
-> snapshot. Six water-quality (E. coli / bacteria) sources it recommended and that
-> were later built — Wisconsin DNR, Ohio BeachGuard, HD of Northwest Michigan,
-> Benzie-Leelanau DHD, Lenawee County HD, and Michigan City IN — have since been
-> **removed**. An official color overrides the flag estimate wherever shown, and a
-> bacteria "clean → green" reading is a different axis from surf hazard: letting it
-> win would mask a genuine hazard estimate (e.g. a gale-driven red). Only
-> hazard/flag/closure sources are registered — seven of them today. Water quality
-> now feeds the separate raise-only floor in `src/wqFloor/`. See TODO.md's
+> **This survey is not authoritative for the current registry.** An official
+> color overrides the flag estimate wherever shown, and a bacteria "clean →
+> green" reading is a different axis from surf hazard: letting it win would
+> mask a genuine hazard estimate (e.g. a gale-driven red). So water quality
+> feeds only the separate raise-only floor in `src/wqFloor/`, never
+> `src/officialSources/`; none of Wisconsin DNR, Ohio BeachGuard, HD of
+> Northwest Michigan, Benzie-Leelanau DHD, Lenawee County HD or Michigan City
+> IN, named below, are registered scrapers. `src/officialSources/index.js`
+> registers seven hazard/flag/closure sources. See TODO.md's
 > "Official-source coverage" and PLAN.md section 6 for the current registry.
 
 ## 1. TL;DR

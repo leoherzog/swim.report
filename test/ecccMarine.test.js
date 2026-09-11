@@ -1,4 +1,4 @@
-// [experimental] ECCC marine-warnings client tests. Fixtures mirror real
+// ECCC marine-warnings client tests. Fixtures mirror real
 // api.weather.gc.ca/collections/marineweather-realtime responses (pygeoapi
 // GeoJSON: per-zone Polygon features; properties.area.region.en "Great Lakes",
 // "Atlantic - Nova Scotia", "Pacific - British Columbia", ...;
@@ -87,7 +87,7 @@ function okJson(body) {
 // The marine event -> color mapping lives in src/rules.js
 // (ECCC_ALERT_PRECEDENCE / ECCC_ALERT_COLOR_MAP for the short-circuit lane,
 // ECCC_FLOOR_PRECEDENCE for the yellow floor) and is covered by
-// test/rules.test.js; this client no longer carries a second copy of it.
+// test/rules.test.js; this client carries no second copy of it.
 describe("parseEcccMarineAlerts", function () {
   it("extracts active Great Lakes marine warnings (Lake Erie: strong wind + gale)", function () {
     const json = collection([

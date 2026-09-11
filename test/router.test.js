@@ -432,8 +432,8 @@ describe("renderListPage search form", () => {
   });
 
   it("shows the no-match empty state (not the empty-database copy) on a q-filtered page with zero results", () => {
-    // Regression: a search miss against a populated table used to fall through
-    // to "No beaches found yet. Check back soon.", telling the searcher the
+    // A search miss against a populated table must not fall through to "No
+    // beaches found yet. Check back soon.", which would tell the searcher the
     // site has no beaches at all.
     const html = renderListPage({
       entries: [],
@@ -1821,7 +1821,7 @@ describe("honest unknown: missing estimate never defaults green", () => {
   });
 });
 
-describe("unrecognized flag colors normalize to unknown (corrupt-KV guard)", () => {
+describe("unrecognized flag colors normalize to unknown (corrupt-D1 guard)", () => {
   it("renders a garbage estimate color as UNKNOWN in the list row", () => {
     const html = renderListPage({
       entries: [{ beach: OVAL, estimate: { color: "purple" }, official: null, distanceMi: null }],

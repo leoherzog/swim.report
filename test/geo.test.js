@@ -6,8 +6,8 @@
 import { describe, it, expect } from "vitest";
 import { distanceKm, distanceMi, metersToFeet } from "../src/geo.js";
 
-// The mile-per-kilometre ratio geo.js carries over from the pre-consolidation
-// copies (3958.8 mi radius paired with the 6371 km radius).
+// geo.js pairs a 3958.8 mi Earth radius with a 6371 km one, so MI_PER_KM is
+// exactly their ratio rather than a rounder mile-per-km constant.
 const MI_PER_KM = 3958.8 / 6371;
 
 describe("distanceMi", function () {

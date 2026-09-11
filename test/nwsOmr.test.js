@@ -395,10 +395,10 @@ describe("nwsOmr end-to-end resolution", function () {
   });
 
   it("a beach ~1.7 mi from a centroid (no name match) both matches AND resolves to that site", function () {
-    // Regression: matchesOmr claims within OMR_MATCH_RADIUS_MI (2 mi), so the
-    // resolve radius must also be 2 mi. A beach 1.5-2.0 mi from a centroid with
-    // no name substring was previously CLAIMED yet resolved to null (silent
-    // coverage gap) because resolveSiteForBeach fell back to the 1.5 mi default.
+    // matchesOmr claims a beach within OMR_MATCH_RADIUS_MI (2 mi), so
+    // resolveSiteForBeach must resolve at the same 2 mi radius: a smaller
+    // default here would leave a claimed beach with no site, a silent coverage
+    // gap.
     const sites = parseOmrBeachReport(buildProduct(LIVE_ROWS), NOW_ISO);
     // 1.700 mi due north of the Holland State Park centroid (42.7739, -86.2090).
     const beach = makeBeach({

@@ -101,8 +101,8 @@ function assertCompleteRead(header, decoded, what) {
 // --- Pure record normalization ------------------------------------------------
 
 // osm_id vs osm_way_id is the way/relation discriminator, and it is
-// load-bearing: the id feeds "osm-" + osmType + "-" + osmId, which is both the
-// D1 primary key and the KV flag key, and src/layerSignals.js gates
+// load-bearing: the id feeds "osm-" + osmType + "-" + osmId, the D1 primary key
+// for both beaches and beach_state, and src/layerSignals.js gates
 // nearbyWayWater on type "way" and nearbyLakeQids on type "relation". Getting it
 // wrong silently orphans every stored flag.
 //

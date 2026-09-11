@@ -6,9 +6,10 @@
 // regex that matches anywhere in the product (each regex itself matches its
 // first occurrence, so a multi-period product resolves to the earliest period).
 // The ocean "Rip Current Risk" wordings (regexes 0-2) are listed before the
-// Great Lakes "Swim Risk" variant (regex 3) so any product carrying the explicit
-// rip wording keeps resolving exactly as before; the Swim Risk regex only fires
-// on Great Lakes beach-hazard products that use that label and no rip wording.
+// Great Lakes "Swim Risk" variant (regex 3) so a product carrying the explicit
+// rip wording always matches one of regexes 0-2 before regex 3 is tried; the
+// Swim Risk regex fires only on Great Lakes beach-hazard products that use that
+// label and no rip wording.
 // NWS Great Lakes forecasts express the swimming hazard as "SWIM RISK...HIGH"
 // (High/Moderate/Low), which maps onto the same HIGH/MODERATE/LOW the estimator
 // already consumes via ripCurrentRisk.

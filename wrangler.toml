@@ -63,17 +63,16 @@ directory = "public"
 # Changing a cron string is a FIVE-file edit (this file, package.json's seed:*
 # URLs, CRON_JOBS in src/index.js, the cron strings hard-coded in the tests, and
 # whichever docs quote the schedule). test/cronTriggers.test.js catches a
-# wrangler.toml / CRON_JOBS mismatch, which nothing did before; the rest still
-# fail silently.
+# wrangler.toml / CRON_JOBS mismatch; drift in the other three files still
+# fails silently.
 # 17 3,9,15,21 * * * — NWS point enrichment, 4x daily
 # 29 4,10,16,22 * * * — ECCC zone enrichment, 4x daily (Canadian beaches the
 #                    NWS enrichment permanently parked)
 # 31 9 * * *       — daily Windy webcam hydration
 #
-# beaches.marine_zone is now derived OFFLINE by the GitHub Actions discovery
+# beaches.marine_zone is derived offline by the GitHub Actions discovery
 # batch (a nearest-marine-zone point-in-polygon pass over the repo-committed NWS
-# marine-zone shapefile geometry in data/marine-zones.json), replacing
-# the retired in-Worker marine enrichment cron. Beach discovery (prebuilt OSM
+# marine-zone shapefile geometry in data/marine-zones.json). Beach discovery (prebuilt OSM
 # layers, fetched from R2 by the GitHub Actions job — never by this Worker) and
 # water-body classification also run only in that offline batch
 # (scripts/discovery-batch.js), which emits an idempotent SQL delta bulk-loaded

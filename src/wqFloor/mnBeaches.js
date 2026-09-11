@@ -49,10 +49,10 @@ import { perBeachResult, matchesAnyAlias } from "../officialSources/util.js";
 const MN_BEACHES_URL = "https://mnbeaches.org/map/data/results.json";
 const MN_BEACHES_LABEL = "Minnesota Department of Health Beach Monitoring (mnbeaches.org)";
 
-// mnbeaches.org does not document a required User-Agent; the live fetch used
-// to confirm the shape succeeded with a plain request. Keep a descriptive UA
-// anyway (harmless, and matches the project convention of identifying the
-// bot to any upstream that later starts caring).
+// mnbeaches.org does not document a required User-Agent, and a plain request
+// succeeds. Send a descriptive UA anyway (harmless, and matches the project
+// convention of identifying the bot to any upstream that later starts
+// caring).
 const MN_BEACHES_USER_AGENT = "swim.report (hello@swim.report)";
 
 // The Lake Superior / Duluth stations this source curates. names[] feed the

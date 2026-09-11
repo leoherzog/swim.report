@@ -146,8 +146,8 @@ describe("associateParkForBeach: containment over bbox size", () => {
 
   it("names by the park that contains the beach, not the smallest bbox that brushes it", () => {
     // The Pentwater shape (way 1339227522): a tiny park at the beach's south tip
-    // brushes its bbox and used to win on size; the state park holds most of
-    // the vertices.
+    // brushes its bbox, so bbox size alone would pick it; the state park holds
+    // most of the vertices and must win instead.
     const statePark = park(544228744, "Charles Mears State Park", rect(43.7815, -86.4421, 43.7871, -86.4333));
     const tinyPark = park(544228745, "Channel Lane Park", rect(43.7811, -86.4405, 43.7818, -86.4396));
     const beach = beachStrip(43.7814, 43.7869, -86.4400, 33);
@@ -212,19 +212,18 @@ describe("associateParkForBeach: containment over bbox size", () => {
 });
 
 describe("pondWaterSeeds", () => {
-  // The pond-water query (the around:60 water fetch that used to ride inside
-  // the single park query) is seeded only with beaches small enough to
-  // plausibly need the pond test. Oversized multipolygons (Beaver Islands /
-  // Sleeping Bear scale) made the server-side around evaluation exceed
-  // [timeout:180] and took park discovery down for days — they must never
-  // appear in the seed list.
+  // The pond-water query is seeded only with beaches small enough to plausibly
+  // need the pond test (POND_TEST_MAX_BEACH_AREA_DEG2). Oversized multipolygons
+  // (Beaver Islands / Sleeping Bear scale) must never appear in the seed list:
+  // a beach that size cannot plausibly sit only on pond-sized water, so
+  // skipping it errs toward keeping rather than dropping a real beach.
   function beach(osmType, osmId, name, areaDeg2) {
     return { osmType: osmType, osmId: osmId, name: name, areaDeg2: areaDeg2 };
   }
 
   it("seeds every small beach, named ones included, when an unnamed candidate exists", () => {
-    // Named beaches are seeded too: water found near a named beach fed
-    // neighboring unnamed beaches' pond tests under the old single query.
+    // Named beaches are seeded too: water found near a named beach is evidence
+    // for a neighboring unnamed beach's pond test.
     const seeds = pondWaterSeeds([
       beach("way", 1, null, 1e-6),
       beach("way", 2, "Named Beach", 1e-6),
@@ -259,12 +258,10 @@ describe("pondWaterSeeds", () => {
 
 describe("classification probe radii", () => {
   it("exposes the validated radius constants", () => {
-    // Relocated from test/waterClass.test.js with the constants themselves.
-    // The 2026-07-18 audit of 698 production beaches validated exactly these
-    // three numbers: every genuine-inland beach sits >= 3 km from a Great
-    // Lake, so a 150 m probe never hides a real shore beach while avoiding the
-    // cross-water false positive a wider radius caused. Widening any of them
-    // re-opens that false positive, so they are pinned here.
+    // Every genuine-inland beach sits >= 3 km from a Great Lake, so a 150 m
+    // probe never hides a real shore beach while avoiding the cross-water
+    // false positive a wider radius causes. Widening any of them reopens that
+    // false positive, so they are pinned here.
     expect(OCEAN_RADIUS_M).toBe(150);
     expect(GREAT_LAKE_RADIUS_M).toBe(150);
     expect(INLAND_RADIUS_M).toBe(120);

@@ -5,9 +5,10 @@
 // covering the county's Lake Erie public bathing beaches: Point Gratiot and
 // Wright Park (City of Dunkirk), Irving and Sunset Bay (Town of Hanover).
 //
-// The fetch URL is unconfirmed and needs verification before wiring. The county
-// site moved to chautauquacountyny.gov; the health subdomain fails TLS hostname
-// verification and the migrated-domain Environmental Health paths 404. So
+// The fetch URL is unconfirmed and needs verification before wiring. The
+// county's domain, chautauquacountyny.gov, has a health subdomain that fails
+// TLS hostname verification, and separate Environmental Health paths that
+// 404. So
 // CHAUTAUQUA_BEACH_STATUS_URL ships empty and scrape() fails closed, returning
 // null without fetching, rather than trusting a plausible-but-wrong path to
 // incidentally 404 into null. Before registering this source in

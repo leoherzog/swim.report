@@ -1,6 +1,6 @@
 // Tests for the pure SQL / queue / rail builders in scripts/discovery-batch.js —
-// the offline discovery + water-class pipeline, now driven by prebuilt spatial
-// layers rather than per-tile upstream queries. These verify the emitted SQL
+// the offline discovery + water-class pipeline, driven by prebuilt spatial
+// layers. These verify the emitted SQL
 // mirrors the statements the Worker upsert used, that classification queueing
 // matches the Worker's semantics, and — the part that carries the real risk —
 // that every one of the four safety rails refuses what it is supposed to refuse.
@@ -116,7 +116,7 @@ describe("parseArgs", function () {
     expect(function () { return parseArgs(["--nope"]); }).toThrow();
   });
   it("rejects the retired per-run classify pacing flags", function () {
-    // Classification is a local join in the same run as discovery now, so there
+    // Classification is a local join in the same run as discovery, so there
     // is nothing to ration per run. The parameters survive INSIDE classifyQueue
     // (see the budget/limit/flush tests below) — only the CLI surface is gone,
     // and it must fail loudly rather than silently ignore a stale invocation.
@@ -297,10 +297,10 @@ describe("SQL literal delivery is statement-split safe", function () {
 describe("reconciliationAllowed / classificationAllowed gate on a VERIFIED layer set", function () {
   // THE safety invariant, restated for the layers transport: a DELETE may be
   // emitted only when the manifest proves the set is a complete, intact,
-  // in-scope, fresh view of OSM. Under the old transport failure was noisy and
-  // delete-safe; under prebuilt layers a wrong tag filter exits 0 with a
+  // in-scope, fresh view of OSM. A wrong tag filter can exit 0 with a
   // well-formed manifest and every checksum matching, so the proof has to be
-  // positive. This predicate is the single choke point in main().
+  // positive rather than inferred from an error. This predicate is the single
+  // choke point in main().
   it("allows reconciliation ONLY under a fully verified report", function () {
     expect(reconciliationAllowed(verifiedReport())).toBe(true);
     expect(classificationAllowed(verifiedReport())).toBe(true);
@@ -332,8 +332,7 @@ describe("reconciliationAllowed / classificationAllowed gate on a VERIFIED layer
     expect(classificationAllowed(stale)).toBe(true);
   });
   it("is strict about the boolean true — any non-true (null/undefined/truthy) refuses", function () {
-    // Ported verbatim in intent from the per-tile era, and it matters more now:
-    // the report is assembled by three separate scripts, so a MISSING field is
+    // The report is assembled by three separate scripts, so a MISSING field is
     // the realistic failure and must refuse exactly as an explicit false does.
     expect(reconciliationAllowed(verifiedReport({ layersVerified: 1 }))).toBe(false);
     expect(reconciliationAllowed(verifiedReport({ layersVerified: "true" }))).toBe(false);
@@ -382,7 +381,7 @@ describe("sourceAgeDays / applyRunConjuncts fold in the two conjuncts the fetche
 });
 
 // The delete rail's full composition is exported as a real builder
-// (reconciliationDelta), so this helper no longer mirrors production by hand —
+// (reconciliationDelta), so this helper does not mirror production by hand —
 // it just names the half of that builder these assertions read.
 function reconciliationDeletes(snapshotRows, producedIds, producedParkRowCount) {
   return reconciliationDelta(snapshotRows, producedIds, producedParkRowCount).statements;
@@ -418,9 +417,10 @@ describe("reconcileStaleRows / deleteBeachSql single-source the delete set", fun
   });
 
   it("re-drains rows parked unclassified by the pre-decisive classifier (version IS NULL at the cap)", function () {
-    // The ~409 production rows left NULL at attempts=5 by the old clean-but-empty
-    // null path. A version bump can never reach them (the version clause is ANDed
-    // with attempts < cap), so the version-IS-NULL legacy marker admits them.
+    // Rows left with water_class_version NULL at the attempts cap predate the
+    // decisive classifier's version stamp. A version bump alone can never reach
+    // them (the version clause is ANDed with attempts < cap), so the NULL-version
+    // marker admits them for one re-drain.
     const row = function (id, extra) {
       return Object.assign({
         id: id, osm_id: "way/" + id, lat: 42.6, lon: -83.4,
@@ -499,9 +499,9 @@ describe("classifyCoverageCounts (required visibility for NULL-hides)", function
 
 describe("syncMetaSql", function () {
   it("upserts key/value/updated", function () {
-    // The key is last_discovery_count, not the retired transport-named row: a D1
-    // row literally named after a data source this pipeline no longer uses,
-    // frozen at its final value forever, is exactly the residue to avoid.
+    // The key is last_discovery_count — generic rather than tied to a specific
+    // upstream name, so a future change of data source can never leave a frozen,
+    // misnamed row behind.
     const sql = syncMetaSql("last_discovery_count", "613", "2026-07-18T08:47:00.000Z");
     expect(sql).toContain("INSERT INTO sync_meta (key, value, updated) VALUES ('last_discovery_count', '613', '2026-07-18T08:47:00.000Z')");
     expect(sql).toContain("ON CONFLICT(key) DO UPDATE SET value = '613', updated = '2026-07-18T08:47:00.000Z'");
@@ -589,13 +589,9 @@ describe("reconciliation safety rails", function () {
     expect(deletes).toEqual([]);
   });
 
-  // --- the TIGHTENED global fraction (0.05, was 0.25) ------------------------
-  // 0.25 was calibrated for a transport where partial coverage was normal and a
-  // large legitimate delete set was plausible. Under verified layers it is
-  // never legitimate, and against the measured table (982 park-origin
-  // candidates) it permitted 246 silent deletes — waving through every
-  // regression worth naming. These two cases pin the new boundary from both
-  // sides; the second is a delete the OLD fraction would have allowed.
+  // --- the global delete fraction (5%, floor 10) -------------------------------
+  // Under a verified layer set a large delete set is never legitimate, so the
+  // allowance stays tight. These two cases pin the boundary from both sides.
   function candidates(n, staleFrom) {
     const snap = [];
     for (let i = 0; i < n; i = i + 1) { snap.push(parkRow("osm-way-" + i)); }
@@ -889,9 +885,8 @@ describe("buildClassifyQueue", function () {
   });
   it("skips a parked row at the attempts cap once it has been through the decisive classifier", function () {
     // The attempts cap still parks rows for good — but the proof a row was
-    // actually decided-on is a STAMPED version. An unversioned park predates the
-    // clean-but-empty -> inland change and is re-drained exactly once (covered in
-    // the legacy re-drain tests above).
+    // actually decided-on is a STAMPED version. An unversioned park is re-drained
+    // exactly once (covered in the version-IS-NULL re-drain tests above).
     const snap = [{
       id: "osm-node-p", osm_id: "node/p", lat: 43.0, lon: -86.0,
       water_class: null, water_class_version: WATER_CLASS_VERSION,
@@ -925,11 +920,10 @@ describe("buildClassifyQueue", function () {
 });
 
 describe("classifyQueue absent-from-layers bump (the attempts semantics)", function () {
-  // Under the old per-beach probe there was no such thing as "absent": the
-  // server answered for any id. Under a VERIFIED layer set, absent means GONE
-  // FROM OSM, which is a real answer and must bump attempts — otherwise the row
-  // re-queues forever with attempts stuck at 0 and the fail-open serves it live
-  // with an estimated flag card permanently.
+  // Under a VERIFIED layer set, absent means gone from OSM, which is a real
+  // answer and must bump attempts — otherwise the row re-queues forever with
+  // attempts stuck at 0 and the fail-open serves it live with an estimated flag
+  // card permanently.
   const queue = [{ id: "osm-way-gone", water_class_attempts: 0 }];
   it("bumps attempts and counts absent_from_layers when the set is verified", async function () {
     const result = await classifyQueue(queue, {

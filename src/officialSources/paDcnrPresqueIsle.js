@@ -17,11 +17,11 @@
 // COLOR MAPPING (provisional — fail closed):
 //   swimming-hazard closure keyword in an IsAlert:true Message -> red
 //   everything else                                            -> no site
-// NOTE: as of this writing the live payload is 100% off-axis boilerplate
-// (Spotted Lanternfly / firewood / drone advisories, all IsAlert:false), so
-// the hazard keyword mapping is verified only against the SYNTHETIC fixtures in
-// test/paDcnrPresqueIsle.test.js. Treat the mapping as provisional; every
-// unrecognized shape/word degrades to null, never a wrong color.
+// The live payload carries only off-axis boilerplate (Spotted Lanternfly /
+// firewood / drone advisories, all IsAlert:false), so the hazard keyword
+// mapping is verified only against the synthetic fixtures in
+// test/paDcnrPresqueIsle.test.js. Treat the mapping as provisional: every
+// unrecognized shape or word degrades to null, never a wrong color.
 //
 // INTEGRATOR DEDUP NOTE: Presque Isle water-quality Danger advisories are
 // deliberately routed to null here — they belong to the raise-only water-

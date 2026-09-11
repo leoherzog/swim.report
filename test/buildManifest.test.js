@@ -837,8 +837,8 @@ describe("verifySources", () => {
   });
 
   // A mid-download Geofabrik extract rotation shows as a mismatch and can never
-  // publish: this is the download-completeness proof that replaces "did every
-  // tile fetch".
+  // publish: this is the download-completeness proof, an md5 match on every
+  // source, so a partial transfer cannot verify.
   it("refuses to claim verification on an md5 mismatch", () => {
     const result = verifySources([{ name: "us", md5Published: "aa", md5Observed: "zz" }]);
     expect(result.verified).toBe(false);

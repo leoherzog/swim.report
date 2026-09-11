@@ -620,8 +620,8 @@ describe("buildConsumerReport", function () {
     expect(r.gridStatus.noaa_glwu.status).toBe("unfetched");
     expect(classifyWaveManifestFailure(r).tier).toBe("ok");
     // Stripping the whole block changes nothing about the verdict, which is what
-    // "provenance only" means: a gate on it would refuse every manifest built before
-    // the field existed.
+    // "provenance only" means: a gate on it would refuse any manifest that lacks
+    // the field.
     const stripped = report({ manifest: manifest({ gridStatus: undefined }) });
     expect(stripped.gridStatus).toBe(null);
     expect(classifyWaveManifestFailure(stripped).tier).toBe("ok");

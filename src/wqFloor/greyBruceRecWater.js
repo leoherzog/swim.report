@@ -43,14 +43,13 @@
 // module boundary.
 //
 // FETCH URL NOTE (integrator: please confirm before enabling in the
-// registry): the exact live HTML shape of this ASP.NET/GridView-style
-// sortable table (it uses javascript:__doPostBack sort handlers) was
-// confirmed via a one-time page fetch during authoring, but no bot-protection
-// probing was performed and the table carries no id/class in the observed
-// markup to anchor on — the parser instead anchors on the literal header cell
-// text "Public Beach", which is the most change-resistant handle available.
-// If the header text or table structure ever changes, parseGreyBruceRecWaterTable
-// degrades to null (fail closed), never a wrong color.
+// registry): this ASP.NET/GridView-style sortable table (it uses
+// javascript:__doPostBack sort handlers) carries no id/class in its markup to
+// anchor on, so the parser anchors on the literal header cell text "Public
+// Beach", the most change-resistant handle available. Unverified against
+// bot-protection challenges until fetched live. If the header text or table
+// structure ever changes, parseGreyBruceRecWaterTable degrades to null (fail
+// closed), never a wrong color.
 //
 // INTEGRATOR DEDUP NOTE: this is the only Grey Bruce Health Unit source in the
 // project; it does not overlap with any existing hazard scraper or wave/alert

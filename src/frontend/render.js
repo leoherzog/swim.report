@@ -490,7 +490,7 @@ function renderAlertEntry(entry, nowIso) {
 // order within each group, so the alert that chose the color sits above one
 // echoed ahead of its onset. The reason line names an event; this is where a
 // reader finds out what that event actually says. "" when nothing was echoed,
-// which is also every legacy payload written before the text fields shipped.
+// which covers an estimate with no alertDetails at all.
 function renderAlertDetails(estimate, nowIso) {
   const details = (estimate && Array.isArray(estimate.alertDetails)) ? estimate.alertDetails : [];
   const active = [];

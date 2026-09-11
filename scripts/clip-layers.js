@@ -350,8 +350,8 @@ export const LAYER_PLAN = [
 
 // The id fields a published layer carries, by GDAL source layer. osm_id vs
 // osm_way_id is the way/relation discriminator and it is load-bearing: the id
-// feeds "osm-" + osmType + "-" + osmId, which is both the D1 primary key and the
-// KV flag key, so getting it wrong silently orphans every stored flag. Only the
+// feeds "osm-" + osmType + "-" + osmId, the D1 primary key for both beaches and
+// beach_state, so getting it wrong silently orphans every stored flag. Only the
 // multipolygons layer has both columns; points and lines features carry osm_id
 // alone, and other_relations features are always relations.
 function idFieldsFor(source) {

@@ -103,8 +103,8 @@ describe("renderListPage home map", () => {
     expect(html).toContain("maplibre-gl@6.8.0/dist/maplibre-gl.mjs");
     expect(html).toContain("maplibre-gl@6.8.0/dist/maplibre-gl.css");
     expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap)");
-    // The retired UMD bundle must not come back as a <script src>: it is no
-    // longer published, so the tag would 404 and the map would never load.
+    // MapLibre 6 ships ESM-only with no UMD bundle published: a <script src> to
+    // that path would 404 and the map would never load.
     expect(html).not.toContain("<script src=\"https://unpkg.com/maplibre-gl");
     expect(html).not.toContain("/dist/maplibre-gl.js");
   });
@@ -175,13 +175,14 @@ describe("renderListPage home map", () => {
     expect(html).toContain("fetch(GEOJSON_URL");
     expect(html).toContain("'/api/beaches.geojson'");
     expect(html).toContain("map.addSource('beaches', { type: 'geojson', data: fc });");
-    // The retired clustering must not come back: a bubble's count is beach
-    // density, which competes with its color for the same symbol.
+    // No density clustering: a bubble's count would be beach density, which
+    // competes with its color for the same symbol.
     expect(html).not.toContain("cluster: true");
     expect(html).not.toContain("clusterProperties");
     expect(html).not.toContain("getClusterExpansionZoom");
     expect(html).not.toContain("point_count");
-    // The removed viewport pan-to-load must be gone: no moveend fetch, no bbox.
+    // The map loads every beach in one fetch: no moveend-triggered fetch, no
+    // bbox query.
     expect(html).not.toContain("scheduleViewportLoad");
     expect(html).not.toContain("/api/beaches?bbox=");
     expect(html).not.toContain("markersById");

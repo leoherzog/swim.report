@@ -11,12 +11,12 @@
 // Indicator_ (E.coli / Enterococci), Results (double), Date_sampled ("13-Jul-26"),
 // Latitude, Longitude.
 //
-// NOTE: the version YEAR in the layer path ("2025_...") rolls each season. When
+// NOTE: the version year in the layer path ("2025_...") rolls each season. When
 // it rolls, the pinned URL 404s -> fetchJson returns null -> scrape returns null
 // (fail closed to no-floor, never a wrong color). The URL below must be
-// re-confirmed / bumped when NYS publishes the next season's view. The live
-// response shape was confirmed 2026-07; the parser degrades to null on any
-// shape change (missing features array, unrecognized status).
+// re-confirmed / bumped when NYS publishes the next season's view. The parser
+// degrades to null on any shape change (missing features array, unrecognized
+// status).
 //
 // FLOOR MAPPING (raise-only; nothing else produces a site):
 //   Beach_status "Closed"  AND  Status_Reason contains "Exceedance" or

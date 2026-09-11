@@ -692,7 +692,7 @@ describe("scraper health season/cadence gate (healthMonitored)", function () {
     // Inside the south-haven-mi matches() box (North Beach). south-haven-mi is
     // a season/hours-gated scraper (healthMonitored = isSouthHavenMonitored:
     // May 15-Sept 15, 9am-9pm America/Detroit), so it exercises the deliberate
-    // season/cadence pre-fetch skip the same way the retired wisconsin-dnr did.
+    // season/cadence pre-fetch skip.
     return makeBeachRow({ id: "osm-node-sh", name: "North Beach", lat: 42.406, lon: -86.28 });
   }
 

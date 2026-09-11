@@ -1114,7 +1114,7 @@ export function evaluateWaveGates(input) {
   const decay = decayFallback ? decayRefusals(input.counts, input.oldest) : [];
 
   // A previous manifest with no per-grid counts and a grid missing this cycle scores
-  // no ratio comparison at all: the global fallback is retired by the missing grid
+  // no ratio comparison at all: the global fallback is disabled by the missing grid
   // and every per-grid comparison skips for want of a previous entry. Refusing would
   // be a false alarm on behalf of a grid that never ran, so the response is to
   // withhold auto-publish and make a human read the manifest, as an unseeded floor

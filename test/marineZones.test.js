@@ -1,5 +1,5 @@
 // Tests for src/marineZones.js — the pure offline nearest-marine-zone resolver
-// that replaced the retired in-Worker runMarineEnrichment probe. Synthetic
+// the discovery batch runs over US beaches that already carry nws_zone. Synthetic
 // zone fixtures throughout (no network); two small sanity blocks read the
 // committed data/marine-zones-greatlakes.json and data/marine-zones.json via fs.
 

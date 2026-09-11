@@ -56,11 +56,11 @@
 // builder curating a namesake "Outlet Beach"/"Dunes Beach"/"Lakeshore Beach"
 // elsewhere should re-check this list.
 //
-// CADENCE: the page samples periodically (observed sample dates were 1-8
-// days old at fetch time) and carries no reliable machine-parseable ISO
-// timestamp -- site.updated is left undefined so the wqFloor resolver falls
-// back to the perBeachResult-level "updated", which scrape() stamps with the
-// passed-in nowIso. Nothing in this module reads Date.now()/new Date().
+// CADENCE: the page samples periodically and carries no reliable
+// machine-parseable ISO timestamp -- site.updated is left undefined so the
+// wqFloor resolver falls back to the perBeachResult-level "updated", which
+// scrape() stamps with the passed-in nowIso. Nothing in this module reads
+// Date.now()/new Date().
 //
 // DEFENSIVE PARSING: any markup/schema change (missing "Beach Postings"
 // section/table, reordered/renamed columns, unrecognized Posted icon)

@@ -183,11 +183,11 @@ export async function fetchLatestSrfText(wfo) {
 
 // beaches.marine_zone is derived OFFLINE by the GitHub Actions discovery batch
 // (a nearest-marine-zone point-in-polygon pass over the NWS marine-zone
-// shapefile geometry), not by any live probe here — the old in-Worker
-// resolveMarineZone offshore probe and its fetchMarineZonesAtPoint helper were
-// retired to stop deriving a static, ~biannually-updated mapping via up to
-// ~1,360 live api.weather.gov requests/day. The hourly recompute still READS
-// marine_zone from D1 to match marine alerts; nothing in the Worker writes it.
+// shapefile geometry), never by a live per-point probe here: the shapefile
+// mapping changes only ~biannually, so resolving it live per beach would cost
+// up to ~1,360 api.weather.gov requests a day for no benefit. The hourly
+// recompute still READS marine_zone from D1 to match marine alerts; nothing in
+// the Worker writes it.
 
 // Marine forecast zone id prefixes. api.weather.gov/points answers a beach
 // centroid over water with the MARINE forecast zone ("LMZ221", "ANZ050"), which
