@@ -1654,8 +1654,8 @@ conjunct a strict !== true so a missing field refuses exactly as a false one doe
                                                   // sample with no series behind it
     export function classifyWaveManifestFailure(report)
       // { tier: "ok" | "degraded" | "expired" | "fatal", reasons: string[] }
-      //   fatal   → write no KV: schema mismatch, pointer/manifest disagreement, artifacts
-      //             unverified, artifactsPresent/artifactsExpected (both isFiniteNumber-
+      //   fatal   → write no KV: schema mismatch, artifacts unverified (byte length and
+      //             sha256 against the manifest), artifactsPresent/artifactsExpected (both isFiniteNumber-
       //             guarded FIRST — undefined !== undefined is false and fails OPEN),
       //             buildStatus not "complete", validTimes or sentinelScan not passed,
       //             minimumRecordsPassed not true (the absolute record rails, independent
@@ -3580,22 +3580,23 @@ per file; scripts/sample-waves.js --mode plan names the band index carrying each
 HTSGW and WIND, discovered from gdalinfo and never assumed; the shell extracts each band to
 a flat ENVI plane; scripts/sample-waves.js --mode sample samples every beach in the D1
 snapshot and emits waveinput.ndjson and waves.ndjson; scripts/build-wave-manifest.js applies
-every gate and writes manifest.json plus SHA256SUMS or exits 1; the shell publishes and then
-reads the cycle back through the public domain; scripts/build-wave-kv.js --mode emit
-re-verifies it against the manifest, applies the consumer gate (src/waveManifest.js) and
-emits the bulk-put chunks.
+every gate and writes manifest.json, carrying each artifact's byte count and sha256, or exits
+1. The sample job hands those three files to the publish-kv job as the run's wave-cycle
+workflow artifact; scripts/build-wave-kv.js verifies each file against the manifest, applies
+the consumer gate (src/waveManifest.js) and emits the bulk-put chunks. The NDJSON never
+leaves the run.
 
-Publication copies build-layers.yml. R2 bucket swim-report (hyphen), path-style addressing,
+R2 keeps only what must outlive the run. Bucket swim-report (hyphen), path-style addressing,
 public at https://map.swim.report:
 
-    waves/<cycleId>/manifest.json      immutable
-    waves/<cycleId>/waveinput.ndjson   immutable
-    waves/<cycleId>/waves.ndjson       immutable
-    waves/<cycleId>/SHA256SUMS         immutable, covers the two .ndjson only
+    waves/<cycleId>/manifest.json      immutable, read back through the public domain
     waves/current.json                 no-store, WRITTEN LAST
 
-manifest.buildStatus:"complete" is the last key written and is assigned nowhere else, so a
-torn manifest cannot read as a finished one.
+The next cycle follows the pointer to the live manifest for its shrink and decay ratios and
+the rolling history, so the pointer is written only after its manifest has been read back and
+byte-compared. manifest.buildStatus:"complete" is the last key written and is assigned nowhere
+else, so a torn manifest cannot read as a finished one. A withheld cycle writes nothing to
+R2.
 
 Per-grid isolation. gridStatus is the data contract that keeps one grid's failure off every
 other grid's beaches. It carries one entry per GRIDS member — { status, elements, reasons } —

@@ -38,10 +38,10 @@
 // costs nothing beyond refusing a cycle left mid-flight across the change.
 export const WAVE_SCHEMA_VERSION = 2;
 
-// The artifact keys this code knows how to consume. The download list comes from
-// here and never from manifest.artifacts[].key, so a manifest describing a third
-// file is a cycle this code cannot decode rather than one to consume as-is, and
-// every written filename stays a constant of this repo.
+// The artifact keys this code knows how to consume. The files read from the cycle
+// directory are named here and never by manifest.artifacts[].key, so a manifest
+// describing a third file is a cycle this code cannot decode rather than one to
+// consume as-is, and every filename stays a constant of this repo.
 export const EXPECTED_WAVE_ARTIFACTS = ["waveinput.ndjson", "waves.ndjson"];
 
 // Absolute leases granted to the emitted KV pairs, measured from the model valid
@@ -110,17 +110,9 @@ function collectFailures(report) {
     fatal.push("schema-version: expected " + String(WAVE_SCHEMA_VERSION) +
       ", got " + describeValue(report.schemaVersion));
   }
-  // The manifest read from the pinned immutable prefix must carry the cycleId
-  // waves/current.json named. A mismatch means a cycle completed mid-run and the
-  // fetch mixed two sets, so every count below would be measuring one cycle
-  // against another's manifest.
-  if (report.pointerAgreesWithManifest !== true) {
-    fatal.push("pointer-mismatch: pointerAgreesWithManifest is " +
-      describeValue(report.pointerAgreesWithManifest));
-  }
-  // sha256 AND byte length of every downloaded artifact matched the manifest. A
-  // truncated NDJSON still parses line by line and yields a plausible record count,
-  // so the count alone proves nothing.
+  // sha256 AND byte length of every artifact matched the manifest. A truncated
+  // NDJSON still parses line by line and yields a plausible record count, so the
+  // count alone proves nothing.
   if (report.artifactsVerified !== true) {
     fatal.push("artifacts-unverified: artifactsVerified is " +
       describeValue(report.artifactsVerified));

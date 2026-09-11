@@ -21,7 +21,6 @@ import {
 function okReport(overrides) {
   return Object.assign({
     schemaVersion: WAVE_SCHEMA_VERSION,
-    pointerAgreesWithManifest: true,
     artifactsVerified: true,
     artifactsPresent: EXPECTED_WAVE_ARTIFACTS.length,
     artifactsExpected: EXPECTED_WAVE_ARTIFACTS.length,
@@ -52,8 +51,8 @@ describe("the clean cycle", function () {
 });
 
 describe("the fatal tier", function () {
-  const fields = ["schemaVersion", "pointerAgreesWithManifest", "artifactsVerified",
-    "buildStatus", "validTimesPassed", "sentinelScanPassed", "minimumRecordsPassed"];
+  const fields = ["schemaVersion", "artifactsVerified", "buildStatus",
+    "validTimesPassed", "sentinelScanPassed", "minimumRecordsPassed"];
 
   it("refuses on any single false fatal conjunct", function () {
     for (let i = 0; i < fields.length; i = i + 1) {

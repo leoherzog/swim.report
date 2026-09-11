@@ -1,8 +1,12 @@
 name: Wave cycle
 
-# Pulls one NOAA GRIB2 wave cycle, point-samples it against the beach table, publishes
-# the result to the swim-report R2 bucket (public at https://map.swim.report) and bulk
-# writes it into the "waveinput:" / "waves:" KV the hourly flag cron already reads.
+# Pulls one NOAA GRIB2 wave cycle, point-samples it against the beach table, hands
+# the result from the sample job to the publish-kv job as a workflow artifact, and
+# bulk writes it into the "waveinput:" / "waves:" KV the hourly flag cron already
+# reads. The swim-report R2 bucket (public at https://map.swim.report) keeps only
+# what must outlive the run: each published cycle's manifest.json, which the next
+# cycle's shrink and decay gates ratio against, and the waves/current.json pointer
+# that names it. The NDJSON never leaves the run.
 #
 # Never color-bearing on failure. This job never writes a flag color. A failed or
 # refused cycle leaves the previous cycle's KV in place under an expiration derived
@@ -11,9 +15,9 @@ name: Wave cycle
 # sorts the gates: everything that could produce a wrong number is non-overridable,
 # and everything that is merely less data is overridable and warns.
 #
-# Publication is atomic by construction: every artifact is written under an immutable
-# per-cycle prefix nobody is reading, and only then is the small waves/current.json
-# pointer overwritten. A reader can never see a torn set.
+# The manifest is written under an immutable per-cycle prefix, read back through the
+# public domain, and only then is the small waves/current.json pointer overwritten, so
+# the pointer never names a manifest that is not there.
 #
 # Absolute expiration, never a TTL, and one of two leases per record. A waveinput
 # carrying the hourly series expires at validStartEpoch + 86400, the span it
@@ -38,6 +42,7 @@ name: Wave cycle
 # CLOUDFLARE_R2_SECRET_ACCESS_KEY plus CLOUDFLARE_D1_READ_TOKEN, a read-scoped D1
 # token rather than the edit-scoped one discovery.yml uses. publish-kv reads
 # CLOUDFLARE_KV_WRITE_TOKEN, which carries Workers KV Storage: Edit, and no AWS keys.
+# The artifact handoff between them needs no secret at all.
 #
 # It needs no npm private-registry tokens: it never runs npm install in the repo root,
 # which would reify package.json's private deps and fail E401. Every wrangler call
@@ -57,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Write waves/current.json (false = build and upload the prefix only, do not make it live)"
+        description: "Write waves/current.json (false = build the cycle artifact only, do not make it live)"
         type: boolean
         default: true
       apply:
@@ -96,9 +101,9 @@ jobs:
     # invocations.
     timeout-minutes: 30
     outputs:
-      # publish-kv reads this. Without it, a run that withheld the pointer would send
-      # job 2 at the previous cycle, whose absolute expiration is already spent: a
-      # guaranteed "expired" refusal that says nothing about what happened here.
+      # publish-kv reads this. The pointer and the KV must name the same cycle, and a
+      # withheld publish means the manifest's evidence does not support going live,
+      # so a run that did not move the pointer must not write KV either.
       published: ${{ steps.publish.outputs.published }}
     env:
       # The bucket is swim-report with a hyphen. The zone is swim.report with a dot and
@@ -213,7 +218,7 @@ jobs:
           WORK="$RUNNER_TEMP/waves"
           echo "WORK=$WORK" >> "$GITHUB_ENV"
           echo "PLANES=$WORK/planes" >> "$GITHUB_ENV"
-          mkdir -p "$WORK/grib" "$WORK/planes" "$WORK/out" "$WORK/verify"
+          mkdir -p "$WORK/grib" "$WORK/planes" "$WORK/out"
           # Previous manifest, for the shrink-ratio and decay gates. Absent on the first
           # cycle, where build-wave-manifest.js skips the ratio checks and withholds
           # auto-publish.
@@ -553,86 +558,82 @@ jobs:
             console.log(lines.join(' '));
           " "$WORK/out/manifest.json"
 
-      - name: Upload the immutable prefix
-        run: |
-          set -euo pipefail
-          PREFIX="waves/$CYCLE_ID"
-          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
-          cd "$WORK/out"
-          for f in waveinput.ndjson waves.ndjson manifest.json SHA256SUMS; do
-            case "$f" in
-              *.json) ct=application/json ;;
-              *.ndjson) ct=application/x-ndjson ;;
-              *) ct=text/plain ;;
-            esac
-            aws s3 cp "$f" "s3://$R2_BUCKET/$PREFIX/$f" \
-              --cache-control "public, max-age=31536000, immutable" \
-              --content-type "$ct" --only-show-errors
-          done
-
-      - name: Read back through the public domain and verify
-        run: |
-          set -euo pipefail
-          cd "$WORK/verify"
-          # SHA256SUMS covers the two .ndjson artifacts and nothing else. manifest.json
-          # must stay outside its own checksum scope: it is the sole input to the
-          # consumer gate and is byte-compared on its own.
-          cp "$WORK/out/SHA256SUMS" .
-          # --retry-all-errors is load-bearing: plain --retry does not retry the 404 a
-          # few seconds of edge propagation produces on a just-written key.
-          for f in waveinput.ndjson waves.ndjson; do
-            curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/$f" -o "$f"
-          done
-          sha256sum -c SHA256SUMS
-          curl -sfL --retry 5 --retry-all-errors --retry-delay 5 "$R2_PUBLIC_BASE/$PREFIX/manifest.json" -o manifest.json
-          cmp manifest.json "$WORK/out/manifest.json"
-          echo "read-back verified at $PREFIX"
+      - name: Hand the cycle to publish-kv
+        # The three files publish-kv consumes, and the only copy of the NDJSON that
+        # exists outside this runner. Success-only, unlike the reports artifact below:
+        # a refused gate leaves no manifest, and a cycle with no manifest is not a
+        # cycle to hand on. The retention covers "Re-run failed jobs" on publish-kv
+        # and the human cross-check of a withheld cycle; the files are the largest
+        # thing this workflow stores, so it is kept short.
+        uses: actions/upload-artifact@v7
+        with:
+          name: wave-cycle
+          path: |
+            ${{ env.WORK }}/out/waveinput.ndjson
+            ${{ env.WORK }}/out/waves.ndjson
+            ${{ env.WORK }}/out/manifest.json
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Explain a withheld publish
-        # Loud, and not a failure: the prefix is uploaded and complete, it is simply not
-        # live. This is the bootstrap path — seed data/wave-floors.json from this
-        # manifest, commit it, then re-dispatch with force_publish — and the unseeded
-        # gridsDigest path, where someone changed a grid in src/waveGrids.js.
+        # Loud, and not a failure: the cycle is complete and in this run's wave-cycle
+        # artifact, it is simply not live. This is the bootstrap path — seed
+        # data/wave-floors.json from this manifest, commit it, then re-dispatch with
+        # force_publish — and the unseeded gridsDigest path, where someone changed a
+        # grid in src/waveGrids.js.
         if: ${{ env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
         run: |
-          echo "::warning::build-wave-manifest.js withheld auto-publish (bootstrap cycle, or no seeded floors entry for this gridsDigest). The cycle is uploaded at $PREFIX but waves/current.json was NOT moved. Read the manifest above, seed data/wave-floors.json at 0.75x the observed counts, commit it, then re-dispatch with force_publish true."
+          echo "::warning::build-wave-manifest.js withheld auto-publish (bootstrap cycle, or no seeded floors entry for this gridsDigest). The cycle $CYCLE_ID is in this run's wave-cycle artifact but waves/current.json was NOT moved and no KV was written. Read the manifest above, seed data/wave-floors.json at 0.75x the observed counts, commit it, then re-dispatch with force_publish true."
 
-      - name: Publish the pointer
+      - name: Publish the manifest and the pointer
         id: publish
         # Two conjuncts, both required. PUBLISH is the operator's intent; AUTO_PUBLISH
         # is build-wave-manifest.js's verdict on whether the evidence supports going
         # live. FORCE_PUBLISH is the human override for the bootstrap deadlock and is
         # unavailable on a scheduled run.
+        #
+        # The manifest is what the next cycle's shrink and decay gates ratio against,
+        # so it is the one file that must outlive this run. A withheld cycle writes
+        # nothing to R2 at all.
         if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
         run: |
           set -euo pipefail
-          printf '{"cycleId":"%s","prefix":"%s"}\n' "$CYCLE_ID" "$PREFIX" > current.json
+          PREFIX="waves/$CYCLE_ID"
+          aws s3 cp "$WORK/out/manifest.json" "s3://$R2_BUCKET/$PREFIX/manifest.json" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --content-type application/json --only-show-errors
+          # Read back through the public domain before the pointer names it: a manifest
+          # the next run cannot parse reads as a bootstrap cycle, which withholds its
+          # auto-publish and fails the scheduled run. --retry-all-errors is
+          # load-bearing: plain --retry does not retry the 404 a few seconds of edge
+          # propagation produces on a just-written key.
+          curl -sfL --retry 5 --retry-all-errors --retry-delay 5 \
+            "$R2_PUBLIC_BASE/$PREFIX/manifest.json" -o "$WORK/manifest.readback.json"
+          cmp "$WORK/manifest.readback.json" "$WORK/out/manifest.json"
+          printf '{"cycleId":"%s","prefix":"%s"}\n' "$CYCLE_ID" "$PREFIX" > "$WORK/current.json"
           # no-store, and JSON is not in Cloudflare's default-cached extension set, so
-          # the pointer is never served stale. Every object it names is immutable, so
-          # caching those is a win.
-          aws s3 cp current.json "s3://$R2_BUCKET/waves/current.json" \
+          # the pointer is never served stale. The manifest it names is immutable, so
+          # caching that is a win.
+          aws s3 cp "$WORK/current.json" "s3://$R2_BUCKET/waves/current.json" \
             --cache-control "no-store" --content-type application/json --only-show-errors
           echo "published=true" >> "$GITHUB_OUTPUT"
           echo "published $CYCLE_ID"
 
       - name: Prune old wave cycles
-        # Same gate as Publish, deliberately: a run that did not move the pointer has
-        # left an extra non-live prefix behind, and pruning there would delete cycles to
-        # make room for one nobody is reading. 24 cycles is six days at the 6-hourly
-        # cadence. An age-based R2 lifecycle rule is deliberately not used: if the job
-        # broke for longer than the rule's age it would delete the live cycle.
-        if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
+        # Runs only after this run's pointer write, so this cycle is the live one and
+        # is spared by name. Deleting the live manifest would make the next cycle a
+        # bootstrap, which withholds auto-publish; an age-based R2 lifecycle rule is
+        # not used because it would do exactly that if the workflow broke for longer
+        # than the rule's age. cycleId leads with validStart, so a lexical sort is
+        # chronological. 28 cycles is seven days at four slots a day.
+        if: ${{ steps.publish.outputs.published == 'true' }}
         run: |
           set -euo pipefail
-          LIVE_PREFIX=$(curl -sfL "$R2_PUBLIC_BASE/waves/current.json?cb=$GITHUB_RUN_ID" \
-            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.parse(s).prefix)})")
-          echo "live prefix: $LIVE_PREFIX"
           aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "waves/" --delimiter "/" \
             --query 'CommonPrefixes[].Prefix' --output text \
-            | tr '\t' '\n' | sed '/^$/d' | sort | head -n -24 \
+            | tr '\t' '\n' | sed '/^$/d; /^None$/d' | sort | head -n -28 \
             | while read -r p; do
-                case "$p" in *"$LIVE_PREFIX"*) continue ;; esac
-                case "$p" in *"$CYCLE_ID"*) continue ;; esac
+                if [ "$p" = "waves/$CYCLE_ID/" ]; then continue; fi
                 echo "pruning $p"
                 aws s3 rm "s3://$R2_BUCKET/$p" --recursive --only-show-errors
               done
@@ -664,14 +665,12 @@ jobs:
 
   publish-kv:
     needs: sample
-    # Only when this run actually moved the pointer. A withheld publish leaves the
-    # previous cycle live, and re-writing that cycle's KV would either refuse as
-    # expired or extend nothing.
+    # Only when this run actually moved the pointer, so the pointer and the KV always
+    # name the same cycle and a withheld cycle never reaches production.
     if: ${{ needs.sample.outputs.published == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      R2_PUBLIC_BASE: https://map.swim.report
       # Workers KV Storage: Edit. This job holds no AWS keys, so the job that can write
       # production KV cannot write R2 and the job that can write R2 cannot write KV.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_KV_WRITE_TOKEN }}
@@ -696,41 +695,27 @@ jobs:
       - name: Cache Deno dependencies (frozen lockfile)
         run: deno cache --lock=deno.lock --frozen scripts/build-wave-kv.js
 
-      - name: Read the pointer ONCE and plan the download
-        # Re-reading the pointer per file would let a cycle completing mid-run hand you
-        # a set that passes every checksum, since each file matches its own manifest,
-        # while describing a world that never existed.
-        run: |
-          set -euo pipefail
-          DL="$RUNNER_TEMP/wavedl"
-          echo "DL=$DL" >> "$GITHUB_ENV"
-          mkdir -p "$DL/quarantine" "$DL/kv"
-          curl -sfL --retry 5 --retry-all-errors --retry-delay 5 \
-            "$R2_PUBLIC_BASE/waves/current.json?cb=$GITHUB_RUN_ID" -o "$DL/current.json"
-          deno run --lock=deno.lock --frozen --allow-read --allow-write \
-            scripts/build-wave-kv.js --mode plan --pointer "$DL/current.json" --out "$DL/plan.json"
-          cat "$DL/plan.json"
-
-      - name: Download the cycle into quarantine
-        # A quarantine, not a working directory: nothing but scripts/build-wave-kv.js
-        # reads this path, and that script verifies byte length and sha256 against the
-        # manifest before a record is parsed. The download list comes from
-        # EXPECTED_WAVE_ARTIFACTS in code, never from manifest.artifacts[].key.
-        run: |
-          set -euo pipefail
-          prefix=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).prefix)" "$DL/plan.json")
-          for f in $(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).files.join(' '))" "$DL/plan.json"); do
-            curl -sfL --retry 5 --retry-all-errors --retry-delay 5 \
-              "$R2_PUBLIC_BASE/$prefix/$f" -o "$DL/quarantine/$f"
-          done
-          ls -l "$DL/quarantine"
+      - name: Download the cycle from the sample job
+        # The same run's wave-cycle artifact, so this job can only ever consume the
+        # cycle whose pointer the sample job just moved. download-artifact verifies
+        # the archive's digest against what upload-artifact recorded and fails on a
+        # mismatch; scripts/build-wave-kv.js then verifies each file's byte length and
+        # sha256 against the manifest before a record is parsed, so a file truncated
+        # on extraction is refused rather than measured as a legitimate shrink.
+        uses: actions/download-artifact@v8
+        with:
+          name: wave-cycle
+          path: ${{ runner.temp }}/wavecycle
 
       - name: Apply the consumer gate and emit the KV chunks
         run: |
           set -euo pipefail
+          DL="$RUNNER_TEMP"
+          echo "DL=$DL" >> "$GITHUB_ENV"
+          ls -l "$DL/wavecycle"
+          mkdir -p "$DL/kv"
           deno run --lock=deno.lock --frozen --allow-read --allow-write \
-            scripts/build-wave-kv.js --mode emit --dir "$DL/quarantine" \
-            --pointer "$DL/current.json" --out "$DL/kv"
+            scripts/build-wave-kv.js --dir "$DL/wavecycle" --out "$DL/kv"
           cat "$DL/kv/kv-report.json"
 
       - name: Warn on a degraded cycle
@@ -766,12 +751,12 @@ jobs:
               'noaa_glwu, the ocean for the gfswave grids, the Salish Sea for ' +
               'noaa_nwps_sew — has no wave record this cycle ' +
               'and ages out to unknown, while the grids that sampled were written normally.');
-          " "$DL/kv/kv-report.json" "$DL/quarantine/manifest.json"
+          " "$DL/kv/kv-report.json" "$DL/wavecycle/manifest.json"
 
       - name: Bulk write the KV pairs
         # Chunks are idempotent — same key, same value, same absolute expiration — so
-        # "Re-run failed jobs" repairs a half-landed write against the pinned immutable
-        # prefix.
+        # "Re-run failed jobs" repairs a half-landed write from the same wave-cycle
+        # artifact for as long as it is retained.
         if: ${{ env.APPLY == 'true' }}
         run: |
           set -euo pipefail
@@ -847,7 +832,7 @@ jobs:
               ' pairs=' + r.pairs +
               ' chunks=' + chunks + '/' + r.chunks +
               ' elapsedMs=' + elapsed);
-          " "$DL/kv/kv-report.json" "$DL/quarantine/manifest.json" "$chunks" "$elapsed"
+          " "$DL/kv/kv-report.json" "$DL/wavecycle/manifest.json" "$chunks" "$elapsed"
 
       - name: Upload the KV report
         if: ${{ always() }}

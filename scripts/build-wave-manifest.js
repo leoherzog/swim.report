@@ -8,11 +8,12 @@
 //     --allow-shrink false --out ./.waves/out/manifest.json
 //
 // It re-reads the two emitted NDJSON artifacts, applies every gate, and either
-// writes manifest.json plus SHA256SUMS or exits 1 with a specific reason. A refused
-// cycle fails safe: nothing is uploaded, waves/current.json stays on the last good
-// cycle, and that cycle's KV rides an expiration derived from its own model valid
-// time, so the failure mode is a flag aging out to unknown rather than a stale wave
-// height deciding a color.
+// writes manifest.json or exits 1 with a specific reason. The manifest carries each
+// artifact's byte count and sha256, which scripts/build-wave-kv.js verifies before
+// parsing a record. A refused cycle fails safe: no KV is written, waves/current.json
+// stays on the last good cycle, and that cycle's KV rides an expiration derived from
+// its own model valid time, so the failure mode is a flag aging out to unknown
+// rather than a stale wave height deciding a color.
 //
 // Everything that could produce a wrong number is non-overridable: grid identity,
 // band identity, valid times, the sentinel scan, series alignment, the distribution
@@ -1297,27 +1298,6 @@ function countUnrefused(produced, refusals) {
   return true;
 }
 
-// --- SHA256SUMS ---------------------------------------------------------------------
-
-// Scope is the two .ndjson artifacts and nothing else. manifest.json must stay
-// outside its own checksum scope: it is the sole input to the consumer gate and is
-// read back and byte-compared with cmp on its own.
-export function sha256SumsText(artifacts) {
-  const list = Array.isArray(artifacts) ? artifacts.slice() : [];
-  list.sort(function (a, b) {
-    if (a.key < b.key) { return -1; }
-    if (a.key > b.key) { return 1; }
-    return 0;
-  });
-  const lines = [];
-  for (let i = 0; i < list.length; i = i + 1) {
-    if (EXPECTED_WAVE_ARTIFACTS.indexOf(list[i].key) !== -1) {
-      lines.push(list[i].sha256 + "  " + list[i].key);
-    }
-  }
-  return lines.join("\n") + "\n";
-}
-
 // --- argument parsing -----------------------------------------------------------------
 
 export function parseArgs(argv) {
@@ -1625,11 +1605,7 @@ export async function main() {
   await runtime.writeTextFile(args.out + ".tmp", text);
   await runtime.rename(args.out + ".tmp", args.out);
 
-  const sumsPath = args.sample + "/SHA256SUMS";
-  await runtime.writeTextFile(sumsPath + ".tmp", sha256SumsText(artifacts));
-  await runtime.rename(sumsPath + ".tmp", sumsPath);
-
-  console.log("build-wave-manifest: wrote " + args.out + " and " + sumsPath);
+  console.log("build-wave-manifest: wrote " + args.out);
   console.log("build-wave-manifest: autoPublishAllowed=" +
     String(verdict.sanity.autoPublishAllowed) +
     " overridden=" + String(verdict.sanity.overridden) +

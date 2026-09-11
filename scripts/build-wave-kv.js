@@ -1,16 +1,15 @@
-// scripts/build-wave-kv.js — applies the fail-closed consumer gate to a published
+// scripts/build-wave-kv.js — applies the fail-closed consumer gate to a sampled
 // wave cycle and, when it passes, emits the wrangler kv bulk put chunk files.
 //
-//   deno run --allow-read --allow-write scripts/build-wave-kv.js --mode plan \
-//     --pointer ./dl/current.json --out ./dl/plan.json
-//   deno run --allow-read --allow-write scripts/build-wave-kv.js --mode emit \
-//     --dir ./dl --pointer ./dl/current.json --out ./kv
+//   deno run --allow-read --allow-write scripts/build-wave-kv.js \
+//     --dir ./cycle --out ./kv
 //
-// No --allow-net. The workflow shell does the HTTPS reads into a quarantine
-// directory nothing else consumes, and this script verifies byte length and
-// sha256 against the manifest before a record is parsed. Length is checked as
-// well as the digest for a legible message on the likelier failure, a truncated
-// transfer.
+// --dir holds manifest.json and the two NDJSON artifacts, handed from the sample
+// job to the publish-kv job as a workflow artifact. No --allow-net. Every artifact
+// is verified by byte length and sha256 against the manifest before a record is
+// parsed, so a truncated or mismatched file is refused rather than measured as a
+// legitimate shrink. Length is checked as well as the digest for a legible message
+// on the likelier failure, a truncated transfer.
 //
 // Units, restated because this file assembles what production reads. Every
 // waveHeightFt and hoursFt cell arriving here is already feet (metersToFeet in
@@ -53,9 +52,6 @@ import { ttlSpellingRefusals, parseNdjson } from "./build-wave-manifest.js";
 // of both ceilings and keeps a failed chunk cheap to retry.
 export const MAX_PAIRS_PER_CHUNK = 5000;
 
-// The pointer is remote input that becomes a URL path, so its charset is constrained
-// rather than trusted.
-const CYCLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 function log(msg) {
@@ -71,74 +67,28 @@ function isPlainObject(value) {
 }
 
 export function parseArgs(argv) {
-  const args = { mode: "emit", dir: null, pointer: null, now: null, out: null };
+  const args = { dir: null, now: null, out: null };
   for (let i = 0; i < argv.length; i = i + 1) {
     const a = argv[i];
-    if (a === "--mode") { args.mode = argv[++i]; }
-    else if (a === "--dir") { args.dir = argv[++i]; }
-    else if (a === "--pointer") { args.pointer = argv[++i]; }
+    if (a === "--dir") { args.dir = argv[++i]; }
     else if (a === "--now") { args.now = argv[++i]; }
     else if (a === "--out") { args.out = argv[++i]; }
     else { throw new Error("unknown argument: " + a); }
   }
-  if (args.mode !== "plan" && args.mode !== "emit") {
-    throw new Error("build-wave-kv: --mode must be plan or emit");
-  }
-  if (typeof args.pointer !== "string" || args.pointer === "") {
-    throw new Error("build-wave-kv: --pointer is required");
+  if (typeof args.dir !== "string" || args.dir === "") {
+    throw new Error("build-wave-kv: --dir is required");
   }
   if (typeof args.out !== "string" || args.out === "") {
     throw new Error("build-wave-kv: --out is required");
   }
-  if (args.mode === "emit" && (typeof args.dir !== "string" || args.dir === "")) {
-    throw new Error("build-wave-kv: --dir is required in emit mode");
-  }
   return args;
-}
-
-// --- pointer -------------------------------------------------------------------------
-
-// Parses waves/current.json and refuses anything that is not a plain, safe pointer.
-// Absolute URLs, absolute paths, parent traversal and backslashes are all rejected,
-// and the prefix must actually contain the cycleId it claims: a pointer that names
-// one cycle and points at another prefix is either a corrupt publish or a tampered
-// object, and neither is a cycle to write production KV from.
-export function parseWavePointer(text) {
-  let pointer = null;
-  try {
-    pointer = JSON.parse(text);
-  } catch (err) {
-    throw new Error("build-wave-kv: pointer is not valid JSON: " +
-      (err && err.message ? err.message : String(err)));
-  }
-  if (!isPlainObject(pointer)) {
-    throw new Error("build-wave-kv: pointer is not an object");
-  }
-  const cycleId = pointer.cycleId;
-  if (typeof cycleId !== "string" || !CYCLE_ID_PATTERN.test(cycleId)) {
-    throw new Error("build-wave-kv: pointer cycleId is missing or malformed");
-  }
-  const prefix = pointer.prefix;
-  if (typeof prefix !== "string" || prefix === "") {
-    throw new Error("build-wave-kv: pointer prefix is missing or malformed");
-  }
-  if (prefix.indexOf("..") !== -1 || prefix.indexOf("\\") !== -1 ||
-      prefix.indexOf("://") !== -1 || prefix.charAt(0) === "/" ||
-      prefix.charAt(prefix.length - 1) === "/") {
-    throw new Error("build-wave-kv: pointer prefix is not a plain relative path: " + prefix);
-  }
-  if (prefix.indexOf(cycleId) === -1) {
-    throw new Error("build-wave-kv: pointer prefix " + prefix +
-      " does not contain cycleId " + cycleId);
-  }
-  return { cycleId: cycleId, prefix: prefix };
 }
 
 // --- artifact verification -------------------------------------------------------------
 
-// Returns null when the downloaded bytes match the manifest entry, or a reason
-// string. The entry is validated first: bytes and sha256 are the entire integrity
-// story for a file this script cannot otherwise judge.
+// Returns null when the file's bytes match the manifest entry, or a reason string.
+// The entry is validated first: bytes and sha256 are the entire integrity story for
+// a file this script cannot otherwise judge.
 export function verifyArtifact(entry, observed) {
   if (!isPlainObject(entry)) {
     return "manifest describes no entry";
@@ -150,7 +100,7 @@ export function verifyArtifact(entry, observed) {
     return entry.key + ": manifest sha256 is not a lowercase 64-hex digest";
   }
   if (!isPlainObject(observed)) {
-    return entry.key + ": nothing downloaded";
+    return entry.key + ": file missing";
   }
   if (observed.bytes !== entry.bytes) {
     return entry.key + ": expected " + String(entry.bytes) + " bytes, got " +
@@ -166,7 +116,7 @@ export function verifyArtifact(entry, observed) {
 // The manifest entry for one artifact key, or null. The list of keys comes from
 // EXPECTED_WAVE_ARTIFACTS and never from manifest.artifacts[].key: a manifest
 // describing a third file is a cycle this code cannot decode, and this keeps
-// every downloaded filename a compile-time constant of this repo.
+// every filename read from the cycle directory a compile-time constant of this repo.
 export function manifestArtifact(manifest, key) {
   if (!isPlainObject(manifest) || !Array.isArray(manifest.artifacts)) {
     return null;
@@ -194,7 +144,6 @@ export function manifestArtifact(manifest, key) {
 // exists to surface.
 export function buildConsumerReport(input) {
   const manifest = isPlainObject(input.manifest) ? input.manifest : null;
-  const pointer = isPlainObject(input.pointer) ? input.pointer : null;
   const verified = Array.isArray(input.verified) ? input.verified : [];
   const problems = Array.isArray(input.problems) ? input.problems.slice() : [];
   const sanity = manifest !== null && isPlainObject(manifest.sanity) ? manifest.sanity : null;
@@ -206,8 +155,6 @@ export function buildConsumerReport(input) {
 
   return {
     schemaVersion: manifest !== null ? manifest.schemaVersion : null,
-    pointerAgreesWithManifest: pointer !== null && manifest !== null &&
-      typeof manifest.cycleId === "string" && manifest.cycleId === pointer.cycleId,
     artifactsVerified: problems.length === 0 && artifactsPresent === artifactsExpected,
     artifactsPresent: artifactsPresent,
     artifactsExpected: artifactsExpected,
@@ -227,8 +174,8 @@ export function buildConsumerReport(input) {
     secondsRemaining: secondsRemaining,
 
     // --- provenance -------------------------------------------------------------
-    cycleId: pointer !== null ? pointer.cycleId : null,
-    prefix: pointer !== null ? pointer.prefix : null,
+    cycleId: manifest !== null && typeof manifest.cycleId === "string"
+      ? manifest.cycleId : null,
     validStartIso: manifest !== null ? manifest.validStartIso : null,
     validStartEpoch: manifest !== null ? manifest.validStartEpoch : null,
     kvExpirationEpoch: manifest !== null ? manifest.kvExpirationEpoch : null,
@@ -350,21 +297,8 @@ async function sha256Hex(bytes) {
   return out;
 }
 
-async function runPlan(args) {
-  const pointer = parseWavePointer(await Deno.readTextFile(args.pointer));
-  const plan = {
-    cycleId: pointer.cycleId,
-    prefix: pointer.prefix,
-    // manifest.json is fetched too but stays out of SHA256SUMS: it is the gate's
-    // sole input and is byte-compared on its own.
-    files: ["manifest.json"].concat(EXPECTED_WAVE_ARTIFACTS)
-  };
-  await Deno.writeTextFile(args.out, JSON.stringify(plan, null, 2) + "\n");
-  log("plan: prefix " + pointer.prefix + ", " + String(plan.files.length) + " file(s)");
-}
-
-async function runEmit(args) {
-  const pointer = parseWavePointer(await Deno.readTextFile(args.pointer));
+async function main() {
+  const args = parseArgs(Deno.args);
   const nowEpoch = args.now === null
     ? Math.floor(Date.now() / 1000)
     : Math.floor(Date.parse(args.now) / 1000);
@@ -386,7 +320,7 @@ async function runEmit(args) {
     try {
       bytes = await Deno.readFile(args.dir + "/" + key);
     } catch (err) {
-      problems.push(key + ": not downloaded");
+      problems.push(key + ": not readable");
       continue;
     }
     const observed = { bytes: bytes.length, sha256: await sha256Hex(bytes) };
@@ -404,7 +338,6 @@ async function runEmit(args) {
 
   const report = buildConsumerReport({
     manifest: manifest,
-    pointer: pointer,
     verified: verified,
     problems: problems,
     nowEpoch: nowEpoch,
@@ -475,15 +408,6 @@ async function runEmit(args) {
   log("wrote " + String(pairCount) + " pair(s) in " + String(chunks.length) +
     " chunk(s), expiration " + String(report.kvExpirationEpoch) +
     " (" + String(Math.round(report.secondsRemaining)) + "s remaining)");
-}
-
-async function main() {
-  const args = parseArgs(Deno.args);
-  if (args.mode === "plan") {
-    await runPlan(args);
-    return;
-  }
-  await runEmit(args);
 }
 
 if (import.meta.main) {

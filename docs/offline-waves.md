@@ -165,11 +165,12 @@ points; reading raw planes in Deno avoids that, and shell-side sampling reintrod
    shore.
 5. `scripts/sample-waves.js --mode sample` samples every beach in the D1 snapshot and emits
    `waveinput.ndjson` and `waves.ndjson`.
-6. `scripts/build-wave-manifest.js` applies every build gate and writes `manifest.json` plus
-   `SHA256SUMS`, or exits 1.
-7. The shell publishes, then reads every artifact back through the public domain, and
-   `scripts/build-wave-kv.js --mode emit` re-verifies the download against the manifest,
-   applies the consumer gate, and emits the bulk-put chunks.
+6. `scripts/build-wave-manifest.js` applies every build gate and writes `manifest.json`,
+   carrying each NDJSON artifact's byte count and sha256, or exits 1.
+7. The `sample` job hands the manifest and the two NDJSON files to the `publish-kv` job as
+   the run's `wave-cycle` workflow artifact, and publishes the manifest and pointer to R2.
+   `scripts/build-wave-kv.js` verifies each file against the manifest, applies the consumer
+   gate, and emits the bulk-put chunks.
 
 ## Per-grid isolation
 
@@ -214,27 +215,36 @@ table and pass; the step passes `--require-where`, which fails on an empty value
 
 ## Publication
 
-Copied from the layer build. R2 bucket `swim-report` — with a hyphen, because the zone is
-`swim.report` with a dot and R2 answers `AccessDenied` rather than `NoSuchBucket` for a bucket a
-token cannot see, so the dotted form fails looking exactly like a bad secret — path-style
-addressing, served at `https://map.swim.report`.
+The NDJSON never leaves the run. The `sample` job uploads `manifest.json`,
+`waveinput.ndjson` and `waves.ndjson` as the `wave-cycle` workflow artifact, retained three
+days, and the `publish-kv` job downloads that same artifact, so it can only ever consume the
+cycle whose pointer the sample job just moved. `download-artifact` fails on an archive digest
+mismatch, and `build-wave-kv.js` then checks each file's byte length and sha256 against the
+manifest before parsing a record, which is what catches a file truncated on extraction.
 
-    waves/<cycleId>/manifest.json      immutable
-    waves/<cycleId>/waveinput.ndjson   immutable
-    waves/<cycleId>/waves.ndjson       immutable
-    waves/<cycleId>/SHA256SUMS         immutable, covers the two .ndjson only
+R2 keeps only what must outlive the run. Bucket `swim-report` — with a hyphen, because the
+zone is `swim.report` with a dot and R2 answers `AccessDenied` rather than `NoSuchBucket` for a
+bucket a token cannot see, so the dotted form fails looking exactly like a bad secret —
+path-style addressing, served at `https://map.swim.report`.
+
+    waves/<cycleId>/manifest.json      immutable, read back through the public domain
     waves/current.json                 no-store, WRITTEN LAST
 
-`cycleId` is `<validStart compact>-g<gfs cycle compact>-<git sha 7>`. The pointer is written
-last so a reader can never see a torn set. `manifest.buildStatus:"complete"` is the last key
-written and is assigned nowhere else. The manifest stays outside its own `SHA256SUMS` scope
-because it is the gate's sole input and is byte-compared on its own.
+`cycleId` is `<validStart compact>-g<gfs cycle compact>-<git sha 7>`. The next cycle follows
+the pointer to the live manifest for its shrink and decay ratios and the rolling history, so
+the pointer is written only after its manifest has been read back and byte-compared: a
+manifest the next run cannot parse reads as a bootstrap cycle, which withholds auto-publish
+and fails the scheduled run. `manifest.buildStatus:"complete"` is the last key written and is
+assigned nowhere else. After the pointer moves, the sample job prunes every prefix older than
+the newest 28 cycles, seven days, sparing its own cycle by name. Pruning is count-based
+rather than an age-based R2 lifecycle rule, which would delete the live manifest if the
+workflow broke for longer than the rule's age.
 
 A withheld publish is a warning on a dispatch and a **failure** on a scheduled run. The
-scheduled cycle wrote no KV for any grid and the pointer did not move, so the failing step
-costs nothing and is the only alert that state produces; without it the run goes green with
-one annotation while every `waveinput:` key expires on its own lease. The reports artifact
-uploads first either way, and its `manifest.json` is what seeds the floors.
+scheduled cycle wrote no KV for any grid, the pointer did not move and nothing reached R2, so
+the failing step costs nothing and is the only alert that state produces; without it the run
+goes green with one annotation while every `waveinput:` key expires on its own lease. The
+reports artifact uploads first either way, and its `manifest.json` is what seeds the floors.
 
 ## Gates
 
@@ -323,8 +333,8 @@ separately so an `--allow-shrink` run is distinguishable downstream.
 one conjunct walk, every conjunct a strict `!== true` so a **missing** field refuses exactly as
 a false one does.
 
-- **fatal**, write no KV: schema version mismatch, pointer disagrees with manifest, artifacts
-  unverified, `artifactsPresent`/`artifactsExpected` (both `isFiniteNumber`-guarded **first**,
+- **fatal**, write no KV: schema version mismatch, artifacts unverified,
+  `artifactsPresent`/`artifactsExpected` (both `isFiniteNumber`-guarded **first**,
   because `undefined !== undefined` is false and fails open), `buildStatus` not `"complete"`,
   `validTimesPassed` or `sentinelScanPassed` not true.
 - **expired**, write no KV: fewer than 10800 seconds (`MIN_LEASE_SECONDS`) of series lease
@@ -407,7 +417,7 @@ reverting.
 ## Prerequisites
 
 - Repo secrets `CLOUDFLARE_R2_ACCESS_KEY` / `CLOUDFLARE_R2_SECRET_ACCESS_KEY`, the same pair
-  the layer build uses.
+  the layer build uses, read by the `sample` job alone for the manifest and pointer writes.
 - Repo secret `CLOUDFLARE_KV_WRITE_TOKEN`, carrying **Workers KV Storage: Edit**, read by the
   `publish-kv` job alone. It is separate from the D1-scoped tokens the other jobs use; if it is
   missing or unscoped, the first bulk put fails after every other step has succeeded.
@@ -437,7 +447,8 @@ the cycle before it also resolved 40. The floors in `data/wave-floors.json` are 
 answer, seeded from a real cycle and moved only by a reviewed commit.
 
 1. Run the workflow by `workflow_dispatch` with publish true. Auto-publish is withheld for an
-   unseeded digest, so the prefix uploads and is readable but the pointer does not move.
+   unseeded digest, so the cycle lands in the run's `wave-cycle` and `wave-cycle-reports`
+   artifacts but the pointer does not move and no KV is written.
 2. Read the produced `manifest.json`, cross-checking `beaches.resolved` against the D1 row count
    and the per-grid split against where the beaches actually are.
 3. Commit an entry under the new digest with status `"seeded"`, `seededFromCycleId` set to that

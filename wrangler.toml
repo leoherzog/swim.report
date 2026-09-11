@@ -76,9 +76,9 @@ directory = "public"
 # layers, fetched from R2 by the GitHub Actions job — never by this Worker) and
 # water-body classification also run only in that offline batch
 # (scripts/discovery-batch.js), which emits an idempotent SQL delta bulk-loaded
-# into D1 out-of-band. The NOAA wave cycle is published to the same bucket under
-# waves/<cycleId>/ and is likewise read only by GitHub Actions, which bulk-writes
-# the resulting waveinput:/waves: pairs into KV.
+# into D1 out-of-band. The NOAA wave cycle keeps only its per-cycle manifest and
+# the waves/current.json pointer in the same bucket, likewise read only by GitHub
+# Actions, which bulk-writes the waveinput:/waves: pairs into KV.
 #
 # The request path still reads only D1/KV, and the cron path only the upstreams
 # named above — which is why there is deliberately no [[r2_buckets]] binding

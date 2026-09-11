@@ -31,7 +31,7 @@ import {
 import { waveRecordsForBeach } from "../scripts/sample-waves.js";
 import {
   MAX_PAIRS_PER_CHUNK,
-  parseWavePointer,
+  parseArgs,
   verifyArtifact,
   manifestArtifact,
   buildConsumerReport,
@@ -342,36 +342,18 @@ describe("chunkGroups", function () {
   });
 });
 
-describe("parseWavePointer", function () {
-  it("accepts a plain pointer whose prefix contains its cycleId", function () {
-    const pointer = parseWavePointer(JSON.stringify({
-      cycleId: "20260903T1200Z-g20260903T06Z-5f80f4c",
-      prefix: "waves/20260903T1200Z-g20260903T06Z-5f80f4c"
-    }));
-    expect(pointer.cycleId).toBe("20260903T1200Z-g20260903T06Z-5f80f4c");
+describe("parseArgs", function () {
+  it("requires the cycle directory and the output directory", function () {
+    expect(parseArgs(["--dir", "/c", "--out", "/kv"])).toEqual(
+      { dir: "/c", now: null, out: "/kv" });
+    expect(function () { parseArgs(["--out", "/kv"]); }).toThrow(/--dir/);
+    expect(function () { parseArgs(["--dir", "/c"]); }).toThrow(/--out/);
   });
 
-  it("refuses a prefix that escapes the bucket path", function () {
-    const bad = ["waves/../secrets", "waves\\x", "https://elsewhere/waves/x",
-      "/waves/x", "waves/x/"];
-    for (let i = 0; i < bad.length; i = i + 1) {
-      expect(function () {
-        parseWavePointer(JSON.stringify({ cycleId: "x", prefix: bad[i] }));
-      }).toThrow();
-    }
-  });
-
-  it("refuses a pointer whose prefix does not contain the cycleId it claims", function () {
+  it("rejects an argument it does not know", function () {
     expect(function () {
-      parseWavePointer(JSON.stringify({ cycleId: "cycle-a", prefix: "waves/cycle-b" }));
-    }).toThrow();
-  });
-
-  it("refuses a malformed cycleId and non-JSON", function () {
-    expect(function () {
-      parseWavePointer(JSON.stringify({ cycleId: "../x", prefix: "waves/../x" }));
-    }).toThrow();
-    expect(function () { parseWavePointer("not json"); }).toThrow();
+      parseArgs(["--dir", "/c", "--out", "/kv", "--pointer", "/p"]);
+    }).toThrow(/unknown argument/);
   });
 });
 
@@ -429,7 +411,6 @@ describe("buildConsumerReport", function () {
   function report(overrides) {
     return buildConsumerReport(Object.assign({
       manifest: manifest(),
-      pointer: { cycleId: "cycle-a", prefix: "waves/cycle-a" },
       verified: [{ key: "waveinput.ndjson" }, { key: "waves.ndjson" }],
       problems: [],
       nowEpoch: VALID_START_EPOCH + 600,
@@ -467,9 +448,10 @@ describe("buildConsumerReport", function () {
       expect(r.sentinelScanPassed).toBe(undefined);
     });
 
-  it("reports the pointer as disagreeing when it names a different cycle", function () {
-    const r = report({ pointer: { cycleId: "cycle-b", prefix: "waves/cycle-b" } });
-    expect(r.pointerAgreesWithManifest).toBe(false);
+  it("takes cycleId from the manifest and nulls it when the manifest has none", function () {
+    expect(report().cycleId).toBe("cycle-a");
+    expect(report({ manifest: manifest({ cycleId: undefined }) }).cycleId).toBe(null);
+    expect(report({ manifest: null }).cycleId).toBe(null);
   });
 
   it("copies optionalGridCountsWarned through verbatim", function () {

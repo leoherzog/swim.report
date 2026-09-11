@@ -697,9 +697,10 @@ only possible with the whole grid in hand, and a genuine capability gain over as
 coordinate API. GFS-Wave's GRIB2 uses JPEG 2000 compression and has no pure-JavaScript decoder,
 so decoding requires GDAL and can never happen inside the Worker.
 
-Publication follows the layer build exactly: an immutable `waves/<cycleId>/` prefix holding
-the manifest, the two NDJSON artifacts and `SHA256SUMS`, with the small `waves/current.json`
-pointer written last so a reader can never see a torn cycle.
+The sampled cycle travels between the workflow's two jobs as a workflow artifact and never
+leaves the run. R2 keeps only each published cycle's `manifest.json`, which the next cycle's
+coverage ratios read, under an immutable `waves/<cycleId>/` prefix, with the small
+`waves/current.json` pointer written last so it never names a manifest that is not there.
 
 Each KV pair carries an **absolute** expiration measured from the model's valid hour, not a TTL
 measured from write time: 24 h for a pair carrying the hourly series, 7 h for a wind-only

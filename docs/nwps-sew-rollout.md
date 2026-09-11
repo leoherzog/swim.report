@@ -137,8 +137,8 @@ gh workflow run waves.yml \
 gh run watch "$(gh run list --workflow waves.yml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
-`publish=true` is safe here precisely because auto-publish is withheld: the immutable prefix
-uploads and is readable, and `waves/current.json` is not moved. `force_publish` stays false.
+`publish=true` is safe here precisely because auto-publish is withheld: the cycle lands in the
+run's `wave-cycle` artifact, and `waves/current.json` is not moved. `force_publish` stays false.
 Never set it before the floors entry is committed — it would move the live pointer to a cycle
 nobody has cross-checked, which is the failure this whole document is arranged around.
 
@@ -146,7 +146,7 @@ The concurrency group is `waves` with `cancel-in-progress: false`, so dispatch a
 minutes past 00, 06, 12 and 18 UTC or the run queues behind a scheduled one.
 
 Expected: the run succeeds, `Explain a withheld publish` emits its warning, `Publish the
-pointer` and `Prune old wave cycles` are skipped, and `publish-kv` is skipped. Watch the wall
+manifest and the pointer` and `Prune old wave cycles` are skipped, and `publish-kv` is skipped. Watch the wall
 clock — this is the first grid whose source file carries 290 bands, adding 48 `gdal_translate`
 invocations and 48 `gdalinfo -stats` calls to a normal 10 to 18 minute run against a 30 minute
 timeout.
@@ -156,8 +156,12 @@ timeout.
 ```
 RUN=$(gh run list --workflow waves.yml --limit 1 --json databaseId -q '.[0].databaseId')
 gh run download "$RUN" -n wave-cycle-reports -D ./.rollout
+gh run download "$RUN" -n wave-cycle -D ./.rollout
 jq '.gridsDigest, .cycleId, .sanity.autoPublishAllowed, .sanity.warnings' ./.rollout/manifest.json
 ```
+
+`wave-cycle-reports` carries the manifest and the two reports for fourteen days; `wave-cycle`
+carries the NDJSON the content checks below read, for three.
 
 `gridsDigest` must equal the digest at the top of this document, and
 `sanity.autoPublishAllowed` must be false with a warning naming the unseeded floors. If the
@@ -260,8 +264,9 @@ from the selected ref, and a ref still carrying the bootstrap entry withholds ag
 
 Expected: `AUTO_PUBLISH=true` in the gate step's output — the seeded entry alone should be
 enough, and `force_publish` is belt and braces for the first cycle whose ratio checks have no
-per-grid predecessor for the new grid. `Publish the pointer` runs, `publish-kv` runs, the bulk
-write reports no "unexpected properties" in the wrangler retry loop.
+per-grid predecessor for the new grid. `Publish the manifest and the pointer` runs,
+`publish-kv` runs, the bulk write reports no "unexpected properties" in the wrangler retry
+loop.
 
 A degraded-tier warning naming `noaa_nwps_sew` as unfetched is a healthy outcome, not a
 failure. SEW publishes on demand near 00Z and 12Z with whole days sometimes absent;

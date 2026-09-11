@@ -54,7 +54,6 @@ import {
   buildHistory,
   oldestRetained,
   historyEntryFor,
-  sha256SumsText,
   parseNdjson,
   sentinelValues,
   runnerImageOf,
@@ -1367,20 +1366,6 @@ describe("evaluateWaveGates", function () {
 
 // --- artifacts and provenance -------------------------------------------------------------
 
-describe("sha256SumsText", function () {
-  it("covers the two NDJSON artifacts and nothing else", function () {
-    // manifest.json must stay OUTSIDE its own checksum scope: it is the sole input
-    // to the consumer gate and is read back and byte-compared on its own.
-    const text = sha256SumsText([
-      { key: "waves.ndjson", sha256: "b".repeat(64) },
-      { key: "manifest.json", sha256: "c".repeat(64) },
-      { key: "waveinput.ndjson", sha256: "a".repeat(64) }
-    ]);
-    expect(text).toBe("a".repeat(64) + "  waveinput.ndjson\n" +
-      "b".repeat(64) + "  waves.ndjson\n");
-  });
-});
-
 describe("parseNdjson", function () {
   it("parses one record per non-blank line", function () {
     expect(parseNdjson("{\"a\":1}\n\n{\"a\":2}\n", "test")).toEqual([{ a: 1 }, { a: 2 }]);
@@ -1552,7 +1537,7 @@ describe("main", function () {
       expect(io.fs[OUT]).toBe(undefined);
     });
 
-  it("writes the manifest and SHA256SUMS through a tmp file and a rename",
+  it("writes the manifest through a tmp file and a rename, carrying each artifact's digest",
     async function () {
       // A reader that sees the final path must never see a half-written manifest:
       // src/waveManifest.js treats a buildStatus other than "complete" as FATAL.
@@ -1560,14 +1545,20 @@ describe("main", function () {
       vi.setSystemTime(new Date("2026-09-03T12:34:56.000Z"));
       const io = stubDeno(files(), ARGV);
       await main();
-      expect(io.written).toEqual([OUT + ".tmp", SAMPLE_DIR + "/SHA256SUMS.tmp"]);
-      expect(io.renamed).toEqual([OUT + ".tmp -> " + OUT,
-        SAMPLE_DIR + "/SHA256SUMS.tmp -> " + SAMPLE_DIR + "/SHA256SUMS"]);
+      expect(io.written).toEqual([OUT + ".tmp"]);
+      expect(io.renamed).toEqual([OUT + ".tmp -> " + OUT]);
       const manifest = JSON.parse(io.fs[OUT]);
       expect(manifest.buildStatus).toBe("complete");
       expect(manifest.generated).toBe("2026-09-03T12:34:56.000Z");
       expect(manifest.gridsComplete).toBe(true);
       expect(manifest.cycleId).toBe("c-test");
+      // build-wave-kv.js verifies every artifact against these before parsing it.
+      expect(manifest.artifacts.map(function (a) { return a.key; }))
+        .toEqual(["waveinput.ndjson", "waves.ndjson"]);
+      for (let i = 0; i < manifest.artifacts.length; i = i + 1) {
+        expect(manifest.artifacts[i].sha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(manifest.artifacts[i].bytes).toBeGreaterThan(0);
+      }
     });
 
   it("reports gridsComplete false when a FETCHED grid contributed no records",
