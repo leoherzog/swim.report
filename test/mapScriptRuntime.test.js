@@ -8,6 +8,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { buildListMapScript } from "../src/frontend/mapScript.js";
+import { distanceKm } from "../src/geo.js";
 
 // Vitest routes dynamic import() through Vite, which will not resolve a data:
 // URL, so the script's one import line is swapped for an already-resolved stub
@@ -27,19 +28,46 @@ function scriptWithStubModule() {
 // Captured before any test swaps globalThis.console for a log collector.
 const REAL_CONSOLE = console;
 
+// Three beaches within about 10 km of Ottawa Beach and one across the lake in
+// Chicago, so a center on the Michigan shore has a tight nearest-three box and
+// an inland center reaches the whole set.
 const FEATURES = {
   type: "FeatureCollection",
   features: [
     { type: "Feature", geometry: { type: "Point", coordinates: [-86.2, 42.7] },
       properties: { id: "beach-1", name: "Ottawa Beach", flag: "green" } },
     { type: "Feature", geometry: { type: "Point", coordinates: [-87.6, 41.9] },
-      properties: { id: "beach-2", name: "Oak Street", flag: "red" } }
+      properties: { id: "beach-2", name: "Oak Street", flag: "red" } },
+    { type: "Feature", geometry: { type: "Point", coordinates: [-86.21, 42.78] },
+      properties: { id: "beach-3", name: "Holland State Park", flag: "yellow" } },
+    { type: "Feature", geometry: { type: "Point", coordinates: [-86.15, 42.65] },
+      properties: { id: "beach-4", name: "Kirk Park", flag: "green" } }
   ]
 };
 
-function makeStubs(propertyValue) {
-  const added = { sources: {}, layers: [], before: [], images: [] };
+// Half-height of a fitBounds box in km, the measure the script's box is built
+// from (the box is symmetric about the center, so this is its radius).
+function boxRadiusKm(bounds) {
+  return (bounds[1][1] - bounds[0][1]) / 2 * 111.32;
+}
+
+// Distance, with the script's 1.2 margin, from a center to the third-nearest
+// of FEATURES: what the script's box radius has to come out to.
+function expectedRadiusKm(lat, lon) {
+  const ds = FEATURES.features
+    .map((f) => distanceKm(lat, lon, f.geometry.coordinates[1], f.geometry.coordinates[0]))
+    .sort((a, b) => a - b);
+  return ds[2] * 1.2;
+}
+
+// attrs are the #home-map attributes the script reads (data-center and
+// data-center-precise); the object is live, so a test can rewrite it before
+// dispatching a nearupdate the way geoScript.js does.
+function makeStubs(propertyValue, attrs) {
+  const mapAttrs = attrs || {};
+  const added = { sources: {}, layers: [], before: [], images: [], fits: [] };
   const handlers = [];
+  const docHandlers = [];
   const logs = [];
   const nav = { href: null };
 
@@ -59,7 +87,7 @@ function makeStubs(propertyValue) {
     addImage(id) { added.images.push(id); },
     setMissingStyleImageResolver() {},
     getSource: (id) => added.sources[id],
-    fitBounds() { added.fitBounds = true; },
+    fitBounds(b, o) { added.fits.push({ bounds: b, options: o }); },
     easeTo(o) { added.easeTo = o; },
     getZoom: () => added.zoom
   };
@@ -77,22 +105,25 @@ function makeStubs(propertyValue) {
   globalThis.fetch = async () => ({ ok: true, json: async () => FEATURES });
   globalThis.document = {
     getElementById: (id) => (id === "home-map"
-      ? { getAttribute: () => null, querySelector: () => null }
+      ? {
+        getAttribute: (name) => (Object.prototype.hasOwnProperty.call(mapAttrs, name) ? mapAttrs[name] : null),
+        querySelector: () => null
+      }
       : null),
     createElement: () => ({ getContext: () => ctx, set width(_w) {}, set height(_h) {} }),
-    addEventListener() {}
+    addEventListener(type, fn) { docHandlers.push({ type: type, fn: fn }); }
   };
   globalThis.console = Object.assign({}, REAL_CONSOLE, {
     log: (m) => { logs.push(String(m)); }
   });
 
-  return { added: added, handlers: handlers, logs: logs, nav: nav };
+  return { added: added, handlers: handlers, docHandlers: docHandlers, logs: logs, nav: nav, attrs: mapAttrs };
 }
 
 // Runs the script and drives it to the point where the layers exist: the map's
 // load event, then the icon decode and the directory fetch it chains.
-async function runScript(propertyValue) {
-  const stubs = makeStubs(propertyValue);
+async function runScript(propertyValue, attrs) {
+  const stubs = makeStubs(propertyValue, attrs);
   // eslint-disable-next-line no-new-func
   new Function(scriptWithStubModule())();
   await new Promise((r) => setTimeout(r, 50));
@@ -185,7 +216,7 @@ describe("map script runtime", () => {
 
   it("names the feature count so a silent map has one line to check", async () => {
     const s = await runScript("#4f8051");
-    expect(s.logs).toContain("map directory: 2 features");
+    expect(s.logs).toContain("map directory: 4 features");
   });
 
   it("logs rather than swallows a failed directory fetch", async () => {
@@ -198,5 +229,90 @@ describe("map script runtime", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(stubs.logs.some((l) => l.indexOf("map directory failed: network down") === 0)).toBe(true);
     expect(stubs.added.layers).toEqual([]);
+  });
+
+  it("fits the whole directory when the page carries no center", async () => {
+    const s = await runScript("#4f8051");
+    expect(s.added.fits.length).toBe(1);
+    expect(s.added.fits[0].options).toEqual({ padding: 40, maxZoom: 10, animate: false });
+  });
+
+  it("opens a coastal visitor on a box around the nearest three beaches, capped at the fix zoom", async () => {
+    const s = await runScript("#4f8051", { "data-center": "42.700,-86.200", "data-center-precise": "1" });
+    expect(s.added.fits.length).toBe(1);
+    const fit = s.added.fits[0];
+    expect(fit.options).toEqual({ padding: 40, maxZoom: 10, animate: false });
+    const km = boxRadiusKm(fit.bounds);
+    expect(km).toBeCloseTo(expectedRadiusKm(42.7, -86.2), 0);
+    // A box a few km wide: the cap, not the box, decides the zoom here.
+    expect(km).toBeLessThan(15);
+    // Symmetric about the visitor, so the fit keeps them centered.
+    expect((fit.bounds[0][0] + fit.bounds[1][0]) / 2).toBeCloseTo(-86.2, 6);
+    expect((fit.bounds[0][1] + fit.bounds[1][1]) / 2).toBeCloseTo(42.7, 6);
+  });
+
+  it("opens an inland visitor zoomed out to the nearest coast", async () => {
+    // Indianapolis: the nearest coast is Lake Michigan, some 300 km north.
+    const s = await runScript("#4f8051", { "data-center": "39.770,-86.160", "data-center-precise": "0" });
+    expect(s.added.fits.length).toBe(1);
+    const fit = s.added.fits[0];
+    expect(fit.options.maxZoom).toBe(9);
+    const km = boxRadiusKm(fit.bounds);
+    expect(km).toBeCloseTo(expectedRadiusKm(39.77, -86.16), 0);
+    expect(km).toBeGreaterThan(300);
+  });
+
+  it("fits at construction when the directory lands before the module", async () => {
+    const stubs = makeStubs("#4f8051", { "data-center": "42.700,-86.200", "data-center-precise": "1" });
+    const mod = globalThis.__maplibre;
+    // Promise.resolve adopts a promise, so a delayed module import is one that
+    // resolves after the (immediate) stub fetch has landed.
+    globalThis.__maplibre = new Promise((r) => setTimeout(() => r(mod), 20));
+    // eslint-disable-next-line no-new-func
+    new Function(scriptWithStubModule())();
+    await new Promise((r) => setTimeout(r, 50));
+    // Fitted before the load event, so before the first render.
+    expect(stubs.added.fits.length).toBe(1);
+    expect(stubs.added.fits[0].options.animate).toBe(false);
+    stubs.handlers.filter((h) => h.type === "load").forEach((h) => h.fn());
+    await new Promise((r) => setTimeout(r, 50));
+    // The load chain adds the layers but does not fit a second time.
+    expect(stubs.added.layers.length).toBe(5);
+    expect(stubs.added.fits.length).toBe(1);
+  });
+
+  it("refits around a browser fix, animated, and only eases while the directory is in flight", async () => {
+    const stubs = makeStubs("#4f8051", { "data-center": "39.770,-86.160", "data-center-precise": "0" });
+    let releaseFetch;
+    globalThis.fetch = () => new Promise((r) => { releaseFetch = r; });
+    // eslint-disable-next-line no-new-func
+    new Function(scriptWithStubModule())();
+    await new Promise((r) => setTimeout(r, 50));
+    const nearupdate = stubs.docHandlers.find((h) => h.type === "swimreport:nearupdate");
+    expect(nearupdate).toBeTruthy();
+
+    // geoScript.js rewrites the attributes and dispatches; with no directory yet
+    // the map can only ease to the fix at its cap.
+    stubs.attrs["data-center"] = "42.700,-86.200";
+    stubs.attrs["data-center-precise"] = "1";
+    nearupdate.fn();
+    expect(stubs.added.fits.length).toBe(0);
+    expect(stubs.added.easeTo).toEqual({ center: [-86.2, 42.7], zoom: 10 });
+
+    releaseFetch({ ok: true, json: async () => FEATURES });
+    await new Promise((r) => setTimeout(r, 50));
+    stubs.handlers.filter((h) => h.type === "load").forEach((h) => h.fn());
+    await new Promise((r) => setTimeout(r, 50));
+    // The load chain widens the eased view once the directory lands.
+    expect(stubs.added.fits.length).toBe(1);
+    expect(stubs.added.fits[0].options).toEqual({ padding: 40, maxZoom: 10, animate: false });
+
+    // A later fix refits around the new center, animated, at the coarser cap.
+    stubs.attrs["data-center"] = "39.770,-86.160";
+    stubs.attrs["data-center-precise"] = "0";
+    nearupdate.fn();
+    expect(stubs.added.fits.length).toBe(2);
+    expect(stubs.added.fits[1].options).toEqual({ padding: 40, maxZoom: 9, animate: true });
+    expect(boxRadiusKm(stubs.added.fits[1].bounds)).toBeCloseTo(expectedRadiusKm(39.77, -86.16), 0);
   });
 });

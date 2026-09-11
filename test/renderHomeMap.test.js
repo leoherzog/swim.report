@@ -316,10 +316,13 @@ describe("renderListPage home map", () => {
   it("embeds the map script's live-update hook for the geolocation swap", () => {
     const html = renderListPage({ entries: [] });
     // geoScript.js swaps data-center in place and dispatches this event; the map
-    // script re-reads data-center and eases to the new center. The source already
-    // holds every beach, so it is a pure re-center (no refetch, no rebuild).
+    // script re-reads data-center and refits around the new center, easing to it
+    // at the zoom cap only while the directory is still in flight. The source
+    // already holds every beach, so it is a pure re-center (no refetch, no
+    // rebuild).
     expect(html).toContain("document.addEventListener('swimreport:nearupdate'");
-    expect(html).toContain("map.easeTo({ center: updated.center, zoom: updated.zoom })");
+    expect(html).toContain("if (fitNear(updated, true)) { return; }");
+    expect(html).toContain("map.easeTo({ center: updated.center, zoom: updated.maxZoom })");
   });
 
   it("re-centers the map on the browser fix immediately, not after the list fetch", () => {

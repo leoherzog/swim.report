@@ -4119,7 +4119,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // they never do. The mount's <wa-skeleton> is removed on the map's load event and
       // on every path that ends with no map — the construction catch, the 'error'
       // event, and a failed module import — so a sheening placeholder never stands in
-      // for a map that is not coming. On load it fetches /api/beaches.geojson once and hands the
+      // for a map that is not coming. It fetches /api/beaches.geojson once, started at
+      // parse time in parallel with the module import so the initial view can be fitted
+      // before the first render, and on load hands the
       // FeatureCollection to a single UNCLUSTERED GeoJSON source, which carries every
       // beach at every zoom: the zoomed-out view is a rendering choice, not a thinned
       // dataset. Two renderings of that one source, handing off at PICK_MIN_ZOOM (9).
@@ -4166,17 +4168,26 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // whichever feature sits under the cursor is arbitrary and the click eases to zoom
       // 9 on the clicked point instead of guessing a beach; at or above it one disc is
       // one beach and the click navigates to /beach/<id>, as a flag click does. 9 is also
-      // the zoom the map opens at once a user location is resolved, so a located visitor
-      // lands on flags and can click straight through.
+      // the floor of the zoom cap the map opens under once a user location is resolved,
+      // so a located visitor on the coast lands on flags and can click straight through.
       // A failed source, a failed layer, an unusable directory and a failed fetch each
       // console.log a named line, and the load path logs the feature count, because a
       // silently skipped layer is indistinguishable from a map that never got its data.
       // Centering:
-      // data-center (zoom 10 when precise, else 9), else fitBounds over all fetched
-      // features, else a Great Lakes default ([-84, 44], zoom 5). It also listens for
-      // "swimreport:nearupdate" on document and re-reads data-center to map.easeTo() the
-      // new center and zoom. All browser-only: the request path fetches nothing
-      // upstream.
+      // data-center, else fitBounds over all fetched features (padding 40, maxZoom 10),
+      // else a Great Lakes default ([-84, 44], zoom 5). With a center the zoom shows the
+      // nearest coast: the view is fitBounds over a box symmetric about the center
+      // (padding 40) whose half-width is 1.2x the distance to the NEAR_DOT_COUNT (3)
+      // nearest beaches in the fetched directory, floored at 1 km, capped at maxZoom 10
+      // when data-center-precise is "1", else 9. A coastal visitor opens at the cap on
+      // flags; an inland one opens zoomed out far enough that the nearest coast's
+      // highlight is in view. The map is constructed at the cap and fitted right after
+      // construction when the directory has already landed, else in the load chain once
+      // it does; a fit that already ran is not repeated. It also listens for
+      // "swimreport:nearupdate" on document and re-reads data-center to refit around
+      // the new center, animated; while the directory is still in flight it map.easeTo()s
+      // the new center at the cap and the load chain's fit widens it. All browser-only:
+      // the request path fetches nothing upstream.
       // MapLibre 6 is ESM-only, so there is no <script src> for the library: the inline
       // classic map script pulls in dist/maplibre-gl.mjs with a dynamic
       // import(MAPLIBRE_MODULE_URL).then(startMap).catch(noop), chosen over a

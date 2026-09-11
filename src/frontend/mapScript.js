@@ -19,12 +19,19 @@
 // in; clicking a separated disc navigates to /beach/:id.
 //
 // Centering precedence: the container's data-center attribute (the resolved user
-// location, at zoom 10 when data-center-precise is "1", else zoom 9), then
-// fitBounds over all fetched features (padding 40, maxZoom 10), then the Great
-// Lakes default center [-84, 44] at zoom 5. A "swimreport:nearupdate"
-// CustomEvent on document, dispatched by geoScript.js after its in-place
-// proximity swap, makes the live map re-read the updated data-center and ease to
-// it; the source already holds every beach, so it is a pure re-center.
+// location), then fitBounds over all fetched features (padding 40, maxZoom 10),
+// then the Great Lakes default center [-84, 44] at zoom 5. With a center, the
+// zoom is whatever shows the nearest coast: the view is a box around the user
+// wide enough to hold the NEAR_DOT_COUNT nearest beaches, capped at zoom 10 when
+// data-center-precise is "1", else 9. A visitor on the coast opens on flags; one
+// inland opens zoomed out far enough that the nearest coast's dots are in view.
+// The box is measured against the fetched directory, so the fetch starts at
+// parse time alongside the module import and the map is fitted at construction
+// when the directory has already landed, else once it does. A
+// "swimreport:nearupdate" CustomEvent on document, dispatched by geoScript.js
+// after its in-place proximity swap, makes the live map re-read the updated
+// data-center and refit around it; the source already holds every beach, so it
+// is a pure re-center.
 //
 // The map is a purely visual supplement: the search box plus results list is the
 // complete accessible path, covering the full flag-worthy table server-side. So
@@ -62,7 +69,8 @@ const SCRIPT_LINES = [
   "  let map;",
   // Require exactly two non-empty parts before Number(): Number('') is 0, so a
   // truncated value like '42.7,' would otherwise center the map at 0 lon
-  // instead of falling through to fitBounds.
+  // instead of falling through to fitBounds. maxZoom is the tightest the view
+  // may open at on this center; the directory decides how far out of it to be.
   "  const readCenter = function () {",
   "    const centerAttr = container.getAttribute('data-center') || '';",
   "    const centerParts = centerAttr.split(',');",
@@ -72,7 +80,7 @@ const SCRIPT_LINES = [
   "      if (isFinite(clat) && isFinite(clon)) {",
   "        return {",
   "          center: [clon, clat],",
-  "          zoom: container.getAttribute('data-center-precise') === '1' ? 10 : 9",
+  "          maxZoom: container.getAttribute('data-center-precise') === '1' ? 10 : 9",
   "        };",
   "      }",
   "    }",
@@ -81,6 +89,18 @@ const SCRIPT_LINES = [
   "  const DEFAULT_CENTER = [-84, 44];",
   "  const DEFAULT_ZOOM = 5;",
   "  const GEOJSON_URL = '/api/beaches.geojson';",
+  // The directory fetch starts here, in parallel with the module import, so the
+  // initial view can usually be fitted at construction rather than snapping
+  // after first paint. The rejection handler only marks a failure handled; the
+  // load chain below re-awaits the same promise and logs the failure itself.
+  "  const directoryRequest = (typeof fetch === 'undefined') ? Promise.resolve(null) :",
+  "    fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } }).then(function (resp) {",
+  "      return resp && resp.ok ? resp.json() : null;",
+  "    });",
+  "  let directory = null;",
+  "  directoryRequest.then(function (fc) {",
+  "    if (fc && Array.isArray(fc.features)) { directory = fc; }",
+  "  }, function () {});",
   // The four flag hexes: resolve the flag variables styles.js declares on <html>
   // so the map matches the rest of the UI exactly, falling back to the
   // mild-palette hexes only if resolution yields an empty string. Resolved once,
@@ -158,8 +178,9 @@ const SCRIPT_LINES = [
   // markers, the flag icons start fading in, and a click stops zooming in and
   // starts navigating. Below it the discs are merged, so whichever feature sits
   // under the cursor is arbitrary and guessing a beach from it would be a coin
-  // flip. It is also the zoom the map opens at once a user location is resolved,
-  // so a located visitor lands on flags and can click straight through.
+  // flip. It is also the floor of the zoom cap the map opens under once a user
+  // location is resolved, so a located visitor on the coast lands on flags and
+  // can click straight through.
   //
   // Declared before the ramps below, which read them: these are emitted as plain
   // const declarations in one browser scope, so a ramp placed above them dies on
@@ -226,17 +247,75 @@ const SCRIPT_LINES = [
   "      img.src = url;",
   "    });",
   "  };",
-  // Fit the whole fetched set only when there is no explicit data-center; the
-  // resolved user/IP center always wins. Re-read the live center rather than the
-  // init snapshot, so a geolocation swap that lands while the geojson fetch is in
-  // flight is not overridden by a whole-region fitBounds.
-  "  const fitToFeatures = function (fc) {",
-  "    if (readCenter()) { return; }",
-  "    if (!fc || !fc.features || !fc.features.length) { return; }",
+  // The view around a resolved center is a box wide enough to hold the
+  // NEAR_DOT_COUNT nearest beaches, so an inland visitor opens on the nearest
+  // coast rather than on empty land. The count is small because the beaches
+  // are on the coast: a box that holds three holds the ribbon they sit on. The
+  // margin keeps the outermost of them off the padding edge, and the floor
+  // keeps a box of beaches at the center from collapsing to a point.
+  "  const NEAR_DOT_COUNT = 3;",
+  "  const NEAR_MARGIN = 1.2;",
+  "  const NEAR_MIN_KM = 1;",
+  "  const KM_PER_DEG = 111.32;",
+  "  const distanceKm = function (lat1, lon1, lat2, lon2) {",
+  "    const rad = Math.PI / 180;",
+  "    const dLat = (lat2 - lat1) * rad;",
+  "    const dLon = (lon2 - lon1) * rad;",
+  "    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +",
+  "      Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);",
+  "    return 2 * 6371 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));",
+  "  };",
+  // Distance, with margin, to the NEAR_DOT_COUNT-th nearest beach in the
+  // directory, or null when the directory holds no usable point.
+  "  const nearRadiusKm = function (lat, lon) {",
+  "    const distances = [];",
+  "    const features = directory ? directory.features : [];",
+  "    for (let i = 0; i < features.length; i++) {",
+  "      const g = features[i] && features[i].geometry;",
+  "      if (!g || !g.coordinates) { continue; }",
+  "      const flon = Number(g.coordinates[0]);",
+  "      const flat = Number(g.coordinates[1]);",
+  "      if (!isFinite(flon) || !isFinite(flat)) { continue; }",
+  "      distances.push(distanceKm(lat, lon, flat, flon));",
+  "    }",
+  "    if (!distances.length) { return null; }",
+  "    distances.sort(function (a, b) { return a - b; });",
+  "    const kth = distances[Math.min(NEAR_DOT_COUNT, distances.length) - 1];",
+  "    return Math.max(kth * NEAR_MARGIN, NEAR_MIN_KM);",
+  "  };",
+  // A box of the given half-width in km centered on the point, as the
+  // [[west, south], [east, north]] pair fitBounds takes. The box is symmetric
+  // about the center, so fitting it keeps the visitor at the middle of the map.
+  "  const boxAround = function (lat, lon, km) {",
+  "    const dLat = km / KM_PER_DEG;",
+  "    const dLon = km / (KM_PER_DEG * Math.max(0.1, Math.cos(lat * Math.PI / 180)));",
+  "    return [",
+  "      [lon - dLon, Math.max(-85, lat - dLat)],",
+  "      [lon + dLon, Math.min(85, lat + dLat)]",
+  "    ];",
+  "  };",
+  // Set once any fit has run, so the load-time fit does not re-run a view the
+  // construction-time or a nearupdate fit already settled.
+  "  let viewFitted = false;",
+  "  const fitNear = function (view, animate) {",
+  "    const km = nearRadiusKm(view.center[1], view.center[0]);",
+  "    if (km === null) { return false; }",
+  "    try {",
+  "      map.fitBounds(boxAround(view.center[1], view.center[0], km),",
+  "        { padding: 40, maxZoom: view.maxZoom, animate: animate });",
+  "    } catch (e) {",
+  "      return false;",
+  "    }",
+  "    viewFitted = true;",
+  "    return true;",
+  "  };",
+  // With no center at all, fit the whole directory.
+  "  const fitAll = function () {",
+  "    const features = directory ? directory.features : [];",
   "    const bounds = new maplibre.LngLatBounds();",
   "    let extended = 0;",
-  "    for (let i = 0; i < fc.features.length; i++) {",
-  "      const g = fc.features[i] && fc.features[i].geometry;",
+  "    for (let i = 0; i < features.length; i++) {",
+  "      const g = features[i] && features[i].geometry;",
   "      if (!g || !g.coordinates) { continue; }",
   "      const lon = Number(g.coordinates[0]);",
   "      const lat = Number(g.coordinates[1]);",
@@ -244,9 +323,22 @@ const SCRIPT_LINES = [
   "      bounds.extend([lon, lat]);",
   "      extended = extended + 1;",
   "    }",
-  "    if (extended > 0) {",
-  "      try { map.fitBounds(bounds, { padding: 40, maxZoom: 10, animate: false }); } catch (e) {}",
+  "    if (extended === 0) { return false; }",
+  "    try {",
+  "      map.fitBounds(bounds, { padding: 40, maxZoom: 10, animate: false });",
+  "    } catch (e) {",
+  "      return false;",
   "    }",
+  "    viewFitted = true;",
+  "    return true;",
+  "  };",
+  // Re-read the live center rather than an init snapshot, so a geolocation swap
+  // that lands while the directory is in flight is what the fit centers on.
+  // Returns whether a fit ran; a directory with no usable point leaves the view
+  // where construction or the caller put it.
+  "  const fitView = function (animate) {",
+  "    const view = readCenter();",
+  "    return view ? fitNear(view, animate) : fitAll();",
   "  };",
   // Add the unclustered source and its four highlight layers, then wire the
   // click/cursor handlers. The source carries every beach at every zoom: the
@@ -340,7 +432,7 @@ const SCRIPT_LINES = [
   "        container: container,",
   "        style: 'https://tiles.openfreemap.org/styles/positron',",
   "        center: initialCenter ? initialCenter.center : DEFAULT_CENTER,",
-  "        zoom: initialCenter ? initialCenter.zoom : DEFAULT_ZOOM,",
+  "        zoom: initialCenter ? initialCenter.maxZoom : DEFAULT_ZOOM,",
   // keyboard: false disables MapLibre's KeyboardHandler so the visual-only map
   // never captures arrow/+/- keys; it is not in the tab order to begin with.
   "        keyboard: false,",
@@ -379,16 +471,17 @@ const SCRIPT_LINES = [
   "        try { map.addImage(id, { width: 1, height: 1, data: new Uint8Array(4) }); } catch (err) {}",
   "      });",
   "    } catch (e) {}",
+  // A directory that landed before the module did fits the view now, before the
+  // first render, so the visitor never sees the maxZoom guess the map was
+  // constructed at.
+  "    if (directory) { fitView(false); }",
   "    map.on('load', function () {",
-  // This handler only removes the placeholder and fetches the beach directory
-  // once the style is ready; the focusable sweep already ran synchronously at
-  // construction.
+  // This handler only removes the placeholder and adds the beach directory once
+  // the style is ready; the focusable sweep already ran synchronously at
+  // construction, and the directory fetch has been in flight since parse time.
   "      clearSkeleton();",
-  "      if (typeof fetch === 'undefined') { return; }",
   "      addFlagImages().then(function () {",
-  "        return fetch(GEOJSON_URL, { headers: { 'Accept': 'application/geo+json' } });",
-  "      }).then(function (resp) {",
-  "        return resp && resp.ok ? resp.json() : null;",
+  "        return directoryRequest;",
   "      }).then(function (fc) {",
   "        if (!fc || !Array.isArray(fc.features)) {",
   "          console.log('map directory unusable');",
@@ -396,25 +489,27 @@ const SCRIPT_LINES = [
   "        }",
   "        console.log('map directory: ' + fc.features.length + ' features');",
   "        addBeachLayers(fc);",
-  "        fitToFeatures(fc);",
+  "        if (!viewFitted) { fitView(false); }",
   "      }).catch(function (e) {",
   "        console.log('map directory failed: ' + ((e && e.message) || 'unknown'));",
   "      });",
   "    });",
   "  };",
-  // Proximity swap (geoScript.js): a pure re-center on the updated data-center,
+  // Proximity swap (geoScript.js): a pure refit around the updated data-center,
   // with no refetch or rebuild. Registered at parse time, before the import
   // resolves, so it is never missed; a swap that arrives with no map yet is
   // dropped, because startMap's own readCenter() picks that same live attribute
-  // up at construction.
+  // up at construction. With no directory to measure against yet, the map eases
+  // to the fix at its maxZoom and the load chain's fit widens it once the
+  // directory lands.
   "  document.addEventListener('swimreport:nearupdate', function () {",
   "    if (!map) { return; }",
   "    const updated = readCenter();",
-  "    if (updated) {",
-  "      try {",
-  "        map.easeTo({ center: updated.center, zoom: updated.zoom });",
-  "      } catch (e) {}",
-  "    }",
+  "    if (!updated) { return; }",
+  "    if (fitNear(updated, true)) { return; }",
+  "    try {",
+  "      map.easeTo({ center: updated.center, zoom: updated.maxZoom });",
+  "    } catch (e) {}",
   "  });",
   // import() works in a classic script, keeps the failure path silent, and never
   // blocks the parser.
