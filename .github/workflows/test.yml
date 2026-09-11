@@ -2,7 +2,7 @@ name: Tests
 
 # Runs the vitest suite on every push and pull request.
 #
-# The install is deliberately not "npm ci". package.json's two runtime dependencies
+# The install is deliberately not "npm ci". Two of package.json's runtime dependencies
 # (@web.awesome.me/webawesome-pro and @awesome.me/kit-*) come from private registries
 # whose tokens live in .dev.vars, and .npmrc routes those scopes through
 # ${WEBAWESOME_NPM_TOKEN} / ${FONTAWESOME_NPM_TOKEN}. A plain npm ci here fails E401,
@@ -10,16 +10,16 @@ name: Tests
 # either package: Web Awesome and Font Awesome load from a version-pinned CDN kit at
 # runtime (see WA_KIT_BASE in src/frontend/render.js), and the local package exists
 # only so a developer can read the bundled Web Awesome agent skill. So the job drops
-# the two dependencies from the ephemeral checkout's manifest and installs the rest:
+# those two by name from the ephemeral checkout's manifest and installs the rest,
+# including suncalc, which src/frontend/sun.js imports and the Worker bundles:
 #
-#   npm pkg delete dependencies    (npm's own CLI; touches only the runner's copy)
-#   npm install                    (devDependencies only, still resolved from the
-#                                   committed package-lock.json entries)
+#   npm pkg delete 'dependencies[<private>]' ...  (touches only the runner's copy)
+#   npm install                    (still resolved from the committed package-lock.json)
 #
 # npm ci cannot be used after that edit, because it requires package.json and
 # package-lock.json to agree and the edit deliberately makes them disagree; npm
 # install reconciles by pruning the two private trees, which is the intended effect.
-# The devDependency versions still come from the lockfile.
+# Every remaining version still comes from the lockfile.
 #
 # If this job ever fails with E401, the cause is a new import of a private package
 # from src/ or test/ — fix the import, do not add the secrets.
@@ -63,11 +63,11 @@ jobs:
           node-version: "24"
           cache: npm
 
-      - name: Install devDependencies without the private registries
+      - name: Install dependencies without the private registries
         # See the header. This edits only the runner's ephemeral checkout.
         run: |
           set -euo pipefail
-          npm pkg delete dependencies
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
           npm install --no-audit --no-fund
           npx vitest --version
 
@@ -195,9 +195,10 @@ jobs:
     #                       the repo that sees that. test/workerExports.test.js stays
     #                       the fast static guard on the one known instance.
     #
-    # No npm install anywhere: package.json's two runtime dependencies come from private
-    # registries this job has no tokens for, so wrangler is fetched on its own through
-    # npx, as discovery.yml and waves.yml do it.
+    # The bundle resolves suncalc from node_modules, so this job installs the way the
+    # vitest job does, minus the two private-registry packages it has no tokens for.
+    # wrangler is still fetched on its own through npx, as discovery.yml and waves.yml
+    # do it.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -212,6 +213,14 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
+          cache: npm
+
+      - name: Install dependencies without the private registries
+        # See the header. This edits only the runner's ephemeral checkout.
+        run: |
+          set -euo pipefail
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm install --no-audit --no-fund
 
       - name: Bundle the Worker
         run: npx --yes "wrangler@${WRANGLER_VERSION}" deploy --dry-run
