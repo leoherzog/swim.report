@@ -215,6 +215,17 @@ describe("the degraded tier", function () {
       expect(waveKvWriteAllowed(without("gridsComplete"))).toBe(true);
     });
 
+  it("writes but warns when an optional grid missed a floor, shrink or decay gate",
+    function () {
+      const verdict = classifyWaveManifestFailure(okReport({ optionalGridCountsWarned: true }));
+      expect(verdict.tier).toBe("degraded");
+      expect(verdict.reasons[0].indexOf("optional-grid-counts")).toBe(0);
+      expect(waveKvWriteAllowed(okReport({ optionalGridCountsWarned: true }))).toBe(true);
+      expect(classifyWaveManifestFailure(okReport({ optionalGridCountsWarned: false })).tier)
+        .toBe("ok");
+      expect(classifyWaveManifestFailure(okReport()).tier).toBe("ok");
+    });
+
   it("does not degrade on a missing sanityOverridden, which is only true-triggered",
     function () {
       expect(classifyWaveManifestFailure(without("sanityOverridden")).tier).toBe("ok");

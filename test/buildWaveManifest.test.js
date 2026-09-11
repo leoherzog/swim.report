@@ -41,6 +41,8 @@ import {
   perGridFloorStatus,
   perGridShrinkRefusals,
   perGridDecayRefusals,
+  perGridMinRatio,
+  demoteOptionalGridCounts,
   shrinkRatioRefusals,
   decayRefusals,
   gridIdsOf,
@@ -863,6 +865,237 @@ describe("the minimum record rails", function () {
       expect(warnings.length).toBe(1);
       expect(warnings[0].indexOf("noaa_glwu")).not.toBe(-1);
     });
+});
+
+// --- optional grids -----------------------------------------------------------------------
+
+// The NWPS nest wets and dries with the tide, so its resolved count swings between
+// 553 and about 484 with the phase at validStart. These pin that a grid outside
+// REQUIRED_GRID_IDS can never refuse the cycle on a count, and that the tide itself
+// stays silent.
+describe("optional-grid count gates", function () {
+  const NWPS_IDENTITY = { width: 99, height: 93, originLon: -127.0259693877551,
+    originLat: 49.43804347826087, pixelLon: 0.05193877551020408,
+    pixelLat: -0.03608695652173913, nodata: 9999 };
+
+  function nwps(n, overrides) {
+    return Object.assign({ assignedBeaches: 608, resolvedBeaches: n,
+      waveinputRecords: n, wavesRecords: n, validPercent: 54.47,
+      identity: NWPS_IDENTITY, identityPlanes: FORECAST_HOURS + 1,
+      identityMismatches: [] }, overrides || {});
+  }
+
+  function doc() {
+    const d = expectDoc();
+    d.grids.noaa_nwps_sew = { sampled: NWPS_IDENTITY };
+    return d;
+  }
+
+  // Run 34530997812's shape: gfswave steady, NWPS 484 against an accepted 553.
+  function input(nwpsCount, overrides) {
+    const inputs = waveinputRecords(40);
+    const floors = { floors: {} };
+    floors.floors[DIGEST] = { status: "seeded", waveinputRecords: 10, wavesRecords: 10,
+      grids: { noaa_gfswave: 10, noaa_nwps_sew: 414 } };
+    const stats = gridStats();
+    stats.noaa_nwps_sew = nwps(nwpsCount);
+    return Object.assign({
+      gridStats: stats,
+      gridStatus: gridStatus(),
+      sampleBeaches: { total: 1600, resolved: 1200 },
+      expectDoc: doc(),
+      bands: bands(),
+      expectedElements: ["HTSGW", "WIND"],
+      validStartEpoch: VALID_START,
+      kvExpirationEpoch: VALID_START + WAVE_SERIES_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
+      stats: scanRecords(inputs, wavesRecords(inputs), [9999]),
+      counts: { waveinputRecords: 40, wavesRecords: 40 },
+      floorsFile: floors,
+      gridsDigest: DIGEST,
+      previousManifest: { cycleId: "c-prev", beaches: {} },
+      previousCounts: { waveinputRecords: 40, wavesRecords: 40 },
+      previousGridCounts: {
+        noaa_gfswave: { waveinputRecords: 90, wavesRecords: 90, validPercent: 42 },
+        noaa_nwps_sew: { waveinputRecords: 553, wavesRecords: 553, validPercent: 54.48 }
+      },
+      oldest: { waveinputRecords: 40, wavesRecords: 40 },
+      oldestGridCounts: {
+        noaa_gfswave: { waveinputRecords: 90, wavesRecords: 90, validPercent: 42 },
+        noaa_nwps_sew: { waveinputRecords: 553, wavesRecords: 553, validPercent: 54.48 }
+      },
+      allowShrink: false
+    }, overrides || {});
+  }
+
+  it("scores NWPS record counts at its declared ratio and validPercent at the default",
+    function () {
+      expect(perGridMinRatio("noaa_nwps_sew", "waveinputRecords", "shrinkRatio",
+        WAVE_SHRINK_MIN_RATIO)).toBe(0.8);
+      expect(perGridMinRatio("noaa_nwps_sew", "wavesRecords", "decay",
+        WAVE_DECAY_MIN_RATIO)).toBe(0.8);
+      expect(perGridMinRatio("noaa_nwps_sew", "validPercent", "shrinkRatio",
+        WAVE_SHRINK_MIN_RATIO)).toBe(WAVE_SHRINK_MIN_RATIO);
+      expect(perGridMinRatio("noaa_glwu", "waveinputRecords", "shrinkRatio",
+        WAVE_SHRINK_MIN_RATIO)).toBe(WAVE_SHRINK_MIN_RATIO);
+      const bad = [{ id: "x", recordCountMinRatio: { shrinkRatio: 0 } },
+        { id: "y", recordCountMinRatio: { shrinkRatio: 1.5 } },
+        { id: "z", recordCountMinRatio: { shrinkRatio: "0.8" } }];
+      for (let i = 0; i < bad.length; i = i + 1) {
+        expect(perGridMinRatio(bad[i].id, "waveinputRecords", "shrinkRatio", 0.95, bad))
+          .toBe(0.95);
+      }
+    });
+
+  it("passes the tidal low-water count and still scores a real NWPS loss", function () {
+    const prev = { noaa_nwps_sew: { waveinputRecords: 553, wavesRecords: 553,
+      validPercent: 54.48 } };
+    const status = gridStatus();
+    expect(perGridShrinkRefusals({ noaa_nwps_sew: nwps(482) }, prev, status).refusals)
+      .toEqual([]);
+    const lost = perGridShrinkRefusals({ noaa_nwps_sew: nwps(430) }, prev, status);
+    expect(lost.refusals.map(function (r) { return r.subject; }))
+      .toEqual(["noaa_nwps_sew waveinputRecords", "noaa_nwps_sew wavesRecords"]);
+    expect(lost.refusals[0].countGridId).toBe("noaa_nwps_sew");
+    expect(lost.refusals[0].message.indexOf("floor 0.8x")).not.toBe(-1);
+    const plane = perGridShrinkRefusals({ noaa_nwps_sew: nwps(553, { validPercent: 40 }) },
+      prev, status);
+    expect(plane.refusals.map(function (r) { return r.subject; }))
+      .toEqual(["noaa_nwps_sew validPercent"]);
+  });
+
+  it("keeps a refusal with no countGridId and a required grid's, demotes the rest",
+    function () {
+      const list = [
+        { check: "perGridFloor", countGridId: "noaa_gfswave", message: "a" },
+        { check: "perGridFloor", countGridId: null, message: "b" },
+        { check: "shrinkRatio", countGridId: "noaa_nwps_sew", message: "c" },
+        { check: "decay", countGridId: "noaa_nwps_sew", message: "d" }
+      ];
+      const split = demoteOptionalGridCounts(list);
+      expect(split.kept.map(function (r) { return r.message; })).toEqual(["a", "b"]);
+      expect(Object.keys(split.byGrid)).toEqual(["noaa_nwps_sew"]);
+      expect(split.byGrid.noaa_nwps_sew.length).toBe(2);
+    });
+
+  it("publishes run 34530997812's tidal shrink silently", function () {
+    const verdict = evaluateWaveGates(input(484));
+    expect(verdict.refusals).toEqual([]);
+    expect(verdict.sanity.passed).toBe(true);
+    expect(verdict.sanity.overridden).toBe(false);
+    expect(verdict.sanity.autoPublishAllowed).toBe(true);
+    expect(verdict.sanity.optionalGridCountsWarned).toBe(false);
+    expect(verdict.sanity.optionalGridCounts).toEqual({});
+    expect(verdict.sanity.floors.grids.noaa_nwps_sew).toBe(414);
+  });
+
+  it("passes a high-water count scored against an accepted low-water baseline",
+    function () {
+      const low = { waveinputRecords: 484, wavesRecords: 484, validPercent: 54.47 };
+      const verdict = evaluateWaveGates(input(553, {
+        previousGridCounts: { noaa_gfswave: { waveinputRecords: 90, wavesRecords: 90,
+          validPercent: 42 }, noaa_nwps_sew: low }
+      }));
+      expect(verdict.refusals).toEqual([]);
+      expect(verdict.sanity.optionalGridCountsWarned).toBe(false);
+    });
+
+  it("warns rather than refuses for a real NWPS shrink, and --allow-shrink stays unstamped",
+    function () {
+      const modes = [false, true];
+      for (let i = 0; i < modes.length; i = i + 1) {
+        const verdict = evaluateWaveGates(input(430, { allowShrink: modes[i] }));
+        expect(verdict.refusals).toEqual([]);
+        expect(verdict.sanity.passed).toBe(true);
+        expect(verdict.sanity.overridden).toBe(false);
+        expect(verdict.sanity.autoPublishAllowed).toBe(true);
+        expect(verdict.sanity.optionalGridCountsWarned).toBe(true);
+        expect(verdict.sanity.optionalGridCounts.noaa_nwps_sew.length).toBe(4);
+        expect(verdict.warnings.join("\n")
+          .indexOf("OPTIONAL GRID shrinkRatio: noaa_nwps_sew waveinputRecords: 430 vs 553"))
+          .not.toBe(-1);
+        expect(verdict.sanity.floors.grids.noaa_nwps_sew).toBe(414);
+      }
+    });
+
+  it("warns rather than refuses for an NWPS that resolved nothing, and says its floor " +
+    "was missed", function () {
+      const verdict = evaluateWaveGates(input(0, { gridStats: (function () {
+        const s = gridStats();
+        s.noaa_nwps_sew = nwps(0);
+        return s;
+      })() }));
+      expect(verdict.refusals).toEqual([]);
+      expect(verdict.sanity.floors.grids.noaa_nwps_sew).toBe("warned");
+      expect(verdict.sanity.optionalGridCounts.noaa_nwps_sew[0].indexOf("perGridFloor"))
+        .toBe(0);
+      expect(verdict.warnings.join("\n").indexOf("none resolved")).not.toBe(-1);
+    });
+
+  it("still refuses a required grid's shrink in the same cycle", function () {
+    const verdict = evaluateWaveGates(input(430, {
+      previousGridCounts: {
+        noaa_gfswave: { waveinputRecords: 200, wavesRecords: 200, validPercent: 42 },
+        noaa_nwps_sew: { waveinputRecords: 553, wavesRecords: 553, validPercent: 54.48 }
+      }
+    }));
+    expect(verdict.refusals.map(function (r) { return r.subject; }))
+      .toEqual(["noaa_gfswave waveinputRecords", "noaa_gfswave wavesRecords"]);
+    expect(verdict.sanity.optionalGridCountsWarned).toBe(true);
+  });
+
+  it("still refuses the cycle when an optional grid's validPercent collapses", function () {
+    const s = gridStats();
+    s.noaa_nwps_sew = nwps(553, { validPercent: 40 });
+    const verdict = evaluateWaveGates(input(553, { gridStats: s }));
+    const subjects = verdict.refusals.map(function (r) { return r.subject; });
+    expect(subjects.indexOf("noaa_nwps_sew validPercent")).not.toBe(-1);
+    expect(verdict.refusals[subjects.indexOf("noaa_nwps_sew validPercent")].check)
+      .toBe("shrinkRatio");
+    expect(verdict.sanity.optionalGridCountsWarned).toBe(false);
+  });
+
+  it("still refuses an optional grid's identity, validPercent and inconsistent report",
+    function () {
+      const cases = [
+        { name: "gridIdentity", allowShrink: true, nwps: nwps(484, { identityMismatches:
+          ["noaa_nwps_sew-h07-HTSGW: originLon is -126, expected -127.0259693877551"] }) },
+        { name: "minimumRecords", allowShrink: true, nwps: nwps(484, { validPercent: 0 }) },
+        // Overridable, as before, but a sampler that claims "sampled" with no count is
+        // a report bug and never demoted as an optional grid's shortfall.
+        { name: "perGridFloor", allowShrink: false, nwps: { assignedBeaches: 608, waveinputRecords: 484,
+          wavesRecords: 484, validPercent: 54.47, identity: NWPS_IDENTITY,
+          identityPlanes: FORECAST_HOURS + 1, identityMismatches: [] } }
+      ];
+      for (let i = 0; i < cases.length; i = i + 1) {
+        const s = gridStats();
+        s.noaa_nwps_sew = cases[i].nwps;
+        const verdict = evaluateWaveGates(input(484, { gridStats: s,
+          allowShrink: cases[i].allowShrink }));
+        const checks = verdict.refusals.map(function (r) { return r.check; });
+        expect(checks.indexOf(cases[i].name)).not.toBe(-1);
+      }
+    });
+
+  it("warns rather than refuses when GLWU shrinks behind a steady global sum", function () {
+    // The trade this scoping makes: a GLWU collapse costs Great Lakes beaches their
+    // fresh records and degrades the cycle, and never refuses the ocean.
+    const s = gridStats();
+    s.noaa_glwu = { assignedBeaches: 1675, resolvedBeaches: 500, waveinputRecords: 500,
+      wavesRecords: 500, validPercent: 8, identity: { width: 10, height: 8, originLon: -5,
+        originLat: 4, pixelLon: 0.5, pixelLat: -0.5, nodata: 9999 },
+      identityPlanes: FORECAST_HOURS + 1, identityMismatches: [] };
+    const d = doc();
+    d.grids.noaa_glwu = { sampled: s.noaa_glwu.identity };
+    const verdict = evaluateWaveGates(input(553, { gridStats: Object.assign(s,
+      { noaa_nwps_sew: nwps(553) }), expectDoc: d,
+      previousGridCounts: {
+        noaa_gfswave: { waveinputRecords: 90, wavesRecords: 90, validPercent: 42 },
+        noaa_glwu: { waveinputRecords: 1200, wavesRecords: 1200, validPercent: 8 }
+      } }));
+    expect(verdict.refusals).toEqual([]);
+    expect(Object.keys(verdict.sanity.optionalGridCounts)).toEqual(["noaa_glwu"]);
+  });
 });
 
 // --- history ---------------------------------------------------------------------------

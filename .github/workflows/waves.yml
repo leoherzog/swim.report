@@ -618,7 +618,7 @@ jobs:
       - name: Prune old wave cycles
         # Same gate as Publish, deliberately: a run that did not move the pointer has
         # left an extra non-live prefix behind, and pruning there would delete cycles to
-        # make room for one nobody is reading. 24 cycles is three days at the 3-hourly
+        # make room for one nobody is reading. 24 cycles is six days at the 6-hourly
         # cadence. An age-based R2 lifecycle rule is deliberately not used: if the job
         # broke for longer than the rule's age it would delete the live cycle.
         if: ${{ env.PUBLISH == 'true' && (env.AUTO_PUBLISH == 'true' || env.FORCE_PUBLISH == 'true') }}
@@ -744,7 +744,7 @@ jobs:
             const fs = require('fs');
             const report = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
             if (report.tier !== 'degraded') { process.exit(0); }
-            const generic = '::warning::the wave cycle passed the gate in the DEGRADED tier — a grid contributed nothing, or a coverage gate was overridden. See kv-report.json.';
+            const generic = '::warning::the wave cycle passed the gate in the DEGRADED tier — a grid contributed nothing, a coverage gate was overridden, or a grid outside REQUIRED_GRID_IDS missed a count gate (manifest sanity.optionalGridCounts). See kv-report.json.';
             let status = null;
             try {
               const m = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
@@ -830,6 +830,10 @@ jobs:
               degraded.push('gridsIncomplete' + (out.length === 0 ? '' : '(' + out.join(',') + ')'));
             }
             if ((m.sanity || {}).overridden === true) { degraded.push('sanityOverridden'); }
+            if ((m.sanity || {}).optionalGridCountsWarned === true) {
+              degraded.push('optionalGridCounts(' +
+                Object.keys((m.sanity || {}).optionalGridCounts || {}).join(',') + ')');
+            }
             const expires = new Date(r.kvExpirationEpoch * 1000).toISOString();
             console.log('wave cycle ' + r.cycleId +
               ': beaches=' + beaches.total +

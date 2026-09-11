@@ -29,6 +29,11 @@
 // not a count of zero; scoring it as one refuses the whole cycle on behalf of a grid
 // that never ran.
 //
+// A grid outside REQUIRED_GRID_IDS never refuses the cycle on a record count: its
+// per-grid floor, shrink and decay misses warn, land in sanity.optionalGridCounts and
+// degrade the cycle at the consumer gate. Its identity, band, valid-time, sentinel,
+// minimum-record and validPercent-ratio rails still refuse like any other grid's.
+//
 // distinctValues and meanPlausibility exist because every other gate counts things
 // and a constant plane counts perfectly: 24 aligned hours, no sentinels, no
 // out-of-range values, full coverage, every beach reading the same number. They are
@@ -50,15 +55,18 @@ import {
   FORECAST_HOURS,
   METERS_PER_SECOND_TO_MPH,
   gridsDigest,
+  gridById,
   matchesNodata
 } from "../src/waveGrids.js";
 import { metersToFeet } from "../src/geo.js";
 
 // --- gate constants ----------------------------------------------------------------
 
-// Ratio against the previous accepted cycle. Coverage is a beach count, which moves
-// only when discovery adds rows or a grid stops answering, so this is loose enough
-// for ordinary growth and tight enough that a lost grid is unmissable.
+// Ratio against the previous accepted cycle. On a fixed-mask grid coverage is a beach
+// count that moves only when discovery adds rows or the grid stops answering, so this
+// is loose enough for ordinary growth and tight enough that a lost grid is
+// unmissable. A nest that wets and dries with the tide declares its own
+// recordCountMinRatio in src/waveGrids.js.
 export const WAVE_SHRINK_MIN_RATIO = 0.95;
 
 // Against the oldest retained cycle. A hit rate bleeding a few percent per cycle
@@ -66,8 +74,8 @@ export const WAVE_SHRINK_MIN_RATIO = 0.95;
 // thing that can see it.
 export const WAVE_DECAY_MIN_RATIO = 0.85;
 
-// Rolling window carried forward in manifest.history. Eight cycles is one day at the
-// 3-hourly cadence, which is the right span for a decay check whose unit is a cycle.
+// Rolling window carried forward in manifest.history. Eight cycles is two days at the
+// 6-hourly cadence.
 export const HISTORY_RETAIN = 8;
 
 // The ratio a human uses when seeding data/wave-floors.json from a first real cycle.
@@ -114,12 +122,17 @@ function isPlainObject(value) {
 
 // Every gate speaks this shape. overridable says whether --allow-shrink may demote it
 // to a warning: count-shrink refusals may, identity and integrity refusals may not.
-function refusal(check, subject, message, overridable) {
+// countGridId names the grid a per-grid floor or record-count ratio refusal scored,
+// and only those set it: evaluateWaveGates demotes it to a warning for a grid outside
+// REQUIRED_GRID_IDS, so an identity, integrity or validPercent refusal must never
+// carry one.
+function refusal(check, subject, message, overridable, countGridId) {
   return {
     check: check,
     subject: subject,
     message: check + ": " + subject + ": " + message,
-    overridable: overridable === true
+    overridable: overridable === true,
+    countGridId: typeof countGridId === "string" ? countGridId : null
   };
 }
 
@@ -820,7 +833,7 @@ export function perGridFloorRefusals(gridCounts, floorsEntry, gridStatus) {
     }
     if (entry.resolvedBeaches < floor) {
       out.push(refusal("perGridFloor", ids[i], String(entry.resolvedBeaches) +
-        " resolved beaches is below the seeded floor " + String(floor), true));
+        " resolved beaches is below the seeded floor " + String(floor), true, ids[i]));
     }
   }
   return out;
@@ -854,6 +867,17 @@ export function perGridFloorStatus(floorsEntry, gridStatus) {
   return { grids: grids, warnings: warnings };
 }
 
+// The ratio one record-count field is scored at: the grid's own
+// recordCountMinRatio[check] when it declares one in (0, 1], else the gate default.
+// validPercent always takes the default.
+export function perGridMinRatio(id, field, check, fallback, grids) {
+  if (field === "validPercent") { return fallback; }
+  const grid = gridById(id, grids);
+  const declared = grid !== null && isPlainObject(grid.recordCountMinRatio)
+    ? grid.recordCountMinRatio[check] : undefined;
+  return isFiniteNumber(declared) && declared > 0 && declared <= 1 ? declared : fallback;
+}
+
 // One per-grid ratio comparison. A grid is compared only when it sampled this cycle
 // and the other side carries a positive count for it; every other case is a skip
 // that warns, because a silent skip and a pass are indistinguishable in a manifest.
@@ -881,6 +905,8 @@ function perGridRatioRefusals(check, minRatio, gridCounts, otherGrids, gridStatu
   // validPercent rides the same rails as the record counts: it is a fraction rather
   // than a count, and a collapse from 70 to 3 while beaches still resolve through
   // longer spiral rings is the partial corruption every count floor holds through.
+  // That makes it a wrong-plane signal rather than less data, so its refusal carries
+  // no countGridId and refuses the cycle for every grid, required or not.
   const fields = ["waveinputRecords", "wavesRecords", "validPercent"];
   for (let i = 0; i < ids.length; i = i + 1) {
     const id = ids[i];
@@ -910,9 +936,11 @@ function perGridRatioRefusals(check, minRatio, gridCounts, otherGrids, gridStatu
         continue;
       }
       compared = compared + 1;
-      if (now < minRatio * was) {
+      const ratio = perGridMinRatio(id, fields[f], check, minRatio);
+      if (now < ratio * was) {
         refusals.push(refusal(check, id + " " + fields[f],
-          ratioText(now, was, minRatio), true));
+          ratioText(now, was, ratio), true,
+          fields[f] === "validPercent" ? null : id));
       }
     }
   }
@@ -969,6 +997,26 @@ export function decayRefusals(counts, oldest) {
     }
   }
   return out;
+}
+
+// Splits per-grid count refusals by whether their grid may refuse the cycle. A grid
+// outside REQUIRED_GRID_IDS costs only its own beaches when it misses a floor or a
+// ratio, which is what its absence already costs, so its refusals become warnings
+// keyed by grid. A refusal with no countGridId is kept whatever its check.
+export function demoteOptionalGridCounts(list, requiredIds) {
+  const required = Array.isArray(requiredIds) ? requiredIds : REQUIRED_GRID_IDS;
+  const kept = [];
+  const byGrid = {};
+  for (let i = 0; i < list.length; i = i + 1) {
+    const id = list[i].countGridId;
+    if (typeof id !== "string" || required.indexOf(id) !== -1) {
+      kept.push(list[i]);
+      continue;
+    }
+    if (byGrid[id] === undefined) { byGrid[id] = []; }
+    byGrid[id].push(list[i]);
+  }
+  return { kept: kept, byGrid: byGrid };
 }
 
 // --- history --------------------------------------------------------------------------
@@ -1110,10 +1158,16 @@ export function evaluateWaveGates(input) {
   // and a bootstrap cycle already do.
   const ratioCoverage = shrinkFallback || perGridShrink.compared > 0;
 
+  // Demoted before --allow-shrink is consulted, so an optional grid's shortfall never
+  // stamps overridden and a dispatch with the flag set still says whether a human
+  // actually bypassed anything.
+  const optional = demoteOptionalGridCounts(
+    perGrid.concat(perGridShrink.refusals, perGridDecay.refusals));
+  const optionalIds = Object.keys(optional.byGrid).sort();
+
   const all = gridIdentity
     .concat(bandIdentity, validTimes, sentinel, alignment, distribution,
-      minimumRecords, ttl, coverage, perGrid, shrink, decay,
-      perGridShrink.refusals, perGridDecay.refusals);
+      minimumRecords, ttl, coverage, shrink, decay, optional.kept);
 
   const allowShrink = input.allowShrink === true;
   const refusals = [];
@@ -1126,6 +1180,21 @@ export function evaluateWaveGates(input) {
     refusals.push(all[i]);
   }
   const overridden = allowShrink && warnings.length > 0;
+
+  const optionalGridCounts = {};
+  for (let i = 0; i < optionalIds.length; i = i + 1) {
+    const id = optionalIds[i];
+    optionalGridCounts[id] = [];
+    const list = optional.byGrid[id];
+    for (let r = 0; r < list.length; r = r + 1) {
+      optionalGridCounts[id].push(list[r].message);
+      warnings.push("OPTIONAL GRID " + list[r].message + " — " + id + " is not in " +
+        "REQUIRED_GRID_IDS, so the cycle publishes and any beach it dropped rides its " +
+        "previous key until that expires");
+      // A floor this grid missed is published as "warned", never as its number.
+      if (list[r].check === "perGridFloor") { floorStatus.grids[id] = "warned"; }
+    }
+  }
 
   const skips = floorStatus.warnings
     .concat(perGridShrink.warnings, perGridDecay.warnings,
@@ -1186,6 +1255,11 @@ export function evaluateWaveGates(input) {
       // downstream: under an override every individual flag above still reads true,
       // and this is the only field that still says a human bypassed a refusal.
       overridden: overridden,
+      // The floor, shrink and decay misses of grids outside REQUIRED_GRID_IDS, which
+      // warn instead of refusing. The *Passed flags above never see them, so these two
+      // fields are what tell such a cycle apart from a clean one.
+      optionalGridCounts: optionalGridCounts,
+      optionalGridCountsWarned: optionalIds.length > 0,
       passed: passed,
       autoPublishAllowed: passed && floorsResult.autoPublishAllowed && !bootstrap &&
         ratioCoverage,
@@ -1196,8 +1270,9 @@ export function evaluateWaveGates(input) {
           ? floorsResult.entry.waveinputRecords : null,
         wavesRecords: isPlainObject(floorsResult.entry)
           ? floorsResult.entry.wavesRecords : null,
-        // A floor that could not be scored reads "not evaluated", never its numeric
-        // value, so a skip is never mistakable for a pass.
+        // A floor that could not be scored reads "not evaluated", and an optional
+        // grid's missed floor reads "warned", never the numeric value, so neither is
+        // mistakable for a pass.
         grids: floorStatus.grids
       }
     }

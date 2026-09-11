@@ -218,6 +218,7 @@ export function buildConsumerReport(input) {
     sentinelScanPassed: sanity !== null ? sanity.sentinelScanPassed : null,
     minimumRecordsPassed: sanity !== null ? sanity.minimumRecordsPassed : null,
     sanityOverridden: sanity !== null ? sanity.overridden : null,
+    optionalGridCountsWarned: sanity !== null ? sanity.optionalGridCountsWarned : null,
     gridsComplete: manifest !== null ? manifest.gridsComplete : null,
 
     // --- the two conjuncts the producer leaves absent ---------------------------

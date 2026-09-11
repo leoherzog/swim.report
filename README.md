@@ -701,9 +701,10 @@ Publication follows the layer build exactly: an immutable `waves/<cycleId>/` pre
 the manifest, the two NDJSON artifacts and `SHA256SUMS`, with the small `waves/current.json`
 pointer written last so a reader can never see a torn cycle.
 
-Each KV pair carries an **absolute** expiration of the model's valid hour plus 7 h, not a TTL
-measured from write time. A run that fires late gets a correspondingly shorter lease rather
-than seven fresh hours on old data, and republishing an older cycle yields a negative lease
+Each KV pair carries an **absolute** expiration measured from the model's valid hour, not a TTL
+measured from write time: 24 h for a pair carrying the hourly series, 7 h for a wind-only
+pair. A run that fires late gets a correspondingly shorter lease rather than a fresh one on
+old data, and republishing an older cycle yields a negative lease
 and is refused. A failed or refused cycle writes nothing and leaves the previous cycle's keys
 in place, so the failure mode is a flag aging out to `unknown` — gray and honest — never a
 stale wave height deciding a color. See `docs/offline-waves.md`.

@@ -253,12 +253,21 @@ export const GRIDS = [
     // HTSGW 9999 beside WIND 0, and isUsableSample accepts 0. A wind-only reading
     // taken where no wet HTSGW cell was found would be a false calm that rules.js
     // colors green, and no build gate can see it.
-    windFallback: false
+    windFallback: false,
+    // SWAN wets and dries this nest's shore cells with the tide, and some beaches'
+    // only wet cell inside the cap is wet only near high water, so the count resolved
+    // at hour 0 swings about 13% with the tidal phase at validStart. The record-count
+    // ratios take 0.8 so the tide stays silent. validPercent keeps the default ratio
+    // and still refuses the cycle, since the plane's wet fraction moves under 2% over
+    // a tide. Outside the digest: it changes which cycles warn, never which beaches
+    // resolve.
+    recordCountMinRatio: { shrinkRatio: 0.8, decay: 0.8 }
   }
 ];
 
-// A grid whose absence is a refusal rather than a degradation. gfswave global.0p16
-// is every ocean beach in the table; the others are regional.
+// A grid whose absence, or whose failed floor, shrink or decay gate, refuses the
+// cycle. Any other grid only warns for those, since it costs only its own beaches.
+// gfswave global.0p16 is every ocean beach in the table; the others are regional.
 export const REQUIRED_GRID_IDS = ["noaa_gfswave"];
 
 // --- small helpers ---------------------------------------------------------------

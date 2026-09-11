@@ -472,6 +472,15 @@ describe("buildConsumerReport", function () {
     expect(r.pointerAgreesWithManifest).toBe(false);
   });
 
+  it("copies optionalGridCountsWarned through verbatim", function () {
+    expect(report().optionalGridCountsWarned).toBe(undefined);
+    const warned = report({ manifest: manifest({ sanity: { validTimesPassed: true,
+      sentinelScanPassed: true, minimumRecordsPassed: true, overridden: false,
+      optionalGridCountsWarned: true } }) });
+    expect(warned.optionalGridCountsWarned).toBe(true);
+    expect(classifyWaveManifestFailure(warned).tier).toBe("degraded");
+  });
+
   it("copies minimumRecordsPassed through verbatim", function () {
     expect(report().minimumRecordsPassed).toBe(true);
     expect(report({ manifest: manifest({ sanity: { minimumRecordsPassed: false } }) })

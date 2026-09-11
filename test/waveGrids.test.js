@@ -503,3 +503,26 @@ describe("gridsDigest", function () {
       expect(function () { gridsDigestInput([{ id: "x" }]); }).toThrow();
     });
 });
+
+describe("recordCountMinRatio", function () {
+  it("declares only finite ratios in (0, 1] keyed by a per-grid ratio check", function () {
+    for (let i = 0; i < GRIDS.length; i = i + 1) {
+      const r = GRIDS[i].recordCountMinRatio;
+      if (r === undefined) { continue; }
+      const keys = Object.keys(r);
+      for (let k = 0; k < keys.length; k = k + 1) {
+        expect(["shrinkRatio", "decay"].indexOf(keys[k])).not.toBe(-1);
+        expect(Number.isFinite(r[keys[k]]) && r[keys[k]] > 0 && r[keys[k]] <= 1).toBe(true);
+      }
+    }
+  });
+
+  it("stays out of the digest, so no floors reseed follows a ratio change", function () {
+    const stripped = GRIDS.map(function (g) {
+      const copy = Object.assign({}, g);
+      delete copy.recordCountMinRatio;
+      return copy;
+    });
+    expect(gridsDigestInput(stripped)).toBe(gridsDigestInput(GRIDS));
+  });
+});

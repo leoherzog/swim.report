@@ -60,7 +60,7 @@ export const WAVE_KV_LEASE_SECONDS = 25200;
 
 // Below this much of the SERIES lease, writing is pointless and the lateness is
 // the actual news: the cycle is more than 21 h old, which is two consecutive
-// missed occurrences of the 8 h pipeline schedule.
+// missed occurrences of the 6 h pipeline schedule.
 export const MIN_LEASE_SECONDS = 10800;
 
 function isPlainObject(value) {
@@ -203,6 +203,14 @@ function collectFailures(report) {
   if (report.sanityOverridden === true) {
     degraded.push("sanity-overridden: a coverage gate was demoted to a warning by " +
       "--allow-shrink");
+  }
+  // A grid outside REQUIRED_GRID_IDS missed its floor, shrink or decay ratio, which
+  // warns rather than refuses. True-triggered like sanityOverridden: the build
+  // publishes the per-grid messages in manifest.sanity.optionalGridCounts.
+  if (report.optionalGridCountsWarned === true) {
+    degraded.push("optional-grid-counts: a grid outside REQUIRED_GRID_IDS missed a " +
+      "floor, shrink or decay gate; the beaches it dropped keep their previous keys " +
+      "until those expire");
   }
 
   return { fatal: fatal, expired: expired, degraded: degraded };

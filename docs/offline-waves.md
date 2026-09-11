@@ -59,7 +59,10 @@ and `maxCycleAgeHours` 36 walks back three of them. One file carries 145 hourly 
 cycle over a day old still covers the 24 h window. The grid is deliberately outside
 `REQUIRED_GRID_IDS`: requiring a grid that publishes on demand would turn one missing office
 run into a nationwide refusal, where its absence instead degrades the cycle and every other
-grid still writes KV.
+grid still writes KV. Its per-grid floor and record-count ratio misses likewise warn rather
+than refuse. SWAN wets and dries the nest's shore cells with the tide, so the count resolved at
+hour 0 swings about 13% with the tidal phase at validStart, and the grid declares
+`recordCountMinRatio` 0.8 so that swing never warns.
 
 NOMADS documents a ten second wait between scripted fetches, honoured by construction: every
 NOMADS request is spaced, and each grid's NOMADS request count is capped on its own, because a
@@ -84,8 +87,9 @@ different neighbour than the true nearest. Each produces a plausible wave height
 anywhere.
 
 The resolved cell is computed **once** per beach, from the hour-0 wave band, and reused for all
-24 hours. The land mask is fixed for a cycle, and re-running the search per hour would let
-`hoursFt` jump between cells, breaking the `hoursFt[0] === waveinput.waveHeightFt` invariant
+24 hours. On a fixed-mask grid that cell is wet for all 24 hours; on the tidal
+`noaa_nwps_sew` nest it can read null at low-water hours. Either way, re-running the search
+per hour would let `hoursFt` jump between cells, breaking the `hoursFt[0] === waveinput.waveHeightFt` invariant
 and making the detail page's "now" stat contradict its own first bar. A beach on a narrow
 peninsula can still find a wet cell on the far side within its cap: `water_class` removes the
 worst cases, and the residual is bounded only by the cap and accepted.
@@ -189,7 +193,8 @@ grid as a shrink to zero and refuses the whole cycle.
 
 `REQUIRED_GRID_IDS` in `src/waveGrids.js` names the grids a cycle cannot do without. A required
 grid that does not reach `planned` refuses the cycle at every step that can see it, as does an
-empty plan; everything else warns and continues with fewer grids. The element requirement splits
+empty plan; everything else warns and continues with fewer grids. The build gate draws the same
+line for the per-grid count gates, below. The element requirement splits
 in one direction only: a grid missing `HTSGW` at any of the 24 hours is `unplanned` and
 contributes nothing, while a grid missing only `WIND` stays planned for waves and loses only the
 wind-only fallback. The inverse would publish records from a grid whose wave plane was never
@@ -284,6 +289,12 @@ data.
 - Both ratios score `validPercent` alongside the two record counts, per grid. The dangerous
   shape is partial corruption: a wet fraction falling from 70 to 3 while beaches still resolve
   through longer spiral rings and every count floor holds.
+- Only a `REQUIRED_GRID_IDS` grid refuses the cycle on its per-grid floor or record-count
+  ratios. Any other grid's miss warns, lands in `sanity.optionalGridCounts` and degrades the
+  cycle, since it costs only that grid's beaches; a missed floor publishes as `"warned"`. A
+  grid may declare `recordCountMinRatio` for its record counts, outside `gridsDigest`.
+  `validPercent` always takes the default ratio and refuses for every grid, because it
+  signals a wrong plane rather than less data.
 
 A **seeded absolute floor** for `validPercent` (`floors[<digest>].validPercent[<gridId>]`,
 seeded at 0.75x an observed real cycle) is the right eventual shape and is deferred while
@@ -316,12 +327,14 @@ a false one does.
   unverified, `artifactsPresent`/`artifactsExpected` (both `isFiniteNumber`-guarded **first**,
   because `undefined !== undefined` is false and fails open), `buildStatus` not `"complete"`,
   `validTimesPassed` or `sentinelScanPassed` not true.
-- **expired**, write no KV: fewer than 3600 seconds of lease left, or `gridsDigestMatches` not
-  true. A cycle with 40 minutes left costs a full bulk write, buys nothing, and means the
-  pipeline is more than six hours late, which the operator must see. `NaN` from an unparseable
+- **expired**, write no KV: fewer than 10800 seconds (`MIN_LEASE_SECONDS`) of series lease
+  left, or `gridsDigestMatches` not true. A cycle with under three hours left costs a full
+  bulk write, buys little, and means the pipeline is more than 21 hours late, which the
+  operator must see. `NaN` from an unparseable
   `validStartIso` fails the range check, which is correct: refusing because the age is
   unknowable is the same answer as refusing because it is too old.
-- **degraded**, write and warn: `gridsComplete` not true, or `sanity.overridden` true. The
+- **degraded**, write and warn: `gridsComplete` not true, `sanity.overridden` true, or
+  `optionalGridCountsWarned` true. The
   manifest sets `gridsComplete` only when every grid was fetched **and** reached `sampled`, so
   a grid lost at plan or extraction time degrades the cycle the same way a failed fetch does.
 

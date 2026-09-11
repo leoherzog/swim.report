@@ -1552,7 +1552,10 @@ scripts/sample-waves.js and scripts/build-wave-manifest.js.
                                            // gfswave data publish. noaa_nwps_sew is
                                            // deliberately absent: it publishes on demand, so
                                            // requiring it would turn one missing office run
-                                           // into a nationwide refusal.
+                                           // into a nationwide refusal. The build gate's
+                                           // per-grid floor and record-count ratios refuse
+                                           // only for these; any other grid warns into
+                                           // sanity.optionalGridCounts.
     export const WAVE_ELEMENT / WIND_ELEMENT      // "HTSGW" (metres) / "WIND" (metres/second)
     export const FORECAST_HOURS                   // 24
     export const METERS_PER_SECOND_TO_MPH         // 2.2369362920544
@@ -1664,7 +1667,8 @@ conjunct a strict !== true so a missing field refuses exactly as a false one doe
       //             NaN from an unparseable validStartIso fails the range check, which is
       //             correct: refusing because the age is unknowable is the same answer as
       //             refusing because it is too old.
-      //   degraded→ write, warn: gridsComplete !== true, or sanity.overridden === true
+      //   degraded→ write, warn: gridsComplete !== true, sanity.overridden === true, or
+      //             optionalGridCountsWarned === true
     export function waveKvWriteAllowed(report)    // true only for "ok" and "degraded"
 
 ### src/clients/windyWebcams.js
@@ -3557,7 +3561,9 @@ index, both of which pick the wrong cell as longitude cells narrow with latitude
 a plausible number with no error. The resolved cell is computed once per beach from the
 hour-0 wave band and reused for all 24 hours; re-running the search per hour would let
 hoursFt jump between cells and make the detail page's "now" stat contradict its own first
-bar.
+bar. noaa_nwps_sew is not a fixed mask: SWAN wets and dries its shore cells with the tide, so
+a resolved cell can read null at low-water hours, and the count resolved at hour 0 swings
+about 13% with the tidal phase at validStart.
 
 Decoding requires GDAL. GRIB2 DRS template 5.40 is JPEG 2000 and there is no pure-JS decode
 path, so GRIB2 decoding inside the Worker is impossible and must never be attempted. GDAL
@@ -3633,8 +3639,13 @@ and a decay ratio of 0.85 against the oldest of an 8-cycle rolling history (a hi
 bleeding 5% per cycle passes every ratio-to-previous check forever). Every one of these is
 scored PER GRID and only for a grid that sampled, so an absent grid is never read as a shrink
 to zero; the global coverage floor and the global ratio fallback apply only when every grid
-sampled. validPercent is scored through the same per-grid shrink and decay ratios as the
-counts. An unseeded digest sets autoPublishAllowed:false without failing the build, and
+sampled. The per-grid floor and record-count ratios refuse only for a REQUIRED_GRID_IDS
+member: any other grid's miss warns, lands in sanity.optionalGridCounts and degrades the cycle
+at the consumer gate, since it costs only that grid's beaches. A grid may declare
+recordCountMinRatio for its record counts, and noaa_nwps_sew declares 0.8 because of the tide.
+validPercent is scored through the same per-grid shrink and decay ratios as the counts, always
+at the default ratio, and its miss refuses the cycle for every grid, because a collapsing wet
+fraction is a wrong plane rather than less data. An unseeded digest sets autoPublishAllowed:false without failing the build, and
 auto-publish is likewise withheld, without a refusal, when no ratio comparison was scored at
 all. A withheld publish is a warning on a dispatch and a failure on a scheduled run: that run
 wrote no KV for any grid and moved no pointer, so the failing step is the only alert the state
@@ -3644,7 +3655,8 @@ The floors contract. gridsDigest covers id, domain, cell size, url template, var
 km, accepted water classes and the wind-fallback flag: each decides which beaches resolve to
 which grid, how far a sample may reach, or how many records come back, so counts seeded under
 the old set say nothing about the new one. Cadence and probe fields stay out, because they
-decide whether a cycle lands rather than which beaches it covers. Every GRIDS id needs its
+decide whether a cycle lands rather than which beaches it covers, and so does
+recordCountMinRatio, which decides which cycles warn. Every GRIDS id needs its
 own floor in the entry, since the per-grid refusal walk iterates the floors entry rather than
 GRIDS and an omitted grid is unfloored with no refusal and no warning.
 test/waveGateData.test.js holds the committed data to the structural half of that contract —
@@ -3658,8 +3670,9 @@ state visible, and the rollout sequence in docs/offline-waves.md is what keeps i
 landing.
 
 Cadence and the open risk. GitHub Actions skips cron occurrences rather than merely
-deferring them. At 8 slots a day against the 7 h absolute key expiration this tolerates two
-consecutive misses. That is the design's largest unclosed exposure; the permanent fix is in
+deferring them. At 4 slots a day against the 24 h series lease this tolerates two
+consecutive misses with six hours to spare; a wind-only key keeps the 7 h lease and survives
+a late slot but not a missed one. That is the design's largest unclosed exposure; the permanent fix is in
 TODO.md.
 
 ### Flag-worthy gate (HIDE-UNTIL-FLAG-WORTHY) — a cross-cutting invariant
