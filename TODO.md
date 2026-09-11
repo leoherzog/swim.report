@@ -595,8 +595,8 @@ remains partnership-gated.
   view — it fetches every flag-worthy beach once from the cacheable `GET /api/beaches.geojson`,
   one D1 statement over scalar columns with no KV read at all, and renders them as a coast
   highlight under flag icons — and
-  that single-fetch model is comfortable to roughly 5–10k features. It currently serves 9,068
-  features in 1.7 MB — inside that band, though closer to its upper edge than its lower one;
+  that single-fetch model is comfortable to roughly 5–10k features. It currently serves about
+  9,070 features in about 1.6 MB — inside that band, though closer to its upper edge than its lower one;
   beyond it the GeoJSON endpoint
   itself needs server-side clustering or tiling. Cross-reference, out of scope here: a browser-fetched static tiled
   artifact in the R2 bucket the layer build already writes would solve both this and the map's

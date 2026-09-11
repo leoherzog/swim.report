@@ -22,6 +22,8 @@ export const WINDY_WEBCAMS_API_URL = "https://api.windy.com/webcams/api/v3/webca
 export const WEBCAM_RADIUS_KM = 5;
 // API max limit per request.
 export const WEBCAM_FETCH_LIMIT = 50;
+// Per-request bound; the webcam cron makes up to 100 lookups a run.
+const WINDY_TIMEOUT_MS = 30000;
 
 // Pure. A parsed Windy v3 /webcams body ->
 // { webcamId, title, playerUrl, detailUrl } for the nearest usable active cam
@@ -102,7 +104,8 @@ export async function fetchNearestWebcam(lat, lon, apiKey) {
     "&include=player,location,urls&limit=" + String(WEBCAM_FETCH_LIMIT);
   const json = await fetchJson(url, {
     headers: { "x-windy-api-key": apiKey },
-    label: "windyWebcams:"
+    label: "windyWebcams:",
+    timeoutMs: WINDY_TIMEOUT_MS
   });
   if (json === null) {
     return null;
@@ -127,6 +130,7 @@ export async function fetchWebcamsInBbox(north, east, south, west, apiKey) {
     "&include=player,location,urls&limit=" + String(WEBCAM_FETCH_LIMIT);
   return await fetchJson(url, {
     headers: { "x-windy-api-key": apiKey },
-    label: "windyWebcams: bbox"
+    label: "windyWebcams: bbox",
+    timeoutMs: WINDY_TIMEOUT_MS
   });
 }

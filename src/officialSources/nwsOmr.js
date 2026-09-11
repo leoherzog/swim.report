@@ -48,7 +48,7 @@
 // scrape() runs cron-side only; the parsers are pure.
 
 import { fetchJson } from "../clients/http.js";
-import { NWS_USER_AGENT } from "../clients/nws.js";
+import { NWS_USER_AGENT, NWS_TIMEOUT_MS } from "../clients/nws.js";
 import { resolveSiteForBeach, perBeachResult } from "./util.js";
 
 // Product-type list for the OMR product issued by WFO Grand Rapids (GRR).
@@ -401,7 +401,8 @@ export const nwsOmr = {
     // Leg 1: list the OMR products for GRR and pick the newest id.
     const listJson = await fetchJson(OMR_LIST_URL, {
       headers: nwsHeaders(),
-      label: "nwsOmr: OMR product list"
+      label: "nwsOmr: OMR product list",
+      timeoutMs: NWS_TIMEOUT_MS
     });
     if (listJson === null) {
       return null;
@@ -415,7 +416,8 @@ export const nwsOmr = {
     const productUrl = "https://api.weather.gov/products/" + productId;
     const productJson = await fetchJson(productUrl, {
       headers: nwsHeaders(),
-      label: "nwsOmr: OMR product"
+      label: "nwsOmr: OMR product",
+      timeoutMs: NWS_TIMEOUT_MS
     });
     if (productJson === null) {
       return null;

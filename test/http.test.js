@@ -2,11 +2,20 @@
 // every client in src/clients/ builds on. Contract under test: parsed JSON on
 // success; null (never a throw) on non-2xx, transport rejection, or JSON
 // parse failure, each logged via console.log with the caller's label prefix;
-// method/headers/body passed through to fetch verbatim; optional timeoutMs
-// wiring an AbortController that is cleared on completion.
+// method/headers/body passed through to fetch verbatim; every request bounded
+// by AbortSignal.timeout, at timeoutMs when > 0 and DEFAULT_TIMEOUT_MS
+// otherwise; an unread non-2xx body cancelled without touching the status.
+//
+// AbortSignal.timeout does not obey vitest fake timers, so the hung-request
+// case runs on real time with a short bound.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fetchJson, fetchJsonWithStatus } from "../src/clients/http.js";
+import {
+  fetchJson,
+  fetchJsonWithStatus,
+  cancelBody,
+  DEFAULT_TIMEOUT_MS
+} from "../src/clients/http.js";
 import { installFetch, jsonResponse } from "./helpers/fetch.js";
 
 const URL = "https://example.test/api";
@@ -114,8 +123,9 @@ describe("fetchJson data-or-null contract", function () {
     const result = await fetchJson(URL);
     expect(result).toBeNull();
     expect(log).toHaveBeenCalledWith(" fetch failed: HTTP 500");
-    // No opts means a bare init: no method/headers/body/signal keys.
-    expect(calls[0].init).toEqual({});
+    // No opts means a bare init: no method/headers/body keys, only the default bound.
+    expect(Object.keys(calls[0].init)).toEqual(["signal"]);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("succeeds with opts omitted entirely", async function () {
@@ -128,41 +138,52 @@ describe("fetchJson data-or-null contract", function () {
 });
 
 describe("fetchJson timeoutMs abort wiring", function () {
+  it("exports a 30 s default bound", function () {
+    expect(DEFAULT_TIMEOUT_MS).toBe(30000);
+  });
+
   it("aborts a hung request after timeoutMs and resolves to null", async function () {
-    vi.useFakeTimers();
     const log = vi.spyOn(console, "log").mockImplementation(function () {});
     installFetch(function (url, init) {
-      // Simulate a hung connection: the promise settles only when the
-      // AbortController signal fires.
+      // A hung connection: the promise settles only when the signal fires,
+      // rejecting with the TimeoutError the runtime's fetch would surface.
       return new Promise(function (resolve, reject) {
         init.signal.addEventListener("abort", function () {
-          const err = new Error("This operation was aborted");
-          err.name = "AbortError";
-          reject(err);
+          reject(init.signal.reason);
         });
       });
     });
-    const pending = fetchJson(URL, { timeoutMs: 5000, label: "t" });
-    await vi.advanceTimersByTimeAsync(5000);
-    const result = await pending;
+    const result = await fetchJson(URL, { timeoutMs: 20, label: "t" });
     expect(result).toBeNull();
-    expect(log).toHaveBeenCalledWith("t fetch failed: This operation was aborted");
+    expect(log).toHaveBeenCalledWith("t fetch failed: The operation was aborted due to timeout");
   });
 
-  it("creates no AbortController when timeoutMs is absent", async function () {
+  it("arms AbortSignal.timeout when timeoutMs is absent", async function () {
     const calls = installFetch(function () {
       return Promise.resolve(jsonResponse({}));
     });
     await fetchJson(URL, { label: "t" });
-    expect(calls[0].init.signal).toBeUndefined();
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[0].init.signal.aborted).toBe(false);
   });
 
-  it("creates no AbortController when timeoutMs is 0", async function () {
+  it("falls back to the default bound when timeoutMs is 0", async function () {
     const calls = installFetch(function () {
       return Promise.resolve(jsonResponse({}));
     });
     await fetchJson(URL, { timeoutMs: 0, label: "t" });
-    expect(calls[0].init.signal).toBeUndefined();
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("falls back to the default bound when timeoutMs is negative or not a number", async function () {
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse({}));
+    });
+    await fetchJson(URL, { timeoutMs: -5, label: "t" });
+    await fetchJson(URL, { timeoutMs: "45000", label: "t" });
+    expect(calls.length).toBe(2);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[1].init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("wires init.signal when timeoutMs is set", async function () {
@@ -170,27 +191,79 @@ describe("fetchJson timeoutMs abort wiring", function () {
       return Promise.resolve(jsonResponse({}));
     });
     await fetchJson(URL, { timeoutMs: 5000, label: "t" });
-    expect(calls[0].init.signal).toBeDefined();
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("clears the timeout after a fast success so no timer leaks", async function () {
-    vi.useFakeTimers();
-    installFetch(function () {
+  it("leaves the signal unaborted after a fast success", async function () {
+    const calls = installFetch(function () {
       return Promise.resolve(jsonResponse({ fast: true }));
     });
     const result = await fetchJson(URL, { timeoutMs: 5000, label: "t" });
     expect(result).toEqual({ fast: true });
-    expect(vi.getTimerCount()).toBe(0);
+    expect(calls[0].init.signal.aborted).toBe(false);
+  });
+});
+
+describe("non-2xx body cancel", function () {
+  it("cancels the unread body and still returns the status", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    const cancel = vi.fn(function () { return Promise.resolve(); });
+    installFetch(function () {
+      return Promise.resolve({ ok: false, status: 404, body: { cancel: cancel } });
+    });
+    expect(await fetchJsonWithStatus(URL, { label: "t" })).toEqual({ json: null, status: 404 });
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
-  it("clears the timeout after a fast failure so no timer leaks", async function () {
-    vi.useFakeTimers();
+  it("keeps the status when cancel throws synchronously", async function () {
     vi.spyOn(console, "log").mockImplementation(function () {});
     installFetch(function () {
-      return Promise.reject(new Error("refused"));
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+        body: { cancel: function () { throw new Error("locked"); } }
+      });
     });
-    const result = await fetchJson(URL, { timeoutMs: 5000, label: "t" });
-    expect(result).toBeNull();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(await fetchJsonWithStatus(URL, { label: "t" })).toEqual({ json: null, status: 404 });
+  });
+
+  it("keeps the status when cancel rejects", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    installFetch(function () {
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+        body: { cancel: function () { return Promise.reject(new Error("locked")); } }
+      });
+    });
+    expect(await fetchJsonWithStatus(URL, { label: "t" })).toEqual({ json: null, status: 404 });
+  });
+
+  it("leaves a response without a body untouched", async function () {
+    vi.spyOn(console, "log").mockImplementation(function () {});
+    installFetch(function () {
+      return Promise.resolve({ ok: false, status: 500 });
+    });
+    expect(await fetchJsonWithStatus(URL, { label: "t" })).toEqual({ json: null, status: 500 });
+  });
+
+  it("does not cancel a 2xx body before it is read", async function () {
+    const cancel = vi.fn(function () { return Promise.resolve(); });
+    installFetch(function () {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        body: { cancel: cancel },
+        json: function () { return Promise.resolve({ ok: 1 }); }
+      });
+    });
+    expect(await fetchJson(URL, { label: "t" })).toEqual({ ok: 1 });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("cancelBody tolerates null, a missing body and a null body", function () {
+    expect(function () { cancelBody(null); }).not.toThrow();
+    expect(function () { cancelBody({}); }).not.toThrow();
+    expect(function () { cancelBody({ body: null }); }).not.toThrow();
   });
 });

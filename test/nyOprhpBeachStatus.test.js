@@ -1,7 +1,7 @@
 // test/nyOprhpBeachStatus.test.js
 // Unit tests for the NY OPRHP Beach Status water-quality FLOOR source.
-// Pure parsers only, no network.
-import { describe, it, expect } from "vitest";
+// Pure parsers, plus scrape() against a stubbed globalThis.fetch.
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseNyOprhpBeachStatus,
   mapStatusToFloor,
@@ -11,6 +11,7 @@ import {
 } from "../src/wqFloor/nyOprhpBeachStatus.js";
 import { scrapeWqFloorFromResult, resolveSiteForBeach } from "../src/wqFloor/index.js";
 import { perBeachResult } from "../src/officialSources/util.js";
+import { installFetch, jsonResponse } from "./helpers/fetch.js";
 import { makeBeach } from "./helpers/beach.js";
 
 const NOW_ISO = "2026-07-21T12:00:00Z";
@@ -278,6 +279,24 @@ describe("nyOprhpBeachStatus.matches", function() {
       park_name: "Ludington State Park",
       lat: 43.95, lon: -86.45
     }))).toBe(false);
+  });
+});
+
+describe("nyOprhpBeachStatus.scrape transport", function() {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("arms an abort signal on the FeatureServer fetch", async function() {
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse(buildResponse([
+        feature({ StateParkBeach: "Evangola SP", Beach_status: "Closed", Status_Reason: "Exceedance" })
+      ])));
+    });
+    const result = await nyOprhpBeachStatus.scrape(NOW_ISO);
+    expect(result).not.toBe(null);
+    expect(calls.length).toBe(1);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 });
 

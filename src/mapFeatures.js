@@ -9,9 +9,15 @@
 // Each record honors its own *_expires: an expired estimate reads as null
 // without dropping a live official beside it, and the reverse. The expiry rule
 // itself lives in src/beachState.js, so the map and the list surfaces cut a
-// record off at the same instant.
+// record off at the same instant. The geometry is rounded to 5 decimals.
 import { displayFlag } from "./displayFlag.js";
 import { liveChipState } from "./beachState.js";
+
+// 5 decimals is about 1.1 m; dividing by a power of ten yields the shortest
+// repr, so float noise never bloats the body or churns its ETag.
+function roundCoord(v) {
+  return Math.round(v * 1e5) / 1e5;
+}
 
 // One Feature from a row of the geojson SELECT, or null when the coordinates are
 // not finite — those rows are dropped rather than emitted as NaN geometry. name
@@ -35,7 +41,7 @@ export function mapFeatureFromRow(row, nowIso, nowMs) {
   const state = liveChipState(row, instantMs);
   return {
     type: "Feature",
-    geometry: { type: "Point", coordinates: [lon, lat] },
+    geometry: { type: "Point", coordinates: [roundCoord(lon), roundCoord(lat)] },
     properties: {
       id: row.id,
       name: row.park_name || row.name || "",

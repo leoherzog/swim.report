@@ -46,6 +46,28 @@ describe("fetchText", function () {
     expect(text).not.toHaveBeenCalled();
   });
 
+  it("cancels the unread body on a non-ok status", async function () {
+    const cancel = vi.fn(function () {
+      return Promise.resolve();
+    });
+    installFetch(function () {
+      return Promise.resolve({ ok: false, status: 503, body: { cancel: cancel } });
+    });
+    expect(await fetchText(URL)).toBeNull();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("still resolves null (does not reject) when the non-ok body's cancel throws", async function () {
+    installFetch(function () {
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        body: { cancel: function () { throw new Error("locked"); } }
+      });
+    });
+    expect(await fetchText(URL)).toBeNull();
+  });
+
   it("resolves null (does not reject) when fetch itself rejects", async function () {
     installFetch(function () {
       return Promise.reject(new Error("network down"));
@@ -110,6 +132,21 @@ describe("fetchText", function () {
     });
     await fetchText(URL);
     expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("falls back to the shared default when timeoutMs is 0 or negative", async function () {
+    const calls = installFetch(function () {
+      return Promise.resolve({
+        ok: true,
+        text: function () {
+          return Promise.resolve("ok");
+        }
+      });
+    });
+    await fetchText(URL, { timeoutMs: 0 });
+    await fetchText(URL, { timeoutMs: -1 });
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[1].init.signal).toBeInstanceOf(AbortSignal);
   });
 });
 

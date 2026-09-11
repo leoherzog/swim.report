@@ -256,4 +256,45 @@ describe("runEcccEnrichment", function () {
       return c.sql.indexOf("eccc_attempts + 1") !== -1;
     })).toBe(false);
   });
+
+  it("a parked run resolves: parking is a logged return, not a failure", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.resolve({ ok: false, status: 503 });
+    });
+    const made = makeEnrichmentEnv([{ id: "osm-node-ca-1", lat: 46.26, lon: -83.28 }]);
+    await expect(runEcccCron(made.env)).resolves.toBeUndefined();
+  });
+
+  it("rejects the scheduled promise when the candidate SELECT fails, with no fetch and no write", async function () {
+    // A throw escaping the run's top level is logged and rethrown, so the
+    // invocation records as failed; the per-beach catch is untouched.
+    const state = stubZonesFetch([]);
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(String(line)); });
+    const runCalls = [];
+    const env = {
+      ECCC_ZONES_SANITY_MIN: 1,
+      DB: {
+        prepare: function (sql) {
+          return {
+            all: function () {
+              return sql.indexOf("eccc_zone IS NULL AND eccc_attempts <") !== -1
+                ? Promise.reject(new Error("D1 fake: forced failure"))
+                : Promise.resolve({ results: [] });
+            },
+            first: function () { return Promise.resolve({ n: 0 }); },
+            bind: function () {
+              return { run: function () { runCalls.push(sql); return Promise.resolve({ success: true }); } };
+            }
+          };
+        }
+      }
+    };
+
+    await expect(runEcccCron(env)).rejects.toThrow(/D1 fake: forced failure/);
+    expect(state.calls).toBe(0);
+    expect(runCalls.length).toBe(0);
+    expect(logs).toContain("index: eccc enrichment failed: D1 fake: forced failure");
+    vi.restoreAllMocks();
+  });
 });

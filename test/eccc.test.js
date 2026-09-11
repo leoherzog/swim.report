@@ -423,10 +423,9 @@ describe("truncation warning at the 2000-feature fetch limit", function () {
   });
 });
 
-// Both GeoMet calls are bulk national collections fetched once per run. Before
-// this they passed no timeoutMs, and src/clients/http.js arms its
-// AbortController ONLY when timeoutMs > 0 — so one hung socket could run the
-// hourly (alerts) or enrichment (zones) cron to the 900 s scheduled ceiling.
+// Both GeoMet calls are bulk national collections fetched once per run, each
+// bounded by ECCC_TIMEOUT_MS so one hung socket cannot run the hourly (alerts)
+// or enrichment (zones) cron to the 900 s scheduled ceiling.
 describe("ECCC transport timeout", function () {
   afterEach(function () {
     vi.unstubAllGlobals();

@@ -427,4 +427,41 @@ describe("runNwsEnrichment", function () {
     expect(zoneUpdates.length).toBe(1);
     expect(zoneUpdates[0].args).toEqual(["ILZ014", gridUrl2, "osm-node-2"]);
   });
+
+  it("rejects the scheduled promise when the candidate SELECT fails, with no fetch and no write", async function () {
+    // A throw escaping the run's top level is logged and rethrown, so the
+    // invocation records as failed; the per-beach catch above is untouched.
+    const urls = [];
+    vi.stubGlobal("fetch", function (url) {
+      urls.push(url);
+      return Promise.resolve({ ok: false, status: 404 });
+    });
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(String(line)); });
+    const runCalls = [];
+    const env = {
+      ENRICHMENT_REQUEST_SPACING_MS: 0,
+      DB: {
+        prepare: function (sql) {
+          return {
+            all: function () {
+              return sql.indexOf("SELECT id, lat, lon FROM beaches WHERE nws_zone IS NULL AND enrichment_attempts <") === 0
+                ? Promise.reject(new Error("D1 fake: forced failure"))
+                : Promise.resolve({ results: [] });
+            },
+            first: function () { return Promise.resolve({ n: 0 }); },
+            bind: function () {
+              return { run: function () { runCalls.push(sql); return Promise.resolve({ success: true }); } };
+            }
+          };
+        }
+      }
+    };
+
+    await expect(runNwsCron(env)).rejects.toThrow(/D1 fake: forced failure/);
+    expect(urls.length).toBe(0);
+    expect(runCalls.length).toBe(0);
+    expect(logs).toContain("index: nws enrichment failed: D1 fake: forced failure");
+    vi.restoreAllMocks();
+  });
 });

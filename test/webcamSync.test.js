@@ -173,4 +173,54 @@ describe("runWebcamSync clustering", function () {
     // stay at the front of the queue for next run.
     expect(made.runCalls.length).toBe(0);
   });
+
+  it("rejects the scheduled promise when the due SELECT fails, with no fetch and no write", async function () {
+    // A throw escaping the run's top level is logged and rethrown, so the
+    // invocation records as failed; per-beach and per-bucket catches are untouched.
+    const urls = [];
+    vi.stubGlobal("fetch", function (url) {
+      urls.push(url);
+      return okJson({ webcams: [] });
+    });
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(String(line)); });
+    const runCalls = [];
+    const env = {
+      WINDY_WEBCAM_API_TOKEN: "test-token",
+      DB: {
+        prepare: function (sql) {
+          return {
+            bind: function () {
+              return {
+                all: function () {
+                  return sql.indexOf("webcam_checked IS NULL") !== -1
+                    ? Promise.reject(new Error("D1 fake: forced failure"))
+                    : Promise.resolve({ results: [] });
+                },
+                run: function () { runCalls.push(sql); return Promise.resolve({ success: true }); }
+              };
+            }
+          };
+        }
+      }
+    };
+
+    await expect(runWebcamCron(env)).rejects.toThrow(/D1 fake: forced failure/);
+    expect(urls.length).toBe(0);
+    expect(runCalls.length).toBe(0);
+    expect(logs).toContain("index: webcam sync failed: D1 fake: forced failure");
+    vi.restoreAllMocks();
+  });
+
+  it("a token-less run resolves: it is a logged return, not a failure", async function () {
+    const logs = [];
+    vi.spyOn(console, "log").mockImplementation(function (line) { logs.push(String(line)); });
+    const made = makeWebcamEnv([BEACH_A]);
+    delete made.env.WINDY_WEBCAM_API_TOKEN;
+
+    await expect(runWebcamCron(made.env)).resolves.toBeUndefined();
+    expect(made.preparedSql.length).toBe(0);
+    expect(logs).toContain("index: WINDY_WEBCAM_API_TOKEN not set, skipping webcam hydration");
+    vi.restoreAllMocks();
+  });
 });

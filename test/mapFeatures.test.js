@@ -87,6 +87,11 @@ describe("mapFeatureFromRow geometry and label", function () {
     expect(feature.properties.id).toBe("b1");
   });
 
+  it("rounds coordinates to 5 decimals", function () {
+    const feature = mapFeatureFromRow(row({ lat: 41.4927463, lon: -82.69965590000001 }), NOW_ISO);
+    expect(feature.geometry.coordinates).toEqual([-82.69966, 41.49275]);
+  });
+
   it("labels with park_name, falling back to name and then the empty string", function () {
     expect(mapFeatureFromRow(row({ park_name: "Big Park" }), NOW_ISO).properties.name)
       .toBe("Big Park");

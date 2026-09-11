@@ -1093,4 +1093,28 @@ describe("runAlertRefresh write mechanics", function () {
     expect(line.indexOf(" written=320 ")).toBeGreaterThan(-1);
     expect(line.indexOf(" skipSuperseded=0 ")).toBeGreaterThan(-1);
   });
+
+  it("a failing page SELECT rejects the scheduled promise and writes nothing", async function () {
+    // The one failure the run does not swallow: a throw escaping its top level
+    // is logged and rejects the waitUntil promise, so the invocation records as
+    // failed rather than as an ok run that touched nothing.
+    freezeClock();
+    const beach = beachRow({ id: "osm-node-1" });
+    const standings = {};
+    standings["osm-node-1"] = standingFlag(beach, [], { waveHeightFt: 0.5 }, minutesAgo(10));
+    const logs = captureLogs();
+    const made = makeEnv([beach], standings);
+    made.db.failWhen(function (sql) {
+      return sql.indexOf("JOIN beach_state") !== -1;
+    });
+    stubFetch({ features: [nwsFeature("High Surf Warning", ["MIZ071"])] });
+
+    await expect(runAlertCron(made.env)).rejects.toThrow(/D1 fake: forced failure/);
+    expect(rewrote(made, "osm-node-1")).toBe(false);
+    expect(made.db.batchCalls.length).toBe(0);
+    expect(logs.some(function (l) {
+      return l.indexOf("index: alert refresh failed: D1 fake: forced failure") === 0;
+    })).toBe(true);
+    expect(completionLine(logs)).toBeUndefined();
+  });
 });

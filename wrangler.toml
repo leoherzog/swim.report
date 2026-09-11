@@ -1,13 +1,21 @@
 name = "swim-report"
 main = "src/index.js"
-compatibility_date = "2026-07-13"
+compatibility_date = "2026-09-08"
 routes = [
   { pattern = "swim.report", custom_domain = true }
 ]
 
+# No workers.dev hostname: swim.report is the only route, and previews cannot run on a custom domain.
+workers_dev = false
+preview_urls = false
+# Remaps the stack of anything that escapes the fetch and scheduled error boundaries in src/index.js.
+upload_source_maps = true
+
 [observability]
 enabled = true
 head_sampling_rate = 1
+# Drops ?near= (visitor coordinates), ?q= and ?ids= from the request URL in Workers Logs.
+redact_query_string = true
 
 [placement]
 mode = "smart"

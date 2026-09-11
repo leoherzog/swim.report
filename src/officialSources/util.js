@@ -1,13 +1,14 @@
 // src/officialSources/util.js — shared helpers for the official-source scrapers.
-// It imports only the dependency-free src/geo.js, so a scraper can import it
-// without creating a cycle through src/officialSources/index.js: that module
-// imports every scraper, so a scraper importing it back would hit the
-// scrapers-array TDZ during module evaluation.
+// It imports only src/geo.js and src/clients/http.js, both of which import
+// nothing, so a scraper can import it without creating a cycle through
+// src/officialSources/index.js: that module imports every scraper, so a scraper
+// importing it back would hit the scrapers-array TDZ during module evaluation.
 //
 // Everything here is pure except fetchText, a thin network wrapper used only on
 // the cron path. No Date.now(), no ambient clock.
 
 import { distanceMi } from "../geo.js";
+import { DEFAULT_TIMEOUT_MS, cancelBody } from "../clients/http.js";
 
 export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -35,15 +36,19 @@ export const FLAG_SEVERITY = { green: 1, yellow: 2, red: 3, "double-red": 4 };
 //   redirect  — passed to fetch verbatim when present (e.g. "follow").
 //   logPrefix — console.log prefix; failures log as
 //               logPrefix + ": HTTP " + status  /  logPrefix + ": " + message.
-//   timeoutMs — outbound-request deadline in ms (default 30000). A hung
-//               upstream aborts at this bound; the resulting AbortError is
-//               caught below and degrades to null like any other failure, so
-//               one slow source cannot stall the shared hourly flag cron.
+//   timeoutMs — outbound-request deadline in ms; a number > 0 overrides the
+//               DEFAULT_TIMEOUT_MS shared with clients/http.js. A hung upstream
+//               rejects with a TimeoutError, caught below and degraded to null
+//               like any other failure, so one slow source cannot stall the
+//               shared hourly flag cron.
 export async function fetchText(url, options) {
   const opts = options || {};
   const prefix = opts.logPrefix || "officialSources: fetch failed";
   try {
-    const init = { signal: AbortSignal.timeout(opts.timeoutMs || 30000) };
+    const ms = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0
+      ? opts.timeoutMs
+      : DEFAULT_TIMEOUT_MS;
+    const init = { signal: AbortSignal.timeout(ms) };
     if (opts.headers) {
       init.headers = opts.headers;
     }
@@ -53,6 +58,7 @@ export async function fetchText(url, options) {
     const response = await fetch(url, init);
     if (!response.ok) {
       console.log(prefix + ": HTTP " + response.status);
+      cancelBody(response);
       return null;
     }
     return await response.text();

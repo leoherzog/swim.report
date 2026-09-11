@@ -245,6 +245,113 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     expect(estimate.ripCurrentRisk).toBeNull();
   });
 
+  it("treats a paginated national feed as no feed and seals alertsResolved false", async function () {
+    // Same feature as the unpaginated control above, plus a pagination cursor:
+    // a partial view of the population must not seal any zone as checked.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gov/alerts/active") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              features: [{
+                properties: {
+                  event: "Beach Hazards Statement",
+                  onset: "2026-07-15T14:00:00Z",
+                  ends: "2026-07-16T06:00:00Z",
+                  geocode: { UGC: ["MIZ071"] },
+                  affectedZones: ["https://api.weather.gov/zones/forecast/MIZ071"]
+                }
+              }],
+              pagination: { next: "https://api.weather.gov/alerts/active?cursor=next" }
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-paged", nws_zone: "MIZ071", nws_grid_url: null })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = estimateOf(made, "osm-node-paged");
+    expect(estimate.color).toBe("unknown");
+    expect(estimate.reason).toBe("No wave or weather data is available for this beach yet");
+    expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+    expect(estimate.alertDetails).toEqual([]);
+    expect(estimate.sources.map(function (s) { return s.label; })).not.toContain("NWS Alerts");
+    expect(estimate.estimateInputs.alertsResolved).toBe(false);
+    expect(loggedLines(logSpy)).toContain("nws alerts feed paginated");
+    logSpy.mockRestore();
+  });
+
+  it("issues the NWS and both ECCC national fetches concurrently", async function () {
+    let inFlight = 0;
+    let peakInFlight = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      const national = target.indexOf("api.weather.gov/alerts/active") !== -1 ||
+        target.indexOf("collections/weather-alerts/items") !== -1 ||
+        target.indexOf("collections/marineweather-realtime/items") !== -1;
+      if (!national) {
+        return Promise.reject(new Error("network disabled in test"));
+      }
+      inFlight = inFlight + 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          inFlight = inFlight - 1;
+          resolve({ ok: false, status: 503 });
+        }, 5);
+      });
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-us", nws_zone: "MIZ071", nws_grid_url: null }),
+      makeBeachRow({
+        id: "osm-way-ca",
+        name: "Colchester Beach",
+        lat: 41.9836774,
+        lon: -82.9343626,
+        eccc_zone: "Windsor - Essex - Chatham-Kent",
+        enrichment_attempts: 5
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    expect(peakInFlight).toBe(3);
+    // Failure isolation is unchanged: every authority failed, no caveat.
+    for (const id of ["osm-node-us", "osm-way-ca"]) {
+      const estimate = estimateOf(made, id);
+      expect(estimate.color).toBe("unknown");
+      expect(estimate.reason.indexOf(ALERTS_UNAVAILABLE_CAVEAT)).toBe(-1);
+    }
+  });
+
+  it("skips the NWS fetch with no zoned row and the ECCC fetches with no Canadian row", async function () {
+    const urls = [];
+    vi.stubGlobal("fetch", function (url) {
+      urls.push(typeof url === "string" ? url : (url && url.url) || "");
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const unenriched = makeEnv([makeBeachRow({ id: "osm-node-bare" })]);
+    await runHourlyCron(unenriched.env);
+    expect(urls.some(function (u) { return u.indexOf("alerts/active") !== -1; })).toBe(false);
+    expect(urls.some(function (u) { return u.indexOf("collections/") !== -1; })).toBe(false);
+
+    urls.length = 0;
+    const usOnly = makeEnv([makeBeachRow({ id: "osm-node-us", nws_zone: "MIZ071" })]);
+    await runHourlyCron(usOnly.env);
+    expect(urls.some(function (u) { return u.indexOf("alerts/active") !== -1; })).toBe(true);
+    expect(urls.some(function (u) { return u.indexOf("collections/") !== -1; })).toBe(false);
+  });
+
   it("marine-zone alert (Gale Warning) matched via marine_zone -> red, NWS Marine Alerts source", async function () {
     // The national feed carries a Gale Warning zoned to the MARINE zone LMZ874,
     // not the beach's land nws_zone. The recompute must match it via marine_zone
@@ -1466,6 +1573,91 @@ describe("runFlagRecompute - registered-source integration", function () {
     })();
   });
 
+  // A Kenosha County beach at a curated LAKE_MICHIGAN_SITES coordinate, so
+  // kenoshaBeachConditions matches it by proximity.
+  function kenoshaBeachRow() {
+    return makeBeachRow({
+      id: "osm-node-kenosha-1",
+      name: "Alford Park Beach",
+      lat: 42.619,
+      lon: -87.795
+    });
+  }
+
+  function seedCalmWave(made, id) {
+    made.db.seedWave(id, {
+      beachId: id,
+      waveHeightFt: 1.0,
+      model: "noaa_glwu",
+      windSpeedMph: null,
+      windGustMph: null,
+      updated: "2026-07-18T12:00:00.000Z"
+    });
+  }
+
+  it("fetches two distinct wqFloor sources concurrently and isolates each", async function () {
+    const mnFetch = mnAdvisoryFetch("Elevated E. coli bacteria");
+    let inFlight = 0;
+    let peakInFlight = 0;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      const isMn = target.indexOf("mnbeaches.org") !== -1;
+      const isKenosha = target.indexOf("kenoshacountywi.gov") !== -1;
+      if (!isMn && !isKenosha) {
+        return Promise.reject(new Error("network disabled in test"));
+      }
+      inFlight = inFlight + 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          inFlight = inFlight - 1;
+          if (isKenosha) {
+            resolve({ ok: false, status: 404 });
+            return;
+          }
+          resolve(mnFetch(url));
+        }, 5);
+      });
+    });
+
+    const made = makeEnv([mnBeachRow(), kenoshaBeachRow()]);
+    seedCalmWave(made, "osm-node-duluth-1");
+    seedCalmWave(made, "osm-node-kenosha-1");
+    await runHourlyCron(made.env);
+
+    expect(peakInFlight).toBe(2);
+    const duluth = estimateOf(made, "osm-node-duluth-1");
+    expect(duluth.color).toBe("yellow");
+    expect(duluth.trigger).toBe("wq-floor");
+    const kenosha = estimateOf(made, "osm-node-kenosha-1");
+    expect(kenosha.trigger).toBe("wave-height");
+    expect(wqfloorOf(made, "osm-node-kenosha-1")).toBeNull();
+  });
+
+  it("an expired wq gather deadline leaves every source unfetched, the same outcome as a failed scrape", async function () {
+    const urls = [];
+    const mnFetch = mnAdvisoryFetch("Elevated E. coli bacteria");
+    vi.stubGlobal("fetch", function (url) {
+      urls.push(typeof url === "string" ? url : (url && url.url) || "");
+      return mnFetch(url);
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+
+    const made = makeEnv([mnBeachRow()]);
+    made.env.WQ_GATHER_DEADLINE_MS = 0;
+    seedCalmWave(made, "osm-node-duluth-1");
+    await runHourlyCron(made.env);
+
+    expect(urls.some(function (u) { return u.indexOf("mnbeaches.org") !== -1; })).toBe(false);
+    const estimate = estimateOf(made, "osm-node-duluth-1");
+    expect(estimate).not.toBeNull();
+    expect(estimate.color).toBe("green");
+    expect(estimate.trigger).toBe("wave-height");
+    expect(wqfloorOf(made, "osm-node-duluth-1")).toBeNull();
+    expect(loggedLines(logSpy)).toContain("index: wqFloor gather deadline reached=0 of 1 sources");
+    logSpy.mockRestore();
+  });
+
   it("a registered official scraper writes an official override", function () {
     return (async function () {
       vi.stubGlobal("fetch", function (url) {
@@ -2152,6 +2344,48 @@ describe("runFlagRecompute indexes the wave series at the hour it estimates",
         expect(estimate.reason).not.toContain("ft");
       });
   });
+
+// A throw escaping a runner's top level is the one failure the cron path does
+// not swallow: it is logged and rejects the scheduled promise, which is what
+// records the invocation as failed. Inner isolation (a rejected chunk, a failed
+// scrape) still resolves, as the flush tests above pin.
+describe("whole-run failure rejects the scheduled promise", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("hourly: a failing opening SELECT rejects and writes no beach_state row", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv([makeBeachRow({ id: "osm-node-1", nws_zone: "MIZ071" })]);
+    made.db.failWhen(function (sql) {
+      return sql.indexOf("SELECT b.*") === 0;
+    });
+
+    await expect(runHourlyCron(made.env)).rejects.toThrow(/D1 fake: forced failure/);
+    expect(made.db.stateOf("osm-node-1")).toBeNull();
+    expect(loggedLines(logSpy)).toContain("index: flag recompute failed: D1 fake: forced failure");
+    expect(loggedLines(logSpy)).toContain("index: scheduled flag recompute threw: D1 fake: forced failure");
+  });
+
+  it("water temp: a failing opening SELECT rejects and writes no key", async function () {
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const made = makeEnv([makeBeachRow({ id: "osm-node-1" })]);
+    made.db.failWhen(function (sql) {
+      return sql.indexOf("SELECT id, lat, lon, last_viewed") === 0;
+    });
+
+    await expect(runWaterTempCron(made.env)).rejects.toThrow(/D1 fake: forced failure/);
+    expect(made.kvPuts.size).toBe(0);
+    expect(loggedLines(logSpy)).toContain("index: water temp refresh failed: D1 fake: forced failure");
+  });
+});
 
 // The hourly is the seal's producer. If it ever wrote a value the refresh cron's
 // signalsFromStanding rejects, that cron would silently skip every beach — a

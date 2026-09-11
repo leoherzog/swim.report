@@ -505,6 +505,22 @@ describe("nwsOmr.scrape", function () {
     expect(calls[0].init.headers["User-Agent"].indexOf("swim.report")).not.toBe(-1);
   });
 
+  it("arms an abort signal on both legs", async function () {
+    const calls = installFetch(function (url) {
+      if (String(url) === OMR_LIST_URL) {
+        return Promise.resolve(jsonResponse(LIST_JSON));
+      }
+      return Promise.resolve(jsonResponse({
+        productText: buildProduct(LIVE_ROWS),
+        issuanceTime: ISSUANCE
+      }));
+    });
+    await nwsOmr.scrape(NOW_ISO);
+    expect(calls.length).toBe(2);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[1].init.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("returns null when the product list fetch fails", async function () {
     installFetch(function () {
       return Promise.resolve({ ok: false, status: 503, json: function () { return Promise.resolve({}); } });

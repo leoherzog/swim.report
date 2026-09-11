@@ -276,6 +276,7 @@ export const nyOprhpBeachStatus = {
   },
   scrape: async function(nowIso) {
     const json = await fetchJson(NY_OPRHP_QUERY_URL, {
+      timeoutMs: 30000,
       label: "nyOprhpBeachStatus: beach status"
     });
     if (json === null) {

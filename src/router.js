@@ -4,6 +4,7 @@ import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
 import { IDS_LIST_LIMIT } from "./idsListLimit.js";
 import { mapFeatureFromRow } from "./mapFeatures.js";
 import { displayFlag } from "./displayFlag.js";
+import { strongEtag, etagMatches } from "./etag.js";
 import {
   BEACH_STATE_SELECT,
   CHIP_STATE_SELECT,
@@ -25,27 +26,30 @@ const HOME_LIST_LIMIT = 100;
 const HOME_GEO_FETCH_LIMIT = 500;
 
 // The id format discovery mints (src/discovery.js): "osm-" + node|way|relation
-// + "-" + the OSM id. Anything else never reaches a bound parameter.
+// + "-" + the OSM id. It gates ?ids= and the raw /beach/:id and /api/flag/:id
+// path segment, which is never decoded, so anything else never reaches a bound
+// parameter.
 const BEACH_ID_PATTERN = /^osm-(node|way|relation)-\d+$/;
 
 // Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
-// Cacheable routes are location-independent and short-lived: 60 s fresh, up to
-// 10 min served stale while revalidating. stale-if-error is set explicitly
-// because Cloudflare's default on Worker error is to serve stale indefinitely,
-// which would freeze the pages' embedded staleness warnings — nowIso is baked
-// into the HTML — with no bound. The home page must never be cached: it is
-// personalized by request.cf geolocation, which is not part of the cache key and
-// not expressible via Vary.
+// Every cacheable route is location-independent and its origin is one or two D1
+// statements, so the stale-while-revalidate window is 60 s: Workers Cache serves
+// stale asynchronously, which makes max-age + stale-while-revalidate (120 s) the
+// bound on how old a served flag can be and so on flip latency. stale-if-error
+// is set explicitly because Cloudflare's default on Worker error is to serve
+// stale indefinitely, which would freeze the pages' embedded staleness warnings
+// — nowIso is baked into the HTML — with no bound. The home page without near
+// must never be cached: it is personalized by request.cf geolocation, which is
+// not part of the cache key and not expressible via Vary.
 const CACHE_CONTROL_CACHEABLE =
-  "public, max-age=60, stale-while-revalidate=600, stale-if-error=600";
-const CACHE_CONTROL_NO_STORE = "no-store";
-// /api/beaches.geojson has its own policy. Its origin is one scalar-column scan
-// plus a few milliseconds of CPU, where the 600 s stale-while-revalidate above
-// was sized to hide a multi-second cache-miss origin; keeping it would add up to
-// ten minutes to the very flip latency the read-time color gate exists to
-// preserve. 60 s still gives single-request-per-colo-per-minute herd protection.
-const CACHE_CONTROL_MAP_DIRECTORY =
   "public, max-age=60, stale-while-revalidate=60, stale-if-error=600";
+const CACHE_CONTROL_NO_STORE = "no-store";
+
+// Per-location KV cache for the watertemp: read. The key has one 6-hourly
+// writer, is display-only, and the tile gates on observedIso, so an hour of
+// edge caching (negative lookups included) cannot show a reading as fresher than
+// it is.
+const WATERTEMP_KV_CACHE_TTL_SECONDS = 3600;
 
 // Throttle for the last_viewed demand stamp: at most one D1 write per beach per
 // hour. The enrichment crons order their candidate queues with last_viewed as a
@@ -354,14 +358,41 @@ async function handleIdsList(env, idsParam) {
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
 }
 
-// Nearby cards on the detail page. The planar ORDER BY keeps the D1 read to
-// the NEARBY_FETCH_LIMIT nearest candidates, the JS haversine decides the final
-// order, and NEARBY_LIMIT of them render. NEARBY_MAX_MI drops the far tail so a
-// lone beach never advertises "nearby" beaches a day's drive away; a beach with
-// nothing inside it simply gets no section.
+// Nearby cards on the detail page. A lat/lon window derived from NEARBY_MAX_MI
+// lets D1 seek idx_beaches_lon_lat instead of scanning the table; the index
+// leads with lon, so it is the lon predicate that seeks and a lat-only query
+// scans. The planar ORDER BY then picks the NEARBY_FETCH_LIMIT nearest inside
+// the window, the JS haversine decides the final order, and NEARBY_LIMIT of them
+// render. NEARBY_MAX_MI drops the far tail so a lone beach never advertises
+// "nearby" beaches a day's drive away; a beach with nothing inside it simply
+// gets no section.
 const NEARBY_FETCH_LIMIT = 12;
 const NEARBY_LIMIT = 3;
 const NEARBY_MAX_MI = 50;
+// Under the 69.09 mi haversine degree, so the window rounds outward.
+const MILES_PER_DEG_LAT = 69.0;
+
+// The bounding box the nearby query seeks, { latLo, latHi, lonLo, lonHi }, or
+// null when lat or lon is not finite. The box is a superset of the NEARBY_MAX_MI
+// great-circle cap through 82 degrees of latitude, and REGIONS tops out at
+// 67.2 N. lonLo and lonHi are null, dropping the lon predicate rather than
+// wrapping it, when the window touches +-180 or the cap nears the pole; that
+// beach pays the full scan. Pure; exported for tests.
+export function nearbyBounds(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+  const latSpan = NEARBY_MAX_MI / MILES_PER_DEG_LAT;
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  const lonSpan = latSpan / cosLat;
+  const bounds = { latLo: lat - latSpan, latHi: lat + latSpan, lonLo: null, lonHi: null };
+  if (cosLat > 0 && Number.isFinite(lonSpan) && lonSpan < 180 &&
+      lon - lonSpan >= -180 && lon + lonSpan <= 180) {
+    bounds.lonLo = lon - lonSpan;
+    bounds.lonHi = lon + lonSpan;
+  }
+  return bounds;
+}
 
 // The NEARBY_LIMIT nearest flag-worthy beaches to the beach, each carrying its
 // distance and its own estimate and official, so the card resolves through
@@ -371,15 +402,21 @@ const NEARBY_MAX_MI = 50;
 // id-less row out.
 async function nearbyBeaches(env, beach, nowMs) {
   const orderBy = proximityOrderByClause({ lat: beach.lat, lon: beach.lon });
-  if (orderBy === null) {
+  const bounds = nearbyBounds(Number(beach.lat), Number(beach.lon));
+  if (orderBy === null || bounds === null) {
     return [];
   }
-  const stmt = env.DB.prepare(
+  const withLon = bounds.lonLo !== null;
+  const prepared = env.DB.prepare(
     "SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, " +
     CHIP_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN + " WHERE " +
-    FLAG_WORTHY_WATER_SQL + " AND id <> ?1 ORDER BY " + orderBy +
-    " LIMIT " + String(NEARBY_FETCH_LIMIT)
-  ).bind(beach.id);
+    FLAG_WORTHY_WATER_SQL + " AND id <> ?1 AND lat BETWEEN ?2 AND ?3" +
+    (withLon ? " AND lon BETWEEN ?4 AND ?5" : "") +
+    " ORDER BY " + orderBy + " LIMIT " + String(NEARBY_FETCH_LIMIT)
+  );
+  const stmt = withLon
+    ? prepared.bind(beach.id, bounds.latLo, bounds.latHi, bounds.lonLo, bounds.lonHi)
+    : prepared.bind(beach.id, bounds.latLo, bounds.latHi);
   const result = await stmt.all();
   const rows = (result && result.results) || [];
   const scored = [];
@@ -410,8 +447,7 @@ async function handleDetail(env, ctx, beachId) {
   // A confirmed-inland beach (or a parked-unresolved one) is not flag-worthy,
   // so it 404s exactly like a missing row — the same gate the home list uses.
   if (!beach || !isFlagWorthyWater(beach)) {
-    const html = renderErrorPage({ status: 404, message: "Beach not found" });
-    return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
+    return detailNotFound();
   }
   touchLastViewed(env, ctx, beach);
   const nowMs = Date.now();
@@ -421,7 +457,10 @@ async function handleDetail(env, ctx, beachId) {
   // page's only extra reads: the list page must never gain a per-row KV get, and
   // /api/flag must not gain the advisory or the series.
   const results = await Promise.all([
-    env.FLAGS.get("watertemp:" + beachId, { type: "json" }),
+    env.FLAGS.get("watertemp:" + beachId, {
+      type: "json",
+      cacheTtl: WATERTEMP_KV_CACHE_TTL_SECONDS
+    }),
     nearbyBeaches(env, beach, nowMs)
   ]);
   const state = liveBeachState(beach, nowMs);
@@ -437,6 +476,11 @@ async function handleDetail(env, ctx, beachId) {
     nowIso: new Date(nowMs).toISOString()
   });
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+}
+
+function detailNotFound() {
+  const html = renderErrorPage({ status: 404, message: "Beach not found" });
+  return htmlResponse(html, 404, CACHE_CONTROL_NO_STORE);
 }
 
 // Scalar columns only: the marker color is resolved from the estimate's and the
@@ -456,7 +500,11 @@ const MAP_FEATURE_SQL =
 // as a top-level GeoJSON foreign member (RFC 7946 section 6.1) so a dead hourly
 // is visible to anyone hitting the endpoint. A D1 failure surfaces as the error
 // boundary's 500, never as a silently all-unknown map.
-async function handleBeachesGeojson(env) {
+//
+// The body is the validator: its SHA-256 is the ETag, and a matching
+// If-None-Match answers 304. There is no D1 shortcut before the hash, since no
+// stored timestamp moves with every write that changes a marker.
+async function handleBeachesGeojson(env, ifNoneMatch) {
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const nowEpoch = Math.floor(nowMs / 1000);
@@ -482,21 +530,34 @@ async function handleBeachesGeojson(env) {
       builtAt = row.estimate_updated;
     }
   }
-  return geojsonResponse(
-    { type: "FeatureCollection", builtAt: builtAt, features: features },
-    CACHE_CONTROL_MAP_DIRECTORY
-  );
+  const payload = { type: "FeatureCollection", builtAt: builtAt, features: features };
+  // Hashed and sent as the same bytes, so the tag is byte-exact for the body.
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  const etag = await strongEtag(bytes);
+  return geojsonResponse(bytes, etag, CACHE_CONTROL_CACHEABLE, ifNoneMatch);
 }
 
 // application/geo+json is the RFC 7946 media type (the client sends a matching
-// Accept). Built by hand so the media type is set alongside the route's own
-// cache policy.
-function geojsonResponse(payload, cacheControl) {
-  return new Response(JSON.stringify(payload), {
+// Accept). Built by hand so the media type is set alongside the shared cacheable
+// policy. The 200 carries the strong SHA-256 ETag over the body; an If-None-Match
+// naming it (weak comparison, comma list and * honored) answers 304 with the same
+// ETag and cache-control and no body. Cloudflare weakens the tag when it
+// compresses the body, which is why the comparison ignores W/. No Vary: Workers
+// Cache compares Vary values verbatim and would fragment the entry per
+// Accept-Encoding spelling.
+function geojsonResponse(bytes, etag, cacheControl, ifNoneMatch) {
+  if (etagMatches(ifNoneMatch, etag)) {
+    return new Response(null, {
+      status: 304,
+      headers: { "etag": etag, "cache-control": cacheControl }
+    });
+  }
+  return new Response(bytes, {
     status: 200,
     headers: {
       "content-type": "application/geo+json; charset=utf-8",
-      "cache-control": cacheControl
+      "cache-control": cacheControl,
+      "etag": etag
     }
   });
 }
@@ -509,12 +570,7 @@ async function handleApiFlag(env, ctx, beachId) {
   // A confirmed-inland (or parked-unresolved) beach 404s like a missing row,
   // matching the detail page and the flag-worthy gate on the list/map.
   if (!beach || !isFlagWorthyWater(beach)) {
-    // Plain max-age (no stale-while-revalidate): a just-discovered beach
-    // should stop 404ing within a minute, not linger stale for the SWR window.
-    return Response.json(
-      { error: "beach not found" },
-      { status: 404, headers: { "cache-control": "public, max-age=60" } }
-    );
+    return apiFlagNotFound();
   }
   touchLastViewed(env, ctx, beach);
   const nowMs = Date.now();
@@ -532,6 +588,15 @@ async function handleApiFlag(env, ctx, beachId) {
   );
 }
 
+// Plain max-age (no stale-while-revalidate): a just-discovered beach should
+// stop 404ing within a minute, not linger stale for the SWR window.
+function apiFlagNotFound() {
+  return Response.json(
+    { error: "beach not found" },
+    { status: 404, headers: { "cache-control": "public, max-age=60" } }
+  );
+}
+
 export async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -539,7 +604,10 @@ export async function handleRequest(request, env, ctx) {
   if (request.method !== "GET") {
     return new Response("Method not allowed", {
       status: 405,
-      headers: { "content-type": "text/plain; charset=utf-8" }
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": CACHE_CONTROL_NO_STORE
+      }
     });
   }
 
@@ -564,19 +632,27 @@ export async function handleRequest(request, env, ctx) {
   }
 
   if (path === "/api/beaches.geojson") {
-    return handleBeachesGeojson(env);
+    return handleBeachesGeojson(env, request.headers.get("if-none-match"));
   }
 
+  // The segment is matched raw. An id's alphabet has nothing
+  // encodeURIComponent changes, so a segment that needs decoding is not an id,
+  // and decodeURIComponent would throw URIError on a bad escape (/beach/%FF)
+  // and turn into the boundary's 500.
   const flagMatch = path.match(/^\/api\/flag\/([^/]+)$/);
   if (flagMatch) {
-    const beachId = decodeURIComponent(flagMatch[1]);
-    return handleApiFlag(env, ctx, beachId);
+    if (!BEACH_ID_PATTERN.test(flagMatch[1])) {
+      return apiFlagNotFound();
+    }
+    return handleApiFlag(env, ctx, flagMatch[1]);
   }
 
   const detailMatch = path.match(/^\/beach\/([^/]+)$/);
   if (detailMatch) {
-    const beachId = decodeURIComponent(detailMatch[1]);
-    return handleDetail(env, ctx, beachId);
+    if (!BEACH_ID_PATTERN.test(detailMatch[1])) {
+      return detailNotFound();
+    }
+    return handleDetail(env, ctx, detailMatch[1]);
   }
 
   if (path.indexOf("/api/") === 0) {

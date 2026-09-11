@@ -460,12 +460,10 @@ describe("fetchPointMetadata", function () {
   });
 });
 
-// Every api.weather.gov request routes through one fetchNwsJson wrapper, and
-// src/clients/http.js arms its AbortController ONLY when timeoutMs > 0. An
-// unarmed call site is genuinely unbounded: a single hung socket runs the
-// hourly cron to the 900 s scheduled ceiling and kills it mid-run. A wall-clock
-// deadline cannot rescue it, because deadlines are checked BETWEEN units of
-// work, never inside a pending fetch.
+// Every api.weather.gov request routes through one fetchNwsJson wrapper that
+// passes NWS_TIMEOUT_MS, so a single hung socket cannot run the hourly cron to
+// the 900 s scheduled ceiling. A wall-clock deadline cannot rescue it, because
+// deadlines are checked between units of work, never inside a pending fetch.
 describe("NWS transport timeout", function () {
   afterEach(function () {
     vi.unstubAllGlobals();

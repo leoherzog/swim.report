@@ -195,6 +195,14 @@ describe("fetchNearestWebcam", function () {
     expect(out.webcam.title).toBe("Indian Grove: South Haven");
   });
 
+  it("arms an abort signal on the nearby fetch", async function () {
+    const calls = installFetch(function () {
+      return Promise.resolve(jsonResponse(GOOD_BODY));
+    });
+    await fetchNearestWebcam(LAT, LON, API_KEY);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("returns { webcam: null } on HTTP success with zero usable cams", async function () {
     installFetch(function () {
       return Promise.resolve(jsonResponse({ total: 0, webcams: [] }));
@@ -260,6 +268,7 @@ describe("fetchWebcamsInBbox", function () {
     expect(calls[0].init.headers["x-windy-api-key"]).toBe(API_KEY);
     // Raw body passes through untouched for the caller to parse per beach.
     expect(out).toEqual(body);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("returns null on failure and makes no fetch when the api key is falsy", async function () {

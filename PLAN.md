@@ -468,7 +468,9 @@ carry it.
 
 ### Map feature row (the /api/beaches.geojson shape)
 
-The map endpoint runs one D1 statement and turns each row into a GeoJSON Feature:
+The map endpoint runs one D1 statement and turns each row into a GeoJSON Feature, its
+coordinates rounded to 5 decimals (about 1.1 m) so float noise never bloats the body or
+churns its ETag:
 
     SELECT b.id, b.name, b.park_name, b.lat, b.lon,
            s.estimate_color, s.estimate_updated, s.estimate_expires,
@@ -735,8 +737,9 @@ migrations/0015_beach_state_wave.sql:
   correct pre-cycle state: a NULL wave reads as "no wave input", which degrades to the wind
   fallback or unknown. ADD COLUMN appends, so the two names sit after reading_expires.
 
-- idx_beaches_lon_lat is retained for discovery/reconciliation spatial scans; the
-  GeoJSON map endpoint does a full flag-worthy-gated scan with no lon/lat predicate.
+- idx_beaches_lon_lat serves the discovery/reconciliation spatial scans and the detail
+  page's nearby query, whose lat/lon window from nearbyBounds seeks it on lon (section 8);
+  the GeoJSON map endpoint does a full flag-worthy-gated scan with no lon/lat predicate.
 - sync_meta rows used by the offline discovery batch: "last_discovery_sync"
   (ISO timestamp), "last_discovery_count" (String(count) — a partial run
   undercounts, which is why the next key exists), "last_discovery_complete"
@@ -834,7 +837,8 @@ renders, and nothing in KV is written from outside the Worker.
 - Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly
   water-temperature cron with { expirationTtl: 25200 }, only when the beach's nearest
   CAP_WATER_TEMP station within 25 km produced a valid recent reading. Read only by the
-  detail route and passed to renderDetailPage as the water-temperature tile's reading.
+  detail route, with cacheTtl 3600, and passed to renderDetailPage as the water-temperature
+  tile's reading.
   Display-only — never feeds src/rules.js. Absent key → the tile reads "No data".
   Its puts ride a bounded-concurrency pool; no cron may reintroduce a sequential per-beach
   await env.FLAGS.put (section 7, "Run budgets and write pools").
@@ -1188,6 +1192,15 @@ return null.
 
 ### src/clients/http.js (shared transport layer)
 
+    export const DEFAULT_TIMEOUT_MS = 30000;
+      // The bound every request gets when timeoutMs is absent, 0, negative or not a
+      // number. Shared with src/officialSources/util.js#fetchText.
+
+    export function cancelBody(response)
+      // Releases an unread response body when response.body.cancel is a function. Never
+      // awaited, never throws: a sync throw or a rejection from cancel is swallowed, so a
+      // definitive HTTP status never turns into a transport failure.
+
     export async function fetchJsonWithStatus(url, opts)
       // The same pipeline as fetchJson, resolving to { json, status }: status is the HTTP
       // status whenever a response arrived (json null unless 2xx and parsed) and null when
@@ -1196,15 +1209,19 @@ return null.
 
     export async function fetchJson(url, opts)
       // fetchJsonWithStatus(url, opts).json.
-      // opts: { method, headers, body, label, timeoutMs }, all optional; each init field
-      // is set only when supplied. timeoutMs, when > 0, bounds the request via an
-      // AbortController — on expiry fetch aborts and the catch returns null, which is
-      // what keeps one hung socket from running a cron to the 900 s scheduled ceiling
-      // (NWS_TIMEOUT_MS is 45 s on every api.weather.gov request). Runs the shared
-      // fetch -> ok-check -> response.json() -> catch pipeline: a non-2xx status logs
-      // label + " fetch failed: HTTP " + status, a thrown error logs
+      // opts: { method, headers, body, label, timeoutMs }, all optional; method, headers
+      // and body are set only when supplied. init.signal is always
+      // AbortSignal.timeout(ms), ms = timeoutMs when a number > 0, else
+      // DEFAULT_TIMEOUT_MS. On expiry fetch rejects with a TimeoutError and the catch
+      // returns null, which is what keeps one hung socket from running a cron to the
+      // 900 s scheduled ceiling (NWS_TIMEOUT_MS is 45 s on every api.weather.gov
+      // request). Runs the shared fetch -> ok-check -> response.json() -> catch
+      // pipeline: a non-2xx status logs label + " fetch failed: HTTP " + status and
+      // releases the unread body through cancelBody, a thrown error logs
       // label + " fetch failed: " + err.message, and both return null. Every module in
-      // src/clients/ routes its HTTP through it, passing label = "<module>: " + detail.
+      // src/clients/ routes its HTTP through it, passing label = "<module>: " + detail;
+      // every direct caller outside src/clients/ (nwsOmr, nyOprhpBeachStatus, mnBeaches)
+      // passes timeoutMs too.
 
 ### src/geo.js (shared geo helpers, dependency-free)
 
@@ -1356,7 +1373,8 @@ shapes it walks are the clients' wire shapes, not general geography.
       //                         sender, zones: [zone ids] }],
       //              sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount, truncated }
       //   featureCount is the RAW feature count before the event/zone filter below and
-      //   truncated says the response carried a pagination cursor; the alerts refresh
+      //   truncated says the response carried a pagination cursor, which both crons read
+      //   as no feed at all (section 7); the alerts refresh
       //   logs featureCount against alerts.length, where a large gap is the visible
       //   signature of a schema drift rather than a quiet nation.
       //   event = properties.event; onset falls back properties.onset ->
@@ -2031,7 +2049,8 @@ src/index.js, and test/workerExports.test.js guards that.
 
 ### src/officialSources/util.js
 
-Shared helpers for the scrapers. Imports only src/geo.js, so any scraper can import it
+Shared helpers for the scrapers. Imports only src/geo.js and src/clients/http.js, both of
+which import nothing, so any scraper can import it
 without creating a cycle through officialSources/index.js — which imports every scraper, so
 a scraper importing index.js back would hit the scrapers-array TDZ during module
 evaluation. Everything here is pure except fetchText, a cron-side network wrapper. No
@@ -2054,9 +2073,11 @@ Date.now(), no ambient clock.
       // options: { headers } and { redirect }, passed verbatim when present;
       // { logPrefix }, the console.log prefix, so failures log as
       // logPrefix + ": HTTP " + status or logPrefix + ": " + message; and { timeoutMs },
-      // the outbound-request deadline in ms, default 30000, enforced via
-      // AbortSignal.timeout so the AbortError flows through the existing catch and
-      // degrades to null. No registered scraper overrides the default.
+      // the outbound-request deadline in ms, a number > 0 overriding the
+      // DEFAULT_TIMEOUT_MS shared with src/clients/http.js, enforced via
+      // AbortSignal.timeout so the TimeoutError flows through the existing catch and
+      // degrades to null. A non-2xx body is released through http.js#cancelBody before
+      // the null return. No registered scraper overrides the default.
 
     export function decodeCellText(raw)
       // Pure. Strips residual tags and decodes a conservative table-cell entity set
@@ -2592,13 +2613,19 @@ matched job; an unrecognized cron is logged and ignored. The table:
 
 The six jobs are deliberately separate crons so each upstream's rate-limit posture is
 independent and a failure in one never starves another. The matched job is invoked via
-ctx.waitUntil with a top-level .catch that logs "index: scheduled <label> threw"; each
-runner logs its own summary line (beaches processed, per-source failure counts).
+ctx.waitUntil with a top-level .catch that logs "index: scheduled <label> threw" and
+rethrows, so a throw escaping a runner's top level (its opening SELECT failing, say)
+rejects the waitUntil promise and records the invocation as failed in Cron Past Events and
+the invocations view; Cloudflare documents no retry for it. Inside a runner, per-beach and
+per-source failures are caught and counted, and each runner logs its own summary line
+(beaches processed, per-source failure counts); a runner that fails past its own outer
+catch logs its "<label> failed:" line in place of that summary before the rethrow.
 
 ### runFlagRecompute (hourly)
 
 Constants: MAX_BEACHES_PER_RUN = 3000, FLAG_TTL_SECONDS = 25200,
 WQFLOOR_TTL_SECONDS = 7200 (src/beachState.js), KV_WRITE_CONCURRENCY = 12,
+SRF_GATHER_DEADLINE_MS = 120000, WQ_GATHER_DEADLINE_MS = 120000,
 HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
 src/demandWindow.js rather than src/index.js — see "Entry-module export shape" below).
 FLAG_TTL_SECONDS lives in src/flagTtl.js for the same entry-module reason and is imported
@@ -2652,11 +2679,18 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    fetchAllActiveAlerts() call for the whole run, then each zone's Map entry =
    nwsAlertsForZone(nationalAlerts.alerts, zone) as { events, details, sourceUrl:
    alertsUrlForZone(zone) }, label "NWS Alerts". One subrequest regardless of zone count. A
-   failed or thrown national fetch maps every zone to null; alertsCheckable stays true.
+   failed, thrown or paginated national fetch (truncated true, logged as "index: nws alerts
+   feed paginated, features=N parsed=M; treating as no feed") maps every zone to null;
+   alertsCheckable stays true and the seal's alertsResolved reads false, so the refresh
+   re-selects the row. The three national fetches of steps 3 and 3b are one Promise.all,
+   each promise carrying its own catch that logs and yields null and each skipped fetch a
+   Promise.resolve(null) placeholder, so the phase costs one client timeout rather than
+   three and one authority's failure nulls only its own result.
 3b. ECCC alerts: for the Canadian rows (nws_zone NULL, eccc_zone NOT NULL), one
    fetchActiveEcccAlerts(nowIso) call and one fetchActiveEcccMarineAlerts(nowIso) call over
    the national active sets, no bbox, so per-beach matching happens locally in step 7 at
-   two subrequests total. The two fetches have independent try/catch: the collections are
+   two subrequests total. The two fetches ride the step-3 Promise.all with a per-promise
+   catch: the collections are
    disjoint, so a marine-fetch failure never nulls the land alerts or vice versa. Skipped
    when the run has no Canadian rows; a failed fetch means those beaches get that
    authority's alerts as null this run.
@@ -2685,8 +2719,15 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
 6b. Water-quality floor gather: one findWqFloorSource(beach) pass over the run's beaches
    builds wqSourceByBeach (beach.id -> source, reused by step 7 so the resolver runs once
    per beach) and wqDistinctSources (source.id -> source, the fetch list). Each distinct
-   source's scrape(nowIso) is then called once per run into wqResultsBySource, mirroring
-   the step-8 official-scraper grouping. This must happen before the per-beach estimate,
+   source's scrape(nowIso) is then called once per run into wqResultsBySource, every entry
+   pre-seeded null, through runPool at KV_WRITE_CONCURRENCY under WQ_GATHER_DEADLINE_MS =
+   120000 anchored at the step's start (numeric env override, read inside runFlagRecompute,
+   for tests). A source the deadline leaves unreached keeps its null, the same outcome as a
+   failed scrape, and a shortfall logs "index: wqFloor gather deadline reached=X of Y
+   sources". The pool checks the deadline only between sources, so it trips only once the
+   registry outgrows the pool width; each source's own fetch timeout bounds an in-flight
+   scrape. The sources share no mutable state, which is why this gather may be pooled
+   while the step-8 scraper loop stays sequential. This must happen before the per-beach estimate,
    because the resolved advisory feeds estimateFlag's waterQualityAdvisory input (a
    raise-only floor, section 4 step 7); the step-8 official gather is too late. A scrape
    failure is isolated — result null means no floor for that source's beaches.
@@ -2697,7 +2738,8 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    this body later, and pool.js's backstop around the per-beach try/catch, which keeps a
    throw while assembling one beach's inputs from aborting the rest of the run.
    estimateCount / failureCount are incremented with a single synchronous statement. No
-   deadline is passed here; only the water-temp cron's pools are deadline-bounded.
+   deadline is passed here; the hourly's deadline-bounded pools are the step-4 SRF gather
+   and the step-6b wq gather.
    Assemble inputs (nulls for anything missing), including
    alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false
    — a beach enriched for no authority gets the honesty caveat instead of a silent
@@ -2900,7 +2942,7 @@ alert means.
    45000): fetchAllActiveAlerts(), fetchActiveEcccAlerts(nowIso),
    fetchActiveEcccMarineAlerts(nowIso).
 
-       nwsOk  = nationalAlerts !== null
+       nwsOk  = nationalAlerts !== null && nationalAlerts.truncated !== true
        ecccOk = ecccAlerts !== null && ecccMarineAlerts !== null
 
    Both ECCC collections are required, stricter than the hourly's deliberate
@@ -3050,7 +3092,8 @@ offline as one batched delta.
 The water-temp cron's wall-clock budgets are WAVE_GATHER_DEADLINE_MS (480000) and
 WAVE_WRITE_DEADLINE_MS (840000), plus the WAVE_CURSOR_FLUSH_SIZE (100) flush granularity
 for the write pool's cursor. The two deadlines are numeric-env-overridable via
-runBudget(env).
+runBudget(env); the hourly's WQ_GATHER_DEADLINE_MS is read the same way inside
+runFlagRecompute.
 
 The alerts refresh cron takes no write deadline and no write pool. Its worst case — three
 fetches bounded at 45 s each, the keyset pages, and one D1 batch per 200 CAS statements —
@@ -3746,15 +3789,43 @@ else → 405.
 src/index.js:
 
     export default {
-      fetch: async (request, env, ctx) => { try { return await handleRequest(request, env, ctx); } catch ... },
+      fetch: async (request, env, ctx) => { let response; try { response = await handleRequest(request, env, ctx); } catch ...; return withSecurityHeaders(response); },
       // The fetch export is the request path's last-resort error boundary: an uncaught
       // throw from handleRequest is logged ("index: request handler threw: " +
       // err.message) and turned into a 500 in the same shape as the route family —
       // /api/* paths get JSON { "error": "internal error" }, everything else
       // renderErrorPage HTML — always cache-control: no-store, so a transient error is
-      // never cached.
+      // never cached. After the boundary, withSecurityHeaders (src/securityHeaders.js)
+      // adds the four security headers to every response, the 500s included, without
+      // overriding a name a route already set.
       scheduled: (controller, env, ctx) => { ...dispatch per section 7... }
     };
+
+src/securityHeaders.js:
+
+    export const SECURITY_HEADERS
+      // [name, value] pairs, lowercase: strict-transport-security: max-age=31536000 (no
+      // includeSubDomains), x-content-type-options: nosniff, referrer-policy:
+      // strict-origin-when-cross-origin, content-security-policy: frame-ancestors 'none';
+      // base-uri 'none'; object-src 'none'; form-action 'self'. No script-src or
+      // style-src: the pages load the Web Awesome and Font Awesome kits plus inline
+      // scripts. public/_headers declares the same four under /* for the assets the
+      // platform serves ahead of the Worker.
+
+    export function withSecurityHeaders(response)
+      // Sets each name only when absent and returns the same Response; when its headers
+      // are immutable (Response.redirect) it returns a copy with the same status,
+      // statusText, headers and body.
+
+src/etag.js:
+
+    export async function strongEtag(bytes)
+      // The quoted lowercase SHA-256 hex of a Uint8Array via crypto.subtle. Pure.
+
+    export function etagMatches(ifNoneMatch, etag)
+      // Pure. False for a missing or empty header; "*" matches anything; a comma list
+      // matches on any entry; a W/ prefix on an entry is ignored, because Cloudflare
+      // re-compresses the body and hands the browser W/"<hash>".
 
 src/router.js:
 
@@ -3778,7 +3849,18 @@ src/router.js:
       // "Your Beaches" script bakes the same bound into the id list it asks for).
       // An id must match /^osm-(node|way|relation)-\d+$/ (the format
       // src/discovery.js mints) or it is dropped, so no request text can reach SQL
-      // as anything but a bound parameter.
+      // as anything but a bound parameter. handleRequest tests the same pattern against
+      // the raw /beach/:id and /api/flag/:id segment, which is never decoded: an id's
+      // alphabet has nothing encodeURIComponent changes, and decodeURIComponent throws
+      // URIError on a bad escape.
+
+    export function nearbyBounds(lat, lon)
+      // -> { latLo, latHi, lonLo, lonHi } | null. Pure; exported for tests. The window
+      // the nearby query seeks, a superset of the NEARBY_MAX_MI great-circle cap
+      // (MILES_PER_DEG_LAT = 69.0, under the haversine degree, so it rounds outward)
+      // through 82 degrees of latitude. Null when lat or lon is not finite. lonLo and
+      // lonHi are null, dropping the lon predicate rather than wrapping it, when the
+      // window would cross +-180 or the cap nears the pole; that beach pays the full scan.
 
     export function resolveUserLocation(request, url)
       // -> { lat, lon } | null. A valid "near" query param ("lat,lon", finite,
@@ -3791,16 +3873,17 @@ Routing table (method GET only; anything else → 405):
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT b.*, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: the same joined SELECT [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. No KV read at all: the two records displayFlag reads ride the join as scalar columns, resolved per row by liveChipState(row, nowMs) (section 2). A list row renders one displayFlag decision and nothing else, so it never selects a JSON blob: the proximity branch ranks 500 rows to render 100, and a blob here would cross the binding five times for every row a visitor sees. Only the sliced rows are resolved. HOME_LIST_LIMIT is 100 | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /?ids=id1,id2,...     | handleIdsList  | The same list page rendered for exactly the listed beaches, in the order given. parseBeachIds validates and dedupes the comma-separated value and caps it at 10 BEFORE any SQL; the ids are bound as parameters (D1: the same joined chip SELECT WHERE b.id IN (?1, ?2, ...) AND [flag-worthy gate] — no ORDER BY, since SQLite returns an IN-set in its own order and the caller's order is restored in JS by id), resolved through liveChipState like handleHome. Ids that do not match the id format, that name no row, or that name a non-flag-worthy row are skipped silently; an empty result reads no D1 at all. q, near and request.cf are ignored on this route, which is what makes the response fully URL-determined and therefore CACHEABLE. It writes no last_viewed stamp — only the two single-beach routes carry the demand signal. This is what the browser-side "Your Beaches" section (section 9) fetches for a visitor's saved and recently viewed ids; nothing about those lists reaches the server beyond the bounded id list in the URL. | HTML renderListPage with idsMode: true, query "", hasMore false and no location, so the page renders unsorted, un-filtered rows and never asserts data-complete. idsMode also owns the empty-state copy: a page with no rows reads "No beaches match those ids.", since an unrecognized id list is neither a search miss nor an empty database |
-| GET /beach/:beachId       | handleDetail   | D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, wave, each honoring its own expiry — the wave record through liveWaveRecord over WAVE_STATE_SELECT); KV watertemp: only; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
-| GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which stamps displayFlag({ estimate, official }, nowIso).keyword (section 9) on the same liveChipState resolution the list surfaces use, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. |
-| GET /api/flag/:beachId    | handleApiFlag  | D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } }, with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
+| GET /beach/:beachId       | handleDetail   | A segment that fails the beach-id pattern (matched raw, never decoded) 404s before any read. Otherwise D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, wave, each honoring its own expiry — the wave record through liveWaveRecord over WAVE_STATE_SELECT); KV watertemp: only, with cacheTtl 3600; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 AND lat BETWEEN ?2 AND ?3 [AND lon BETWEEN ?4 AND ?5] from nearbyBounds(lat, lon), ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT). The window is a superset of the 50 mi cap and lets D1 seek idx_beaches_lon_lat, which leads with lon, so the lon predicate seeks and a lat-only query scans; the lon window is omitted when it would cross +-180 or the cap nears the pole. The rows are haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if the segment is malformed or no row |
+| GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which stamps displayFlag({ estimate, official }, nowIso).keyword (section 9) on the same liveChipState resolution the list surfaces use, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] rounded to 5 decimals }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. The 200 carries a strong SHA-256 ETag over the serialized bytes; a GET whose If-None-Match matches (etagMatches: weak comparison, comma list and * honored) answers 304 with the same ETag and cache-control and no body. There is no D1 shortcut before the hash, because no stored timestamp moves with every write that changes a marker: the body is the validator. No Vary, since Workers Cache compares Vary values verbatim and would fragment the entry per Accept-Encoding spelling. |
+| GET /api/flag/:beachId    | handleApiFlag  | A segment that fails the beach-id pattern (matched raw, never decoded) 404s before any read. Otherwise D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } }, with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
-| GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
+| GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag plus the four security headers public/_headers declares. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
 
 - /api/beaches.geojson: no query params are read — the response is the entire flag-worthy
   set. It is not personalized and takes no bbox.
-- /api/flag/:beachId: unknown beachId → 404 JSON { "error": "beach not found" }.
+- /api/flag/:beachId: a segment that is not a well-formed id, or an unknown beachId → 404
+  JSON { "error": "beach not found" }; the malformed case reads nothing.
 - D1 state reads: every route that renders a color selects over BEACH_STATE_JOIN, in one of
   two widths. A route that renders a record — the detail page and /api/flag — selects
   BEACH_STATE_SELECT and resolves the row with liveBeachState(row, nowMs), which returns
@@ -3815,30 +3898,32 @@ Routing table (method GET only; anything else → 405):
   throws, so a corrupt row degrades one beach rather than the response. beach_state's column names are all
   distinct from beaches', so FLAG_WORTHY_WATER_SQL, the LIKE clause, the proximity ORDER BY
   and WHERE id IN stay unqualified; only the SELECT list needs the b. / s. aliases.
-- KV reads: env.FLAGS.get(key, { type: "json" }); null passes through as null. Only
-  handleDetail reads KV, for "watertemp:", one single-key get.
+- KV reads: env.FLAGS.get(key, { type: "json", cacheTtl: 3600 }); null passes through as
+  null. Only handleDetail reads KV, for "watertemp:", one single-key get. The hour-long
+  per-location cache (negative lookups included) is safe because the key's only writer is
+  6-hourly and the tile's freshness gate reads observedIso, not the fetch instant.
 - Headers: HTML "content-type": "text/html; charset=utf-8"; JSON
   "content-type": "application/json" — EXCEPT /api/beaches.geojson, which sends the
   RFC 7946 GeoJSON media type "content-type": "application/geo+json; charset=utf-8"
-  (built as a hand-rolled Response so the media type is set while keeping the same
-  cacheable policy). Every response carries an explicit cache-control for the Workers
-  Cache layer ([cache] enabled in wrangler.toml):
-  - CACHEABLE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=600"
+  (built as a hand-rolled Response so the media type, the etag and the 304 branch are set
+  while keeping the same cacheable policy). Every response also carries
+  strict-transport-security, x-content-type-options, referrer-policy and
+  content-security-policy (SECURITY_HEADERS above), added in src/index.js after the error
+  boundary and never overriding a route-set name. Every response carries an explicit
+  cache-control for the Workers Cache layer ([cache] enabled in wrangler.toml):
+  - CACHEABLE = "public, max-age=60, stale-while-revalidate=60, stale-if-error=600"
     on detail-page 200s, /?ids= 200s (URL-determined: the route reads neither request.cf
-    nor q/near) and /api/flag 200s (/api/beaches.geojson has its own policy,
-    below, since its origin is one D1 scan). stale-if-error is
-    explicit because Cloudflare's default on Worker error is to serve stale indefinitely,
-    which would freeze the HTML's embedded nowIso-based staleness warnings without bound;
-    600 s caps the total stale window at ~11 min.
-  - /api/beaches.geojson has its OWN policy, not CACHEABLE:
-    "public, max-age=60, stale-while-revalidate=60, stale-if-error=600". A 600 s SWR window
-    would hide a multi-second cache-miss origin, but the origin is one D1 scan of scalar
-    columns, so it would only add up to ten minutes to the very flip latency the read-time
-    color gate was chosen to preserve. 60 s still gives single-request-per-colo-per-minute
-    herd protection.
-  - "public, max-age=60", no SWR, on the /api/flag 404 — a just-discovered beach must stop
-    404ing within a minute rather than linger for the SWR window.
-  - "no-store" on the home page, /health, and all other 404s and error pages. The home page
+    nor q/near), /api/flag 200s and /api/beaches.geojson 200s and 304s. Every cacheable
+    origin is one or two D1 statements, and Workers Cache serves stale asynchronously, so
+    max-age + stale-while-revalidate (120 s) is the oldest flag a live cached body can
+    carry and therefore the bound on flip latency. stale-if-error is explicit because
+    Cloudflare's default on Worker error is to serve stale indefinitely, which would freeze
+    the HTML's embedded nowIso-based staleness warnings without bound; its 600 s applies
+    only while the Worker fails.
+  - "public, max-age=60", no SWR, on the /api/flag 404, the malformed-id case included — a
+    just-discovered beach must stop 404ing within a minute rather than linger for the SWR
+    window.
+  - "no-store" on the home page, /health, the 405, and all other 404s and error pages. The home page
     is personalized by request.cf geolocation, which is not in the cache key and not
     expressible via Vary, so caching it would serve one visitor's proximity sort to
     everyone. The ?near= and ?ids= modes are the exceptions above, because neither reads
@@ -3853,28 +3938,36 @@ Routing table (method GET only; anything else → 405):
   split, and runNwsEnrichment / runEcccEnrichment / runWebcamSync's last_viewed DESC NULLS
   LAST candidate-queue tiebreak. The home list never stamps last_viewed; only the two
   single-beach routes do.
-- The router never fetches upstream. It imports src/frontend/render.js, src/beachState.js
-  and src/mapFeatures.js, and uses env.DB and env.FLAGS. The last_viewed UPDATE is its only
+- The router never fetches upstream. It imports src/frontend/render.js, src/beachState.js,
+  src/mapFeatures.js and src/etag.js, and uses env.DB and env.FLAGS. The last_viewed UPDATE is its only
   write; it never writes beach_state.
 - Static assets: the brand files under public/ (favicon, apple-touch icon, the two manifest
   icons, manifest.webmanifest, and the five share cards under og/) are served by Workers
-  static assets, matched before the Worker runs. There is deliberately no assets binding, so
+  static assets, matched before the Worker runs, carrying the four security headers the
+  hand-written public/_headers declares under /*; that file is never itself served. There
+  is deliberately no assets binding, so
   no module in src/ can read one; not_found_handling stays at its default, so every path
   that matches no asset still reaches handleRequest, which keeps owning "/" and every 404.
-  Regenerate the files with node scripts/build-brand-assets.js and commit them.
+  Regenerate the brand files with node scripts/build-brand-assets.js and commit them; the
+  script never writes _headers.
 
 ### wrangler.toml
 
     name = "swim-report"
     main = "src/index.js"
-    compatibility_date = "2026-07-13"
+    compatibility_date = "2026-09-08"
     routes = [
       { pattern = "swim.report", custom_domain = true }
     ]
 
+    workers_dev = false
+    preview_urls = false
+    upload_source_maps = true
+
     [observability]
     enabled = true
     head_sampling_rate = 1
+    redact_query_string = true
 
     [placement]
     mode = "smart"
@@ -3898,7 +3991,10 @@ Routing table (method GET only; anything else → 405):
     id = "d7814f3408de401e8fef467754c18381"
 
 The production Worker serves https://swim.report (custom-domain route), with Workers Logs
-observability (full head sampling) and Smart Placement enabled. The D1 and KV ids above are
+observability (full head sampling, query strings redacted from logged request URLs) and
+Smart Placement enabled. workers.dev and Preview URLs are off, since swim.report is the only
+route and previews cannot run on a custom domain; source maps are uploaded with each
+deploy. The D1 and KV ids above are
 the real production resources; all migrations are applied remotely and the
 WINDY_WEBCAM_API_TOKEN secret is set on the Worker. compatibility_date is pinned, not
 rolling — bump it occasionally.
@@ -4816,7 +4912,7 @@ test uses symbolically.
   pure parse functions against inline fixtures, including ambiguous and unknown-status rows
   being omitted, plus matches() with matching and non-matching BeachRow fixtures.
 - test/mapFeatures.test.js — mapFeatureFromRow: non-finite coords dropped, the
-  park_name/name/"" label fallback, [lon, lat] order, and PARITY against
+  park_name/name/"" label fallback, [lon, lat] order, 5-decimal rounding, and PARITY against
   displayFlag(...).keyword called directly on the same records across the whole gate. Plus
   the
   expiry rules that decide a marker: an expired estimate reading unknown rather than its
@@ -4838,6 +4934,19 @@ test uses symbolically.
   keys out of src/index.js and asserts the two are the same set. Nothing else catches a
   mismatch: an unlisted cron logs "unknown cron" and does nothing, and the reverse never
   fires at all.
+- test/wranglerConfig.test.js — the placement of workers_dev, preview_urls and
+  upload_source_maps above the first table header in wrangler.toml, and
+  redact_query_string inside [observability]: wrangler validates the types, but a
+  top-level key below a table header is silently re-parented into that table.
+- test/securityHeaders.test.js — withSecurityHeaders in place, no-clobber and the
+  immutable-headers rebuild; the four headers on every route and both boundary 500s
+  through the entry module, with each route's own cache-control and content-type intact;
+  the CSP assumptions on rendered markup (no <base>, <object>, <embed> or meta CSP, every
+  form action "/"); and public/_headers parsing to exactly SECURITY_HEADERS under one
+  pattern line.
+- test/etag.test.js — etagMatches (missing or empty false, exact and W/-prefixed, comma
+  list, *, unquoted or partial rejected) and strongEtag (the known SHA-256 of "abc",
+  determinism, moves with the body).
 - test/flagInputs.test.js — the seal's safety proof. A matrix over rip risk, wave height,
   wind, water-quality advisory, source sets, alert shapes and beach authorities, asserting
   signalsFromStanding(JSON round trip of the stored value) equals the signals the estimate was
@@ -4977,7 +5086,15 @@ test uses symbolically.
   echoes land in beach_state.estimate; and the Canadian path (an eccc_zone beach inside a
   stubbed GeoMet polygon → ECCC red plus "Environment Canada Alerts" source, no caveat;
   outside every polygon → checked-but-clear, no caveat; a failed ECCC fetch behaves like a
-  transient NWS alerts failure). It also covers the state flush: one row per beach with all
+  transient NWS alerts failure). It pins the gather shape: the three national fetches in
+  flight at once with per-authority failure isolation, no alerts or collections URL without
+  a zoned or Canadian row, a paginated NWS feed reading as no feed (unknown, no caveat,
+  alertsResolved false, the "feed paginated" line), two wq sources fetched at once, and
+  WQ_GATHER_DEADLINE_MS = 0 issuing no wq fetch and logging reached=0 of 1. A whole-run
+  failure (the opening SELECT rejecting) rejects the scheduled promise after the
+  "failed:" line, for this runner and runWaterTempRefresh here, and for the other four in
+  their own files. It also
+  covers the state flush: one row per beach with all
   four records and their leases, a run that resolved no advisory or scrape leaving the
   stored column alone, official_expires taking a scraper's officialTtlSeconds over the
   default, flag_history rows written only for beaches whose estimate chunk committed
@@ -4995,7 +5112,13 @@ test uses symbolically.
   displayFlag's keyword, /api/flag's additive display field, and the cross-surface matrix:
   list, ?ids=, nearby card, hero, share meta, geojson and /api/flag showing one displayFlag
   decision per fixture, plus builtAt as the newest live estimate_updated (null when none),
-  and its cache-control. It
+  its cache-control, its ETag (shape, determinism, moving on a flag flip), the 304 on a
+  matching If-None-Match (W/, comma list and *) and the 5-decimal rounding. It covers the
+  shared CACHEABLE directives (max-age + stale-while-revalidate <= 120, finite
+  stale-if-error) across the five cacheable routes, the malformed /beach and /api/flag
+  segments 404ing against a DB whose prepare throws, the nearby query's lat/lon window
+  (both windows bound, the lon window dropped at +-180, every point on the 50 mi cap inside
+  the box) and the watertemp: get's exact { type, cacheTtl } options. It
   also covers the ?ids= list mode: parameter binding behind the flag-worthy gate, the
   caller's order restored over SQLite's, unknown and malformed ids skipped, the 10-id cap,
   the CACHEABLE header, the absent data-complete, and the absent last_viewed stamp.

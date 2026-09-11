@@ -23,10 +23,9 @@ export const ECCC_API_BASE = "https://api.weather.gc.ca";
 // can reach the operator before throttling. Mirrors nws.js NWS_USER_AGENT.
 export const ECCC_USER_AGENT = "swim.report (https://swim.report)";
 
-// An unbounded fetch lets a single hung socket run a cron to the 900 s scheduled
-// ceiling, because http.js arms its AbortController only when timeoutMs > 0. Both
-// GeoMet calls behind this constant are bulk national collections, so the budget
-// is generous: it bounds the invocation, it does not police latency.
+// Overrides http.js's DEFAULT_TIMEOUT_MS for GeoMet. Both calls behind this
+// constant are bulk national collections, so the budget is generous: it bounds
+// the invocation, it does not police latency.
 export const ECCC_TIMEOUT_MS = 45000;
 // Human-readable alerts page for source { url } entries shown to visitors.
 export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";

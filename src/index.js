@@ -56,6 +56,7 @@ import {
   chunkStatements
 } from "./beachState.js";
 import { makeDeadline, runPool } from "./pool.js";
+import { withSecurityHeaders } from "./securityHeaders.js";
 
 // Rows per hourly run. The cap bounds one run's wall clock and its D1 batch
 // budget against the 900 s scheduled ceiling; it does not have to cover the table.
@@ -143,9 +144,20 @@ const WAVE_WRITE_DEADLINE_MS = 840000;
 // healthy nation of 60+ WFOs finishes in seconds and this only trips when
 // several sockets hang at once. A WFO the pool never reaches gets a null entry,
 // which is the same outcome as its own fetch failing: no rip input, never a
-// wrong color. Sits after the three 45 s national alert fetches and leaves the
-// per-beach pool most of the 900 s ceiling.
+// wrong color. Sits after the concurrent national alert gather, itself bounded
+// at one 45 s client timeout, and leaves the per-beach pool most of the 900 s
+// ceiling.
 const SRF_GATHER_DEADLINE_MS = 120000;
+// Wall-clock budget for the hourly's water-quality gather, anchored at the
+// step's start. One scrape per registered wqFloor source through the same pool;
+// a source the deadline leaves unreached keeps its pre-seeded null, the same
+// outcome as its own fetch failing: no floor, never a wrong color. The pool
+// checks the budget only between sources, so with the registry smaller than the
+// pool width every source starts at once and this trips only once the registry
+// outgrows the width; each source's own fetch timeouts, not this budget, bound
+// an in-flight scrape. Numeric env override (WQ_GATHER_DEADLINE_MS) for the
+// same reason runBudget has one.
+const WQ_GATHER_DEADLINE_MS = 120000;
 // Ids per wave_updated D1 batch. The flush must be incremental: a single batch
 // after the loop never runs when the invocation is killed mid-loop, so the cursor
 // never moves and the same prefix of beaches is reprocessed every run forever.
@@ -433,6 +445,8 @@ async function runFlagRecompute(env) {
   const nowIso = new Date().toISOString();
   const nowMs = Date.parse(nowIso);
   const nowEpoch = Math.floor(nowMs / 1000);
+  const wqGatherDeadlineMs = env && typeof env.WQ_GATHER_DEADLINE_MS === "number"
+    ? env.WQ_GATHER_DEADLINE_MS : WQ_GATHER_DEADLINE_MS;
   // Descriptors for the two beach_state flushes. A record this run did not
   // produce is simply absent: the upsert COALESCEs, so expiry stays the only
   // retraction path for a cleared advisory, official or reading. They are
@@ -466,9 +480,10 @@ async function runFlagRecompute(env) {
 
     // Step 3: alerts — one national fetch, matched to the run's distinct zone ids
     // locally. Costs a single subrequest regardless of zone count, so nationwide
-    // scale-out never multiplies alert calls. A failed fetch maps every zone to
-    // null, leaving per-beach alertsCheckable true. Each zone's entry keeps the
-    // zone-scoped provenance URL for its beaches' source entries.
+    // scale-out never multiplies alert calls. A failed, thrown or paginated fetch
+    // maps every zone to null, leaving per-beach alertsCheckable true and sealing
+    // alertsResolved false so the refresh re-selects the row. Each zone's entry
+    // keeps the zone-scoped provenance URL for its beaches' source entries.
     //
     // A beach's land forecast zone (nws_zone, "MIZ056") and its adjacent marine
     // zone (marine_zone, "LMZ874") go through the same map: marine warnings and
@@ -481,15 +496,59 @@ async function runFlagRecompute(env) {
           .filter(function (z) { return z !== null && z !== undefined; })
       )
     );
+
+    // Step 3b: ECCC alerts for Canadian beaches (eccc_zone set by the ECCC
+    // enrichment cron; such rows always have nws_zone NULL). One national fetch
+    // returns every active alert with its region polygon and per-beach matching
+    // is a local point-in-polygon in step 7, so this costs a single subrequest
+    // regardless of beach count. Skipped when the run has no Canadian rows; null
+    // means the fetch failed and alertsCheckable stays true. ECCC marine
+    // warnings come from a separate GeoMet collection, disjoint from the land
+    // weather-alerts one, matched locally per beach in step 7.
+    //
+    // The three national fetches are issued concurrently, so the phase costs one
+    // client timeout rather than three; each promise carries its own catch, so
+    // one authority's failure nulls only its own result. The clients are async
+    // data-or-null functions, so Promise.all cannot reject.
+    const ecccBeaches = beaches.filter(function (b) {
+      return !b.nws_zone && b.eccc_zone;
+    });
+    const fetched = await Promise.all([
+      zones.length > 0
+        ? fetchAllActiveAlerts().catch(function (err) {
+          console.log("index: nws alerts fetch threw: " + err.message);
+          return null;
+        })
+        : Promise.resolve(null),
+      ecccBeaches.length > 0
+        ? fetchActiveEcccAlerts(nowIso).catch(function (err) {
+          console.log("index: eccc alerts fetch threw: " + err.message);
+          return null;
+        })
+        : Promise.resolve(null),
+      ecccBeaches.length > 0
+        ? fetchActiveEcccMarineAlerts(nowIso).catch(function (err) {
+          console.log("index: eccc marine alerts fetch threw: " + err.message);
+          return null;
+        })
+        : Promise.resolve(null)
+    ]);
+    let nationalAlerts = fetched[0];
+    const ecccAlerts = fetched[1];
+    const ecccMarineAlerts = fetched[2];
+    // A paginated /alerts/active response is a partial view of the population,
+    // so it reads as no feed at all: a zone past the page boundary would
+    // otherwise be sealed as checked with none active. The refresh reads it the
+    // same way.
+    if (nationalAlerts !== null && nationalAlerts.truncated === true) {
+      console.log(
+        "index: nws alerts feed paginated, features=" + String(nationalAlerts.featureCount) +
+        " parsed=" + String(nationalAlerts.alerts.length) + "; treating as no feed"
+      );
+      nationalAlerts = null;
+    }
     const alertsMap = new Map();
     if (zones.length > 0) {
-      let nationalAlerts = null;
-      try {
-        nationalAlerts = await fetchAllActiveAlerts();
-      } catch (err) {
-        console.log("index: nws alerts fetch threw: " + err.message);
-        nationalAlerts = null;
-      }
       for (const zone of zones) {
         if (nationalAlerts === null) {
           alertsMap.set(zone, null);
@@ -501,36 +560,6 @@ async function runFlagRecompute(env) {
             sourceUrl: alertsUrlForZone(zone)
           });
         }
-      }
-    }
-
-    // Step 3b: ECCC alerts for Canadian beaches (eccc_zone set by the ECCC
-    // enrichment cron; such rows always have nws_zone NULL). One national fetch
-    // returns every active alert with its region polygon and per-beach matching
-    // is a local point-in-polygon in step 7, so this costs a single subrequest
-    // regardless of beach count. Skipped when the run has no Canadian rows; null
-    // means the fetch failed and alertsCheckable stays true.
-    const ecccBeaches = beaches.filter(function (b) {
-      return !b.nws_zone && b.eccc_zone;
-    });
-    let ecccAlerts = null;
-    let ecccMarineAlerts = null;
-    if (ecccBeaches.length > 0) {
-      try {
-        ecccAlerts = await fetchActiveEcccAlerts(nowIso);
-      } catch (err) {
-        console.log("index: eccc alerts fetch threw: " + err.message);
-        ecccAlerts = null;
-      }
-      // ECCC marine warnings come from a separate GeoMet collection, disjoint
-      // from the land weather-alerts one. Own try/catch so a marine-fetch failure
-      // never nulls the land alerts or the reverse; one national fetch, matched
-      // locally per beach in step 7.
-      try {
-        ecccMarineAlerts = await fetchActiveEcccMarineAlerts(nowIso);
-      } catch (err) {
-        console.log("index: eccc marine alerts fetch threw: " + err.message);
-        ecccMarineAlerts = null;
       }
     }
 
@@ -598,8 +627,8 @@ async function runFlagRecompute(env) {
       }
     }
 
-    // Step 5b: water-quality floor gather, mirroring the step-8 official-scraper
-    // grouping: group beaches by their matching wqFloor source and fetch each
+    // Step 5b: water-quality floor gather, grouped like the step-8 official
+    // scrapers: group beaches by their matching wqFloor source and fetch each
     // source once per run, so a table-wide advisory source costs one fetch. The
     // resolved advisory feeds estimateFlag's waterQualityAdvisory input
     // (rules.js step 7) as a raise-only floor, so it must be in hand before the
@@ -619,16 +648,31 @@ async function runFlagRecompute(env) {
         }
       }
     }
+    // The sources run through the pool at KV_WRITE_CONCURRENCY (~6 in flight),
+    // so the phase costs the longest single source's internal chain rather than
+    // the sum. Every source is pre-seeded null, so one the deadline leaves
+    // unreached resolves exactly like a failed scrape. The sources share no
+    // mutable state and hold no scraperhealth-style KV read-modify-write, which
+    // is why this loop may be pooled while the step-8 scraper loop must not be.
     const wqResultsBySource = new Map();
-    for (const wqSource of wqDistinctSources.values()) {
-      let wqResult = null;
+    const wqSourceList = Array.from(wqDistinctSources.values());
+    for (const wqSource of wqSourceList) {
+      wqResultsBySource.set(wqSource.id, null);
+    }
+    const wqDeadline = makeDeadline(Date.now(), wqGatherDeadlineMs);
+    const wqReached = await runPool(wqSourceList, KV_WRITE_CONCURRENCY, async function (wqSource) {
       try {
-        wqResult = await wqSource.scrape(nowIso);
+        wqResultsBySource.set(wqSource.id, await wqSource.scrape(nowIso));
       } catch (err) {
         console.log("index: wqFloor scrape threw for " + wqSource.id + ": " + err.message);
-        wqResult = null;
+        wqResultsBySource.set(wqSource.id, null);
       }
-      wqResultsBySource.set(wqSource.id, wqResult);
+    }, wqDeadline);
+    if (wqReached < wqSourceList.length) {
+      console.log(
+        "index: wqFloor gather deadline reached=" + String(wqReached) +
+        " of " + String(wqSourceList.length) + " sources"
+      );
     }
 
     // Step 6: per-beach estimate, isolated failures, through the bounded pool
@@ -1002,6 +1046,7 @@ async function runFlagRecompute(env) {
     );
   } catch (err) {
     console.log("index: flag recompute failed: " + err.message);
+    throw err;
   }
 }
 
@@ -1100,7 +1145,7 @@ async function runAlertRefresh(env) {
     const ecccMarineAlerts = fetched[2];
     // A paginated /alerts/active response is a partial view of the population, so
     // it reads as no feed at all: recomputing against it would clear every zone
-    // past the page boundary.
+    // past the page boundary. The hourly reads it the same way.
     nwsOk = nationalAlerts !== null && nationalAlerts.truncated !== true;
     // Stricter than the hourly's deliberate proceed-on-partial-success: at 6x
     // cadence a marine-collection outage would repeatedly recompute Canadian
@@ -1313,6 +1358,7 @@ async function runAlertRefresh(env) {
     logComplete();
   } catch (err) {
     console.log("index: alert refresh failed: " + err.message);
+    throw err;
   }
 }
 
@@ -1495,6 +1541,7 @@ async function runWaterTempRefresh(env) {
     );
   } catch (err) {
     console.log("index: water temp refresh failed: " + err.message);
+    throw err;
   }
 }
 
@@ -1659,6 +1706,7 @@ async function runNwsEnrichment(env) {
     );
   } catch (err) {
     console.log("index: nws enrichment failed: " + err.message);
+    throw err;
   }
 }
 
@@ -1747,6 +1795,7 @@ async function runEcccEnrichment(env) {
     );
   } catch (err) {
     console.log("index: eccc enrichment failed: " + err.message);
+    throw err;
   }
 }
 
@@ -1898,13 +1947,14 @@ async function runWebcamSync(env) {
     );
   } catch (err) {
     console.log("index: webcam sync failed: " + err.message);
+    throw err;
   }
 }
 
 // Cron dispatch table, paired with the scheduled triggers in wrangler.toml. Each
-// entry carries a runner and the label used in the top-level throw log; the
-// unknown-cron fallback below is the single place an unrecognized trigger is
-// logged.
+// entry carries a runner and the label used in the top-level throw log, which
+// precedes the rethrow that fails the invocation; the unknown-cron fallback
+// below is the single place an unrecognized trigger is logged.
 const CRON_JOBS = {
   "7 * * * *": { run: runFlagRecompute, label: "flag recompute" },
   "3-53/10 * * * *": { run: runAlertRefresh, label: "alert refresh" },
@@ -1920,34 +1970,43 @@ export default {
     // Cloudflare's generic error page instead of the project's own. Renders a 500
     // in the same shape as the route's success case — a JSON body for /api/
     // routes, renderErrorPage HTML otherwise — always no-store so a transient
-    // error is never cached.
+    // error is never cached. The security headers are applied after the
+    // boundary, so the 500s carry them too.
+    let response;
     try {
-      return await handleRequest(request, env, ctx);
+      response = await handleRequest(request, env, ctx);
     } catch (err) {
       console.log("index: request handler threw: " + err.message);
       const path = new URL(request.url).pathname;
       if (path.indexOf("/api/") === 0) {
-        return Response.json(
+        response = Response.json(
           { error: "internal error" },
           { status: 500, headers: { "cache-control": "no-store" } }
         );
+      } else {
+        const html = renderErrorPage({ status: 500, message: "Something went wrong." });
+        response = new Response(html, {
+          status: 500,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store"
+          }
+        });
       }
-      const html = renderErrorPage({ status: 500, message: "Something went wrong." });
-      return new Response(html, {
-        status: 500,
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store"
-        }
-      });
     }
+    return withSecurityHeaders(response);
   },
+  // A whole-run failure is logged here and then rejects the waitUntil promise,
+  // which is what records the invocation as failed in Cron Past Events and the
+  // invocations view; per-unit isolation inside each runner still swallows its
+  // own failures. Cloudflare documents no retry for a failed cron invocation.
   scheduled: function (controller, env, ctx) {
     const job = CRON_JOBS[controller.cron];
     if (job) {
       ctx.waitUntil(
         job.run(env).catch(function (err) {
           console.log("index: scheduled " + job.label + " threw: " + err.message);
+          throw err;
         })
       );
     } else {
