@@ -225,6 +225,26 @@ export function makeD1(options) {
       insert.run.apply(insert, values);
     },
 
+    // Seeds one beach's wave record with a live lease. expiresEpoch defaults to a
+    // series lease measured from the record's own startIso, matching the offline
+    // writer; pass it explicitly to age the record out. Merges into the row's
+    // existing columns, because seedState replaces the whole row.
+    seedWave: function (beachId, record, expiresEpoch) {
+      const existing = env.stateOf(beachId) || {};
+      const startMs = record && typeof record.startIso === "string"
+        ? Date.parse(record.startIso)
+        : NaN;
+      const fallback = Number.isFinite(startMs)
+        ? Math.floor(startMs / 1000) + 86400
+        : Math.floor(Date.now() / 1000) + 86400;
+      const fields = Object.assign({}, existing, {
+        wave: record,
+        wave_expires: expiresEpoch === undefined ? fallback : expiresEpoch
+      });
+      delete fields.beach_id;
+      env.seedState(beachId, fields);
+    },
+
     stateOf: function (beachId) {
       return plainRow(
         sqlite.prepare("SELECT * FROM beach_state WHERE beach_id = ?1").get(beachId)

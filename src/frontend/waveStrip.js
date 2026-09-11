@@ -223,8 +223,8 @@ const HAZARD_STYLES = {
 // alert overlapping the trimmed window (positioned by its onset/ends period),
 // plus a full-window band for a HIGH/MODERATE rip-current risk (the SRF
 // product carries no parseable period, so its text names the source instead
-// of claiming one). estimate is the FlagEstimate KV payload — legacy payloads
-// without alertDetails/ripCurrentRisk simply produce no bands. Colors come
+// of claiming one). estimate is the stored FlagEstimate record — one without
+// alertDetails/ripCurrentRisk simply produces no bands. Colors come
 // from rules.js (alertColorForEvent / ripRiskColor), never restated here.
 // -> [{ kind, label, text, leftPct, widthPct, bgVar, fgVar, edgeVar }]
 export function computeHazardBands(estimate, totalHours, nowIso) {

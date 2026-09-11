@@ -7,7 +7,7 @@ dist/
 .marine-snapshot.json
 .marine.sql
 .wavegrids/
-.wavekv/
+.wavesql/
 .wave-snapshot.json
 .layers/
 coverage/

@@ -3,9 +3,10 @@
 // the m/s -> mph conversion the GRIB path needs.
 //
 // Offline only. Nothing in the Worker's import closure may import this module: it
-// exists for scripts/sample-waves.js and scripts/build-wave-manifest.js, which run
-// on Deno inside .github/workflows/waves.yml. The Worker request path reads only
-// D1 and KV, and the cron path reads the KV this pipeline writes.
+// exists for scripts/fetch-wave-grids.js, scripts/sample-waves.js,
+// scripts/build-wave-manifest.js and scripts/build-wave-sql.js, which run on Deno
+// inside .github/workflows/waves.yml. The Worker request path reads only D1 and
+// KV, and the cron path reads the beach_state.wave record this pipeline writes.
 //
 // The units contract. HTSGW is metres; feet = metres * 3.28084 (metersToFeet,
 // src/geo.js). WIND is metres per second; mph = m/s * 2.2369362920544

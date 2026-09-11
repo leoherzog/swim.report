@@ -3,8 +3,8 @@
 //
 // Nothing else under test/ reads either file, and both failure modes are silent in
 // production. A grid set with no floors entry withholds auto-publish: the scheduled
-// cycle goes green with one annotation while every waveinput: key on the site expires
-// on its 24 h lease. A grid with no committed identity block refuses the cycle
+// cycle goes green with one annotation while every stored wave record on the site
+// expires on its 24 h lease. A grid with no committed identity block refuses the cycle
 // outright, before any artifact uploads. A grid missing from a floors entry's grids
 // map is worse than either, because perGridFloorRefusals and perGridFloorStatus both
 // iterate that map rather than GRIDS: the grid is unfloored forever with no refusal,

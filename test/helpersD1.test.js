@@ -10,7 +10,9 @@ describe("makeD1", function () {
   it("applies every migration", async function () {
     const env = makeD1();
     const cols = await env.prepare("PRAGMA table_info(beach_state)").all();
-    expect(cols.results.map(function (c) { return c.name; })).toContain("estimate_expires");
+    const names = cols.results.map(function (c) { return c.name; });
+    expect(names).toContain("estimate_expires");
+    expect(names).toContain("wave_expires");
     const beachCols = await env.prepare("PRAGMA table_info(beaches)").all();
     expect(beachCols.results.map(function (c) { return c.name; })).toContain("marine_zone");
   });
@@ -60,6 +62,28 @@ describe("makeD1", function () {
     expect(rows.results[1].estimate).toBeNull();
     expect(env.stateOf("b1").estimate_color).toBe("yellow");
     expect(env.stateOf("b2")).toBeNull();
+  });
+
+  it("seeds a wave record without wiping the columns already seeded", async function () {
+    const env = makeD1();
+    env.seedBeaches([{ id: "b1" }]);
+    env.seedState("b1", {
+      estimate: { color: "yellow", updated: "2026-09-09T12:00:00Z" },
+      estimate_color: "yellow",
+      estimate_expires: 1750025200
+    });
+    const record = { beachId: "b1", startIso: "2026-09-09T06:00:00Z", hoursFt: [1.2] };
+    env.seedWave("b1", record);
+
+    const row = env.stateOf("b1");
+    expect(JSON.parse(row.wave)).toEqual(record);
+    expect(row.wave_expires).toBe(Math.floor(Date.parse(record.startIso) / 1000) + 86400);
+    expect(row.estimate_color).toBe("yellow");
+    expect(row.estimate_expires).toBe(1750025200);
+
+    env.seedWave("b1", record, 42);
+    expect(env.stateOf("b1").wave_expires).toBe(42);
+    expect(env.stateOf("b1").estimate_color).toBe("yellow");
   });
 
   it("returns D1 shapes from all, first and run", async function () {

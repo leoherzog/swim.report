@@ -9,15 +9,15 @@
 //
 // It re-reads the two emitted NDJSON artifacts, applies every gate, and either
 // writes manifest.json or exits 1 with a specific reason. The manifest carries each
-// artifact's byte count and sha256, which scripts/build-wave-kv.js verifies before
-// parsing a record. A refused cycle fails safe: no KV is written, waves/current.json
-// stays on the last good cycle, and that cycle's KV rides an expiration derived from
-// its own model valid time, so the failure mode is a flag aging out to unknown
-// rather than a stale wave height deciding a color.
+// artifact's byte count and sha256, which scripts/build-wave-sql.js verifies before
+// parsing a record. A refused cycle fails safe: no rows are written,
+// waves/current.json stays on the last good cycle, and that cycle's stored records
+// ride an expiration derived from their own model valid time, so the failure mode is
+// a flag aging out to unknown rather than a stale wave height deciding a color.
 //
 // Everything that could produce a wrong number is non-overridable: grid identity,
 // band identity, valid times, the sentinel scan, series alignment, the distribution
-// checks and the KV pair spelling. A flag an operator reaches for during an incident
+// checks and the lease arithmetic. A flag an operator reaches for during an incident
 // must not wave a wrong wave height into src/rules.js. Everything that is merely
 // less data is overridable by --allow-shrink and warns: the coverage floors, the
 // per-grid floors and the two ratios. The minimum record rails are the exception in
@@ -47,7 +47,7 @@
 import {
   WAVE_SCHEMA_VERSION,
   EXPECTED_WAVE_ARTIFACTS,
-  WAVE_KV_LEASE_SECONDS,
+  WAVE_SCALAR_LEASE_SECONDS,
   WAVE_SERIES_LEASE_SECONDS
 } from "../src/waveManifest.js";
 import {
@@ -102,14 +102,6 @@ export const MAX_EMITTED_FT = 100;
 export const MAX_EMITTED_MPH = 200;
 
 export const ATTRIBUTION = "NOAA / NWS / NCEP — US Government work, public domain";
-
-// The KV pair fields the pinned wrangler validator accepts. It warns and exits 0 on
-// an unexpected property, so a camelCase expirationTtl — the spelling the Worker
-// runtime uses, making it the likeliest mistake here — is silently dropped and the
-// key never expires. runFlagRecompute never reads waveinput.updated, so expiration is
-// the only staleness control on the color path and that key would color flags from
-// dead data indefinitely.
-export const ALLOWED_PAIR_FIELDS = ["key", "value", "expiration", "expiration_ttl", "base64", "metadata"];
 
 // --- small pure helpers ---------------------------------------------------------------
 
@@ -335,7 +327,8 @@ export function validTimeRefusals(bands, validStartEpoch) {
 
 // Rescans the emitted records rather than trusting the sampler's summary, covering
 // waveinput.waveHeightFt, waveinput.windSpeedMph and every waves.hoursFt cell, which
-// is every number that will reach a KV value. waves.byModel[gridId] and hoursFt are
+// is every number that will reach a stored wave record. waves.byModel[gridId] and
+// hoursFt are
 // the same array object assigned twice by the sampler, so byModel is not scanned
 // separately.
 //
@@ -347,7 +340,7 @@ export function validTimeRefusals(bands, validStartEpoch) {
 // over waves.hoursFt. The sampler assigns one array to both, so what makes the walk
 // cover the color path is seriesMismatches: every series-bearing waveinput must have a
 // waves record whose cells are identical. A series with no counterpart, or one that
-// diverged across the NDJSON round trip, would reach KV unscanned.
+// diverged across the NDJSON round trip, would reach production unscanned.
 //
 // Wind is counted in its own fields: folding mph into the height distribution would
 // make meanWaveFt and distinctWaveValues a mixed measurement, and a constant wave
@@ -596,12 +589,12 @@ export function distributionRefusals(stats) {
   return out;
 }
 
-// The KV pair spelling gate, applied twice: here against the cycle's expiration
-// arithmetic, and in scripts/build-wave-kv.js against every pair it emits.
+// The lease arithmetic gate: the cycle's two expiration epochs are exactly the two
+// leases measured from the model valid time. scripts/build-wave-sql.js then checks
+// every emitted row's wave_expires against those same two numbers.
 //
-//   input = { kvExpirationEpoch, kvScalarExpirationEpoch, validStartEpoch, pairs }
+//   input = { kvExpirationEpoch, kvScalarExpirationEpoch, validStartEpoch }
 //
-// pairs may be empty at manifest time; the epoch arithmetic is checked either way.
 // Absolute expiration, never a TTL: a TTL measured from write time is wrong for a
 // scheduler that skips occurrences, because a run firing 9 h late would grant a
 // fresh lease to data already 9 h old.
@@ -615,7 +608,7 @@ export function ttlSpellingRefusals(input) {
   const validStartEpoch = isPlainObject(input) ? input.validStartEpoch : null;
   const epochs = [
     { field: "kvExpirationEpoch", lease: WAVE_SERIES_LEASE_SECONDS },
-    { field: "kvScalarExpirationEpoch", lease: WAVE_KV_LEASE_SECONDS }
+    { field: "kvScalarExpirationEpoch", lease: WAVE_SCALAR_LEASE_SECONDS }
   ];
   if (!isFiniteNumber(validStartEpoch)) {
     out.push(refusal("ttlSpelling", "cycle", "validStartEpoch is not a finite number", false));
@@ -628,36 +621,6 @@ export function ttlSpellingRefusals(input) {
       } else if (value !== validStartEpoch + epochs[e].lease) {
         out.push(refusal("ttlSpelling", "cycle", epochs[e].field + " " + String(value) +
           " is not validStartEpoch + " + String(epochs[e].lease), false));
-      }
-    }
-  }
-  const pairs = isPlainObject(input) && Array.isArray(input.pairs) ? input.pairs : [];
-  for (let i = 0; i < pairs.length; i = i + 1) {
-    const pair = pairs[i];
-    const subject = isPlainObject(pair) && typeof pair.key === "string"
-      ? pair.key : "pair " + String(i);
-    if (!isPlainObject(pair)) {
-      out.push(refusal("ttlSpelling", subject, "pair is not an object", false));
-      continue;
-    }
-    if (typeof pair.key !== "string" || pair.key === "") {
-      out.push(refusal("ttlSpelling", subject, "key is not a non-empty string", false));
-    }
-    // The validator rejects a nested-object value outright, which fails loudly, but
-    // only a string is ever correct, so it is asserted here too.
-    if (typeof pair.value !== "string") {
-      out.push(refusal("ttlSpelling", subject, "value is " + typeof pair.value +
-        ", not a JSON string", false));
-    }
-    if (!isFiniteNumber(pair.expiration)) {
-      out.push(refusal("ttlSpelling", subject, "expiration is not a number", false));
-    }
-    const fields = Object.keys(pair);
-    for (let f = 0; f < fields.length; f = f + 1) {
-      if (ALLOWED_PAIR_FIELDS.indexOf(fields[f]) === -1) {
-        // wrangler warns and exits 0 on an unexpected property, so a camelCase
-        // expirationTtl writes a key that never expires. Refuse here instead.
-        out.push(refusal("ttlSpelling", subject, "unexpected pair field " + fields[f], false));
       }
     }
   }
@@ -1119,8 +1082,7 @@ export function evaluateWaveGates(input) {
   const ttl = ttlSpellingRefusals({
     validStartEpoch: input.validStartEpoch,
     kvExpirationEpoch: input.kvExpirationEpoch,
-    kvScalarExpirationEpoch: input.kvScalarExpirationEpoch,
-    pairs: []
+    kvScalarExpirationEpoch: input.kvScalarExpirationEpoch
   });
 
   // The global floor and the global ratios measure the whole cycle, so they are
@@ -1452,7 +1414,7 @@ export async function main() {
   };
   const validStartEpoch = sampleReport.validStartEpoch;
   const kvExpirationEpoch = validStartEpoch + WAVE_SERIES_LEASE_SECONDS;
-  const kvScalarExpirationEpoch = validStartEpoch + WAVE_KV_LEASE_SECONDS;
+  const kvScalarExpirationEpoch = validStartEpoch + WAVE_SCALAR_LEASE_SECONDS;
 
   const history = buildHistory(previousManifest, args.retain);
   const oldest = oldestRetained(history);
@@ -1493,7 +1455,8 @@ export async function main() {
     }
     throw new Error("build-wave-manifest: refusing to publish: " +
       String(verdict.refusals.length) + " gate(s) failed — waves/current.json stays on the " +
-      "last good cycle, whose KV rides an expiration derived from its own model valid time");
+      "last good cycle, whose stored records ride an expiration derived from their own " +
+      "model valid time");
   }
 
   const gridEntries = [];

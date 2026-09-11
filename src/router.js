@@ -7,9 +7,11 @@ import { displayFlag } from "./displayFlag.js";
 import {
   BEACH_STATE_SELECT,
   CHIP_STATE_SELECT,
+  WAVE_STATE_SELECT,
   BEACH_STATE_JOIN,
   liveBeachState,
-  liveChipState
+  liveChipState,
+  liveWaveRecord
 } from "./beachState.js";
 
 // Re-exported so existing importers keep working.
@@ -158,8 +160,12 @@ const LIKE_WHERE =
 // The beach row plus its derived state in one read. beach_state's column names
 // are all distinct from beaches', so every WHERE, ORDER BY and LIKE clause below
 // stays unqualified; only the splat needs the alias.
+//
+// The detail route is one of the two readers of the wave record, so it carries
+// WAVE_STATE_SELECT on top: the 24 h series it draws rides the same read.
 const BEACH_WITH_STATE_FROM =
-  "SELECT b.*, " + BEACH_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN;
+  "SELECT b.*, " + BEACH_STATE_SELECT + ", " + WAVE_STATE_SELECT +
+  " FROM beaches b" + BEACH_STATE_JOIN;
 
 // The same read for the list surfaces, which render one displayFlag decision per
 // row from the scalar mirror columns instead of the four JSON blobs.
@@ -409,13 +415,12 @@ async function handleDetail(env, ctx, beachId) {
   }
   touchLastViewed(env, ctx, beach);
   const nowMs = Date.now();
-  // The estimate, the official flag, the water-quality advisory and the
-  // point-in-time reading all came back on the row above. The 24 h wave-forecast
-  // series, the NDBC water temperature and the nearby-beach rows are
-  // detail-page-only reads: the list page must never gain a per-row KV get, and
-  // /api/flag must not gain the advisory.
+  // The estimate, the official flag, the water-quality advisory, the
+  // point-in-time reading and the 24 h wave series all came back on the row
+  // above. The NDBC water temperature and the nearby-beach rows are the detail
+  // page's only extra reads: the list page must never gain a per-row KV get, and
+  // /api/flag must not gain the advisory or the series.
   const results = await Promise.all([
-    env.FLAGS.get("waves:" + beachId, { type: "json" }),
     env.FLAGS.get("watertemp:" + beachId, { type: "json" }),
     nearbyBeaches(env, beach, nowMs)
   ]);
@@ -424,11 +429,11 @@ async function handleDetail(env, ctx, beachId) {
     beach: beach,
     estimate: state.estimate,
     official: state.official,
-    waves: results[0],
-    waterTemp: results[1],
+    waves: liveWaveRecord(beach, nowMs),
+    waterTemp: results[0],
     reading: state.reading,
     wqfloor: state.wqfloor,
-    nearby: results[2],
+    nearby: results[1],
     nowIso: new Date(nowMs).toISOString()
   });
   return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);

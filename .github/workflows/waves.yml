@@ -1,15 +1,15 @@
 name: Wave cycle
 
 # Pulls one NOAA GRIB2 wave cycle, point-samples it against the beach table, hands
-# the result from the sample job to the publish-kv job as a workflow artifact, and
-# bulk writes it into the "waveinput:" / "waves:" KV the hourly flag cron already
-# reads. The swim-report R2 bucket (public at https://map.swim.report) keeps only
+# the result from the sample job to the publish-d1 job as a workflow artifact, and
+# applies it as a SQL delta into the beach_state.wave column the hourly flag cron
+# already reads. The swim-report R2 bucket (public at https://map.swim.report) keeps only
 # what must outlive the run: each published cycle's manifest.json, which the next
 # cycle's shrink and decay gates ratio against, and the waves/current.json pointer
 # that names it. The NDJSON never leaves the run.
 #
 # Never color-bearing on failure. This job never writes a flag color. A failed or
-# refused cycle leaves the previous cycle's KV in place under an expiration derived
+# refused cycle leaves the previous cycle's rows in place under an expiration derived
 # from the model valid time, so the failure mode is the flag aging out to unknown —
 # gray and honest — never a stale wave height deciding a color. That is also what
 # sorts the gates: everything that could produce a wrong number is non-overridable,
@@ -19,16 +19,16 @@ name: Wave cycle
 # public domain, and only then is the small waves/current.json pointer overwritten, so
 # the pointer never names a manifest that is not there.
 #
-# Absolute expiration, never a TTL, and one of two leases per record. A waveinput
+# Absolute wave_expires, never a TTL, and one of two leases per record. A record
 # carrying the hourly series expires at validStartEpoch + 86400, the span it
 # describes, because runFlagRecompute indexes it at the hour it is estimating
-# (src/waveInput.js); the waves: series key shares that lease, since the detail-page
-# strip trims itself to the hours from now forward. A wind-only waveinput is one
-# hour-0 sample with no series behind it and keeps the short validStartEpoch + 25200.
-# Neither reads waveinput.updated, so expiration and the hour index are the whole
-# staleness control on the color path. A TTL measured from write time would be wrong
-# for a scheduler that skips occurrences: a run firing 9 h late would grant a fresh
-# lease to data already 9 h old.
+# (src/waveInput.js); the detail-page strip rides the same lease, since it trims
+# itself to the hours from now forward. A wind-only record is one hour-0 sample with
+# no series behind it and keeps the short validStartEpoch + 25200.
+# Neither reads the record's updated field, so wave_expires and the hour index are the
+# whole staleness control on the color path. A TTL measured from write time would be
+# wrong for a scheduler that skips occurrences: a run firing 9 h late would grant a
+# fresh lease to data already 9 h old.
 #
 # GitHub skips schedule occurrences rather than merely deferring them, so the cadence
 # must tolerate consecutive misses and not merely late runs. Four slots a day against
@@ -38,10 +38,10 @@ name: Wave cycle
 # across consecutive cycles.
 #
 # Repository secrets, split so neither job holds both halves and the job that can
-# write production KV cannot write R2. sample reads CLOUDFLARE_R2_ACCESS_KEY and
+# write production D1 cannot write R2. sample reads CLOUDFLARE_R2_ACCESS_KEY and
 # CLOUDFLARE_R2_SECRET_ACCESS_KEY plus CLOUDFLARE_D1_READ_TOKEN, a read-scoped D1
-# token rather than the edit-scoped one discovery.yml uses. publish-kv reads
-# CLOUDFLARE_KV_WRITE_TOKEN, which carries Workers KV Storage: Edit, and no AWS keys.
+# token rather than the edit-scoped one discovery.yml uses. publish-d1 reads
+# CLOUDFLARE_D1_EDIT_TOKEN, the same secret discovery.yml uses, and no AWS keys.
 # The artifact handoff between them needs no secret at all.
 #
 # It needs no npm private-registry tokens: it never runs npm install in the repo root,
@@ -51,8 +51,8 @@ name: Wave cycle
 on:
   # 4 slots a day, matching the 4 GFS cycles and the 24 h series each one publishes.
   # Every landed cycle covers a full day of hourly estimates, so slots buy margin
-  # against missed occurrences rather than freshness, and each one costs a full bulk
-  # write of roughly two KV pairs per resolved beach. Minute 52 is clear of every
+  # against missed occurrences rather than freshness, and each one costs one D1 row
+  # per resolved beach. Minute 52 is clear of every
   # existing cron minute in this repo (7, 15, 17, 29, 31, 41, 47) and off the
   # congested top of the hour. The cron picks no model cycle: a runtime resolver walks
   # GFS cycles newest-first and takes the first whose f(k)..f(k+23) all exist, so job
@@ -66,7 +66,7 @@ on:
         type: boolean
         default: true
       apply:
-        description: "Bulk write the KV pairs (false = gate and emit the chunks only)"
+        description: "Apply the wave delta to production D1 (false = gate and emit the delta only)"
         type: boolean
         default: true
       allow_shrink:
@@ -101,9 +101,9 @@ jobs:
     # invocations.
     timeout-minutes: 30
     outputs:
-      # publish-kv reads this. The pointer and the KV must name the same cycle, and a
+      # publish-d1 reads this. The pointer and the rows must name the same cycle, and a
       # withheld publish means the manifest's evidence does not support going live,
-      # so a run that did not move the pointer must not write KV either.
+      # so a run that did not move the pointer must not write rows either.
       published: ${{ steps.publish.outputs.published }}
     env:
       # The bucket is swim-report with a hyphen. The zone is swim.report with a dot and
@@ -166,7 +166,7 @@ jobs:
             scripts/fetch-wave-grids.js \
             scripts/sample-waves.js \
             scripts/build-wave-manifest.js \
-            scripts/build-wave-kv.js
+            scripts/build-wave-sql.js
 
       - name: Install GDAL and prove it can decode GRIB2 JPEG 2000
         # gfswave packs with DRS template 5.40, which is JPEG 2000, and
@@ -558,11 +558,11 @@ jobs:
             console.log(lines.join(' '));
           " "$WORK/out/manifest.json"
 
-      - name: Hand the cycle to publish-kv
-        # The three files publish-kv consumes, and the only copy of the NDJSON that
+      - name: Hand the cycle to publish-d1
+        # The three files publish-d1 consumes, and the only copy of the NDJSON that
         # exists outside this runner. Success-only, unlike the reports artifact below:
         # a refused gate leaves no manifest, and a cycle with no manifest is not a
-        # cycle to hand on. The retention covers "Re-run failed jobs" on publish-kv
+        # cycle to hand on. The retention covers "Re-run failed jobs" on publish-d1
         # and the human cross-check of a withheld cycle; the files are the largest
         # thing this workflow stores, so it is kept short.
         uses: actions/upload-artifact@v7
@@ -583,7 +583,7 @@ jobs:
         # grid in src/waveGrids.js.
         if: ${{ env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
         run: |
-          echo "::warning::build-wave-manifest.js withheld auto-publish (bootstrap cycle, or no seeded floors entry for this gridsDigest). The cycle $CYCLE_ID is in this run's wave-cycle artifact but waves/current.json was NOT moved and no KV was written. Read the manifest above, seed data/wave-floors.json at 0.75x the observed counts, commit it, then re-dispatch with force_publish true."
+          echo "::warning::build-wave-manifest.js withheld auto-publish (bootstrap cycle, or no seeded floors entry for this gridsDigest). The cycle $CYCLE_ID is in this run's wave-cycle artifact but waves/current.json was NOT moved and no rows were written. Read the manifest above, seed data/wave-floors.json at 0.75x the observed counts, commit it, then re-dispatch with force_publish true."
 
       - name: Publish the manifest and the pointer
         id: publish
@@ -651,31 +651,35 @@ jobs:
           retention-days: 14
 
       - name: Fail a scheduled withheld publish
-        # The pointer was never going to move and publish-kv was never going to run, so
+        # The pointer was never going to move and publish-d1 was never going to run, so
         # failing costs nothing and is the only alert this state produces. A scheduled
-        # run that withholds otherwise goes green with one annotation while every
-        # waveinput: key on the site expires on its own lease and the whole map ages out
+        # run that withholds otherwise goes green with one annotation while every stored
+        # wave record on the site expires on its own lease and the whole map ages out
         # to unknown. Last in the job, so the reports artifact has already uploaded and
         # its manifest.json is what seeds the floors. Deliberately without always(), so
         # it cannot fire confusingly on top of an earlier failure.
         if: ${{ github.event_name == 'schedule' && env.PUBLISH == 'true' && env.AUTO_PUBLISH != 'true' && env.FORCE_PUBLISH != 'true' }}
         run: |
-          echo "::error::the scheduled wave cycle withheld auto-publish. waves/current.json still names the previous cycle and NO KV was written, for any grid. Seed data/wave-floors.json for the current gridsDigest from the manifest in this run's wave-cycle-reports artifact."
+          echo "::error::the scheduled wave cycle withheld auto-publish. waves/current.json still names the previous cycle and NO rows were written, for any grid. Seed data/wave-floors.json for the current gridsDigest from the manifest in this run's wave-cycle-reports artifact."
           exit 1
 
-  publish-kv:
+  publish-d1:
     needs: sample
-    # Only when this run actually moved the pointer, so the pointer and the KV always
+    # Only when this run actually moved the pointer, so the pointer and the rows always
     # name the same cycle and a withheld cycle never reaches production.
     if: ${{ needs.sample.outputs.published == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Workers KV Storage: Edit. This job holds no AWS keys, so the job that can write
-      # production KV cannot write R2 and the job that can write R2 cannot write KV.
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_KV_WRITE_TOKEN }}
+      # The same edit-scoped D1 secret discovery.yml uses. This job holds no AWS keys,
+      # so the job that can write production D1 cannot write R2 and the job that can
+      # write R2 cannot write D1. CLOUDFLARE_WORKERS_EDIT_TOKEN is not authorized for
+      # D1 (code 7403) and is deliberately not a repo secret.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_EDIT_TOKEN }}
+      # A minimal D1-only API token cannot enumerate GET /accounts to auto-discover the
+      # account, so wrangler needs it explicitly. Account IDs are not secret.
       CLOUDFLARE_ACCOUNT_ID: 0e01552527359dfcce6edc27ebedb530
-      KV_NAMESPACE_ID: d7814f3408de401e8fef467754c18381
+      DB_NAME: swim-report
       WRANGLER_VERSION: "4"
       APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
     steps:
@@ -693,13 +697,13 @@ jobs:
           node-version: "22"
 
       - name: Cache Deno dependencies (frozen lockfile)
-        run: deno cache --lock=deno.lock --frozen scripts/build-wave-kv.js
+        run: deno cache --lock=deno.lock --frozen scripts/build-wave-sql.js
 
       - name: Download the cycle from the sample job
         # The same run's wave-cycle artifact, so this job can only ever consume the
         # cycle whose pointer the sample job just moved. download-artifact verifies
         # the archive's digest against what upload-artifact recorded and fails on a
-        # mismatch; scripts/build-wave-kv.js then verifies each file's byte length and
+        # mismatch; scripts/build-wave-sql.js then verifies each file's byte length and
         # sha256 against the manifest before a record is parsed, so a file truncated
         # on extraction is refused rather than measured as a legitimate shrink.
         uses: actions/download-artifact@v8
@@ -707,16 +711,16 @@ jobs:
           name: wave-cycle
           path: ${{ runner.temp }}/wavecycle
 
-      - name: Apply the consumer gate and emit the KV chunks
+      - name: Apply the consumer gate and emit the delta
         run: |
           set -euo pipefail
           DL="$RUNNER_TEMP"
           echo "DL=$DL" >> "$GITHUB_ENV"
           ls -l "$DL/wavecycle"
-          mkdir -p "$DL/kv"
+          mkdir -p "$DL/sql"
           deno run --lock=deno.lock --frozen --allow-read --allow-write \
-            scripts/build-wave-kv.js --dir "$DL/wavecycle" --out "$DL/kv"
-          cat "$DL/kv/kv-report.json"
+            scripts/build-wave-sql.js --dir "$DL/wavecycle" --out "$DL/sql"
+          cat "$DL/sql/wave-sql-report.json"
 
       - name: Warn on a degraded cycle
         # Names the grid, why it is missing and what a reader will see, because "a grid
@@ -729,7 +733,7 @@ jobs:
             const fs = require('fs');
             const report = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
             if (report.tier !== 'degraded') { process.exit(0); }
-            const generic = '::warning::the wave cycle passed the gate in the DEGRADED tier — a grid contributed nothing, a coverage gate was overridden, or a grid outside REQUIRED_GRID_IDS missed a count gate (manifest sanity.optionalGridCounts). See kv-report.json.';
+            const generic = '::warning::the wave cycle passed the gate in the DEGRADED tier — a grid contributed nothing, a coverage gate was overridden, or a grid outside REQUIRED_GRID_IDS missed a count gate (manifest sanity.optionalGridCounts). See wave-sql-report.json.';
             let status = null;
             try {
               const m = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
@@ -751,49 +755,36 @@ jobs:
               'noaa_glwu, the ocean for the gfswave grids, the Salish Sea for ' +
               'noaa_nwps_sew — has no wave record this cycle ' +
               'and ages out to unknown, while the grids that sampled were written normally.');
-          " "$DL/kv/kv-report.json" "$DL/wavecycle/manifest.json"
+          " "$DL/sql/wave-sql-report.json" "$DL/wavecycle/manifest.json"
 
-      - name: Bulk write the KV pairs
-        # Chunks are idempotent — same key, same value, same absolute expiration — so
-        # "Re-run failed jobs" repairs a half-landed write from the same wave-cycle
-        # artifact for as long as it is retained.
+      - name: Apply the delta to production D1
+        # The delta is idempotent — the same rows, the same values, the same absolute
+        # wave_expires — so "Re-run failed jobs" repairs a half-landed apply from the
+        # same wave-cycle artifact for as long as it is retained. elapsed stays a shell
+        # variable because the summary below is part of this step.
         if: ${{ env.APPLY == 'true' }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
           start=$(date +%s%3N)
-          chunks=0
-          for f in "$DL"/kv/wave-kv-*.json; do
-            chunks=$((chunks + 1))
-            ok=0
-            for attempt in 1 2 3; do
-              if npx --yes "wrangler@${WRANGLER_VERSION}" kv bulk put \
-                --namespace-id "$KV_NAMESPACE_ID" --remote "$f" 2>&1 | tee "$DL/put.log"; then
-                ok=1
-              fi
-              # wrangler warns and exits 0 on an unexpected pair property, so a
-              # camelCase expirationTtl would write keys that never expire and exit
-              # green. This grep is what turns that warning into a failure.
-              if grep -q "unexpected properties" "$DL/put.log"; then
-                echo "::error::wrangler reported unexpected properties in $f — the pair spelling is wrong and those keys would never expire"
-                exit 1
-              fi
-              if [ "$ok" = "1" ]; then break; fi
-              echo "attempt $attempt failed for $f"
-              sleep $((attempt * 10))
-            done
-            if [ "$ok" != "1" ]; then
-              echo "::error::bulk put failed for $f after 3 attempts"
-              exit 1
+          ok=0
+          for attempt in 1 2 3; do
+            if npx --yes "wrangler@${WRANGLER_VERSION}" d1 execute "$DB_NAME" \
+                 --remote --file "$DL/sql/wave-delta.sql"; then
+              ok=1; break
             fi
+            echo "attempt $attempt failed"
+            sleep $((attempt * 10))
           done
+          if [ "$ok" != "1" ]; then
+            echo "::error::wrangler apply failed after 3 attempts (check CLOUDFLARE_D1_EDIT_TOKEN and the delta SQL)"
+            exit 1
+          fi
           elapsed=$(( $(date +%s%3N) - start ))
           node -e "
             const fs = require('fs');
             const r = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
             const m = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-            const chunks = process.argv[3];
-            const elapsed = process.argv[4];
+            const elapsed = process.argv[3];
             const beaches = m.beaches || {};
             // Every grid and its STATUS, so a zero never has to be interpreted: a grid
             // that was never fetched and a grid that sampled nothing read differently.
@@ -820,6 +811,9 @@ jobs:
                 Object.keys((m.sanity || {}).optionalGridCounts || {}).join(',') + ')');
             }
             const expires = new Date(r.kvExpirationEpoch * 1000).toISOString();
+            // maxStatementBytes is the headroom against the emitter's per-statement
+            // budget: it is what shows the record shape growing before a statement is
+            // refused.
             console.log('wave cycle ' + r.cycleId +
               ': beaches=' + beaches.total +
               ' wave=' + beaches.resolved +
@@ -829,16 +823,18 @@ jobs:
               ' tier=' + r.tier +
               ' validStart=' + r.validStartIso +
               ' expires=' + expires +
-              ' pairs=' + r.pairs +
-              ' chunks=' + chunks + '/' + r.chunks +
+              ' rows=' + r.rows +
+              ' statements=' + r.statements +
+              ' deltaBytes=' + r.deltaBytes +
+              ' maxStatementBytes=' + r.maxStatementBytes +
               ' elapsedMs=' + elapsed);
-          " "$DL/kv/kv-report.json" "$DL/wavecycle/manifest.json" "$chunks" "$elapsed"
+          " "$DL/sql/wave-sql-report.json" "$DL/wavecycle/manifest.json" "$elapsed"
 
-      - name: Upload the KV report
+      - name: Upload the SQL report
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: wave-kv-report
-          path: ${{ env.DL }}/kv/kv-report.json
+          name: wave-sql-report
+          path: ${{ env.DL }}/sql/wave-sql-report.json
           if-no-files-found: ignore
           retention-days: 14

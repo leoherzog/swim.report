@@ -35,10 +35,11 @@ directory = "public"
 #                    beach_state D1 table, one row per beach, batched 200 at a time).
 #                    Offset off the congested top-of-hour :00 slot the repo's own
 #                    GH workflows deliberately avoid. It READS (never fetches) the
-#                    waveinput: KV that .github/workflows/waves.yml writes out of
-#                    band from NOAA GRIB2 model output, resolving each record through
+#                    beach_state.wave record that .github/workflows/waves.yml writes
+#                    out of band from NOAA GRIB2 model output, off the join its own
+#                    SELECT already issues, resolving each record through
 #                    src/waveInput.js, which indexes the stored 24 h series at the
-#                    hour being estimated. Those keys carry an ABSOLUTE expiration
+#                    hour being estimated. Those records carry an ABSOLUTE wave_expires
 #                    derived from the model valid time rather than from write time,
 #                    so no schedule ordering between this cron and that workflow is
 #                    required or implied: a late or missing pipeline run ages a beach
@@ -78,7 +79,8 @@ directory = "public"
 # (scripts/discovery-batch.js), which emits an idempotent SQL delta bulk-loaded
 # into D1 out-of-band. The NOAA wave cycle keeps only its per-cycle manifest and
 # the waves/current.json pointer in the same bucket, likewise read only by GitHub
-# Actions, which bulk-writes the waveinput:/waves: pairs into KV.
+# Actions, which applies the per-beach wave records into beach_state as an
+# idempotent SQL delta exactly as the discovery batch does.
 #
 # The request path still reads only D1/KV, and the cron path only the upstreams
 # named above — which is why there is deliberately no [[r2_buckets]] binding

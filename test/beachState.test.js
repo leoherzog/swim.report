@@ -7,8 +7,10 @@ import {
   BEACH_STATE_SELECT,
   BEACH_STATE_JOIN,
   CHIP_STATE_SELECT,
+  WAVE_STATE_SELECT,
   liveBeachState,
   liveChipState,
+  liveWaveRecord,
   beachStateUpsertStatements,
   estimateCasStatement,
   chunkStatements
@@ -41,6 +43,11 @@ describe("beachState constants", function () {
       "s.wqfloor, s.wqfloor_expires, s.reading, s.reading_expires"
     );
     expect(BEACH_STATE_JOIN).toBe(" LEFT JOIN beach_state s ON s.beach_id = b.id");
+    expect(BEACH_STATE_SELECT.indexOf("wave")).toBe(-1);
+  });
+
+  it("keeps the wave record in its own fragment, selected only by its two readers", function () {
+    expect(WAVE_STATE_SELECT).toBe("s.wave, s.wave_expires");
   });
 
   it("gives the chip surfaces the scalar mirror columns and no blob", function () {
@@ -52,6 +59,76 @@ describe("beachState constants", function () {
     expect(CHIP_STATE_SELECT.indexOf("s.official,")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("wqfloor")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("reading")).toBe(-1);
+    expect(CHIP_STATE_SELECT.indexOf("wave")).toBe(-1);
+  });
+});
+
+describe("liveWaveRecord", function () {
+  const RECORD = {
+    beachId: "b1",
+    startIso: "2026-07-05T12:00:00.000Z",
+    hoursFt: [1.2, 1.4],
+    waveHeightFt: 1.2,
+    model: "global.0p16"
+  };
+
+  it("parses a live record off a row that selected WAVE_STATE_SELECT", function () {
+    expect(liveWaveRecord({
+      wave: JSON.stringify(RECORD),
+      wave_expires: NOW_EPOCH + 1
+    }, NOW_MS)).toEqual(RECORD);
+  });
+
+  it("treats expires equal to the current epoch as expired", function () {
+    expect(liveWaveRecord({
+      wave: JSON.stringify(RECORD), wave_expires: NOW_EPOCH
+    }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: JSON.stringify(RECORD), wave_expires: NOW_EPOCH - 1
+    }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: JSON.stringify(RECORD), wave_expires: NOW_EPOCH + 1
+    }, NOW_MS)).not.toBeNull();
+  });
+
+  it("reads a NULL blob, a missing lease and unparseable JSON as absent", function () {
+    expect(liveWaveRecord({ wave: null, wave_expires: NOW_EPOCH + 1 }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({ wave: "", wave_expires: NOW_EPOCH + 1 }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: JSON.stringify(RECORD), wave_expires: null
+    }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: JSON.stringify(RECORD), wave_expires: Number.NaN
+    }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: "{not json", wave_expires: NOW_EPOCH + 1
+    }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: "null", wave_expires: NOW_EPOCH + 1
+    }, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({
+      wave: "42", wave_expires: NOW_EPOCH + 1
+    }, NOW_MS)).toBeNull();
+  });
+
+  it("returns null for a missing row and never throws", function () {
+    expect(liveWaveRecord(null, NOW_MS)).toBeNull();
+    expect(liveWaveRecord(undefined, NOW_MS)).toBeNull();
+    expect(liveWaveRecord({}, NOW_MS)).toBeNull();
+  });
+
+  it("ignores the other records on a row that selected both widths", function () {
+    const row = {
+      id: "b1",
+      estimate: JSON.stringify({ color: "green" }),
+      estimate_expires: NOW_EPOCH + 10,
+      wave: JSON.stringify(RECORD),
+      wave_expires: NOW_EPOCH + 10
+    };
+    expect(liveWaveRecord(row, NOW_MS).model).toBe("global.0p16");
+    expect(liveBeachState(row, NOW_MS)).toEqual({
+      estimate: { color: "green" }, official: null, wqfloor: null, reading: null
+    });
   });
 });
 
@@ -200,6 +277,11 @@ describe("beachStateUpsertStatements", function () {
     );
   });
 
+  it("names no wave column, so the offline cycle owns them alone", function () {
+    const stmt = beachStateUpsertStatements(recordingDb(), [{ beachId: "b1" }])[0];
+    expect(stmt.sql.indexOf("wave")).toBe(-1);
+  });
+
   it("binds absent fields as NULL and derives color and updated from the objects", function () {
     const estimate = { color: "yellow", updated: "2026-09-09T12:00:00Z", reason: "waves" };
     const stmt = beachStateUpsertStatements(recordingDb(), [{
@@ -266,6 +348,38 @@ describe("beachStateUpsertStatements", function () {
     expect(row.wqfloor_expires).toBe(2000);
     expect(row.official).toBeNull();
   });
+
+  it("leaves a stored wave record byte-identical across a full hourly upsert", async function () {
+    const env = makeD1();
+    env.seedBeaches([{ id: "b1" }]);
+    const record = {
+      beachId: "b1",
+      startIso: "2026-09-09T06:00:00Z",
+      hoursFt: [1.1, 1.2, 1.3],
+      waveHeightFt: 1.1,
+      model: "global.0p16"
+    };
+    env.seedWave("b1", record, 4000);
+    const before = env.stateOf("b1");
+
+    await env.batch(beachStateUpsertStatements(env, [{
+      beachId: "b1",
+      estimate: { color: "yellow", updated: "2026-09-09T12:00:00Z" },
+      estimateExpires: 5000,
+      official: { color: "red", updated: "2026-09-09T11:40:00Z", official: true },
+      officialExpires: 6000,
+      wqfloor: { color: "red", kind: "ecoli" },
+      wqfloorExpires: 7000,
+      reading: { waterTempF: 70 },
+      readingExpires: 8000
+    }]));
+
+    const after = env.stateOf("b1");
+    expect(after.wave).toBe(before.wave);
+    expect(after.wave).toBe(JSON.stringify(record));
+    expect(after.wave_expires).toBe(4000);
+    expect(after.estimate_color).toBe("yellow");
+  });
 });
 
 describe("estimateCasStatement", function () {
@@ -279,6 +393,7 @@ describe("estimateCasStatement", function () {
     expect(stmt.args).toEqual([
       JSON.stringify(estimate), "red", "b1", "2026-09-09T12:00:00Z"
     ]);
+    expect(stmt.sql.indexOf("wave")).toBe(-1);
   });
 
   it("changes nothing once the standing instant moved on", async function () {

@@ -1,5 +1,5 @@
 // scripts/sample-waves.js — turns the downloaded NOAA GRIB2 cycle into the two
-// NDJSON artifacts the KV writer consumes. Two modes, both pure local math over
+// NDJSON artifacts the SQL writer consumes. Two modes, both pure local math over
 // bytes on disk:
 //
 //   deno run --allow-read --allow-write scripts/sample-waves.js --mode plan \
@@ -341,9 +341,9 @@ export function planRefusal(entries, gridStatus) {
 
 // The record pair for one beach, carrying both write-skip guards:
 //
-//   no finite hour and no wind -> no record at all, so the previous KV key rides its
-//                                 lease and the flag ages out to unknown rather than
-//                                 being recoloured from nothing.
+//   no finite hour and no wind -> no record at all, so the previous beach_state.wave
+//                                 row rides its wave_expires and the flag ages out to
+//                                 unknown rather than being recoloured from nothing.
 //   no finite hour, wind present -> a waveinput record only, no series.
 //
 // The wind is a fallback and is recorded only for a wave-null beach, which keeps
@@ -359,7 +359,7 @@ export function planRefusal(entries, gridStatus) {
 // makes scanRecords's cell walk over waves cover the array the color path reads;
 // scanRecords re-checks that identity after the NDJSON round trip.
 //
-// A record's shape decides its lease in scripts/build-wave-kv.js: a series-bearing
+// A record's shape decides its lease in scripts/build-wave-sql.js: a series-bearing
 // record gets WAVE_SERIES_LEASE_SECONDS, a wind-only record the short scalar lease.
 // So startIso and hoursFt are present together or not at all, never half.
 export function waveRecordsForBeach(input) {

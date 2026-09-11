@@ -23,6 +23,11 @@
 //   - runWebcamSync:
 //       ORDER BY (webcam_checked IS NULL) DESC, last_viewed DESC NULLS LAST,
 //                webcam_checked ASC, id ASC
+//
+// The hourly's FROM carries a LEFT JOIN onto beach_state for the wave record,
+// which the clauses above do not name: beach_state shares no column name with
+// beaches, so every term here stays unqualified in the real SQL and the copies
+// below remain byte-identical against this file's own single table.
 import { describe, it, expect, beforeAll } from "vitest";
 
 let DatabaseSync = null;

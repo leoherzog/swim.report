@@ -1,11 +1,12 @@
-// scripts/build-wave-kv.js — applies the fail-closed consumer gate to a sampled
-// wave cycle and, when it passes, emits the wrangler kv bulk put chunk files.
+// scripts/build-wave-sql.js — applies the fail-closed consumer gate to a sampled
+// wave cycle and, when it passes, emits the SQL delta that writes each beach's
+// wave record into beach_state.
 //
-//   deno run --allow-read --allow-write scripts/build-wave-kv.js \
-//     --dir ./cycle --out ./kv
+//   deno run --allow-read --allow-write scripts/build-wave-sql.js \
+//     --dir ./cycle --out ./sql
 //
 // --dir holds manifest.json and the two NDJSON artifacts, handed from the sample
-// job to the publish-kv job as a workflow artifact. No --allow-net. Every artifact
+// job to the publish-d1 job as a workflow artifact. No --allow-net. Every artifact
 // is verified by byte length and sha256 against the manifest before a record is
 // parsed, so a truncated or mismatched file is refused rather than measured as a
 // legitimate shrink. Length is checked as well as the digest for a legible message
@@ -17,45 +18,48 @@
 // src/waveGrids.js). windGustMph is always null: gfswave publishes no GUST
 // element. Nothing here converts anything, it stringifies and stamps an
 // expiration, so a unit error upstream is invisible from this file — which is
-// why test/buildWaveKv.test.js pins both conversions directly.
+// why test/buildWaveSql.test.js pins both conversions directly.
 //
 // Absolute expiration, never a TTL, and one of two leases per record. A record
 // carrying the hourly series expires at validStartEpoch + WAVE_SERIES_LEASE_SECONDS,
 // the span it describes, because runFlagRecompute indexes it at the hour it is
 // estimating (src/waveInput.js). A wind-only record is one hour-0 sample with no
-// series behind it and keeps the short validStartEpoch + WAVE_KV_LEASE_SECONDS.
+// series behind it and keeps the short validStartEpoch + WAVE_SCALAR_LEASE_SECONDS.
 // Either way the lease is measured from the model valid time and not from the write
 // clock: a TTL from write time is wrong for a scheduler that skips occurrences,
 // since a run firing 9 h late would grant a fresh lease to data already 9 h old.
 // Republishing an old cycle therefore yields a short or negative lease and is
 // refused by construction.
 //
-// The spelling trap: the pair field is snake_case "expiration" /
-// "expiration_ttl". wrangler accepts the Worker runtime's camelCase
-// expirationTtl as an unexpected property, warns, ignores it and exits 0,
-// producing a key that never expires. Because runFlagRecompute never reads
-// waveinput.updated, expiration and the series hour index are the whole staleness
-// control on the color path, and a key that never expires defeats both. ttlSpellingRefusals
-// is applied to every emitted pair, and the workflow greps wrangler's output for
-// "unexpected properties".
+// The delta's own traps. wave_expires is a column value, so a malformed lease
+// fails the statement rather than being dropped with a warning — but only
+// waveRowRefusals proves the number is one of the cycle's two computed epochs and
+// is still in the future, and it runs before any file is written. Every statement
+// is one line, because scripts/apply-local-sql.js splits on line boundaries only
+// and hard-fails on a line over its chunk cap. The upsert is idempotent, so
+// re-applying the same delta repairs a half-landed import and writes the same
+// absolute wave_expires, which is correct: the lease is anchored to the model
+// valid time, never to the apply clock.
 
 import {
   EXPECTED_WAVE_ARTIFACTS,
   WAVE_SERIES_LEASE_SECONDS,
   classifyWaveManifestFailure,
-  waveKvWriteAllowed
+  waveWriteAllowed
 } from "../src/waveManifest.js";
 import { gridsDigest } from "../src/waveGrids.js";
-import { ttlSpellingRefusals, parseNdjson } from "./build-wave-manifest.js";
+import { parseNdjson } from "./build-wave-manifest.js";
 
-// wrangler accepts up to 10,000 pairs and 100 MB per request. 5,000 stays clear
-// of both ceilings and keeps a failed chunk cheap to retry.
-export const MAX_PAIRS_PER_CHUNK = 5000;
+// A single beach's record approaching this size is a data-shape bug the sampler
+// and sentinelRefusals should have caught, so an oversize statement is a refusal
+// rather than a reason to split. Sized under scripts/apply-local-sql.js's 90,000
+// byte chunk cap, itself under D1's 100,000 byte SQL call cap.
+export const MAX_STATEMENT_BYTES = 80000;
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 function log(msg) {
-  console.error("build-wave-kv: " + msg);
+  console.error("build-wave-sql: " + msg);
 }
 
 function isFiniteNumber(value) {
@@ -76,10 +80,10 @@ export function parseArgs(argv) {
     else { throw new Error("unknown argument: " + a); }
   }
   if (typeof args.dir !== "string" || args.dir === "") {
-    throw new Error("build-wave-kv: --dir is required");
+    throw new Error("build-wave-sql: --dir is required");
   }
   if (typeof args.out !== "string" || args.out === "") {
-    throw new Error("build-wave-kv: --out is required");
+    throw new Error("build-wave-sql: --out is required");
   }
   return args;
 }
@@ -190,26 +194,48 @@ export function buildConsumerReport(input) {
   };
 }
 
-// --- pair assembly -----------------------------------------------------------------------
+// --- SQL literals ----------------------------------------------------------------------
 
-// One beach's pairs, kept together. Chunking is otherwise free, but a beach's
-// waveinput and waves must land in the same request or a partially applied chunk
-// set leaves a detail page showing a 24 h strip that disagrees with the flag card
-// above it.
+// SQL string literal with single quotes doubled, and a finite number inlined
+// literally or NULL. Both carry the semantics scripts/discovery-batch.js uses for
+// every value in its own delta; they are duplicated rather than imported because
+// that module pulls the whole layer pipeline, flatgeobuf included, in behind them.
+export function sqlStr(value) {
+  if (value === null || value === undefined) {
+    return "NULL";
+  }
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+export function sqlNum(value) {
+  if (typeof value !== "number" || !isFinite(value)) {
+    return "NULL";
+  }
+  return String(value);
+}
+
+// --- row assembly ----------------------------------------------------------------------
+
+// One merged record per beach, ready to become one statement.
 //
 // leases is { series, scalar, nowEpoch }. A record's own shape picks its lease: a
 // waveinput carrying hoursFt is indexed at read time and gets the series lease, and
-// a wind-only one gets the scalar lease. Both are absolute instants, so a scalar
-// lease that has already run out yields a pair wrangler would reject; that whole
-// group is dropped instead, which is the same outcome as the key having expired on
-// its own. The series lease cannot run out here — MIN_LEASE_SECONDS refused the
-// cycle long before — so a series group is never dropped and the pair stays atomic.
-export function kvPairGroups(waveinputRecords, wavesRecords, leases) {
+// a wind-only one gets the scalar lease. Both are absolute instants, so a wind-only
+// record whose lease has already run out is dropped: a reader treats it as absent
+// from the instant of expiry, so writing it would land a row nothing can read. The
+// series lease cannot run out here — MIN_LEASE_SECONDS refused the cycle long
+// before.
+//
+// startIso and hoursFt are taken from the waveinput copy, the array the color path
+// indexes; scanRecords has already proved the two copies identical across the NDJSON
+// round trip. The waves record contributes models, byModel and sources, which the
+// detail page's model-compare chart draws.
+export function waveRowsFor(waveinputRecords, wavesRecords, leases) {
   const series = isPlainObject(leases) ? leases.series : null;
   const scalar = isPlainObject(leases) ? leases.scalar : null;
   const nowEpoch = isPlainObject(leases) && isFiniteNumber(leases.nowEpoch)
     ? leases.nowEpoch : null;
-  const groups = [];
+  const rows = [];
   const byBeach = new Map();
   const inputs = Array.isArray(waveinputRecords) ? waveinputRecords : [];
   for (let i = 0; i < inputs.length; i = i + 1) {
@@ -221,67 +247,120 @@ export function kvPairGroups(waveinputRecords, wavesRecords, leases) {
         expiration <= nowEpoch) {
       continue;
     }
-    const group = [{
-      key: "waveinput:" + record.beachId,
-      value: JSON.stringify(record),
+    const row = {
+      beachId: record.beachId,
+      record: Object.assign({}, record),
       expiration: expiration
-    }];
-    byBeach.set(record.beachId, group);
-    groups.push(group);
+    };
+    byBeach.set(record.beachId, row);
+    rows.push(row);
   }
   const wavesList = Array.isArray(wavesRecords) ? wavesRecords : [];
   for (let i = 0; i < wavesList.length; i = i + 1) {
     const record = wavesList[i];
     if (!isPlainObject(record) || typeof record.beachId !== "string") { continue; }
-    // The detail-page strip trims itself to the hours from now forward
-    // (trimWaveSeries), so it stays correct for exactly as long as the series it
-    // mirrors: one lease for both keys of a group.
-    const pair = {
-      key: "waves:" + record.beachId,
-      value: JSON.stringify(record),
-      expiration: series
-    };
-    const group = byBeach.get(record.beachId);
-    if (group === undefined) {
+    const row = byBeach.get(record.beachId);
+    if (row === undefined) {
       // waveRecordsForBeach cannot produce a series with no waveinput, but a
-      // hand-edited artifact could; it gets its own group rather than being
-      // dropped silently.
-      byBeach.set(record.beachId, [pair]);
-      groups.push([pair]);
+      // hand-edited artifact could; it gets its own row rather than being dropped
+      // silently. Its lease still follows the record's own shape, so a waves
+      // record missing its series takes the scalar lease and its spent-drop rule
+      // rather than the series lease on trust.
+      const ownSeries = Array.isArray(record.hoursFt) && typeof record.startIso === "string";
+      const ownExpiration = ownSeries ? series : scalar;
+      if (!ownSeries && nowEpoch !== null && isFiniteNumber(ownExpiration) &&
+          ownExpiration <= nowEpoch) {
+        continue;
+      }
+      const own = {
+        beachId: record.beachId,
+        record: Object.assign({}, record),
+        expiration: ownExpiration
+      };
+      byBeach.set(record.beachId, own);
+      rows.push(own);
       continue;
     }
-    group.push(pair);
+    // The detail-page strip trims itself to the hours from now forward
+    // (trimWaveSeries), so it stays correct for exactly as long as the series the
+    // color path indexes: one lease for one merged record.
+    row.record.models = record.models;
+    row.record.byModel = record.byModel;
+    row.record.sources = record.sources;
   }
-  return groups;
+  return rows;
 }
 
-// Packs whole groups into chunks of at most maxPairs pairs. A group larger than
-// maxPairs still ships as one chunk: keeping a beach whole outranks chunk size.
-export function chunkGroups(groups, maxPairs) {
-  const limit = isFiniteNumber(maxPairs) && maxPairs > 0 ? maxPairs : MAX_PAIRS_PER_CHUNK;
-  const chunks = [];
-  let current = [];
-  const list = Array.isArray(groups) ? groups : [];
+// The single-row upsert. One statement per beach and one line per statement, so a
+// statement can never exceed the applier's chunk cap by accident, a poison row
+// loses only its own beach, and grepping the delta for a beach id returns exactly
+// one line.
+export function waveRowStatement(row) {
+  return "INSERT INTO beach_state (beach_id, wave, wave_expires) VALUES (" +
+    sqlStr(row.beachId) + ", " + sqlStr(JSON.stringify(row.record)) + ", " +
+    sqlNum(row.expiration) + ") ON CONFLICT(beach_id) DO UPDATE SET " +
+    "wave = excluded.wave, wave_expires = excluded.wave_expires;";
+}
+
+// Every emitted row's gate, applied before any file is written. leases is
+// { series, scalar, nowEpoch }: an expiration must be exactly one of the cycle's
+// two computed epochs and must still be in the future, which is the invariant that
+// keeps a wave record's staleness control — the absolute lease and the series hour
+// index — the only things bounding it. Returns a list of reason strings, empty when
+// every row may be written.
+export function waveRowRefusals(rows, leases) {
+  const out = [];
+  const list = Array.isArray(rows) ? rows : [];
+  const series = isPlainObject(leases) ? leases.series : null;
+  const scalar = isPlainObject(leases) ? leases.scalar : null;
+  const nowEpoch = isPlainObject(leases) ? leases.nowEpoch : null;
+  if (list.length === 0) {
+    // An empty .sql applies cleanly and makes a broken cycle look landed.
+    out.push("no rows: a cycle that resolved nothing must not read as a landed cycle");
+  }
   for (let i = 0; i < list.length; i = i + 1) {
-    const group = list[i];
-    if (current.length > 0 && current.length + group.length > limit) {
-      chunks.push(current);
-      current = [];
+    const row = list[i];
+    const subject = isPlainObject(row) && typeof row.beachId === "string" && row.beachId !== ""
+      ? row.beachId : "row " + String(i);
+    if (!isPlainObject(row)) {
+      out.push(subject + ": row is not an object");
+      continue;
     }
-    for (let p = 0; p < group.length; p = p + 1) {
-      current.push(group[p]);
+    if (typeof row.beachId !== "string" || row.beachId === "") {
+      out.push(subject + ": beachId is not a non-empty string");
+    }
+    let json = null;
+    try {
+      json = JSON.stringify(row.record);
+    } catch (err) {
+      json = null;
+    }
+    if (typeof json !== "string") {
+      out.push(subject + ": record does not stringify to a JSON string");
+    } else if (json.indexOf("\n") !== -1 || json.indexOf("\r") !== -1) {
+      // JSON.stringify escapes both, but apply-local-sql.js splits on line
+      // boundaries only, so a raw newline would tear the statement in half.
+      out.push(subject + ": record stringifies with a raw newline");
+    }
+    if (!isFiniteNumber(row.expiration)) {
+      out.push(subject + ": expiration is not a finite number");
+    } else {
+      if (row.expiration !== series && row.expiration !== scalar) {
+        out.push(subject + ": expiration " + String(row.expiration) +
+          " is neither the series nor the scalar epoch of this cycle");
+      }
+      if (isFiniteNumber(nowEpoch) && row.expiration <= nowEpoch) {
+        out.push(subject + ": expiration " + String(row.expiration) +
+          " has already passed, so the row would read as absent the moment it lands");
+      }
+    }
+    const bytes = new TextEncoder().encode(waveRowStatement(row)).length;
+    if (bytes > MAX_STATEMENT_BYTES) {
+      out.push(subject + ": statement is " + String(bytes) + " bytes, over the " +
+        String(MAX_STATEMENT_BYTES) + " byte budget");
     }
   }
-  if (current.length > 0) {
-    chunks.push(current);
-  }
-  return chunks;
-}
-
-export function chunkFileName(index) {
-  let s = String(index);
-  while (s.length < 3) { s = "0" + s; }
-  return "wave-kv-" + s + ".json";
+  return out;
 }
 
 // --- I/O (main only) ------------------------------------------------------------------
@@ -355,64 +434,81 @@ async function main() {
     cycleId: report.cycleId,
     tier: failure.tier,
     reasons: failure.reasons,
-    writeAllowed: waveKvWriteAllowed(report),
+    writeAllowed: waveWriteAllowed(report),
     validStartIso: report.validStartIso,
     kvExpirationEpoch: report.kvExpirationEpoch,
     kvScalarExpirationEpoch: report.kvScalarExpirationEpoch,
     secondsRemaining: report.secondsRemaining,
     minimumRecordsPassed: report.minimumRecordsPassed,
     gridStatus: report.gridStatus,
-    pairs: 0,
-    chunks: 0
+    rows: 0,
+    statements: 0,
+    deltaBytes: 0,
+    maxStatementBytes: 0
   };
 
-  if (!waveKvWriteAllowed(report)) {
-    await Deno.writeTextFile(args.out + "/kv-report.json",
+  if (!waveWriteAllowed(report)) {
+    await Deno.writeTextFile(args.out + "/wave-sql-report.json",
       JSON.stringify(summary, null, 2) + "\n");
-    log("REFUSED: writing no KV — the previous cycle rides its own expiration and the " +
-      "flags age out to unknown, which is gray and honest");
+    log("REFUSED: writing no rows — the previous cycle's records ride their own " +
+      "expiration and the flags age out to unknown, which is gray and honest");
     Deno.exit(1);
   }
 
-  const groups = kvPairGroups(parsed[EXPECTED_WAVE_ARTIFACTS[0]],
-    parsed[EXPECTED_WAVE_ARTIFACTS[1]], {
-      series: report.kvExpirationEpoch,
-      scalar: report.kvScalarExpirationEpoch,
-      nowEpoch: nowEpoch
-    });
-  const chunks = chunkGroups(groups, MAX_PAIRS_PER_CHUNK);
+  const leases = {
+    series: report.kvExpirationEpoch,
+    scalar: report.kvScalarExpirationEpoch,
+    nowEpoch: nowEpoch
+  };
+  const rows = waveRowsFor(parsed[EXPECTED_WAVE_ARTIFACTS[0]],
+    parsed[EXPECTED_WAVE_ARTIFACTS[1]], leases);
 
-  let pairCount = 0;
-  for (let i = 0; i < chunks.length; i = i + 1) {
-    const spelling = ttlSpellingRefusals({
-      validStartEpoch: report.validStartEpoch,
-      kvExpirationEpoch: report.kvExpirationEpoch,
-      kvScalarExpirationEpoch: report.kvScalarExpirationEpoch,
-      pairs: chunks[i]
-    });
-    if (spelling.length > 0) {
-      for (let r = 0; r < spelling.length; r = r + 1) {
-        console.error("build-wave-kv: REFUSED: " + spelling[r].message);
-      }
-      throw new Error("build-wave-kv: chunk " + String(i) + " failed the pair-spelling gate");
+  const refusals = waveRowRefusals(rows, leases);
+  if (refusals.length > 0) {
+    await Deno.writeTextFile(args.out + "/wave-sql-report.json",
+      JSON.stringify(summary, null, 2) + "\n");
+    for (let i = 0; i < refusals.length; i = i + 1) {
+      log("REFUSED: " + refusals[i]);
     }
-    await Deno.writeTextFile(args.out + "/" + chunkFileName(i),
-      JSON.stringify(chunks[i]) + "\n");
-    pairCount = pairCount + chunks[i].length;
+    log("REFUSED: " + String(refusals.length) + " row(s) failed the emitted-row gate — " +
+      "no delta was written");
+    Deno.exit(1);
   }
 
-  summary.pairs = pairCount;
-  summary.chunks = chunks.length;
-  await Deno.writeTextFile(args.out + "/kv-report.json",
+  const lines = [];
+  lines.push("-- wave cycle " + String(report.cycleId));
+  lines.push("-- validStart " + String(report.validStartIso) +
+    " seriesExpires " + String(report.kvExpirationEpoch) +
+    " scalarExpires " + String(report.kvScalarExpirationEpoch));
+  lines.push("-- wave rows (" + String(rows.length) + ")");
+  let maxStatementBytes = 0;
+  for (let i = 0; i < rows.length; i = i + 1) {
+    const statement = waveRowStatement(rows[i]);
+    const bytes = new TextEncoder().encode(statement).length;
+    if (bytes > maxStatementBytes) { maxStatementBytes = bytes; }
+    lines.push(statement);
+  }
+
+  // Written atomically, once, at the end, so the run has a binary outcome: exit 0
+  // with a complete delta, or exit 1 with no file at all.
+  const delta = lines.join("\n") + "\n";
+  await Deno.writeTextFile(args.out + "/wave-delta.sql", delta);
+
+  summary.rows = rows.length;
+  summary.statements = rows.length;
+  summary.deltaBytes = new TextEncoder().encode(delta).length;
+  summary.maxStatementBytes = maxStatementBytes;
+  await Deno.writeTextFile(args.out + "/wave-sql-report.json",
     JSON.stringify(summary, null, 2) + "\n");
-  log("wrote " + String(pairCount) + " pair(s) in " + String(chunks.length) +
-    " chunk(s), expiration " + String(report.kvExpirationEpoch) +
+  log("wrote " + String(rows.length) + " row(s) in " + String(summary.deltaBytes) +
+    " bytes, largest statement " + String(maxStatementBytes) + " bytes, expiration " +
+    String(report.kvExpirationEpoch) +
     " (" + String(Math.round(report.secondsRemaining)) + "s remaining)");
 }
 
 if (import.meta.main) {
   main().catch(function (err) {
-    console.error("build-wave-kv: FATAL: " + (err && err.stack ? err.stack : err));
+    console.error("build-wave-sql: FATAL: " + (err && err.stack ? err.stack : err));
     Deno.exit(1);
   });
 }

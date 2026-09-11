@@ -65,12 +65,17 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
 - **The `test.yml` permission guard is a fixed script list.** It checks `--allow-net` on
   every pure-math offline script and `--allow-run` on every wave-pipeline Deno script;
   `build-manifest.js` keeps `--allow-run=ogrinfo,osmium` by design, so the run check is
-  scoped to the wave list and a new script on either side needs its own entry.
+  scoped to the wave list and a new script on either side needs its own entry. The guard
+  matches by substring, so a name that matches nothing prints a green "no `--allow-net` on
+  any X.js invocation" forever: a rename is the operation most likely to defeat it. After
+  renaming a script, confirm by eye that the frozen `deno check` list and both permission
+  loops name the new file — `scripts/build-wave-sql.js` appears in all three.
 - **Measure the slot hit rate before trusting the cadence.** No second wave source is left to
   shadow against, so read the hit rate from `waves.yml`'s run history and the per-beach coverage
   from `manifest.beaches.resolved` across consecutive cycles. Four slots a day against the 24 h
   series lease tolerates two consecutive misses with six hours to spare; a run of missed slots
-  is the trigger to add a slot back, at the cost of a full bulk write each.
+  is the trigger to add a slot back, at the cost of one D1 row per resolved beach each,
+  applied as a single delta.
 - **Arctic 9 km spiral is unvalidated against real Alaska coordinates.** Ring geometry on a
   polar-stereographic grid differs from a lat/lon one, and `gfswave.global.0p16` stops at
   52.583°N, so every Alaskan beach depends on that path. Check a handful of real rows before
@@ -127,7 +132,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   `rules_version`, so this is safe to do incrementally. Revisit the flat 90-day retention window
   (`FLAG_HISTORY_RETENTION_DAYS = 90`) in the same pass. That pass should also decide the
   multi-model derivation question: the flag uses the composite first-finite-model wave series,
-  and the per-model data in the `waves:` payloads (`byModel`) exists precisely so mean, max or
+  and the per-model data in the stored wave records (`byModel`) exists precisely so mean, max or
   calibrated-blend alternatives can be evaluated retroactively against official flags. Note the
   safety asymmetry before reaching for a mean: averaging dilutes whichever model saw the hazard
   — a 4.5 ft plus 2.5 ft disagreement averages to yellow, not red — so any derivation change
@@ -256,7 +261,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   at the attempts cap, and a large count means the rings need a third radius.
 - **`rules.js` step 3's else branch still has no finite check**, so any future caller passing a
   non-finite `waveHeightFt` gets green with a nonsense reason. `buildEstimateInputs`
-  (`src/flagInputs.js`) closes the reachable route from a malformed KV value; fixing `rules.js`
+  (`src/flagInputs.js`) closes the reachable route from a malformed stored wave record; fixing `rules.js`
   itself is a color-decision change and needs its own `RULES_VERSION` bump.
 - **An ECCC bounding-box prefilter through `idx_beaches_lon_lat`** before exact
   point-in-polygon. Free at today's 354 Canadian rows (112 ms measured); about 6.4 s of CPU at
@@ -266,9 +271,9 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   Calibration should say so.
 - **Map endpoint scale ceiling.** `handleBeachesGeojson` holds the whole flag-worthy set at
   once — the D1 rows, the feature array and the response body — so the 128 MB isolate is the
-  binding constraint, and a single request is the whole cost. The rows are scalar columns with
-  no JSON blob to parse, which makes the per-feature cost much smaller than the KV artifact's
-  was; it does not make the growth sublinear. Re-measure against the real scan before quoting
+  binding constraint, and a single request is the whole cost. The endpoint selects scalar
+  columns only — no blob of any kind, wave included — so the per-feature cost is small, but
+  the growth is still linear. Re-measure against the real scan before quoting
   a ceiling. Whatever it turns out to be, the single-fetch map model wants bbox or tile
   sharding well before it, and no cache policy hides an OOM on a cache miss.
 - **Both beach-walking crons are O(N) in D1 rows read.** The alerts refresh reads every live
@@ -554,10 +559,13 @@ remains partnership-gated.
 
 - The cron subrequest budgets assume the Workers **Paid** plan (10,000 subrequests per
   invocation, no daily KV-write cap). The hourly `runFlagRecompute` runs alert, SRF and scraper
-  fetches plus its batched `beach_state` writes, and does not fetch waves; the 6-hourly
+  fetches plus its batched `beach_state` writes, does not fetch waves and issues no per-beach
+  KV read; the 6-hourly
   `runWaterTempRefresh` runs one Range-limited read per distinct station plus its `watertemp:`
-  writes (PLAN.md section 7). The **Free** plan's 50-subrequest ceiling and 1000 KV-writes/day
-  quota are not sufficient at this cadence and beach count. For a free-plan demo, drop
+  writes (PLAN.md section 7), which is the whole of the KV-write argument. The **Free** plan's
+  50-subrequest ceiling and 1000 KV-writes/day
+  quota are not sufficient at this cadence and beach count. The wave cycle's own write cost is
+  D1 rows, not KV. For a free-plan demo, drop
   `MAX_BEACHES_PER_RUN` well down and reduce cron frequency before deploying. Two further Free
   blockers arrived with the alerts refresh cron: a sub-hour Cron Trigger gets 10 ms of CPU on
   Free, and Free caps Cron Triggers at 5 per account, which this Worker now exceeds.

@@ -1,0 +1,21 @@
+-- The per-beach wave record: one JSON object carrying both the hourly series the
+-- flag estimate indexes and the 24 h strip the detail page draws, plus its own
+-- absolute lease.
+--
+-- wave_expires is absolute epoch seconds under the rule migration 0014 states for
+-- every other record here: a reader treats expires <= floor(now/1000) as absent.
+-- It is the one lease measured from the model valid time rather than from the
+-- write clock — validStartEpoch + 86400 for a record carrying startIso and
+-- hoursFt, validStartEpoch + 25200 for a wind-only one — so a pipeline run firing
+-- late cannot grant a fresh lease to old data.
+--
+-- Single writer: the offline NOAA wave cycle, as a SQL delta. No cron writes these
+-- columns; the hourly upsert in src/beachState.js names neither in its INSERT
+-- column list nor its SET list, so an hourly run can never blank or restamp a wave
+-- record. Expiry is the only retraction path: there is no delete.
+--
+-- NULL is required — SQLite forbids NOT NULL on ADD COLUMN without a default — and
+-- is the correct pre-cycle state: a NULL wave reads as "no wave input", which
+-- degrades to the wind fallback or unknown.
+ALTER TABLE beach_state ADD COLUMN wave TEXT;
+ALTER TABLE beach_state ADD COLUMN wave_expires INTEGER;

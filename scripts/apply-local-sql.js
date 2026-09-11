@@ -1,15 +1,16 @@
 // scripts/apply-local-sql.js — apply a large .sql delta to the local D1 in
 // chunks (node scripts/apply-local-sql.js <delta.sql> [db-name]).
 //
-// `wrangler d1 execute --local --file <f>` hands the whole file to
+// "wrangler d1 execute --local --file <f>" hands the whole file to
 // miniflare/workerd as one SQL call, which its SQLite build caps at 100,000
 // bytes: a larger file fails with "statement too long: SQLITE_TOOBIG" even when
 // every individual statement is tiny. A full discovery delta is several hundred
 // KB. The --remote path uploads through the D1 import API and is unaffected, so
 // only local dev needs this splitter.
 //
-// scripts/discovery-batch.js emits exactly one statement per line, so splitting
-// on line boundaries can never tear a statement. Chunks stay under
+// scripts/discovery-batch.js and scripts/build-wave-sql.js each emit exactly one
+// statement per line, so splitting on line boundaries can never tear a
+// statement. Chunks stay under
 // CHUNK_MAX_BYTES and each is applied with its own wrangler call; the delta is
 // idempotent, so a failure partway can be re-run.
 

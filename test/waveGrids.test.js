@@ -87,7 +87,7 @@ describe("GRIDS", function () {
   });
 });
 
-// A grid id travels from here into every waveinput: record's 'model', and the
+// A grid id travels from here into every stored wave record's 'model', and the
 // Worker reads it back through src/waveModels.js. The two files are on opposite
 // sides of the two-path boundary and neither imports the other, so a grid added
 // here without a label there degrades SILENTLY: the flag card falls back to the

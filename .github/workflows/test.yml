@@ -122,7 +122,7 @@ jobs:
             scripts/fetch-wave-grids.js \
             scripts/sample-waves.js \
             scripts/build-wave-manifest.js \
-            scripts/build-wave-kv.js
+            scripts/build-wave-sql.js
 
       - name: Assert deno.lock is unchanged
         # Belt to the --frozen brace. If a future Deno relaxes the refusal, the
@@ -150,7 +150,10 @@ jobs:
         # pipelines; a script missing from it is one whose network silence nothing
         # enforces. scripts/fetch-layers.js, scripts/fetch-wave-grids.js and
         # scripts/build-marine-zones.js are the only network-capable offline scripts and
-        # are deliberately absent.
+        # are deliberately absent. scripts/build-wave-sql.js belongs in the list even
+        # though a later shell step applies its delta to production D1: the emitter
+        # itself reads bytes on disk and writes a file, and this guard is what keeps
+        # that true.
         #
         # The --allow-run list names every Deno script in the wave pipeline, the
         # network-capable fetcher included: GDAL runs in the workflow shell, so no wave
@@ -164,7 +167,7 @@ jobs:
               | sed -e ":a" -e "/\\\\$/{N;s/\\\\[[:space:]]*\\n[[:space:]]*/ /;ta}" >> "$joined"
           done
           for script in discovery-batch clip-layers build-manifest print-spat-bbox \
-                        print-flag-worthy-sql sample-waves build-wave-manifest build-wave-kv; do
+                        print-flag-worthy-sql sample-waves build-wave-manifest build-wave-sql; do
             if grep -n -- "--allow-net" "$joined" | grep -- "$script"; then
               echo "::error::a $script.js invocation was given --allow-net — that script is pure local math over bytes on disk"
               exit 1
@@ -172,7 +175,7 @@ jobs:
             echo "no --allow-net on any $script.js invocation"
           done
           for script in fetch-wave-grids print-flag-worthy-sql sample-waves \
-                        build-wave-manifest build-wave-kv; do
+                        build-wave-manifest build-wave-sql; do
             if grep -n -- "--allow-run" "$joined" | grep -- "$script"; then
               echo "::error::a $script.js invocation was given --allow-run — GDAL runs in the workflow shell, never from a wave-pipeline script"
               exit 1

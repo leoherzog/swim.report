@@ -1,8 +1,9 @@
-// src/beachState.js — the shape of the beach_state table (migration 0014), as
-// pure SQL fragments and statement builders. The four derived per-beach records
-// — estimate, official, wqfloor, reading — are read here on the request path and
-// written here by the crons, so the column list, the expiry rule and the upsert
-// live in exactly one module.
+// src/beachState.js — the shape of the beach_state table (migrations 0014 and
+// 0015), as pure SQL fragments and statement builders. The four cron-written
+// derived records — estimate, official, wqfloor, reading — plus the wave record
+// the offline wave cycle writes out of band are read here on the request path
+// under one expiry rule, so the column list, that rule and the upsert live in
+// exactly one module.
 //
 // Pure: no fetch, no Date, no env. Every builder takes the D1 binding only to
 // call prepare/bind, and the caller supplies the clock.
@@ -30,6 +31,14 @@ export const BEACH_STATE_JOIN = " LEFT JOIN beach_state s ON s.beach_id = b.id";
 export const CHIP_STATE_SELECT =
   "s.estimate_color, s.estimate_updated, s.estimate_expires, " +
   "s.official_color, s.official_updated, s.official_expires";
+
+// Selected only by the two readers that consume a wave record: the detail route,
+// which draws the 24 h strip, and the hourly cron, which indexes the series at
+// the hour it is estimating. Deliberately not part of BEACH_STATE_SELECT —
+// /api/flag selects that constant and renders none of this — and never part of
+// CHIP_STATE_SELECT, whose whole reason to exist is not shipping a blob for the
+// rows the home proximity branch ranks and discards.
+export const WAVE_STATE_SELECT = "s.wave, s.wave_expires";
 
 // Column order of the upsert. beach_id is bound as ?1 and the rest follow in
 // this order, so the VALUES list and the bind array cannot drift apart.
@@ -113,6 +122,23 @@ export function liveBeachState(row, nowMs) {
     wqfloor: parseBlob(row.wqfloor, row.wqfloor_expires, nowEpoch),
     reading: parseBlob(row.reading, row.reading_expires, nowEpoch)
   };
+}
+
+// Row from any query that selected WAVE_STATE_SELECT (extra columns ignored), or
+// null. Returns the stored wave record, or null when the column is NULL,
+// unparseable, or its own lease has passed. The caller then passes it to
+// resolveWaveInput or trimWaveSeries, each of which applies its own spent-series
+// rule on top of this lease. Never throws.
+//
+// A separate resolver rather than a fifth key on liveBeachState: that one is also
+// called on rows which never selected these columns, where a fifth key would be
+// null because the column was absent from the SELECT, indistinguishable from
+// expired.
+export function liveWaveRecord(row, nowMs) {
+  if (!row) {
+    return null;
+  }
+  return parseBlob(row.wave, row.wave_expires, Math.floor(nowMs / 1000));
 }
 
 // The color/updated pair a chip renders from, or null when the record is absent

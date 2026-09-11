@@ -1,5 +1,5 @@
 // Tests for src/waveManifest.js — the fail-closed consumer gate that decides whether
-// a published wave cycle may be written into production KV.
+// a published wave cycle may be written into production.
 //
 // The property under test is REFUSAL, not acceptance. Every conjunct is a strict
 // !== true, so the assertions below deliberately spend most of their budget proving
@@ -11,10 +11,10 @@ import { describe, it, expect } from "vitest";
 import {
   WAVE_SCHEMA_VERSION,
   EXPECTED_WAVE_ARTIFACTS,
-  WAVE_KV_LEASE_SECONDS,
+  WAVE_SCALAR_LEASE_SECONDS,
   MIN_LEASE_SECONDS,
   classifyWaveManifestFailure,
-  waveKvWriteAllowed
+  waveWriteAllowed
 } from "../src/waveManifest.js";
 
 // A report every conjunct passes. Each test removes or falsifies exactly one field.
@@ -29,7 +29,7 @@ function okReport(overrides) {
     sentinelScanPassed: true,
     minimumRecordsPassed: true,
     gridsDigestMatches: true,
-    secondsRemaining: WAVE_KV_LEASE_SECONDS,
+    secondsRemaining: WAVE_SCALAR_LEASE_SECONDS,
     gridsComplete: true,
     sanityOverridden: false
   }, overrides || {});
@@ -46,7 +46,7 @@ describe("the clean cycle", function () {
     const verdict = classifyWaveManifestFailure(okReport());
     expect(verdict.tier).toBe("ok");
     expect(verdict.reasons).toEqual([]);
-    expect(waveKvWriteAllowed(okReport())).toBe(true);
+    expect(waveWriteAllowed(okReport())).toBe(true);
   });
 });
 
@@ -59,20 +59,20 @@ describe("the fatal tier", function () {
       const overrides = {};
       overrides[fields[i]] = false;
       expect(classifyWaveManifestFailure(okReport(overrides)).tier).toBe("fatal");
-      expect(waveKvWriteAllowed(okReport(overrides))).toBe(false);
+      expect(waveWriteAllowed(okReport(overrides))).toBe(false);
     }
   });
 
   it("refuses on a MISSING fatal conjunct exactly as on a false one", function () {
     for (let i = 0; i < fields.length; i = i + 1) {
       expect(classifyWaveManifestFailure(without(fields[i])).tier).toBe("fatal");
-      expect(waveKvWriteAllowed(without(fields[i]))).toBe(false);
+      expect(waveWriteAllowed(without(fields[i]))).toBe(false);
     }
   });
 
   it("refuses a truthy-but-not-true value, which is not proof", function () {
-    expect(waveKvWriteAllowed(okReport({ artifactsVerified: 1 }))).toBe(false);
-    expect(waveKvWriteAllowed(okReport({ validTimesPassed: "true" }))).toBe(false);
+    expect(waveWriteAllowed(okReport({ artifactsVerified: 1 }))).toBe(false);
+    expect(waveWriteAllowed(okReport({ validTimesPassed: "true" }))).toBe(false);
   });
 
   it("refuses a schemaVersion this code cannot claim to understand", function () {
@@ -87,10 +87,10 @@ describe("the fatal tier", function () {
   });
 
   it("refuses null and non-object reports rather than throwing", function () {
-    expect(waveKvWriteAllowed(null)).toBe(false);
-    expect(waveKvWriteAllowed(undefined)).toBe(false);
-    expect(waveKvWriteAllowed([])).toBe(false);
-    expect(waveKvWriteAllowed("{}")).toBe(false);
+    expect(waveWriteAllowed(null)).toBe(false);
+    expect(waveWriteAllowed(undefined)).toBe(false);
+    expect(waveWriteAllowed([])).toBe(false);
+    expect(waveWriteAllowed("{}")).toBe(false);
     expect(classifyWaveManifestFailure(null).tier).toBe("fatal");
   });
 });
@@ -104,27 +104,27 @@ describe("the artifact-count trap", function () {
       const report = okReport();
       delete report.artifactsPresent;
       delete report.artifactsExpected;
-      expect(waveKvWriteAllowed(report)).toBe(false);
+      expect(waveWriteAllowed(report)).toBe(false);
       expect(classifyWaveManifestFailure(report).tier).toBe("fatal");
     });
 
   it("refuses when either count alone is absent", function () {
-    expect(waveKvWriteAllowed(without("artifactsPresent"))).toBe(false);
-    expect(waveKvWriteAllowed(without("artifactsExpected"))).toBe(false);
+    expect(waveWriteAllowed(without("artifactsPresent"))).toBe(false);
+    expect(waveWriteAllowed(without("artifactsExpected"))).toBe(false);
   });
 
   it("refuses a count that arrived as JSON text rather than a JSON number", function () {
-    expect(waveKvWriteAllowed(okReport({ artifactsPresent: "2", artifactsExpected: "2" })))
+    expect(waveWriteAllowed(okReport({ artifactsPresent: "2", artifactsExpected: "2" })))
       .toBe(false);
   });
 
   it("refuses a short set", function () {
-    expect(waveKvWriteAllowed(okReport({ artifactsPresent: 1 }))).toBe(false);
+    expect(waveWriteAllowed(okReport({ artifactsPresent: 1 }))).toBe(false);
   });
 
   it("refuses a complete set of the wrong size, which means the two halves drifted",
     function () {
-      expect(waveKvWriteAllowed(okReport({ artifactsPresent: 3, artifactsExpected: 3 })))
+      expect(waveWriteAllowed(okReport({ artifactsPresent: 3, artifactsExpected: 3 })))
         .toBe(false);
     });
 });
@@ -134,35 +134,35 @@ describe("the expired tier", function () {
     const verdict = classifyWaveManifestFailure(
       okReport({ secondsRemaining: MIN_LEASE_SECONDS - 1 }));
     expect(verdict.tier).toBe("expired");
-    expect(waveKvWriteAllowed(okReport({ secondsRemaining: MIN_LEASE_SECONDS - 1 })))
+    expect(waveWriteAllowed(okReport({ secondsRemaining: MIN_LEASE_SECONDS - 1 })))
       .toBe(false);
   });
 
   it("accepts a lease exactly at the floor", function () {
-    expect(waveKvWriteAllowed(okReport({ secondsRemaining: MIN_LEASE_SECONDS }))).toBe(true);
+    expect(waveWriteAllowed(okReport({ secondsRemaining: MIN_LEASE_SECONDS }))).toBe(true);
   });
 
   it("refuses a negative lease, so an old cycle cannot be republished over a new one",
     function () {
-      expect(waveKvWriteAllowed(okReport({ secondsRemaining: -60 }))).toBe(false);
+      expect(waveWriteAllowed(okReport({ secondsRemaining: -60 }))).toBe(false);
     });
 
   it("refuses NaN from an unparseable validStartIso", function () {
     // Refusing because we cannot tell how old the data is is the same answer as
     // refusing because it is too old.
-    expect(waveKvWriteAllowed(okReport({ secondsRemaining: NaN }))).toBe(false);
+    expect(waveWriteAllowed(okReport({ secondsRemaining: NaN }))).toBe(false);
     expect(classifyWaveManifestFailure(okReport({ secondsRemaining: NaN })).tier)
       .toBe("expired");
   });
 
   it("refuses a missing secondsRemaining, which is a dropped consumer fold", function () {
-    expect(waveKvWriteAllowed(without("secondsRemaining"))).toBe(false);
+    expect(waveWriteAllowed(without("secondsRemaining"))).toBe(false);
   });
 
   it("refuses a gridsDigest mismatch and a missing one alike", function () {
     expect(classifyWaveManifestFailure(okReport({ gridsDigestMatches: false })).tier)
       .toBe("expired");
-    expect(waveKvWriteAllowed(without("gridsDigestMatches"))).toBe(false);
+    expect(waveWriteAllowed(without("gridsDigestMatches"))).toBe(false);
   });
 
   it("reports a fatal conjunct ahead of an expired one when both fire", function () {
@@ -181,17 +181,17 @@ describe("the minimum record rail", function () {
     // which skips a field whose previous count is <= 0.
     expect(classifyWaveManifestFailure(okReport({ minimumRecordsPassed: false })).tier)
       .toBe("fatal");
-    expect(waveKvWriteAllowed(without("minimumRecordsPassed"))).toBe(false);
+    expect(waveWriteAllowed(without("minimumRecordsPassed"))).toBe(false);
   });
 
   it("still reaches DEGRADED when a non-required grid was out", function () {
     // This is the case the per-grid isolation exists to make reachable: GLWU down,
     // gfswave sampled, so gridsComplete is false and the ocean beaches still get
-    // their KV.
+    // their rows.
     const verdict = classifyWaveManifestFailure(
       okReport({ minimumRecordsPassed: true, gridsComplete: false }));
     expect(verdict.tier).toBe("degraded");
-    expect(waveKvWriteAllowed(okReport({ gridsComplete: false }))).toBe(true);
+    expect(waveWriteAllowed(okReport({ gridsComplete: false }))).toBe(true);
   });
 });
 
@@ -199,19 +199,19 @@ describe("the degraded tier", function () {
   it("writes but warns when a grid contributed nothing", function () {
     const verdict = classifyWaveManifestFailure(okReport({ gridsComplete: false }));
     expect(verdict.tier).toBe("degraded");
-    expect(waveKvWriteAllowed(okReport({ gridsComplete: false }))).toBe(true);
+    expect(waveWriteAllowed(okReport({ gridsComplete: false }))).toBe(true);
   });
 
   it("writes but warns when a human overrode a coverage gate", function () {
     const verdict = classifyWaveManifestFailure(okReport({ sanityOverridden: true }));
     expect(verdict.tier).toBe("degraded");
-    expect(waveKvWriteAllowed(okReport({ sanityOverridden: true }))).toBe(true);
+    expect(waveWriteAllowed(okReport({ sanityOverridden: true }))).toBe(true);
   });
 
   it("degrades on a MISSING gridsComplete, since a missing claim is not a claim",
     function () {
       expect(classifyWaveManifestFailure(without("gridsComplete")).tier).toBe("degraded");
-      expect(waveKvWriteAllowed(without("gridsComplete"))).toBe(true);
+      expect(waveWriteAllowed(without("gridsComplete"))).toBe(true);
     });
 
   it("writes but warns when an optional grid missed a floor, shrink or decay gate",
@@ -219,7 +219,7 @@ describe("the degraded tier", function () {
       const verdict = classifyWaveManifestFailure(okReport({ optionalGridCountsWarned: true }));
       expect(verdict.tier).toBe("degraded");
       expect(verdict.reasons[0].indexOf("optional-grid-counts")).toBe(0);
-      expect(waveKvWriteAllowed(okReport({ optionalGridCountsWarned: true }))).toBe(true);
+      expect(waveWriteAllowed(okReport({ optionalGridCountsWarned: true }))).toBe(true);
       expect(classifyWaveManifestFailure(okReport({ optionalGridCountsWarned: false })).tier)
         .toBe("ok");
       expect(classifyWaveManifestFailure(okReport()).tier).toBe("ok");

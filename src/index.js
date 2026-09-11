@@ -48,14 +48,17 @@ import {
 } from "./flagInputs.js";
 import {
   WQFLOOR_TTL_SECONDS,
+  WAVE_STATE_SELECT,
+  BEACH_STATE_JOIN,
+  liveWaveRecord,
   beachStateUpsertStatements,
   estimateCasStatement,
   chunkStatements
 } from "./beachState.js";
 import { makeDeadline, runPool } from "./pool.js";
 
-// Rows per hourly run. The cap bounds one run's wall clock and KV write budget
-// against the 900 s scheduled ceiling; it does not have to cover the table.
+// Rows per hourly run. The cap bounds one run's wall clock and its D1 batch
+// budget against the 900 s scheduled ceiling; it does not have to cover the table.
 // Cold rows rotate, and FLAG_TTL_SECONDS is what carries a beach between its
 // turns, so the two must satisfy:
 //
@@ -73,11 +76,11 @@ import { makeDeadline, runPool } from "./pool.js";
 // because the hot tier comes off the top: 2600 lands exactly on 7 <= 7 with none
 // left, and 2000 gives a ten-run rotation and ages half the cold coast out to
 // unknown between turns. Wall clock is not the constraint here — the 3000-row run
-// measures 187-206 s against the 900 s ceiling, at 1.0-2.7 s of CPU — so a cut
-// made to save KV writes has to come from the rotation arithmetic or from the
-// TTL, never from this number alone. Read oldest= and the run's own timestamps
-// before moving it either way. Real pagination is still required past what one
-// run can walk (TODO.md).
+// measures 187-206 s against the 900 s ceiling, at 1.0-2.7 s of CPU — and the
+// run's cost is wall clock plus batched D1 round trips, so a cut has to come from
+// the rotation arithmetic or from the TTL, never from this number alone. Read
+// oldest= and the run's own timestamps before moving it either way. Real
+// pagination is still required past what one run can walk (TODO.md).
 const MAX_BEACHES_PER_RUN = 3000;
 // HOT_VIEW_WINDOW_MS is imported from ./demandWindow.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry module
@@ -106,8 +109,8 @@ const MAX_BEACHES_PER_RUN = 3000;
 // the only way a cleared one stops rendering.
 // The water-temp reading is refreshed on the 6-hourly cron, so its KV must
 // outlive the gap between runs plus slack for a failed one. The offline wave
-// pipeline writes "waveinput:"/"waves:" on its own absolute expiration and does
-// not read this constant.
+// pipeline writes beach_state.wave on its own absolute expiration and does not
+// read this constant.
 const WAVE_DATA_TTL_SECONDS = 25200;
 // Requested width for every fan-out pool in both crons. Cloudflare caps an
 // invocation at six simultaneous open connections, and an upstream fetch or a KV
@@ -117,6 +120,10 @@ const WAVE_DATA_TTL_SECONDS = 25200;
 // every wall-clock estimate for these passes at 6, never at 12. The per-beach
 // D1 state is not pooled at all: it is collapsed into batches of 200 statements
 // and applied sequentially (src/beachState.js).
+//
+// The hourly spends this budget on its upstream gathers alone: its wave records
+// ride the SELECT it already issues, so it makes no per-beach KV read. The
+// water-temp cron spends it on station fetches and its own "watertemp:" puts.
 const KV_WRITE_CONCURRENCY = 12;
 // Wall-clock budgets for the 6-hourly water-temp cron, measured from the top of
 // the invocation, against the 900 s scheduled ceiling. See src/pool.js for the
@@ -211,14 +218,6 @@ const WEBCAM_RECHECK_MS = 14 * 86400000;
 const WEBCAM_CLUSTER_SPAN_DEG = 0.2;
 const WEBCAM_BBOX_MARGIN_DEG = 0.07;
 
-function chunk(items, size) {
-  const out = [];
-  for (let i = 0; i < items.length; i = i + size) {
-    out.push(items.slice(i, i + size));
-  }
-  return out;
-}
-
 // Wall-clock budgets for the water-temp cron, read from env with a fallback to
 // the module constants. The override is a plain number, deliberately not a
 // callable clock: a function smuggled through the binding object would be a
@@ -250,12 +249,23 @@ function runBudget(env) {
 // whitelist — a column name cannot be a bind parameter, so it is concatenated as
 // a literal and the lookup is own-property-checked rather than trusting an
 // arbitrary string to index the map.
-function selectRunBeaches(env, columns, hotCutoffIso, rotation) {
+//
+// stateSelect is optional: pass a beach_state fragment to join the table and
+// select it alongside columns, which the caller must then qualify as b.* rather
+// than * so the row set does not carry every beach_state column. Omit it and the
+// statement is the plain unjoined SELECT. Every other clause stays unqualified in
+// both forms — FLAG_WORTHY_WATER_SQL's water_class and water_class_attempts,
+// last_viewed, the cursor column, id — which holds only because beach_state
+// carries none of those names; any future beach_state column must satisfy that
+// too.
+function selectRunBeaches(env, columns, hotCutoffIso, rotation, stateSelect) {
   const cursorColumn = Object.prototype.hasOwnProperty.call(ROTATION_COLUMNS, rotation)
     ? ROTATION_COLUMNS[rotation]
     : ROTATION_COLUMNS.flag;
+  const select = stateSelect ? columns + ", " + stateSelect : columns;
+  const from = stateSelect ? " FROM beaches b" + BEACH_STATE_JOIN : " FROM beaches";
   return env.DB.prepare(
-    "SELECT " + columns + " FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
+    "SELECT " + select + from + " WHERE " + FLAG_WORTHY_WATER_SQL +
     " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, " + cursorColumn +
     " ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
   ).bind(hotCutoffIso);
@@ -410,8 +420,9 @@ async function flushBeachState(env, writes) {
 
 // Hourly estimate recompute. Fetches the fast-changing safety signals (alerts,
 // rip-current risk) every hour but takes wave height and the wind fallback from
-// the KV the offline NOAA GRIB pipeline bulk-writes; no wave fetch is reachable
-// from this Worker at all.
+// the beach_state.wave record the offline NOAA GRIB pipeline writes, selected on
+// the same join it is about to write back to; no wave fetch is reachable from
+// this Worker at all.
 //
 // Every derived record it produces — estimate, wqfloor, official, reading — is
 // collected as a beach_state write descriptor and applied in batches: the
@@ -445,7 +456,12 @@ async function runFlagRecompute(env) {
   const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString();
 
   try {
-    const beachesResult = await selectRunBeaches(env, "*", hotCutoffIso, "flag").all();
+    // b.* rather than *: a bare splat over the join returns every beach_state
+    // column, putting the estimate and official blobs on all MAX_BEACHES_PER_RUN
+    // rows.
+    const beachesResult = await selectRunBeaches(
+      env, "b.*", hotCutoffIso, "flag", WAVE_STATE_SELECT
+    ).all();
     const beaches = beachesResult.results || [];
 
     // Step 3: alerts — one national fetch, matched to the run's distinct zone ids
@@ -555,35 +571,30 @@ async function runFlagRecompute(env) {
       );
     }
 
-    // Step 5: wave inputs — read only, never fetched here. The offline NOAA GRIB
-    // pipeline bulk-writes a "waveinput:" + id payload
-    // ({ waveHeightFt, model, windSpeedMph, windGustMph, startIso, hoursFt, updated })
-    // per beach. A missing key — no cycle has landed, or its data aged past its
-    // expiration — yields no wave input, and the estimate degrades to the wind
-    // fallback or "unknown", never a wrong flag. Prefetched concurrently in chunks
-    // so the per-beach loop below stays synchronous.
+    // Step 5: wave inputs — read only, never fetched here. Each beach's row
+    // already carries the offline wave cycle's record and its lease, selected
+    // above over the beach_state join, so there is no per-beach read at all.
+    // liveWaveRecord applies the same expiry rule every other beach_state column
+    // obeys, and resolveWaveInput then indexes the stored series at the hour this
+    // run is estimating rather than reading hour 0 — which is what lets one landed
+    // cycle color a day of runs, and why a series-bearing record's lease is the
+    // length of its series.
     //
-    // Each record is resolved through src/waveInput.js at nowMs, which indexes the
-    // stored series at the hour this run is estimating rather than reading hour 0.
-    // That is what lets one landed cycle color a day of runs, and it is why a
-    // series-bearing key's lease is the length of its series. A spent series
-    // resolves to null and is not stored, so the beach reads exactly as it would
-    // with no key at all. Resolving here rather than in the loop below means every
-    // beach in a run indexes the same instant.
+    // An absent record, a lease that has passed and a spent series all yield no
+    // wave input, and the estimate degrades to the wind fallback or "unknown",
+    // never a wrong flag. Both gates hold on their own: a wind-only record's live
+    // wave_expires is not evidence that its hour-0 wind is offerable, which only
+    // resolveWaveInput decides. Resolving here rather than in the loop below means
+    // every beach in a run indexes the same instant.
     const waveInputs = new Map();
-    const inputChunks = chunk(beaches, 50);
-    for (const group of inputChunks) {
-      const fetched = await Promise.all(
-        group.map(function (b) {
-          return env.FLAGS.get("waveinput:" + b.id, { type: "json" })
-            .catch(function () { return null; });
-        })
-      );
-      for (let i = 0; i < group.length; i = i + 1) {
-        const resolved = resolveWaveInput(fetched[i], nowMs);
-        if (resolved !== null) {
-          waveInputs.set(group[i].id, resolved);
-        }
+    for (const beach of beaches) {
+      const record = liveWaveRecord(beach, nowMs);
+      if (record === null) {
+        continue;
+      }
+      const resolved = resolveWaveInput(record, nowMs);
+      if (resolved !== null) {
+        waveInputs.set(beach.id, resolved);
       }
     }
 
@@ -749,8 +760,9 @@ async function runFlagRecompute(env) {
             : nowEpoch + WQFLOOR_TTL_SECONDS
         });
 
-        // The detail-page WaveSeries ("waves:" + id) is bulk-written by the
-        // offline pipeline; this loop only reads wave inputs.
+        // The offline wave cycle owns beach_state.wave and wave_expires, and the
+        // upsert this run builds names neither column, so an hourly run can never
+        // blank or restamp a wave record. This loop only reads them.
         //
         // Recording the estimate here does not license a flag_history row: step
         // 9 pairs only beaches whose beach_state chunk actually committed.
@@ -1066,7 +1078,7 @@ async function runAlertRefresh(env) {
   try {
     // Step 1: three national fetches, issued concurrently, each caught on its own
     // and each already bounded by its client's timeoutMs. Nothing else is fetched
-    // — no SRF, no wqFloor scrape, no official scrape, no "waveinput:" read — so a
+    // — no SRF, no wqFloor scrape, no official scrape, no wave read — so a
     // 10-minute cadence costs county health departments and Ontario Parks nothing,
     // and there is no second source of truth for any non-alert input.
     const fetched = await Promise.all([
@@ -1309,10 +1321,11 @@ async function runAlertRefresh(env) {
 // the only writer of "watertemp:" + id, which the detail page renders as its
 // water-temperature subtitle.
 //
-// No wave fetching happens here or anywhere in this Worker; "waveinput:" and
-// "waves:" are bulk-written by the offline NOAA GRIB pipeline. This cron owns
-// beaches.wave_updated (migration 0012) as its rotation cursor: single writer,
-// single reader, both inside this function.
+// No wave fetching happens here or anywhere in this Worker; the offline NOAA
+// GRIB pipeline writes beach_state.wave and wave_expires (migration 0015), which
+// this cron neither reads nor writes. It owns beaches.wave_updated (migration
+// 0012) as its rotation cursor — a distinct column despite the neighbouring name:
+// single writer, single reader, both inside this function.
 //
 // Bounded in wall clock end to end (runBudget): no station fetch starts after the
 // gather deadline, and the write pool yields at the write deadline rather than

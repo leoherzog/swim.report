@@ -1704,8 +1704,8 @@ export function renderDetailPage(data) {
   const estimate = data.estimate;
   const official = data.official;
   const nowIso = data.nowIso;
-  // Absent for masked beaches and legacy KV payloads, so default to null and the
-  // wave forecast section omits itself.
+  // Absent for masked beaches and for a record past its lease, so default to null
+  // and the wave forecast section omits itself.
   const waves = (data.waves === undefined || data.waves === null) ? null : data.waves;
   // NDBC water-temperature reading, display-only and never a flag input. Absent
   // until the water-temperature cron writes it, so default to null; the tile

@@ -30,18 +30,18 @@ The chain from there is mechanical:
    `false`.
 3. `Publish the pointer` requires `PUBLISH && (AUTO_PUBLISH || FORCE_PUBLISH)`, and
    `FORCE_PUBLISH` is hardcoded `false` on a scheduled run. The pointer does not move.
-4. `publish-kv` runs only `if needs.sample.outputs.published == 'true'`, which is never set. The
+4. `publish-d1` runs only `if needs.sample.outputs.published == 'true'`, which is never set. The
    job is skipped entirely.
 
-The consequence is wider than the new grid. **Every** scheduled cycle writes no KV for **any**
+The consequence is wider than the new grid. **Every** scheduled cycle writes no rows for **any**
 grid, including the Great Lakes and both gfswave grids, which are otherwise healthy. Every
-`waveinput:` key already in KV carries an absolute expiration at `validStartEpoch + 86400`, so
+stored wave record carries an absolute `wave_expires` at `validStartEpoch + 86400`, so
 the last cycle that landed before the merge covers roughly one more day. After that the hourly
 cron finds no wave input for any beach, the wave lane in `src/rules.js` falls through, and the
 site is gray coast to coast.
 
 A scheduled run in that state fails, on `Fail a scheduled withheld publish`. That step is the
-only alert the state produces: the KV job that did not run leaves no artifact to notice, and
+only alert the state produces: the publish job that did not run leaves no artifact to notice, and
 without it the run would go green on one `::warning::` annotation from `Explain a withheld
 publish`. It fires after the reports artifact has uploaded, so the `manifest.json` that seeds
 the floors is still there.
@@ -119,8 +119,12 @@ docs. Confirm before pushing:
 ```
 npx vitest run
 DENO_NO_PACKAGE_JSON=1 deno check --lock=deno.lock --frozen \
-  scripts/fetch-wave-grids.js scripts/sample-waves.js scripts/build-wave-manifest.js
+  scripts/fetch-wave-grids.js scripts/sample-waves.js scripts/build-wave-manifest.js \
+  scripts/build-wave-sql.js
 ```
+
+That list is the wave-pipeline subset of the frozen `deno check` step in
+`.github/workflows/test.yml`; a script added to one belongs in the other.
 
 The suite must be green, including `test/waveGateData.test.js`. A failure there means the
 committed floors key does not match the digest the committed `GRIDS` produce, and the two
@@ -146,7 +150,7 @@ The concurrency group is `waves` with `cancel-in-progress: false`, so dispatch a
 minutes past 00, 06, 12 and 18 UTC or the run queues behind a scheduled one.
 
 Expected: the run succeeds, `Explain a withheld publish` emits its warning, `Publish the
-manifest and the pointer` and `Prune old wave cycles` are skipped, and `publish-kv` is skipped. Watch the wall
+manifest and the pointer` and `Prune old wave cycles` are skipped, and `publish-d1` is skipped. Watch the wall
 clock — this is the first grid whose source file carries 290 bands, adding 48 `gdal_translate`
 invocations and 48 `gdalinfo -stats` calls to a normal 10 to 18 minute run against a 30 minute
 timeout.
@@ -258,19 +262,19 @@ gh workflow run waves.yml \
   -f publish=true -f apply=true -f allow_shrink=false -f force_publish=true
 ```
 
-This is the run that moves `waves/current.json` and writes KV. Dispatch it from the branch or
+This is the run that moves `waves/current.json` and writes the rows. Dispatch it from the branch or
 ref carrying the seeded floors entry: `workflow_dispatch` runs the workflow file and the code
 from the selected ref, and a ref still carrying the bootstrap entry withholds again.
 
 Expected: `AUTO_PUBLISH=true` in the gate step's output — the seeded entry alone should be
 enough, and `force_publish` is belt and braces for the first cycle whose ratio checks have no
 per-grid predecessor for the new grid. `Publish the manifest and the pointer` runs,
-`publish-kv` runs, the bulk write reports no "unexpected properties" in the wrangler retry
-loop.
+`publish-d1` runs, and `Apply the delta to production D1` completes with a non-zero `rows=` on
+its summary line.
 
 A degraded-tier warning naming `noaa_nwps_sew` as unfetched is a healthy outcome, not a
 failure. SEW publishes on demand near 00Z and 12Z with whole days sometimes absent;
-`gridsComplete` false still writes KV for every other grid.
+`gridsComplete` false still writes rows for every other grid.
 
 If `sanity.autoPublishAllowed` is still false, read the withheld reason in the manifest before
 touching anything. Do not reach for `allow_shrink`.
@@ -299,7 +303,7 @@ every grid's reach. The second must be gray. It must never be green.
 ### Step 7 — watch the first scheduled slot
 
 The next `52 */6 * * *` occurrence should auto-publish with no human input: `AUTO_PUBLISH=true`,
-the pointer moved, `publish-kv` run. A scheduled run that withholds instead fails on `Fail a
+the pointer moved, `publish-d1` run. A scheduled run that withholds instead fails on `Fail a
 scheduled withheld publish`, and that failure means the floors entry is wrong or missing for the
 digest in force. Treat it as an outage and go to the recovery section below.
 
@@ -309,16 +313,16 @@ Revert the code commit whole — `src/waveGrids.js` and `data/wave-grids.json` t
 rest. The digest returns to `sha256:c4eafd4a...`, whose seeded entry is still in the file
 because floors are append-only, `test/waveGateData.test.js` is green because that entry covers
 exactly the reverted grid set, and the next scheduled cycle auto-publishes with no further
-action. No data migration and no KV cleanup: `noaa_nwps_sew` keys expire on their own absolute
-lease.
+action. No data migration and no cleanup: a `noaa_nwps_sew` record expires on its own absolute
+lease, and nothing deletes a stored wave record.
 
 Never revert partially. Reverting the `waterClasses` or `windFallback` digest fields alone moves
 the digest again and re-triggers the withhold with no new grid to show for it.
 
 ## If a scheduled run fired before the floors were seeded
 
-Recovery is bounded. The failed run did not move the pointer, so the previous cycle's KV stays
-live until its own `validStart + 86400` — hours of headroom, not minutes.
+Recovery is bounded. The failed run did not move the pointer, so the previous cycle's stored
+records stay live until their own `validStart + 86400` — hours of headroom, not minutes.
 
 `Upload the manifest and sample report` is `if: always()` and runs before the failing step, so a
 run withheld on the floors carries a usable `manifest.json` in its `wave-cycle-reports`

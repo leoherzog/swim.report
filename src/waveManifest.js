@@ -1,10 +1,10 @@
 // src/waveManifest.js — the consumer gate for the NOAA GRIB2 wave pipeline: the
 // one place that decides whether a published wave cycle may be written into
-// production KV. Pure, fail-closed, and never imported by the Worker; it runs
-// inside scripts/build-wave-kv.js on Deno, and is modelled on
+// production. Pure, fail-closed, and never imported by the Worker; it runs
+// inside scripts/build-wave-sql.js on Deno, and is modelled on
 // src/layerManifest.js.
 //
-// The keys this pipeline writes are the only wave input src/rules.js sees. Two
+// The records this pipeline writes are the only wave input src/rules.js sees. Two
 // things bound their staleness: the absolute expiration below, and the hour index
 // runFlagRecompute takes into the series (src/waveInput.js). Neither reads
 // waveinput.updated. A merely well-formed cycle is therefore not enough: every checksum can match while the numbers describe a garbage plane, a
@@ -19,10 +19,10 @@
 // rather than sail through.
 //
 // Three tiers on one conjunct walk:
-//   fatal    — nothing about this cycle can be trusted. Write no KV at all.
+//   fatal    — nothing about this cycle can be trusted. Write no rows at all.
 //   expired  — decodable and intact, but the lease it would grant is worthless.
-//              Write no KV. A cycle down to its last few hours of series costs a
-//              full bulk write, buys almost nothing, and means the pipeline has
+//              Write no rows. A cycle down to its last few hours of series costs a
+//              full delta, buys almost nothing, and means the pipeline has
 //              missed two consecutive occurrences, which the operator must see
 //              rather than have papered over.
 //   degraded — write, and warn. Less data than a clean cycle, but every number in
@@ -44,7 +44,7 @@ export const WAVE_SCHEMA_VERSION = 2;
 // consume as-is, and every filename stays a constant of this repo.
 export const EXPECTED_WAVE_ARTIFACTS = ["waveinput.ndjson", "waves.ndjson"];
 
-// Absolute leases granted to the emitted KV pairs, measured from the model valid
+// Absolute leases granted to the emitted records, measured from the model valid
 // time and not from the write clock. Two, because the two record shapes carry
 // different amounts of time.
 //
@@ -56,7 +56,7 @@ export const EXPECTED_WAVE_ARTIFACTS = ["waveinput.ndjson", "waves.ndjson"];
 // past a few hours would put a stale wind on the color path. It keeps the short
 // lease, which also covers every record written before the series existed.
 export const WAVE_SERIES_LEASE_SECONDS = 86400;
-export const WAVE_KV_LEASE_SECONDS = 25200;
+export const WAVE_SCALAR_LEASE_SECONDS = 25200;
 
 // Below this much of the SERIES lease, writing is pointless and the lateness is
 // the actual news: the cycle is more than 21 h old, which is two consecutive
@@ -191,7 +191,7 @@ function collectFailures(report) {
   // A human ran the build with --allow-shrink, demoting a coverage refusal to a
   // warning. Published separately by build-wave-manifest.js so an overridden cycle
   // stays distinguishable downstream, and flattened onto the report by
-  // scripts/build-wave-kv.js.
+  // scripts/build-wave-sql.js.
   if (report.sanityOverridden === true) {
     degraded.push("sanity-overridden: a coverage gate was demoted to a warning by " +
       "--allow-shrink");
@@ -201,8 +201,8 @@ function collectFailures(report) {
   // publishes the per-grid messages in manifest.sanity.optionalGridCounts.
   if (report.optionalGridCountsWarned === true) {
     degraded.push("optional-grid-counts: a grid outside REQUIRED_GRID_IDS missed a " +
-      "floor, shrink or decay gate; the beaches it dropped keep their previous keys " +
-      "until those expire");
+      "floor, shrink or decay gate; the beaches it dropped keep their previous " +
+      "records until those expire");
   }
 
   return { fatal: fatal, expired: expired, degraded: degraded };
@@ -225,10 +225,10 @@ export function classifyWaveManifestFailure(report) {
   return { tier: tier, reasons: reasons };
 }
 
-// "May this cycle be written into production KV?" True for a clean or degraded
+// "May this cycle be written into production?" True for a clean or degraded
 // cycle, false for anything fatal or expired. Null and malformed input answer
 // false, never a throw and never a default true.
-export function waveKvWriteAllowed(report) {
+export function waveWriteAllowed(report) {
   const failures = collectFailures(report);
   return failures.fatal.length === 0 && failures.expired.length === 0;
 }

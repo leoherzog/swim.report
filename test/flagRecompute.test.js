@@ -59,9 +59,9 @@ function makeBeachRow(overrides) {
 // inserted and the four derived records land in beach_state exactly as the
 // request path reads them back.
 //
-// kvSeed pre-populates the KV reads that remain on the cron path — "waveinput:"
-// payloads (already-parsed objects, as a { type: "json" } get resolves them) and
-// the raw "scraperhealth:" string.
+// kvSeed pre-populates the KV reads that remain on the cron path: the raw
+// "scraperhealth:" string. Wave records are seeded into beach_state through
+// db.seedWave, not here — the cron reads them off the join its SELECT issues.
 function makeEnv(beachRows, kvSeed) {
   const db = makeD1({ beaches: beachRows || [] });
   const kvPuts = new Map();
@@ -332,9 +332,9 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
           marine_zone: "LMZ874",
           nws_grid_url: null
         })
-      ],
-      { "waveinput:osm-node-5": { waveHeightFt: 1.0, model: "noaa_glwu" } }
+      ]
     );
+    made.db.seedWave("osm-node-5", { waveHeightFt: 1.0, model: "noaa_glwu" });
     await runHourlyCron(made.env);
 
     const estimate = estimateOf(made, "osm-node-5");
@@ -586,24 +586,27 @@ describe("runFlagRecompute flag_history calibration logging", function () {
 // not the 2 h flag TTL.
 const WAVE_DATA_TTL = 25200;
 
-// The hourly estimate never fetches wave data — it READS the "waveinput:" + id
-// KV the offline NOAA GRIB pipeline bulk-writes. A seeded wave height must flow
-// through to the flag color; a missing key must degrade honestly (no wave
-// input, no crash).
-describe("runFlagRecompute reads waveinput: KV", function () {
+// The hourly estimate never fetches wave data — it READS the beach_state.wave
+// record the offline NOAA GRIB pipeline writes, off the join its own SELECT
+// issues. A seeded wave height must flow through to the flag color; a beach with
+// no record, and one whose wave_expires has passed, must degrade honestly (no
+// wave input, no crash).
+describe("runFlagRecompute reads the beach_state wave record", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
   });
 
   it("uses a seeded wave height (>=4 ft -> red) with the model's source label", async function () {
-    // No network needed: the hourly path only reads KV. Fail all fetch to
-    // prove no upstream call is reachable from the request-assembly path.
+    // No network needed: the hourly path only reads stored state. Fail all fetch
+    // to prove no upstream call is reachable from the request-assembly path.
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
 
-    const seed = new Map();
-    seed.set("waveinput:osm-node-1", {
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    made.db.seedWave("osm-node-1", {
       beachId: "osm-node-1",
       waveHeightFt: 4.5,
       model: "noaa_gfswave",
@@ -611,10 +614,7 @@ describe("runFlagRecompute reads waveinput: KV", function () {
       windGustMph: null,
       updated: "2026-07-15T12:00:00.000Z"
     });
-
-    const made = makeEnv([
-      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
-    ], seed);
+    const seeded = made.db.stateOf("osm-node-1");
     await runHourlyCron(made.env);
 
     const estimate = estimateOf(made, "osm-node-1");
@@ -623,12 +623,14 @@ describe("runFlagRecompute reads waveinput: KV", function () {
     expect(estimate.color).toBe("red");
     const labels = estimate.sources.map(function (s) { return s.label; });
     expect(labels).toContain("NOAA GFS Wave Model");
-    // The hourly path must never write the strip series (the offline pipeline
-    // owns it).
-    expect(made.kvPuts.get("waves:osm-node-1")).toBeUndefined();
+    // The offline cycle owns these two columns: the hourly upsert names neither,
+    // so the run leaves both byte-identical.
+    const after = made.db.stateOf("osm-node-1");
+    expect(after.wave).toBe(seeded.wave);
+    expect(after.wave_expires).toBe(seeded.wave_expires);
   });
 
-  it("degrades to unknown when no waveinput: key exists", async function () {
+  it("degrades to unknown when the beach has no wave record", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -638,6 +640,39 @@ describe("runFlagRecompute reads waveinput: KV", function () {
     ]);
     await runHourlyCron(made.env);
 
+    expect(estimateOf(made, "osm-node-1").color).toBe("unknown");
+    // Nothing wrote the column, so it stays NULL rather than an empty blob.
+    const row = made.db.stateOf("osm-node-1");
+    expect(row.wave).toBeNull();
+    expect(row.wave_expires).toBeNull();
+  });
+
+  it("reads a past wave_expires as absent even though the blob is still in the row", async function () {
+    // The whole failure this lease closes: the JSON stays in the row past its
+    // lease, so a reader that skips the gate resurrects a spent cycle as a live
+    // wave height. 4.5 ft would be red; the expired lease must make it gray.
+    vi.stubGlobal("fetch", function () {
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", lat: 44.8, lon: -83.3 })
+    ]);
+    made.db.seedWave(
+      "osm-node-1",
+      {
+        beachId: "osm-node-1",
+        waveHeightFt: 4.5,
+        model: "noaa_gfswave",
+        windSpeedMph: null,
+        windGustMph: null,
+        updated: "2026-07-15T12:00:00.000Z"
+      },
+      Math.floor(Date.now() / 1000) - 1
+    );
+    await runHourlyCron(made.env);
+
+    expect(made.db.stateOf("osm-node-1").wave).not.toBeNull();
     expect(estimateOf(made, "osm-node-1").color).toBe("unknown");
   });
 });
@@ -696,15 +731,15 @@ describe("scraper health season/cadence gate (healthMonitored)", function () {
 });
 
 // The hourly recompute's wind-fallback wiring: windSpeedMph/windGustMph come
-// from the same "waveinput:" KV payload the offline wave pipeline wrote, and the
-// { label: "Wind Forecast" } source entry is pushed only when the payload's
+// from the same beach_state.wave record the offline wave pipeline wrote, and the
+// { label: "Wind Forecast" } source entry is pushed only when the record's
 // waveHeightFt is null (wind is a fallback, never a co-signal).
-describe("runFlagRecompute wind fallback from waveinput: KV", function () {
+describe("runFlagRecompute wind fallback from the stored wave record", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
   });
 
-  it("wave-null waveinput with 30 mph wind -> red via the wind trigger, Wind Forecast source", async function () {
+  it("wave-null record with 30 mph wind -> red via the wind trigger, Wind Forecast source", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -717,18 +752,16 @@ describe("runFlagRecompute wind fallback from waveinput: KV", function () {
           // (the stubbed alerts failure keeps alertsCheckable true).
           nws_zone: "MIZ071"
         })
-      ],
-      {
-        "waveinput:osm-node-1": {
-          beachId: "osm-node-1",
-          waveHeightFt: null,
-          model: null,
-          windSpeedMph: 30,
-          windGustMph: null,
-          updated: "2026-07-15T12:00:00.000Z"
-        }
-      }
+      ]
     );
+    made.db.seedWave("osm-node-1", {
+      beachId: "osm-node-1",
+      waveHeightFt: null,
+      model: null,
+      windSpeedMph: 30,
+      windGustMph: null,
+      updated: "2026-07-15T12:00:00.000Z"
+    });
     await runHourlyCron(made.env);
 
     const estimate = estimateOf(made, "osm-node-1");
@@ -744,24 +777,22 @@ describe("runFlagRecompute wind fallback from waveinput: KV", function () {
     });
   });
 
-  it("waveinput carrying BOTH a wave height and wind: wave decides, Wind Forecast source is NOT pushed", async function () {
+  it("a record carrying BOTH a wave height and wind: wave decides, Wind Forecast source is NOT pushed", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
 
     const made = makeEnv(
-      [makeBeachRow({ id: "osm-node-1", nws_zone: "MIZ071" })],
-      {
-        "waveinput:osm-node-1": {
-          beachId: "osm-node-1",
-          waveHeightFt: 1.0,
-          model: "noaa_gfswave",
-          windSpeedMph: 30,
-          windGustMph: null,
-          updated: "2026-07-15T12:00:00.000Z"
-        }
-      }
+      [makeBeachRow({ id: "osm-node-1", nws_zone: "MIZ071" })]
     );
+    made.db.seedWave("osm-node-1", {
+      beachId: "osm-node-1",
+      waveHeightFt: 1.0,
+      model: "noaa_gfswave",
+      windSpeedMph: 30,
+      windGustMph: null,
+      updated: "2026-07-15T12:00:00.000Z"
+    });
     await runHourlyCron(made.env);
 
     const estimate = estimateOf(made, "osm-node-1");
@@ -1211,7 +1242,13 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
     const after = Date.now();
 
     const selectBinds = made.preparedBinds.filter(function (b) {
-      return b.sql.indexOf("SELECT * FROM beaches WHERE") !== -1 && b.sql.indexOf("ORDER BY") !== -1;
+      // The hourly splats b.* and carries the wave columns over the beach_state
+      // join; the water-temp cron's own SELECT names its columns and stays
+      // unjoined, so this literal picks exactly one of the two.
+      return b.sql.indexOf(
+        "SELECT b.*, s.wave, s.wave_expires FROM beaches b" +
+        " LEFT JOIN beach_state s ON s.beach_id = b.id WHERE"
+      ) !== -1 && b.sql.indexOf("ORDER BY") !== -1;
     });
     expect(selectBinds.length).toBe(1);
     const sql = selectBinds[0].sql;
@@ -1379,15 +1416,14 @@ describe("runFlagRecompute - registered-source integration", function () {
   it("a water-quality advisory raises a wave-green estimate to yellow (wq-floor)", function () {
     return (async function () {
       vi.stubGlobal("fetch", mnAdvisoryFetch("Elevated E. coli bacteria"));
-      const made = makeEnv([mnBeachRow()], {
-        "waveinput:osm-node-duluth-1": {
-          beachId: "osm-node-duluth-1",
-          waveHeightFt: 1.0,
-          model: "noaa_glwu",
-          windSpeedMph: null,
-          windGustMph: null,
-          updated: "2026-07-18T12:00:00.000Z"
-        }
+      const made = makeEnv([mnBeachRow()]);
+      made.db.seedWave("osm-node-duluth-1", {
+        beachId: "osm-node-duluth-1",
+        waveHeightFt: 1.0,
+        model: "noaa_glwu",
+        windSpeedMph: null,
+        windGustMph: null,
+        updated: "2026-07-18T12:00:00.000Z"
       });
       await runHourlyCron(made.env);
 
@@ -1410,15 +1446,14 @@ describe("runFlagRecompute - registered-source integration", function () {
   it("a water-quality advisory NEVER lowers a wave-height red", function () {
     return (async function () {
       vi.stubGlobal("fetch", mnAdvisoryFetch("Elevated E. coli bacteria"));
-      const made = makeEnv([mnBeachRow()], {
-        "waveinput:osm-node-duluth-1": {
-          beachId: "osm-node-duluth-1",
-          waveHeightFt: 5.0,
-          model: "noaa_glwu",
-          windSpeedMph: null,
-          windGustMph: null,
-          updated: "2026-07-18T12:00:00.000Z"
-        }
+      const made = makeEnv([mnBeachRow()]);
+      made.db.seedWave("osm-node-duluth-1", {
+        beachId: "osm-node-duluth-1",
+        waveHeightFt: 5.0,
+        model: "noaa_glwu",
+        windSpeedMph: null,
+        windGustMph: null,
+        updated: "2026-07-18T12:00:00.000Z"
       });
       await runHourlyCron(made.env);
 
@@ -1741,7 +1776,7 @@ describe("runWaterTempRefresh water temperature (watertemp: KV)", function () {
     expect(loggedLines(logSpy)).toContain("watertemp=60 truncated=no stations=1 live=1");
   });
 
-  it("writes NO wave KV: waveinput:/waves: belong to the offline pipeline", async function () {
+  it("writes no beach_state wave column: the record belongs to the offline pipeline", async function () {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-15T16:00:00Z"));
 
@@ -1757,11 +1792,11 @@ describe("runWaterTempRefresh water temperature (watertemp: KV)", function () {
     await runWaterTempCron(made.env);
 
     // A WVHT of "MM" is irrelevant here: this cron reads water temperature only,
-    // and the wave keys are bulk-written from GitHub Actions.
-    for (const key of made.kvPuts.keys()) {
-      expect(key.indexOf("waveinput:")).toBe(-1);
-      expect(key.indexOf("waves:")).toBe(-1);
-    }
+    // and the wave record is applied into beach_state from GitHub Actions. It
+    // owns beaches.wave_updated, one underscore away in name and unrelated.
+    const state = made.db.stateOf("osm-node-0");
+    expect(state === null || state.wave === null).toBe(true);
+    expect(state === null || state.wave_expires === null).toBe(true);
     const put = made.kvPuts.get("watertemp:osm-node-0");
     expect(put).toBeDefined();
     expect(put.opts).toEqual({ expirationTtl: WAVE_DATA_TTL });
@@ -1994,26 +2029,25 @@ describe("runFlagRecompute wave input finite guards", function () {
     vi.unstubAllGlobals();
   });
 
-  function waveInput(overrides) {
-    const base = {
-      beachId: "osm-node-1",
-      waveHeightFt: null,
-      model: "noaa_glwu",
-      windSpeedMph: null,
-      windGustMph: null,
-      updated: "2026-07-18T12:00:00.000Z"
-    };
-    const extra = overrides || {};
-    for (const key in extra) {
-      if (Object.prototype.hasOwnProperty.call(extra, key)) {
-        base[key] = extra[key];
-      }
-    }
-    return base;
+  // Seeded as raw JSON text, not through a JS object: these are the only two
+  // spellings of a non-finite number that can reach the guards from a stored
+  // blob. JSON.parse turns an out-of-range literal into Infinity and leaves a
+  // quoted number a string, while JSON.stringify can spell neither.
+  function waveBlob(waveHeightText, windText) {
+    return "{\"beachId\":\"osm-node-1\"," +
+      "\"waveHeightFt\":" + waveHeightText + "," +
+      "\"model\":\"noaa_glwu\"," +
+      "\"windSpeedMph\":" + windText + "," +
+      "\"windGustMph\":null," +
+      "\"updated\":\"2026-07-18T12:00:00.000Z\"}";
   }
 
-  function estimateFor(seed) {
-    const made = makeEnv([makeBeachRow({ id: "osm-node-1" })], { "waveinput:osm-node-1": seed });
+  function estimateFor(blob) {
+    const made = makeEnv([makeBeachRow({ id: "osm-node-1" })]);
+    made.db.seedState("osm-node-1", {
+      wave: blob,
+      wave_expires: Math.floor(Date.now() / 1000) + 86400
+    });
     return runHourlyCron(made.env).then(function () {
       return estimateOf(made, "osm-node-1");
     });
@@ -2023,20 +2057,20 @@ describe("runFlagRecompute wave input finite guards", function () {
     // rules.js step 3's else branch has no finite check, so an unguarded
     // Infinity decides green with a nonsense reason — a green from garbage in
     // the one module that must never default to green.
-    const infinite = await estimateFor(waveInput({ waveHeightFt: Infinity }));
+    const infinite = await estimateFor(waveBlob("1e400", "null"));
     expect(infinite.trigger).not.toBe("wave-height");
     expect(infinite.color).toBe("unknown");
     expect(infinite.waveHeightFt).toBe(null);
     const infiniteLabels = infinite.sources.map(function (s) { return s.label; });
     expect(infiniteLabels.indexOf("NOAA Great Lakes Wave Model")).toBe(-1);
 
-    const notANumber = await estimateFor(waveInput({ waveHeightFt: NaN }));
-    expect(notANumber.trigger).not.toBe("wave-height");
-    expect(notANumber.color).toBe("unknown");
+    const quoted = await estimateFor(waveBlob("\"4.5\"", "null"));
+    expect(quoted.trigger).not.toBe("wave-height");
+    expect(quoted.color).toBe("unknown");
   });
 
   it("refuses a non-finite wind speed instead of falling back on it", async function () {
-    const estimate = await estimateFor(waveInput({ windSpeedMph: NaN }));
+    const estimate = await estimateFor(waveBlob("null", "1e400"));
     expect(estimate.trigger).not.toBe("wind");
     expect(estimate.color).toBe("unknown");
     const labels = estimate.sources.map(function (s) { return s.label; });
@@ -2044,7 +2078,7 @@ describe("runFlagRecompute wave input finite guards", function () {
   });
 
   it("still takes a finite wave height", async function () {
-    const estimate = await estimateFor(waveInput({ waveHeightFt: 4.5 }));
+    const estimate = await estimateFor(waveBlob("4.5", "null"));
     expect(estimate.trigger).toBe("wave-height");
     expect(estimate.color).toBe("red");
   });
@@ -2086,10 +2120,13 @@ describe("runFlagRecompute indexes the wave series at the hour it estimates",
       };
     }
 
-    function estimateAt(hour) {
+    // expiresEpoch overrides the writer's own validStartEpoch + 86400 lease,
+    // which a run at hour 24 would find exactly expired: the gray this describe
+    // is about has to come from the spent series, not from the column lease.
+    function estimateAt(hour, expiresEpoch) {
       vi.setSystemTime(new Date(Date.parse(START) + hour * 3600000));
-      const made = makeEnv([makeBeachRow({ id: "osm-node-1" })],
-        { "waveinput:osm-node-1": seriesInput() });
+      const made = makeEnv([makeBeachRow({ id: "osm-node-1" })]);
+      made.db.seedWave("osm-node-1", seriesInput(), expiresEpoch);
       return runHourlyCron(made.env).then(function () {
         return estimateOf(made, "osm-node-1");
       });
@@ -2109,7 +2146,8 @@ describe("runFlagRecompute indexes the wave series at the hour it estimates",
 
     it("goes gray rather than replaying hour 0 once the series is spent",
       async function () {
-        const estimate = await estimateAt(24);
+        const generous = Math.floor(Date.parse(START) / 1000) + 10 * 86400;
+        const estimate = await estimateAt(24, generous);
         expect(estimate.color).toBe("unknown");
         expect(estimate.reason).not.toContain("ft");
       });
@@ -2128,20 +2166,18 @@ describe("runFlagRecompute writes the estimateInputs seal", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
     const made = makeEnv(
-      [makeBeachRow({ id: "osm-node-seal", nws_zone: "MIZ071" })],
-      {
-        // No series, so resolveWaveInput falls through to the hour-0 scalar. A
-        // seal carrying a non-null wind is the wind-fallback block's case: wind
-        // is offered only where the resolved wave height is null.
-        "waveinput:osm-node-seal": {
-          waveHeightFt: 2.6,
-          model: "noaa_glwu",
-          windSpeedMph: null,
-          windGustMph: null,
-          updated: "2026-07-15T15:00:00.000Z"
-        }
-      }
+      [makeBeachRow({ id: "osm-node-seal", nws_zone: "MIZ071" })]
     );
+    // No series, so resolveWaveInput falls through to the hour-0 scalar. A seal
+    // carrying a non-null wind is the wind-fallback block's case: wind is offered
+    // only where the resolved wave height is null.
+    made.db.seedWave("osm-node-seal", {
+      waveHeightFt: 2.6,
+      model: "noaa_glwu",
+      windSpeedMph: null,
+      windGustMph: null,
+      updated: "2026-07-15T15:00:00.000Z"
+    });
     await runHourlyCron(made.env);
 
     const stored = estimateOf(made, "osm-node-seal");

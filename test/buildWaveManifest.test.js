@@ -16,7 +16,7 @@ import {
   REQUIRED_GRID_IDS,
   METERS_PER_SECOND_TO_MPH
 } from "../src/waveGrids.js";
-import { WAVE_KV_LEASE_SECONDS, WAVE_SERIES_LEASE_SECONDS } from "../src/waveManifest.js";
+import { WAVE_SCALAR_LEASE_SECONDS, WAVE_SERIES_LEASE_SECONDS } from "../src/waveManifest.js";
 import {
   WAVE_SHRINK_MIN_RATIO,
   WAVE_DECAY_MIN_RATIO,
@@ -24,7 +24,6 @@ import {
   MIN_DISTINCT_WAVE_VALUES,
   MAX_EMITTED_FT,
   MAX_EMITTED_MPH,
-  ALLOWED_PAIR_FIELDS,
   gridIdentityRefusals,
   bandIdentityRefusals,
   validTimeRefusals,
@@ -368,7 +367,7 @@ describe("scanRecords", function () {
   });
 
   it("catches half a series, which would take the wrong lease", function () {
-    // startIso and hoursFt are present together or not at all: build-wave-kv.js
+    // startIso and hoursFt are present together or not at all: build-wave-sql.js
     // reads exactly that pair to decide which of the two leases a record gets.
     const inputs = waveinputRecords(2);
     inputs[0].hoursFt = [1, 2, 3];
@@ -480,11 +479,6 @@ describe("distributionRefusals", function () {
 });
 
 describe("ttlSpellingRefusals", function () {
-  function pair(overrides) {
-    return Object.assign({ key: "waveinput:b-1", value: "{}",
-      expiration: VALID_START + WAVE_SERIES_LEASE_SECONDS }, overrides || {});
-  }
-
   // Both epochs, correct. There are two leases — the long one for a record carrying
   // the hourly series and the short one for a wind-only record — and each is checked
   // separately, so dropping either arithmetic refuses.
@@ -492,55 +486,32 @@ describe("ttlSpellingRefusals", function () {
     return Object.assign({
       validStartEpoch: VALID_START,
       kvExpirationEpoch: VALID_START + WAVE_SERIES_LEASE_SECONDS,
-      kvScalarExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS
+      kvScalarExpirationEpoch: VALID_START + WAVE_SCALAR_LEASE_SECONDS
     }, overrides || {});
   }
 
-  it("passes correct epoch arithmetic and correctly spelled pairs", function () {
-    expect(ttlSpellingRefusals(Object.assign(epochs(), { pairs: [pair()] }))).toEqual([]);
+  it("passes correct epoch arithmetic", function () {
+    expect(ttlSpellingRefusals(epochs())).toEqual([]);
   });
 
   it("refuses a series expiration that is not validStartEpoch + 86400", function () {
-    expect(ttlSpellingRefusals(Object.assign(
-      epochs({ kvExpirationEpoch: VALID_START + 3600 }), { pairs: [] })).length).toBe(1);
+    expect(ttlSpellingRefusals(
+      epochs({ kvExpirationEpoch: VALID_START + 3600 })).length).toBe(1);
   });
 
   it("refuses a scalar expiration that is not validStartEpoch + 25200", function () {
-    expect(ttlSpellingRefusals(Object.assign(
-      epochs({ kvScalarExpirationEpoch: VALID_START + 86400 }),
-      { pairs: [] })).length).toBe(1);
+    expect(ttlSpellingRefusals(
+      epochs({ kvScalarExpirationEpoch: VALID_START + 86400 })).length).toBe(1);
   });
 
   it("refuses a dropped scalar epoch, which would leave one lease unchecked",
     function () {
       const input = epochs();
       delete input.kvScalarExpirationEpoch;
-      input.pairs = [];
-      expect(ttlSpellingRefusals(input).length).toBe(1);
+      const refusals = ttlSpellingRefusals(input);
+      expect(refusals.length).toBe(1);
+      expect(refusals[0].overridable).toBe(false);
     });
-
-  it("refuses the camelCase expirationTtl wrangler silently drops", function () {
-    // wrangler warns and exits 0 on an unexpected property, so the key would never
-    // expire and would color flags from dead data indefinitely.
-    const bad = pair();
-    delete bad.expiration;
-    bad.expirationTtl = 25200;
-    const refusals = ttlSpellingRefusals(Object.assign(epochs(), { pairs: [bad] }));
-    expect(refusals.length).toBe(2);
-    for (let i = 0; i < refusals.length; i = i + 1) {
-      expect(refusals[i].overridable).toBe(false);
-    }
-  });
-
-  it("refuses a nested-object value", function () {
-    expect(ttlSpellingRefusals(Object.assign(epochs(),
-      { pairs: [pair({ value: { beachId: "b-1" } })] })).length).toBe(1);
-  });
-
-  it("accepts only the documented pair fields", function () {
-    expect(ALLOWED_PAIR_FIELDS).toEqual([
-      "key", "value", "expiration", "expiration_ttl", "base64", "metadata"]);
-  });
 });
 
 // --- coverage ----------------------------------------------------------------------------
@@ -907,7 +878,7 @@ describe("optional-grid count gates", function () {
       expectedElements: ["HTSGW", "WIND"],
       validStartEpoch: VALID_START,
       kvExpirationEpoch: VALID_START + WAVE_SERIES_LEASE_SECONDS,
-      kvScalarExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START + WAVE_SCALAR_LEASE_SECONDS,
       stats: scanRecords(inputs, wavesRecords(inputs), [9999]),
       counts: { waveinputRecords: 40, wavesRecords: 40 },
       floorsFile: floors,
@@ -1151,7 +1122,7 @@ describe("evaluateWaveGates", function () {
       expectedElements: ["HTSGW", "WIND"],
       validStartEpoch: VALID_START,
       kvExpirationEpoch: VALID_START + WAVE_SERIES_LEASE_SECONDS,
-      kvScalarExpirationEpoch: VALID_START + WAVE_KV_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START + WAVE_SCALAR_LEASE_SECONDS,
       stats: scanRecords(inputs, wavesRecords(inputs), [9999]),
       counts: { waveinputRecords: 40, wavesRecords: 40 },
       floorsFile: floors,
@@ -1552,7 +1523,7 @@ describe("main", function () {
       expect(manifest.generated).toBe("2026-09-03T12:34:56.000Z");
       expect(manifest.gridsComplete).toBe(true);
       expect(manifest.cycleId).toBe("c-test");
-      // build-wave-kv.js verifies every artifact against these before parsing it.
+      // build-wave-sql.js verifies every artifact against these before parsing it.
       expect(manifest.artifacts.map(function (a) { return a.key; }))
         .toEqual(["waveinput.ndjson", "waves.ndjson"]);
       for (let i = 0; i < manifest.artifacts.length; i = i + 1) {

@@ -1,6 +1,6 @@
 // Model labels and provenance urls for the wave inputs the offline NOAA GRIB
-// pipeline publishes into "waveinput:" / "waves:" KV. Static tables, so the hourly
-// flag cron can name a reading's source without importing any fetching module.
+// pipeline publishes into beach_state.wave. Static tables, so the hourly flag
+// cron can name a reading's source without importing any fetching module.
 // Lives outside src/index.js because workerd rejects every non-function named
 // export on the Worker entry module (see src/demandWindow.js).
 

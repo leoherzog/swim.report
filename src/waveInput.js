@@ -1,12 +1,17 @@
-// src/waveInput.js — resolves one stored "waveinput:" record into the wave and
-// wind signals src/rules.js consumes, indexing the record's hourly series at the
-// hour being estimated rather than always reading hour 0.
+// src/waveInput.js — resolves one stored beach_state.wave record into the wave
+// and wind signals src/rules.js consumes, indexing the record's hourly series at
+// the hour being estimated rather than always reading hour 0.
 //
 // That indexing is what lets one landed cycle color FORECAST_HOURS of hourly runs
 // instead of one, so the offline NOAA pipeline can publish a few times a day
-// rather than every three hours. It is also why a series-bearing key's lease is
-// the length of the series it carries (WAVE_SERIES_LEASE_SECONDS) rather than one
-// pipeline interval.
+// rather than every three hours. It is also why a series-bearing record's lease
+// is the length of the series it carries (WAVE_SERIES_LEASE_SECONDS) rather than
+// one pipeline interval.
+//
+// The record's own lease is the caller's gate, not this module's: the blob sits
+// in the row whether or not wave_expires has passed, so a caller resolves the row
+// through liveWaveRecord (src/beachState.js) before calling here. Both gates
+// apply — an expired lease and a spent series each yield no wave input.
 //
 // Two rules hold the staleness line:
 //
@@ -18,7 +23,7 @@
 // The wind is offered only at hour 0. It is a single hour-0 sample with no series
 // behind it, so it may not ride the long lease that the series earns. A wind-only
 // record carries no series at all and is bounded instead by the short scalar
-// lease the pipeline writes it under.
+// lease the pipeline stamps on its wave_expires.
 //
 // Pure: the clock arrives as a parameter, so the cron and the tests walk the same
 // code. Never throws for any input; a malformed record resolves to nulls, which

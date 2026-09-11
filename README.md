@@ -31,8 +31,8 @@ actual authority, not this site.
 ## API
 
 The HTTP request path never calls any upstream API. It reads only pre-computed data from D1
-(the beach directory, and the estimates, official readings, advisories and observations
-beside it in `beach_state`) and KV (the wave forecast series and buoy water temperatures),
+(the beach directory, and the estimates, official readings, advisories, observations and wave
+forecast series beside it in `beach_state`) and KV (buoy water temperatures),
 kept fresh by the scheduled crons and the offline NOAA wave cycle.
 
 ### `GET /api/beaches.geojson`
@@ -160,8 +160,8 @@ title and description and can never disagree with the picture.
 
 ### `GET /` and `GET /beach/:beachId`
 
-Server-rendered HTML pages: a beach list and a beach detail page, built entirely from D1 and
-KV data (see the frontend contract in `src/frontend/render.js`). Both exclude
+Server-rendered HTML pages: a beach list and a beach detail page, built entirely from D1,
+plus the buoy water temperature in KV (see the frontend contract in `src/frontend/render.js`). Both exclude
 confirmed-inland beaches: they are absent from the list and search, and a detail page for one
 returns `404`. Only ocean and Great Lakes rows, plus still-unclassified rows during backfill,
 are shown. The list page's map area holds a skeleton placeholder until the map's `load` event
@@ -206,7 +206,8 @@ The detail page includes a **Wave forecast** section: a "now" wave-height stat (
 estimate's structured `waveHeightFt`) plus a horizontal strip of the next up-to-24 hours of
 forecast wave height, colored and labeled by the same per-water-class thresholds the rules engine uses, gray
 for hours with no model data. The strip is a flex row of proportionally sized segments, one per
-run of consecutive same-band hours, built server-side from the hourly `waves:` KV series. Each
+run of consecutive same-band hours, built server-side from the stored 24-hour series in the
+beach's `beach_state` row. Each
 segment carries a `wa-tooltip` and a matching `aria-label` naming its band and hour range ("2–4
 ft waves (estimated) — +5 h to +8 h"), and a visually-hidden prose summary keeps the forecast
 readable by assistive tech. Active hazards overlay the strip as a lane of labeled bands: each
@@ -420,7 +421,7 @@ automatically. `CLOUDFLARE_WORKERS_EDIT_TOKEN` authenticates wrangler itself: ex
 machine has no `wrangler login` session. It lives in `.dev.vars` only and is deliberately never
 a repository secret, so no CI job can change the code running at swim.report. The GitHub
 Actions pipelines use their own narrower tokens: `CLOUDFLARE_D1_EDIT_TOKEN`,
-`CLOUDFLARE_D1_READ_TOKEN`, `CLOUDFLARE_KV_WRITE_TOKEN` and the `CLOUDFLARE_R2_ACCESS_KEY` /
+`CLOUDFLARE_D1_READ_TOKEN` and the `CLOUDFLARE_R2_ACCESS_KEY` /
 `CLOUDFLARE_R2_SECRET_ACCESS_KEY` pair.
 
 In production the webcam token is a Worker secret, set once with
@@ -461,8 +462,9 @@ classification (offline)](#discovery-and-classification-offline)).
   2 h; the list chip and the map marker carry no age signal, so a rotation-old color reads
   there like a fresh one. It fetches the
   fast-changing safety signals (alerts and SRF rip-current risk) and reads each beach's wave
-  inputs from the `waveinput:` key the offline wave cycle writes, indexing that record's
-  24-hour series at the hour it is estimating — it performs **no** wave or wind fetch itself. Both alert authorities are fetched nationally once per run and matched
+  inputs off the same `beach_state` row it is about to write, indexing that record's
+  24-hour series at the hour it is estimating — it performs **no** wave or wind fetch itself
+  and no per-beach read at all. Both alert authorities are fetched nationally once per run and matched
   locally, so alert cost stays flat no matter how many beaches a run covers: one
   `api.weather.gov/alerts/active` fetch matched by `nws_zone` and `marine_zone`, and one GeoMet
   `weather-alerts` fetch matched by alert-region polygon. It runs the inputs through
@@ -482,10 +484,10 @@ classification (offline)](#discovery-and-classification-offline)).
   absolute schedule 4 h past the observation instant, and the water-quality advisory in
   `wqfloor` at a 2 h lease. A run that resolved no scrape, no observation or no advisory
   writes no value for it and leaves the stored one to age out: expiry is the only retraction
-  path. `waveinput:` keys expire on an
-  absolute schedule tied to the model valid time, so no ordering against the wave pipeline is
-  required, and a missing key — or one whose series is spent — just means the estimate falls
-  back to wind or `unknown`. Each estimate it
+  path. The wave record is the one column the hourly reads and never writes: it carries an
+  absolute expiry tied to the model valid time, so no ordering against the wave pipeline is
+  required, and a missing record — or one past its lease, or one whose series is spent — just
+  means the estimate falls back to wind or `unknown`. Each estimate it
   writes also carries an `estimateInputs` seal — the non-alert inputs that estimate was decided
   from — which is what lets the alerts refresh below recompute a beach without refetching or
   losing any of them.
@@ -575,7 +577,8 @@ prebuilt layer set into `./.layers` (the only step here that touches the network
 `npm run seed:eccc` afterwards for the Canadian rows NWS parks — the NWS attempts cap means a
 fresh database needs about five `seed:enrich` passes before Canadian rows become ECCC
 candidates. For wave data run `npm run seed:wavegrids`, then `npm run seed:waveplanes`, then
-`npm run seed:waves`, before `seed:flags`.
+`npm run seed:waves`, before `seed:flags`. That last step ends by applying its own SQL delta
+into local D1 through `node scripts/apply-local-sql.js`, the same applier `npm run seed` uses.
 
 ### Water temperature stations
 
@@ -683,8 +686,9 @@ value and never touching the delete path. Regenerate the committed geometry file
 ### Wave data (offline)
 
 Wave height and the wind fallback come from NOAA GRIB2 model output, downloaded and
-point-sampled in `.github/workflows/waves.yml` (`52 */6 * * *`) and bulk-written into the
-`waveinput:` and `waves:` KV keys the hourly cron reads. Each cycle publishes 24 hours of
+point-sampled in `.github/workflows/waves.yml` (`52 */6 * * *`) and applied as an idempotent
+SQL delta into each beach's `beach_state` row, where the hourly cron reads it off the join it
+already issues. Each cycle publishes 24 hours of
 forecast per beach and the hourly cron indexes into it, so four cycles a day is margin against
 a skipped GitHub schedule rather than a freshness requirement. Four grids are sampled in ordered
 fallthrough, constrained by each beach's `water_class`: NOAA's Great Lakes Wave model (GLWU,
@@ -702,13 +706,13 @@ leaves the run. R2 keeps only each published cycle's `manifest.json`, which the 
 coverage ratios read, under an immutable `waves/<cycleId>/` prefix, with the small
 `waves/current.json` pointer written last so it never names a manifest that is not there.
 
-Each KV pair carries an **absolute** expiration measured from the model's valid hour, not a TTL
-measured from write time: 24 h for a pair carrying the hourly series, 7 h for a wind-only
-pair. A run that fires late gets a correspondingly shorter lease rather than a fresh one on
-old data, and republishing an older cycle yields a negative lease
-and is refused. A failed or refused cycle writes nothing and leaves the previous cycle's keys
-in place, so the failure mode is a flag aging out to `unknown` — gray and honest — never a
-stale wave height deciding a color. See `docs/offline-waves.md`.
+Each stored record carries an **absolute** expiry measured from the model's valid hour, not a
+TTL measured from write time: 24 h for a record carrying the hourly series, 7 h for a
+wind-only one. A run that fires late gets a correspondingly shorter lease rather than a fresh
+one on old data, and republishing an older cycle yields a negative lease
+and is refused. A failed or refused cycle writes nothing and leaves the previous cycle's
+records in place, so the failure mode is a flag aging out to `unknown` — gray and honest —
+never a stale wave height deciding a color. See `docs/offline-waves.md`.
 
 NOAA data is a US Government work in the public domain; the credit on every page is a
 courtesy, not an obligation.
@@ -720,7 +724,8 @@ limit: a scheduled invocation gets 900 s, and Cloudflare caps an invocation at *
 simultaneous open connections** with KV `get`/`put` counting toward that cap, so a write pool
 wider than ~6 buys no throughput and all wall-clock sizing here is done at 6. The per-beach
 flag writes escape that cap entirely by not being a fan-out: they are batched into
-`env.DB.batch` calls of 200 statements, a handful of round trips for a whole run.
+`env.DB.batch` calls of 200 statements, a handful of round trips for a whole run. The hourly's
+wave read escapes it too, riding the SELECT the run already issues.
 
 ## Deployment
 

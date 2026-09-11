@@ -223,7 +223,7 @@ accepts legacy bare-string entries, rendered as their hostname with "www." strip
                                      // card's "Reported for ..." line (section 9).
     }
 
-### WaveSeries (KV value under "waves:" + beachId)
+### WaveSeries (the series view of beach_state.wave)
 
     {
       "beachId": "osm-node-123456",
@@ -243,8 +243,8 @@ accepts legacy bare-string entries, rendered as their hostname with "www." strip
                                                 // feet, aligned with hoursFt); only models
                                                 // with >= 1 finite hour appear. Powers the
                                                 // detail page's model comparison; the flag
-                                                // never derives from byModel. Older KV
-                                                // payloads lack it; renderers treat
+                                                // never derives from byModel. Older stored
+                                                // records lack it; renderers treat
                                                 // missing/malformed as {}.
       "sources": [{ "label": "NOAA GFS Wave Model",
                     "url": "https://polar.ncep.noaa.gov/waves/" }],
@@ -262,11 +262,12 @@ and reused for all 24 hours, because re-running the nearest-wet-cell search per 
 let the series jump between cells and make the detail page's "now" stat contradict its own
 first bar.
 
-The key carries an absolute per-key expiration of validStartEpoch + 86400 rather than a
-write-time TTL, and the strip trims itself to the hours from now forward, so it stays correct
-for exactly as long as the series it holds. See WaveInput below for why.
+The row carries an absolute wave_expires of validStartEpoch + 86400 rather than a write-time
+TTL, read as absent at or below floor(now/1000), and the strip trims itself to the hours from
+now forward, so it stays correct for exactly as long as the series it holds. See WaveInput
+below for why.
 
-### WaveInput (KV value under "waveinput:" + beachId)
+### WaveInput (the input view of beach_state.wave)
 
     {
       "beachId": "osm-node-123456",
@@ -291,14 +292,15 @@ for exactly as long as the series it holds. See WaveInput below for why.
       "updated": "2026-07-12T15:00:00.000Z"  // the model valid start, never the run clock
     }
 
-Written by the offline NOAA GRIB2 wave cycle and read by the hourly runFlagRecompute, which
-takes the current wave height and the wind fallback from this payload instead of a live
-fetch. Written only when the cycle produced something usable for the beach: at least one
-finite forecast hour, or a wind fallback for a beach that resolved none. A beach that
-resolved neither is skipped entirely, so its last-good key rides its own lease and the flag
-ages out to unknown rather than being recoloured from nothing. Absent or expired key → the
-estimate has no wave input this run, degrading to the wind fallback or "unknown", never a
-wrong flag.
+Written by the offline NOAA GRIB2 wave cycle as an idempotent SQL delta into
+beach_state.wave, and read by the hourly runFlagRecompute off the beach_state join its
+per-run SELECT already issues, so the wave height and the wind fallback cost no live fetch
+and no per-beach read. Written only when the cycle produced something usable for the beach:
+at least one finite forecast hour, or a wind fallback for a beach that resolved none. A beach
+that resolved neither is skipped entirely, so its last-good row rides its own wave_expires
+and the flag ages out to unknown rather than being recoloured from nothing. A NULL wave, or a
+wave_expires at or below floor(now/1000) → the estimate has no wave input this run, degrading
+to the wind fallback or "unknown", never a wrong flag.
 
 The hour index. src/waveInput.js resolveWaveInput(record, nowMs) is the only reader of this
 shape. When the record carries a series it indexes hoursFt at the whole hours elapsed since
@@ -322,22 +324,28 @@ to JSON null in the offline writer. rules.js tests waveHeightFt !== null with no
 guard and the cron guards with typeof === "number" only; containment belongs to the writer.
 
 Absolute expiration, not a TTL, and one of two leases per record. A record carrying the
-series expires at validStartEpoch + 86400 (WAVE_SERIES_LEASE_SECONDS), the span it describes,
-and the matching "waves:" key shares that lease. A wind-only record expires at
-validStartEpoch + 25200 (WAVE_KV_LEASE_SECONDS), because one hour-0 sample may not ride the
-long lease the series earns. scripts/build-wave-kv.js picks the lease from the record's own
-shape — startIso and hoursFt present together, or neither — and drops a wind-only record
-whose scalar lease has already run out rather than handing wrangler a past expiration.
+series expires at validStartEpoch + 86400 (WAVE_SERIES_LEASE_SECONDS), the span it describes.
+A wind-only record expires at validStartEpoch + 25200 (WAVE_SCALAR_LEASE_SECONDS), because one
+hour-0 sample may not ride the long lease the series earns. scripts/build-wave-sql.js picks
+the lease from the record's own shape — startIso and hoursFt present together, or neither —
+and drops a row whose lease has already run out rather than writing a row a reader would
+treat as absent the moment it lands.
 
-Either way the lease is measured from the model valid time, so a key expires a fixed span
+Either way the lease is measured from the model valid time, so a row expires a fixed span
 after the hour it describes regardless of when the job ran. runFlagRecompute never reads
-waveinput.updated, so the expiration and the hour index above are the whole staleness control
-on the color path; a TTL measured from write time would grant a run firing 9 h late a fresh
+wave.updated, so the expiration and the hour index above are the whole staleness control on
+the color path; a TTL measured from write time would grant a run firing 9 h late a fresh
 lease on data already 9 h old. Republishing an older cycle therefore yields a short or
-negative lease and is refused by construction; the only rollback is to stop writing. The
-wrangler bulk-put field is snake_case "expiration"; a camelCase expirationTtl is accepted as
-an unexpected property, warned about and ignored with exit 0, producing a key that never
-expires.
+negative lease and is refused by construction; the only rollback is to stop writing.
+
+Three traps live in the delta that carries the record. D1 caps one SQL statement at 100,000
+bytes, so the emitter holds every statement under MAX_STATEMENT_BYTES (80,000) and refuses
+rather than splits a row that exceeds it. The record travels as a single-quoted SQL literal
+through sqlStr, so a quote inside the JSON must be doubled and a raw newline inside it would
+tear the statement in half for the line-splitting local applier — both are gated before the
+file is written. And every statement is an ON CONFLICT(beach_id) DO UPDATE, so re-applying
+the same delta repairs a half-landed apply and writes the same absolute wave_expires no
+matter how much later it runs.
 
 ### WaterTemp (KV value under "watertemp:" + beachId)
 
@@ -378,10 +386,9 @@ nor distance the source line is the age alone and no tooltip is emitted. It neve
 src/rules.js: it colors no flag and does not bump RULES_VERSION. Written only when the
 station fetch and parse produced a valid recent reading; a null (winter gap, all-"MM",
 stale, 404) writes nothing, so the old key expires on its own and the water-temperature tile
-reads "No data". It is the only KV family the Worker writes on the wave side, and is
-independent of the offline wave cycle in every
-respect: a different upstream, a per-station observedIso time basis rather than one
-cycle-wide valid time, and no path into a flag color.
+reads "No data". It is one of the two KV families the Worker keeps (section 3), and it is
+independent of the offline wave cycle in every respect: a different upstream, a per-station
+observedIso time basis rather than one cycle-wide valid time, and no path into a flag color.
 
 ### OfficialReading (beach_state.reading)
 
@@ -691,8 +698,9 @@ migrations/0014_beach_state.sql:
       reading_expires INTEGER
     );
 
-  The four derived per-beach records, one row per beach: the estimate, the scraped
-  official flag, the water-quality floor and the point-in-time reading. Each is a JSON
+  Four of the five derived per-beach records, one row per beach: the estimate, the
+  scraped official flag, the water-quality floor and the point-in-time reading. Migration
+  0015 below adds the fifth, the offline wave cycle's wave record. Each is a JSON
   blob beside an absolute expiry in epoch seconds; the estimate and the official also
   carry their color and updated stamp as scalar columns, so the map endpoint resolves a
   marker without parsing a payload. See "beach_state" at the end of this section for the
@@ -702,6 +710,30 @@ migrations/0014_beach_state.sql:
   is possible; it is invisible to every JOIN that reaches this table and costs only
   storage. Nothing deletes it yet (TODO.md). The alerts refresh pages on b.id and the map endpoint
   scans the flag-worthy set, so neither query wants an index on an expiry column.
+
+migrations/0015_beach_state_wave.sql:
+
+    ALTER TABLE beach_state ADD COLUMN wave TEXT;
+    ALTER TABLE beach_state ADD COLUMN wave_expires INTEGER;
+
+  The per-beach wave record: one JSON object carrying both the hourly series the flag
+  estimate indexes and the 24 h strip the detail page draws (section 1, WaveSeries and
+  WaveInput are two views of it), plus its own absolute lease.
+
+  wave_expires is absolute epoch seconds under the rule 0014 states for every other record
+  here: a reader treats expires <= floor(now/1000) as absent. It is the one lease measured
+  from the model valid time rather than from the write clock — validStartEpoch + 86400 for a
+  record carrying startIso and hoursFt, validStartEpoch + 25200 for a wind-only one — so a
+  pipeline run firing late cannot grant a fresh lease to old data.
+
+  Single writer: the offline NOAA wave cycle, as a SQL delta. No cron writes these columns;
+  the hourly upsert in src/beachState.js names neither in its INSERT column list nor its SET
+  list, so an hourly run can never blank or restamp a wave record. Expiry is the only
+  retraction path: there is no delete.
+
+  NULL is required — SQLite forbids NOT NULL on ADD COLUMN without a default — and is the
+  correct pre-cycle state: a NULL wave reads as "no wave input", which degrades to the wind
+  fallback or unknown. ADD COLUMN appends, so the two names sit after reading_expires.
 
 - idx_beaches_lon_lat is retained for discovery/reconciliation spatial scans; the
   GeoJSON map endpoint does a full flag-worthy-gated scan with no lon/lat predicate.
@@ -722,20 +754,26 @@ migrations/0014_beach_state.sql:
 ### beach_state
 
 The estimate, official, wqfloor and reading records (section 1) live in migration 0014's
-table, one row per beach, so a single JOIN resolves a beach and everything rendered about
+table and the wave record in 0015's two columns, one row per beach, so a single JOIN
+resolves a beach and everything rendered about
 it and the map endpoint resolves a marker from scalar columns. src/beachState.js is the
-only module that knows the column list: BEACH_STATE_SELECT, CHIP_STATE_SELECT and
-BEACH_STATE_JOIN for readers, beachStateUpsertStatements and estimateCasStatement for
-writers, chunkStatements to keep a D1 batch at 200 statements.
+only module that knows the column list: BEACH_STATE_SELECT, CHIP_STATE_SELECT,
+WAVE_STATE_SELECT and BEACH_STATE_JOIN for readers, beachStateUpsertStatements and
+estimateCasStatement for writers, chunkStatements to keep a D1 batch at 200 statements.
 
-Readers come in two widths. A surface that renders a record — the detail page, /api/flag —
+Readers come in three widths. A surface that renders a record — the detail page, /api/flag —
 selects BEACH_STATE_SELECT and resolves it with liveBeachState. A surface that renders only
 a beach's display flag — the home list, ?ids=, the nearby cards, the map features — selects
 CHIP_STATE_SELECT, the scalar mirror columns, and resolves it with liveChipState, which
 returns { estimate, official } as { color, updated } pairs, exactly the fields displayFlag
 reads. Those are
 deliberately partial records: the list never parses a blob, which is what keeps the home
-proximity branch from shipping four JSON columns for the 400 ranked rows it discards.
+proximity branch from shipping four JSON columns for the 400 ranked rows it discards. The
+two surfaces that consume a wave record — the detail route, which draws the strip, and the
+hourly cron, which indexes the series — add WAVE_STATE_SELECT and resolve it with
+liveWaveRecord. WAVE_STATE_SELECT is never folded into either of the other two: /api/flag
+selects BEACH_STATE_SELECT and renders none of the series, and CHIP_STATE_SELECT exists
+precisely so a ranked-and-discarded row ships no blob.
 
 Leases, all ABSOLUTE epoch seconds:
 
@@ -745,14 +783,19 @@ Leases, all ABSOLUTE epoch seconds:
 | official_expires | writeEpoch + (the scraper's officialTtlSeconds, else FLAG_TTL_SECONDS) |
 | wqfloor_expires | writeEpoch + WQFLOOR_TTL_SECONDS (7200) |
 | reading_expires | floor((Date.parse(observedIso) + READING_MAX_AGE_MS) / 1000) |
+| wave_expires | validStartEpoch + 86400 (series) or + 25200 (wind-only) — the one lease measured from the model valid time, not from writeEpoch |
 
-Reader rule, in liveBeachState(row, nowMs), liveChipState(row, nowMs) and
-mapFeatureFromRow: a record whose
+Reader rule, in liveBeachState(row, nowMs), liveChipState(row, nowMs), liveWaveRecord(row,
+nowMs) and mapFeatureFromRow: a record whose
 \*_expires is at or below floor(nowMs / 1000) is ABSENT — the same null a beach that never
 had one returns, so the API answers null, the frontend renders gray unknown for a missing
 estimate and omits the official card. A NULL blob, a NULL or non-finite expiry, unparseable
-JSON and a non-object parse all read as absent too; neither resolver ever throws. Each
-column expires on its own, so an expired estimate leaves a live official standing.
+JSON and a non-object parse all read as absent too; no resolver ever throws. Each
+column expires on its own, so an expired estimate leaves a live official standing and an
+expired wave_expires drops the forecast strip while the rest of the row renders. The blob
+stays in the row past its lease, so a reader that skips liveWaveRecord and touches row.wave
+directly resurrects a spent cycle as a live wave height: every wave reader goes through the
+resolver.
 
 Single writers, by column:
 
@@ -773,31 +816,21 @@ Single writers, by column:
   it. A row the hourly rewrote between the read and the write matches nothing:
   meta.changes === 0, counted skipSuperseded. The CAS is the whole race contract; there is
   no lock, no cursor and no persisted diff state.
+- The offline NOAA wave cycle owns wave and wave_expires, applied as an idempotent SQL delta
+  of one INSERT ... ON CONFLICT(beach_id) DO UPDATE per resolved beach. It is the only writer
+  from outside the Worker. beachStateUpsertStatements names neither column in its INSERT list
+  nor its SET list and estimateCasStatement touches neither, so no cron run can blank or
+  restamp a wave record; expiry is the only retraction path and there is no delete.
 - Nothing on the request path writes this table. The last_viewed stamp on beaches is the
   request path's only write (section 8).
 
 ## 3. KV design
 
-Binding name: FLAGS. Four key families, all of them wave data, water temperature or scraper
-health. The per-beach derived records — estimate, official, wqfloor, reading — live in D1's
-beach_state (section 2), not here, so nothing on this list is an operand of a flag color the
-request path renders.
+Binding name: FLAGS. Two key families, water temperature and scraper health. Every per-beach
+derived record — estimate, official, wqfloor, reading, wave — lives in D1's beach_state
+(section 2), not here, so nothing on this list is an operand of a flag color the request path
+renders, and nothing in KV is written from outside the Worker.
 
-- Key "waves:" + beachId → JSON.stringify(WaveSeries). Written by the offline NOAA GRIB2
-  wave cycle, only when the series has >= 1 finite hour. Read only by the detail route; the
-  list page must not gain per-row reads. Absent key → the detail page omits the
-  wave-forecast strip, though the "now" stat can still render from
-  FlagEstimate.waveHeightFt.
-- Key "waveinput:" + beachId → JSON.stringify(WaveInput). Written by the same cycle, only
-  when it produced at least one finite forecast hour or a wind fallback. Read by the hourly
-  runFlagRecompute, which resolves the record through src/waveInput.js and takes the wave
-  height for the hour it is estimating, plus the wind fallback, from here rather
-  than a live fetch. Absent key → the estimate has no wave input this run.
-- "waves:" and a series-bearing "waveinput:" carry an absolute per-key expiration of
-  validStartEpoch + 86400, and a wind-only "waveinput:" validStartEpoch + 25200
-  (the wrangler bulk-put field is snake_case "expiration"), not a write-time TTL. They are
-  the only keys in this namespace written from outside the Worker. See section 1 (WaveInput)
-  for why absolute, and section 7's offline subsection for the pipeline.
 - Key "watertemp:" + beachId → JSON.stringify(WaterTemp). Written by the 6-hourly
   water-temperature cron with { expirationTtl: 25200 }, only when the beach's nearest
   CAP_WATER_TEMP station within 25 km produced a valid recent reading. Read only by the
@@ -809,13 +842,11 @@ request path renders.
   lastFailure }. Written by the hourly cron with no expirationTtl (the failure
   streak must survive across runs). See section 7 step 8.
 
-Single writers: the offline wave cycle owns "waves:" and "waveinput:"
-and is the only writer from outside the Worker; runWaterTempRefresh owns "watertemp:";
-the hourly cron owns "scraperhealth:". runAlertRefresh writes no KV at all.
+Single writers: runWaterTempRefresh owns "watertemp:"; the hourly cron owns
+"scraperhealth:". runAlertRefresh writes no KV at all.
 
-Never written from the fetch handler. An absent or expired key means "no data": the detail
-page omits the wave strip, the water-temperature tile reads "No data", and the estimate
-simply has no wave input that run.
+Never written from the fetch handler. An absent or expired key means "no data": the
+water-temperature tile reads "No data", and a scraper starts its failure streak from zero.
 
 ## 4. Rules engine — src/rules.js
 
@@ -1013,11 +1044,11 @@ Pure module. No fetch, no Date, no env. Exports:
                                         // reason caveat after step 5.
       ripCurrentRisk: "HIGH",           // "HIGH" | "MODERATE" | "LOW" | null
       waveHeightFt: 3.2,                // number (feet, already converted) or null. The cron
-                                        // reads it from the "waveinput:" + beachId KV the
-                                        // offline wave cycle wrote (sections 1 and 3), not a
+                                        // reads it from the beach_state.wave record the
+                                        // offline wave cycle wrote (sections 1 and 2), not a
                                         // live fetch.
       windSpeedMph: 18,                 // number (mph, sustained) or null — wind FALLBACK, also
-      windGustMph: 27,                  // number (mph) or null   from the "waveinput:" KV
+      windGustMph: 27,                  // number (mph) or null   from the stored wave record
       waterQualityAdvisory: {           // Raise-only water-quality floor, or null. Shape
         color: "red",                   // { color: "yellow"|"red", reason, source }. A clean
         reason: "beach posted for E. coli", // or absent reading is null and has no effect —
@@ -1616,10 +1647,10 @@ export on the entry module (section 7).
     export function waveSourceLabel(model)        // unknown id degrades to "Wave Forecast";
     export function waveSourceUrl(model)          // never throws, never affects color
 
-### src/waveInput.js (the pure reader of a stored "waveinput:" record)
+### src/waveInput.js (the pure reader of a stored beach_state.wave record)
 
 The only reader of the WaveInput shape (section 1), and the mirror of the offline writer in
-scripts/build-wave-kv.js. Pure: the clock arrives as a parameter, so the cron and the tests
+scripts/build-wave-sql.js. Pure: the clock arrives as a parameter, so the cron and the tests
 walk one code path. Never throws; a malformed record resolves to nulls, which reach rules.js
 as "no wave data" and color gray.
 
@@ -1649,18 +1680,18 @@ conjunct a strict !== true so a missing field refuses exactly as a false one doe
     export const WAVE_SCHEMA_VERSION
     export const EXPECTED_WAVE_ARTIFACTS          // ["waveinput.ndjson", "waves.ndjson"]
     export const WAVE_SERIES_LEASE_SECONDS        // 86400: a record carrying the hourly
-                                                  // series, and its paired "waves:" key
-    export const WAVE_KV_LEASE_SECONDS            // 25200: a wind-only record, one hour-0
+                                                  // series
+    export const WAVE_SCALAR_LEASE_SECONDS        // 25200: a wind-only record, one hour-0
                                                   // sample with no series behind it
     export function classifyWaveManifestFailure(report)
       // { tier: "ok" | "degraded" | "expired" | "fatal", reasons: string[] }
-      //   fatal   → write no KV: schema mismatch, artifacts unverified (byte length and
+      //   fatal   → write no rows: schema mismatch, artifacts unverified (byte length and
       //             sha256 against the manifest), artifactsPresent/artifactsExpected (both isFiniteNumber-
       //             guarded FIRST — undefined !== undefined is false and fails OPEN),
       //             buildStatus not "complete", validTimes or sentinelScan not passed,
       //             minimumRecordsPassed not true (the absolute record rails, independent
       //             of the seeded floors, so a zero-record cycle can never publish)
-      //   expired → write no KV: secondsRemaining < 10800 (MIN_LEASE_SECONDS, measured
+      //   expired → write no rows: secondsRemaining < 10800 (MIN_LEASE_SECONDS, measured
       //             against the SERIES lease — the one the color path stands on — so it
       //             fires when the cycle is more than 21 h old, two consecutive missed
       //             occurrences of the 6 h pipeline schedule), or gridsDigestMatches !== true.
@@ -1669,7 +1700,7 @@ conjunct a strict !== true so a missing field refuses exactly as a false one doe
       //             refusing because it is too old.
       //   degraded→ write, warn: gridsComplete !== true, sanity.overridden === true, or
       //             optionalGridCountsWarned === true
-    export function waveKvWriteAllowed(report)    // true only for "ok" and "degraded"
+    export function waveWriteAllowed(report)      // true only for "ok" and "degraded"
 
 ### src/clients/windyWebcams.js
 
@@ -2528,7 +2559,7 @@ plus the offline-only pure modules src/osmSelect.js, src/layerGrid.js,
 src/layerDiscovery.js, src/layerSignals.js and src/layerManifest.js, all imported verbatim
 by the batch. One module is not importable here and must never become so:
 scripts/lib/fgbReader.js, whose npm dependency (flatgeobuf) resolves only under Deno.
-The D1 schema (section 2) and the KV shapes (sections 1 and 3) are unaffected: the batch
+The D1 schema (section 2) and the KV shapes (section 3) are unaffected: the batch
 writes the same D1 rows out-of-band, the request path still reads only D1 and KV, and the
 prebuilt layer set in R2 is read by the offline batch alone — wrangler.toml deliberately
 carries no r2_buckets binding.
@@ -2541,11 +2572,12 @@ wrangler.toml triggers:
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
 matched job; an unrecognized cron is logged and ignored. The table:
-- "7 * * * *"          → runFlagRecompute(env). Hourly; reads wave inputs from KV and never
+- "7 * * * *"          → runFlagRecompute(env). Hourly; reads wave inputs off the
+                         beach_state join its per-run SELECT already issues, and never
                          fetches waves. Offset off the congested top-of-hour slot the
                          repo's own workflows avoid. No ordering against the offline wave
-                         cycle is required, because "waveinput:" keys carry an absolute
-                         expiration derived from the model valid time.
+                         cycle is required, because a stored wave record carries an absolute
+                         wave_expires derived from the model valid time.
 - "3-53/10 * * * *"    → runAlertRefresh(env). Recompute-and-diff alerts refresh, every
                          10 minutes. Three national fetches, no per-beach upstream call;
                          writes only beach_state.estimate. Offset off the hourly's measured
@@ -2572,11 +2604,11 @@ src/demandWindow.js rather than src/index.js — see "Entry-module export shape"
 FLAG_TTL_SECONDS lives in src/flagTtl.js for the same entry-module reason and is imported
 back.
 The step-7 wave and wind reads use Number.isFinite, not typeof x === "number", so a
-malformed "waveinput:" value cannot reach rules.js step 3's unguarded else branch and decide
+malformed stored wave record cannot reach rules.js step 3's unguarded else branch and decide
 green. That is caller-side input validation, not a rule change, and bumps no RULES_VERSION.
 
-MAX_BEACHES_PER_RUN bounds one run's wall clock, its one-KV-read-per-beach budget and its
-D1 batch budget; it does not have to
+MAX_BEACHES_PER_RUN bounds one run's wall clock and its D1 batch budget; the run issues no
+per-beach KV read at all, because the wave record rides the same SELECT. It does not have to
 cover the table. A beach is hot when its last_viewed falls within HOT_VIEW_WINDOW_MS of the
 run, and every hot row is covered every run. Cold rows rotate through the remaining budget,
 so a cold beach waits ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot)) runs for its
@@ -2592,13 +2624,20 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
 
 1. const nowIso = new Date().toISOString(); (single timestamp for the whole run);
    const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
-2. SELECT * FROM beaches WHERE <FLAG_WORTHY_WATER_SQL>
+2. SELECT b.*, <WAVE_STATE_SELECT> FROM beaches b <BEACH_STATE_JOIN>
+   WHERE <FLAG_WORTHY_WATER_SQL>
    ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
    recompute_updated ASC, id ASC LIMIT 3000, bound with hotCutoffIso as ?1.
    Both beach-walking crons emit this statement from one shared helper,
-   selectRunBeaches(env, columns, hotCutoffIso, rotation), so the WHERE, hot-first guard,
-   id ASC tiebreak, LIMIT and single bind live there once. The callers differ only in the
-   column list ("*" here) and the rotation cursor column, taken from the ROTATION_COLUMNS
+   selectRunBeaches(env, columns, hotCutoffIso, rotation, stateSelect), so the WHERE,
+   hot-first guard, id ASC tiebreak, LIMIT and single bind live there once. The join and the
+   b alias appear only when a caller passes stateSelect, so the water-temp caller's SQL is
+   byte-identical to the unjoined shape. This caller splats b.* rather than *, because a bare
+   * over the join would drag every beach_state blob onto all 3000 rows. Every other clause
+   stays unqualified — FLAG_WORTHY_WATER_SQL's columns, last_viewed, the cursor column, id —
+   which is safe only because beach_state carries none of those names, the constraint any
+   future beach_state column must satisfy. The callers differ only in the
+   column list ("b.*" plus the wave columns here) and the rotation cursor column, taken from the ROTATION_COLUMNS
    whitelist { flag: "recompute_updated", wave: "wave_updated" } and concatenated into the
    SQL as a literal, because a column name cannot be a bind parameter; that lookup is
    own-property-checked and must never be caller-derived text. The hot-first demand term
@@ -2628,17 +2667,19 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    deadline leaves unreached all read as "no rip input" for that WFO's beaches alone. A
    sequential loop bounded only by the 45 s transport timeout would let a few hung WFOs
    spend the 900 s ceiling before any beach is written.
-5. Wave inputs: read only — the hourly cron performs no wave fetch. Prefetch every
-   "waveinput:" + id payload (section 1) from KV concurrently in chunks of 50
-   (env.FLAGS.get(..., { type: "json" }), each guarded so a failed get yields no input),
-   pass each through resolveWaveInput(record, nowMs) (src/waveInput.js) and store what it
-   returns in a Map. That resolver indexes the record's series at the hour this run is
-   estimating, which is what lets one landed cycle color 24 h of runs; nowMs is
-   Date.parse(nowIso), so every beach in a run reads the same instant. A missing key — the
-   cycle has not landed, or its keys reached their absolute expiration — and a record whose
+5. Wave inputs: read only — the hourly cron performs no wave fetch and no per-beach read.
+   Every beach's wave record (section 1) already rode the step-2 SELECT, so this step is a
+   synchronous walk of rows in hand: liveWaveRecord(beach, nowMs) applies the wave_expires
+   lease, and each live record goes through resolveWaveInput(record, nowMs)
+   (src/waveInput.js) into a Map. That resolver indexes the record's series at the hour this
+   run is estimating, which is what lets one landed cycle color 24 h of runs; nowMs is
+   Date.parse(nowIso), so every beach in a run reads the same instant. Both gates stand on
+   their own: a live wave_expires is not evidence that an hour-0 wind is offerable, and a
+   spent series is absent however fresh its lease. A missing record — the cycle has not
+   landed, or its rows reached their absolute expiration — and a record whose
    series is spent both yield no wave input, and the estimate degrades to the wind fallback
    or "unknown", never a wrong flag. This step is the entire Worker-side wave contract.
-6. Wind is not fetched here: the wind fallback rides on the waveinput payload, recorded
+6. Wind is not fetched here: the wind fallback rides on the stored wave record, recorded
    offline only for beaches whose hour 0 resolved no wave height, and offered by
    resolveWaveInput only at hour 0 of a series.
 6b. Water-quality floor gather: one findWqFloorSource(beach) pass over the run's beaches
@@ -2681,7 +2722,7 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    Resolve the water-quality floor for this beach against its group's step-6b result via
    scrapeWqFloorFromResult -> waterQualityAdvisory (null when clean or absent) and pass it
    into estimateFlag. waveHeightFt, windSpeedMph and windGustMph come from the beach's
-   "waveinput:" KV payload (step 5); updated = nowIso.
+   stored wave record, resolved at step 5; updated = nowIso.
    The alert half comes from buildAlertInputs(beach, alertCtx, nowIso) and the whole bundle
    from buildEstimateInputs(beach, alertPart, signals) (src/flagInputs.js), the same two
    functions runAlertRefresh calls, so the two crons cannot drift in how they match a zone,
@@ -2702,7 +2743,9 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    The pool collects descriptors; step 7b writes them. estimatesByBeach.set(...) may run
    inside the pool, because the flag_history guarantee is enforced at step 9 against the
    set of beaches whose chunk actually committed, not against the pool's own bookkeeping.
-   The "waves:" WaveSeries is not written here; the offline wave cycle owns it.
+   The wave columns are not written here; the offline wave cycle owns wave and wave_expires.
+   beachStateUpsertStatements names neither in its INSERT column list nor its SET list, so an
+   hourly run can never blank or restamp a wave record.
 7b. Flush the estimate descriptors, before the scrape pass below starts: everything in
    step 8 is upstream work bounded only by each scraper's own fetch timeout, and a run
    killed at the 900 s ceiling in there must not cost the beaches it has already
@@ -2788,11 +2831,12 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    by this cron alone.
 Subrequest budget (paid plan, 10,000 per invocation): 1 NWS national alerts call + 2 ECCC
 national fetches (only when Canadian rows exist) + one SRF call per distinct WFO (~15 at Great
-Lakes scope, 60+ continental, pooled) + ≤3000 waveinput KV
-gets + one scrape() per matched wqFloor source + one scrape() per matched official scraper
+Lakes scope, 60+ continental, pooled)
++ one scrape() per matched wqFloor source + one scrape() per matched official scraper
 + ~2 scraper-health KV ops per matched scraper + ceil(3000 / 200) = 15 beach_state D1
-batches + ≤1 flag_history D1 batch + 1 recompute_updated D1 batch ≈ 3,100 in the worst case
-at the 3000-row LIMIT. Nothing in this cron is O(the whole table): the per-beach writes
+batches + ≤1 flag_history D1 batch + 1 recompute_updated D1 batch ≈ 100 in the worst case
+at the 3000-row LIMIT — the wave records ride the step-2 SELECT and cost no subrequest each.
+Nothing in this cron is O(the whole table): the per-beach writes
 collapse into batches of 200 rather than a subrequest each, and both authorities' alerts are
 one national fetch each, so alert cost stays flat as the table grows. Wall clock rather than
 subrequest count is the binding limit on all three crons. The free plan (50 subrequests) is
@@ -2863,7 +2907,7 @@ alert means.
    proceed-on-partial-success, because at 6x cadence a marine-collection outage would
    repeatedly drop a live "gale warning" red to a wave-height green. With neither authority
    up, log the completion line with rows=0 and return without touching D1. Nothing else is
-   fetched — no SRF, no wqFloor scrape, no official scrape, no "waveinput:" read — so a
+   fetched — no SRF, no wqFloor scrape, no official scrape, no wave record read — so a
    10-minute cadence costs third-party sites nothing and there is no second source of truth
    for any non-alert input.
 2. Page through the beaches that HAVE a live standing estimate, keyset on b.id:
@@ -2946,7 +2990,8 @@ alert means.
    pages and the completion line reports run totals.
 5. What it never writes: beach_state.wqfloor (the hourly stays its single writer, so expiry
    remains the only way a cleared advisory is withdrawn), beach_state.official, beach_state
-   .reading, a flag_history row (it scrapes no officials, so it has no estimate/official pair
+   .reading, beach_state.wave and beach_state.wave_expires (the offline cycle is their single
+   writer), a flag_history row (it scrapes no officials, so it has no estimate/official pair
    to log), any KV key at all, and above all recompute_updated, which is runFlagRecompute's
    rotation cursor and single-writer by contract. This cron needs no cursor because it
    re-estimates the whole live set every run.
@@ -2993,12 +3038,14 @@ flight with the remainder queued — a modest oversubscription to keep the pipe 
 a claim of 12x throughput. Size wall-clock math at 6, never at the requested width; raising
 the width does not buy throughput.
 
-Every fan-out KV write in the cron path goes through runPool. No cron may reintroduce a
+Every fan-out KV write in the cron path goes through runPool. The only one left is
+runWaterTempRefresh's "watertemp:" put. No cron may reintroduce a
 sequential per-beach `await env.FLAGS.put(...)`: that pattern consumes a whole 900 s
 invocation and costs the run everything it had gathered. Per-beach D1 state is not a fan-out
 at all — beachStateUpsertStatements and estimateCasStatement collapse it into batches of 200
 (chunkStatements), so it costs a handful of round trips rather than one per beach and needs
-no pool.
+no pool; the wave record sits on that side of the split too, read off a join and written
+offline as one batched delta.
 
 The water-temp cron's wall-clock budgets are WAVE_GATHER_DEADLINE_MS (480000) and
 WAVE_WRITE_DEADLINE_MS (840000), plus the WAVE_CURSOR_FLUSH_SIZE (100) flush granularity
@@ -3488,14 +3535,15 @@ new lat/lon), so a beach that moved to different water re-classifies.
 ### Wave cycle (offline batch — GitHub Actions, not an in-Worker cron)
 
 NOAA GRIB2 model output, downloaded and point-sampled in .github/workflows/waves.yml
-("52 */6 * * *", 4 slots a day) and bulk-written into the "waveinput:" / "waves:" KV the
-hourly cron reads. The Worker's read contract is untouched: runFlagRecompute step 5 and the
-KV shapes in section 1 are unchanged, and RULES_VERSION is not bumped.
+("52 */6 * * *", 4 slots a day) and applied as an idempotent SQL delta into the
+beach_state.wave / wave_expires columns the hourly cron reads. The Worker's read contract is
+untouched: runFlagRecompute step 5 and the record shapes in section 1 are unchanged, and
+RULES_VERSION is not bumped.
 
 Not color-bearing on failure. This pipeline never writes a flag color. A failed or refused
-cycle writes no KV at all and leaves the previous cycle riding an expiration derived from
-its own model valid time, so the failure mode is a flag aging out to unknown — gray and
-honest — never a stale wave height deciding a color. That is what sorts the gates:
+cycle writes no rows at all and leaves the previous cycle's records riding a wave_expires
+derived from their own model valid time, so the failure mode is a flag aging out to unknown —
+gray and honest — never a stale wave height deciding a color. That is what sorts the gates:
 everything that could produce a wrong number is non-overridable, everything that is merely
 less data is overridable and warns.
 
@@ -3581,10 +3629,11 @@ HTSGW and WIND, discovered from gdalinfo and never assumed; the shell extracts e
 a flat ENVI plane; scripts/sample-waves.js --mode sample samples every beach in the D1
 snapshot and emits waveinput.ndjson and waves.ndjson; scripts/build-wave-manifest.js applies
 every gate and writes manifest.json, carrying each artifact's byte count and sha256, or exits
-1. The sample job hands those three files to the publish-kv job as the run's wave-cycle
-workflow artifact; scripts/build-wave-kv.js verifies each file against the manifest, applies
-the consumer gate (src/waveManifest.js) and emits the bulk-put chunks. The NDJSON never
-leaves the run.
+1. The sample job hands those three files to the publish-d1 job as the run's wave-cycle
+workflow artifact; scripts/build-wave-sql.js verifies each file against the manifest, applies
+the consumer gate (src/waveManifest.js), merges the two records per beach and emits one
+idempotent SQL delta, which the job applies with npx wrangler d1 execute swim-report --remote
+--file under CLOUDFLARE_D1_EDIT_TOKEN. The NDJSON never leaves the run.
 
 R2 keeps only what must outlive the run. Bucket swim-report (hyphen), path-style addressing,
 public at https://map.swim.report:
@@ -3627,7 +3676,8 @@ MAX_EMITTED_FT and wind values in mph against MAX_EMITTED_MPH, each grid's nodat
 through the same constant the sampler applied; series alignment (exactly 24 entries, every
 value finite or null); distinctValues and meanPlausibility, the only two gates that can tell
 a real ocean from a filled buffer, since every other gate counts things and a constant plane
-counts perfectly; the KV pair spelling; and the minimum record rails (a finite non-zero
+counts perfectly; the emitted-row gate, which holds every row's wave_expires to one of the
+cycle's two computed epochs and still in the future; and the minimum record rails (a finite non-zero
 beach total, at least one wave value anywhere, every REQUIRED_GRID_IDS member "sampled"
 carrying counts of its own and resolving at least one of any beaches it was offered, and no
 grid reaching "sampled" with a validPercent of zero, since a grid that sampled cannot have
@@ -3649,7 +3699,7 @@ at the default ratio, and its miss refuses the cycle for every grid, because a c
 fraction is a wrong plane rather than less data. An unseeded digest sets autoPublishAllowed:false without failing the build, and
 auto-publish is likewise withheld, without a refusal, when no ratio comparison was scored at
 all. A withheld publish is a warning on a dispatch and a failure on a scheduled run: that run
-wrote no KV for any grid and moved no pointer, so the failing step is the only alert the state
+wrote no rows for any grid and moved no pointer, so the failing step is the only alert the state
 produces, and the reports artifact has already uploaded for the human to seed floors from.
 
 The floors contract. gridsDigest covers id, domain, cell size, url template, variables, cap
@@ -3665,14 +3715,14 @@ an entry exists for the digest the committed GRIDS produce, every GRIDS id is ke
 nothing else is, the entry is wholly seeded or wholly pending, and every grid has an identity
 block — and it passes on a "bootstrap" entry by design, so a green suite is not evidence that
 a grid set has been seeded. Landing a grid set whose floors are unseeded withholds
-auto-publish on every scheduled cycle, which writes no KV for any grid and ages the whole
+auto-publish on every scheduled cycle, which writes no rows for any grid and ages the whole
 site out to unknown within a day; the scheduled withheld-publish failure is what makes that
 state visible, and the rollout sequence in docs/offline-waves.md is what keeps it from
 landing.
 
 Cadence and the open risk. GitHub Actions skips cron occurrences rather than merely
 deferring them. At 4 slots a day against the 24 h series lease this tolerates two
-consecutive misses with six hours to spare; a wind-only key keeps the 7 h lease and survives
+consecutive misses with six hours to spare; a wind-only record keeps the 7 h lease and survives
 a late slot but not a missed one. That is the design's largest unclosed exposure; the permanent fix is in
 TODO.md.
 
@@ -3747,7 +3797,7 @@ Routing table (method GET only; anything else → 405):
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT b.*, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: the same joined SELECT [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. No KV read at all: the two records displayFlag reads ride the join as scalar columns, resolved per row by liveChipState(row, nowMs) (section 2). A list row renders one displayFlag decision and nothing else, so it never selects a JSON blob: the proximity branch ranks 500 rows to render 100, and a blob here would cross the binding five times for every row a visitor sees. Only the sliced rows are resolved. HOME_LIST_LIMIT is 100 | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /?ids=id1,id2,...     | handleIdsList  | The same list page rendered for exactly the listed beaches, in the order given. parseBeachIds validates and dedupes the comma-separated value and caps it at 10 BEFORE any SQL; the ids are bound as parameters (D1: the same joined chip SELECT WHERE b.id IN (?1, ?2, ...) AND [flag-worthy gate] — no ORDER BY, since SQLite returns an IN-set in its own order and the caller's order is restored in JS by id), resolved through liveChipState like handleHome. Ids that do not match the id format, that name no row, or that name a non-flag-worthy row are skipped silently; an empty result reads no D1 at all. q, near and request.cf are ignored on this route, which is what makes the response fully URL-determined and therefore CACHEABLE. It writes no last_viewed stamp — only the two single-beach routes carry the demand signal. This is what the browser-side "Your Beaches" section (section 9) fetches for a visitor's saved and recently viewed ids; nothing about those lists reaches the server beyond the bounded id list in the URL. | HTML renderListPage with idsMode: true, query "", hasMore false and no location, so the page renders unsorted, un-filtered rows and never asserts data-complete. idsMode also owns the empty-state copy: a page with no rows reads "No beaches match those ids.", since an unrecognized id list is neither a search miss nor an empty database |
-| GET /beach/:beachId       | handleDetail   | D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, each honoring its own expiry); KV waves: + watertemp:; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
+| GET /beach/:beachId       | handleDetail   | D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, wave, each honoring its own expiry — the wave record through liveWaveRecord over WAVE_STATE_SELECT); KV watertemp: only; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT), haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which stamps displayFlag({ estimate, official }, nowIso).keyword (section 9) on the same liveChipState resolution the list surfaces use, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. |
 | GET /api/flag/:beachId    | handleApiFlag  | D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } }, with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
@@ -3763,13 +3813,16 @@ Routing table (method GET only; anything else → 405):
   { estimate, official, wqfloor, reading }, each parsed or null. A route that renders only a
   beach's display flag — the home list, ?ids=, the nearby cards and the map features — selects CHIP_STATE_SELECT and resolves the row with liveChipState(row, nowMs),
   which returns { estimate, official }, each { color, updated } or null, off the scalar
-  mirror columns and never a blob. Both apply the same expiry rule per record: a NULL column,
-  an expired lease, unparseable JSON or a non-object parse all read as null, and neither
+  mirror columns and never a blob. handleDetail adds WAVE_STATE_SELECT for the forecast strip
+  and resolves it with liveWaveRecord(row, nowMs); CHIP_STATE_SELECT deliberately excludes
+  that blob, and so does BEACH_STATE_SELECT, which /api/flag selects and renders none of.
+  All three apply the same expiry rule per record: a NULL column,
+  an expired lease, unparseable JSON or a non-object parse all read as null, and none
   throws, so a corrupt row degrades one beach rather than the response. beach_state's column names are all
   distinct from beaches', so FLAG_WORTHY_WATER_SQL, the LIKE clause, the proximity ORDER BY
   and WHERE id IN stay unqualified; only the SELECT list needs the b. / s. aliases.
 - KV reads: env.FLAGS.get(key, { type: "json" }); null passes through as null. Only
-  handleDetail reads KV, for "waves:" and "watertemp:", both single-key gets.
+  handleDetail reads KV, for "watertemp:", one single-key get.
 - Headers: HTML "content-type": "text/html; charset=utf-8"; JSON
   "content-type": "application/json" — EXCEPT /api/beaches.geojson, which sends the
   RFC 7946 GeoJSON media type "content-type": "application/geo+json; charset=utf-8"
@@ -4585,7 +4638,8 @@ exporting a CSS string); render.js is the sole module the router imports.
     component kit.
   - Stale warning (WAVE_STALE_MS = 28800000 ms / 8 h, keyed on waves.updated) inside the
     section — longer than the flag cards' 2 h default because the strip refreshes on the
-    offline NOAA wave cycle, whose KV lives 7 h and whose models publish every 6-12 h, so a
+    offline NOAA wave cycle, whose records ride an absolute lease measured from the model
+    valid hour and whose models publish every 6-12 h, so a
     few-hours-old strip is model-current rather than stale. The ESTIMATE badge plus footer
     disclaimer keep the not-official framing.
   - The whole section is omitted when there is neither a finite now-height nor a renderable
@@ -4828,10 +4882,11 @@ test uses symbolically.
 - test/waveSample.test.js — the band plan (element/valid-time matching, refusal on an
   unplannable band), waveRecordsForBeach (both write-skip guards, hoursFt[0] ===
   waveHeightFt, exactly 24 entries), and the snapshot reader.
-- test/buildWaveKv.test.js — the WRITER contract: the units pins (1 m -> 3.28084 ft, 1 m/s ->
-  2.2369362920544 mph), snake_case "expiration" on every pair, value is a JSON STRING, the
-  series lease against the scalar one and which record shape takes which, chunking, and the
-  pointer parser's refusals.
+- test/buildWaveSql.test.js — the WRITER contract: the units pins (1 m -> 3.28084 ft, 1 m/s ->
+  2.2369362920544 mph); wave_expires is an absolute epoch-second integer and the record a
+  quoted TEXT literal; the series lease against the scalar one and which record shape takes
+  which; every statement on one line, under the byte budget, and idempotent through
+  ON CONFLICT(beach_id) DO UPDATE; and the pointer parser's refusals.
 - test/waveInput.test.js — the READER contract, mirroring the file above: the hour index,
   that a live series never falls back to its own hour-0 height, that a spent one yields
   nothing rather than its last hour, and that the wind is offered only at hour 0.
@@ -4921,8 +4976,10 @@ test uses symbolically.
   index, the fill-in keyframe's placement inside the guard, and the strip's neutral "now"
   marker.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
-  wave_updated; runFlagRecompute reads "waveinput:" for wave height and wind fallback,
-  degrading to unknown when absent, rather than fetching; the alertDetails/ripCurrentRisk
+  wave_updated; runFlagRecompute takes wave height and the wind fallback off the
+  beach_state join, degrading to unknown when the record is absent or past its
+  wave_expires, rather than fetching or reading KV, and leaves a stored wave record
+  untouched across its own upsert; the alertDetails/ripCurrentRisk
   echoes land in beach_state.estimate; and the Canadian path (an eccc_zone beach inside a
   stubbed GeoMet polygon → ECCC red plus "Environment Canada Alerts" source, no caveat;
   outside every polygon → checked-but-clear, no caveat; a failed ECCC fetch behaves like a
@@ -4937,8 +4994,9 @@ test uses symbolically.
 - test/router.test.js — behavior against seeded rows rather than pinned SQL text: the list,
   ids, detail and /api/flag routes resolving their estimate and official off the
   beach_state join, an expired record rendering as absent, the list select taking the
-  scalar chip columns and no JSON blob, handleDetail reading the
-  "waves:" and "watertemp:" KV keys and rendering the advisory callout from the joined
+  scalar chip columns and no JSON blob, handleDetail reading the wave record off the join
+  (an expired wave_expires omitting the strip) and "watertemp:" as its only KV key, and
+  rendering the advisory callout from the joined
   wqfloor column, and /api/beaches.geojson in ONE D1 statement with parity against
   displayFlag's keyword, /api/flag's additive display field, and the cross-surface matrix:
   list, ?ids=, nearby card, hero, share meta, geojson and /api/flag showing one displayFlag

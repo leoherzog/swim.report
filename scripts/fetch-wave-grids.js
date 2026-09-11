@@ -6,7 +6,7 @@
 //     --dest ./.waves
 //
 // The only network-touching script in the wave pipeline. Everything downstream of
-// it — band planning, point sampling, the gates, the KV pair assembly — is pure
+// it — band planning, point sampling, the gates, the SQL delta assembly — is pure
 // local math over the bytes this script put on disk, and
 // .github/workflows/test.yml asserts that machine-side by refusing --allow-net on
 // any of the other three scripts.
@@ -28,8 +28,9 @@
 // publishes no such rule and is Range-sliced freely.
 //
 // A grid in REQUIRED_GRID_IDS that resolves no complete cycle inside its age
-// window exits 1 and publishes nothing: the previous cycle's KV rides its lease
-// and the flags age out to unknown, which is gray and honest. Any other grid
+// window exits 1 and publishes nothing: the previous cycle's stored wave records
+// ride their own wave_expires and the flags age out to unknown, which is gray and
+// honest. Any other grid
 // failing is recorded as a problem and leaves gridsComplete false, which the
 // consumer gate treats as degraded — less data, not wrong data.
 

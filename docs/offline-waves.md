@@ -2,13 +2,14 @@
 
 Wave height and the wind fallback change every few hours, tolerate latency, and produce one
 number per beach per hour. They are sampled outside the Worker, in a GitHub Actions job that
-decodes NOAA GRIB2 output with GDAL, resolves each beach to a wet grid cell, and bulk-writes
-the result into the `waveinput:` and `waves:` KV keys the hourly flag cron reads. The Worker
-reads those keys through `src/waveInput.js`, which indexes each record's series at the hour
-being estimated; nothing on the request path changes.
+decodes NOAA GRIB2 output with GDAL, resolves each beach to a wet grid cell, and applies the
+result as a SQL delta into the `beach_state.wave` / `wave_expires` columns the hourly flag cron
+reads. The Worker reads that record off the `beach_state` join its per-run SELECT already
+issues and resolves it through `src/waveInput.js`, which indexes the series at the hour being
+estimated; nothing on the request path changes.
 
-**Blast radius.** This job never writes a flag color. A failed or refused cycle writes no KV
-and leaves the previous cycle's keys under an expiration derived from that cycle's own model
+**Blast radius.** This job never writes a flag color. A failed or refused cycle writes no rows
+and leaves the previous cycle's records under an expiry derived from that cycle's own model
 valid time, so the failure mode is a flag aging out to `unknown` — gray and honest — never a
 stale wave height deciding a color. Republishing an older cycle yields a short or negative
 lease and is refused by construction.
@@ -17,7 +18,7 @@ lease and is refused by construction.
 
 The Worker request path still reads only D1 and KV. The grids are read by the offline job
 alone, and `wrangler.toml` deliberately carries no `r2_buckets` binding. The hourly cron reads
-`waveinput:` from KV and fetches nothing.
+the wave record off a join it already issues and fetches nothing.
 
 ## The grid set
 
@@ -59,7 +60,7 @@ and `maxCycleAgeHours` 36 walks back three of them. One file carries 145 hourly 
 cycle over a day old still covers the 24 h window. The grid is deliberately outside
 `REQUIRED_GRID_IDS`: requiring a grid that publishes on demand would turn one missing office
 run into a nationwide refusal, where its absence instead degrades the cycle and every other
-grid still writes KV. Its per-grid floor and record-count ratio misses likewise warn rather
+grid still writes its rows. Its per-grid floor and record-count ratio misses likewise warn rather
 than refuse. SWAN wets and dries the nest's shore cells with the tide, so the count resolved at
 hour 0 swings about 13% with the tidal phase at validStart, and the grid declares
 `recordCountMinRatio` 0.8 so that swing never warns.
@@ -116,7 +117,7 @@ GRIB `HTSGW` is **metres**; feet are `metres * 3.28084` (`metersToFeet`, `src/ge
 `src/waveGrids.js`). `src/rules.js` thresholds are 2 ft yellow, 4 ft red (3 / 6 ft on `ocean` rows), and 15/25 mph.
 Handing it metres makes every sea state below 1.22 m read green sitewide; handing it m/s makes
 an actual 25 mph arrive as 11. Neither raises an error anywhere, which is why
-`test/buildWaveKv.test.js` pins both conversions directly. `windGustMph` is always null,
+`test/buildWaveSql.test.js` pins both conversions directly. `windGustMph` is always null,
 because no grid in this set publishes a GUST element, so the wind red rule narrows in effect to
 sustained speed alone and `src/rules.js` renders `n/a` for the gust.
 
@@ -167,10 +168,18 @@ points; reading raw planes in Deno avoids that, and shell-side sampling reintrod
    `waveinput.ndjson` and `waves.ndjson`.
 6. `scripts/build-wave-manifest.js` applies every build gate and writes `manifest.json`,
    carrying each NDJSON artifact's byte count and sha256, or exits 1.
-7. The `sample` job hands the manifest and the two NDJSON files to the `publish-kv` job as
+7. The `sample` job hands the manifest and the two NDJSON files to the `publish-d1` job as
    the run's `wave-cycle` workflow artifact, and publishes the manifest and pointer to R2.
-   `scripts/build-wave-kv.js` verifies each file against the manifest, applies the consumer
-   gate, and emits the bulk-put chunks.
+   `scripts/build-wave-sql.js` verifies each file against the manifest, applies the consumer
+   gate, merges the two records per beach and emits `wave-delta.sql`; the job applies it with
+   `npx wrangler d1 execute swim-report --remote --file`.
+
+   The two jobs stay separate so that no job holds both the R2 keys and a production write
+   credential: the job that can write R2 cannot write D1, and the job that can write D1 holds
+   no AWS keys. The split also carries the `needs.sample.outputs.published == 'true'` gate, so
+   the pointer and the rows always name the same cycle and a withheld cycle never reaches
+   production, and it is what makes the artifact handoff a verification boundary rather than a
+   file copy.
 
 ## Per-grid isolation
 
@@ -217,9 +226,9 @@ table and pass; the step passes `--require-where`, which fails on an empty value
 
 The NDJSON never leaves the run. The `sample` job uploads `manifest.json`,
 `waveinput.ndjson` and `waves.ndjson` as the `wave-cycle` workflow artifact, retained three
-days, and the `publish-kv` job downloads that same artifact, so it can only ever consume the
+days, and the `publish-d1` job downloads that same artifact, so it can only ever consume the
 cycle whose pointer the sample job just moved. `download-artifact` fails on an archive digest
-mismatch, and `build-wave-kv.js` then checks each file's byte length and sha256 against the
+mismatch, and `build-wave-sql.js` then checks each file's byte length and sha256 against the
 manifest before parsing a record, which is what catches a file truncated on extraction.
 
 R2 keeps only what must outlive the run. Bucket `swim-report` — with a hyphen, because the
@@ -241,9 +250,9 @@ rather than an age-based R2 lifecycle rule, which would delete the live manifest
 workflow broke for longer than the rule's age.
 
 A withheld publish is a warning on a dispatch and a **failure** on a scheduled run. The
-scheduled cycle wrote no KV for any grid, the pointer did not move and nothing reached R2, so
+scheduled cycle wrote no rows for any grid, the pointer did not move and nothing reached R2, so
 the failing step costs nothing and is the only alert that state produces; without it the run
-goes green with one annotation while every `waveinput:` key expires on its own lease. The
+goes green with one annotation while every stored wave record expires on its own lease. The
 reports artifact uploads first either way, and its `manifest.json` is what seeds the floors.
 
 ## Gates
@@ -283,8 +292,11 @@ into `src/rules.js`.
   the set, mean within 0.05 to 25 ft. Every other gate counts things, and a constant
   plane counts perfectly; these two are the only ones that can tell a real ocean from
   a filled buffer.
-- `ttlSpelling` — every emitted pair carries a numeric `expiration` and a string
-  `value`.
+- `ttlSpelling` — the build's lease arithmetic: both computed epochs are exactly
+  `validStartEpoch + 86400` and `validStartEpoch + 25200`. The emitter then holds every row it
+  writes to the same rule — a finite absolute `wave_expires` that is one of those two epochs
+  and is still in the future — and refuses rather than writing a statement over the
+  per-statement byte cap. Both halves are non-overridable.
 
 **Overridable with `--allow-shrink`, and warned** — everything that is merely less
 data.
@@ -333,13 +345,13 @@ separately so an `--allow-shrink` run is distinguishable downstream.
 one conjunct walk, every conjunct a strict `!== true` so a **missing** field refuses exactly as
 a false one does.
 
-- **fatal**, write no KV: schema version mismatch, artifacts unverified,
+- **fatal**, write no rows: schema version mismatch, artifacts unverified,
   `artifactsPresent`/`artifactsExpected` (both `isFiniteNumber`-guarded **first**,
   because `undefined !== undefined` is false and fails open), `buildStatus` not `"complete"`,
   `validTimesPassed` or `sentinelScanPassed` not true.
-- **expired**, write no KV: fewer than 10800 seconds (`MIN_LEASE_SECONDS`) of series lease
+- **expired**, write no rows: fewer than 10800 seconds (`MIN_LEASE_SECONDS`) of series lease
   left, or `gridsDigestMatches` not true. A cycle with under three hours left costs a full
-  bulk write, buys little, and means the pipeline is more than 21 hours late, which the
+  delta apply, buys little, and means the pipeline is more than 21 hours late, which the
   operator must see. `NaN` from an unparseable
   `validStartIso` fails the range check, which is correct: refusing because the age is
   unknowable is the same answer as refusing because it is too old.
@@ -354,30 +366,32 @@ stubbed, because the gate is fail-closed on missing fields. The consumer folds t
 
 ## Absolute expiration
 
-Every emitted pair carries an `expiration` in seconds since the epoch, never a duration, so a
-key expires a fixed span after the hour it *describes* regardless of when the job ran. A TTL
+Every emitted row carries a `wave_expires` in seconds since the epoch, never a duration, so a
+record expires a fixed span after the hour it *describes* regardless of when the job ran. A TTL
 measured from write time is wrong for a scheduler that skips occurrences: a run firing 9 hours
 late would grant a fresh lease to data already 9 hours old.
 
-There are two spans, and a record's own shape picks one. A `waveinput:` carrying the hourly
+There are two spans, and a record's own shape picks one. A record carrying the hourly
 series gets `validStartEpoch + 86400`, the span it describes, because `runFlagRecompute`
-indexes it at the hour it is estimating rather than reading hour 0; its paired `waves:` key
-shares that lease, since the detail-page strip trims itself to the hours from now forward. A
-wind-only `waveinput:` is one hour-0 sample with no series behind it and gets
+indexes it at the hour it is estimating rather than reading hour 0, and because the
+detail-page strip trims itself to the hours from now forward. A
+wind-only record is one hour-0 sample with no series behind it and gets
 `validStartEpoch + 25200`. `startIso` and `hoursFt` are present together or not at all, which
-is the field `build-wave-kv.js` reads to choose. The series lease outlives the scalar one, so a
+is the field `build-wave-sql.js` reads to choose. The series lease outlives the scalar one, so a
 cycle the gate still accepts can carry wind-only records with nothing left; those are dropped
-rather than handed to wrangler with a past expiration.
+rather than written as a row a reader would treat as absent the moment it lands.
 
-`runFlagRecompute` never reads `waveinput.updated`, so the expiration and the hour index are
+`runFlagRecompute` never reads the record's `updated`, so the expiry and the hour index are
 the whole staleness control on the color path.
 
-The spelling is a trap worth stating plainly. The wrangler bulk-put pair field is snake_case
-`expiration` / `expiration_ttl`. The Worker runtime's camelCase `expirationTtl` — the spelling
-used everywhere else in this repo, and therefore the likeliest mistake in the pipeline — is
-accepted as an unexpected property, warned about, and **ignored**, with exit 0. The result is a
-key that never expires, coloring flags from dead data indefinitely. `value` must also be a JSON
-string. The workflow greps wrangler's output for `unexpected properties` and fails the step.
+Three traps live in the delta that carries the record. D1 caps one SQL statement at 100,000
+bytes, so the emitter holds every statement under `MAX_STATEMENT_BYTES` (80,000) and refuses a
+row it cannot fit rather than splitting one. The record travels as a single-quoted SQL literal,
+so a quote inside the JSON must be doubled and a raw newline inside it would tear the statement
+in half for the line-splitting local applier; both are gated before the file is written. And
+every statement is an `ON CONFLICT(beach_id) DO UPDATE`, so re-running the apply from the same
+artifact repairs a half-landed one and writes the same absolute `wave_expires` however much
+later it runs.
 
 ## Cadence
 
@@ -389,8 +403,8 @@ Every landed cycle carries 24 hours of forecast and the hourly cron indexes into
 buys margin against a missed occurrence rather than freshness. GitHub Actions **skips** cron
 occurrences rather than deferring them, so what the cadence has to survive is consecutive
 misses: 4 slots a day against a 24 hour series lease tolerates two, with six hours to spare.
-Each slot also costs a full bulk write of roughly two KV pairs per resolved beach, which is
-the largest single line in this account's KV write budget, so slots are not free to add.
+Each slot also costs one D1 row per resolved beach, applied as a single delta of one statement
+per row, so slots are not free to add.
 
 Read the slot hit rate from the workflow's run history and the per-beach coverage from
 `manifest.beaches.resolved` across consecutive cycles: the exposure has to be measured, and no
@@ -398,29 +412,35 @@ second wave source is left to shadow against.
 
 ## Rollback
 
-There is no way to roll KV back to a previous cycle: an older cycle's absolute expiration is
-already short or negative, so republishing it is refused. The ladder is about stopping, not
-reverting.
+There is no way to roll the stored records back to a previous cycle: an older cycle's absolute
+expiry is already short or negative, so republishing it is refused. The ladder is about
+stopping, not reverting.
 
 1. **Wrong but not yet written.** Nothing to do — a refused build leaves `waves/current.json` on
-   the last good cycle and writes no KV.
-2. **Written and wrong.** Disable the workflow. The bad keys expire within 24 hours of the hour
-   they describe, and beaches age out to `unknown` meanwhile.
+   the last good cycle and writes no rows.
+2. **Written and wrong.** Disable the workflow. The bad records expire within 24 hours of the
+   hour they describe, and beaches age out to `unknown` meanwhile.
 3. **The grid set itself is wrong.** Revert `src/waveGrids.js` and `data/wave-grids.json`
    together, whole. A whole revert restores the previous digest, whose seeded entry is still in
    the append-only floors file, so the next cycle auto-publishes with no further action. A
    partial revert moves the digest to a third value that nothing has seeded and withholds
    auto-publish until someone reviews a real cycle against D1 truth.
-4. **The pipeline must go away.** Stop the workflow and let the keys expire. The Worker degrades
-   to the wind fallback where one is present and to `unknown` elsewhere.
+4. **The pipeline must go away.** Stop the workflow and let the records expire. The Worker
+   degrades to the wind fallback where one is present and to `unknown` elsewhere.
 
 ## Prerequisites
 
 - Repo secrets `CLOUDFLARE_R2_ACCESS_KEY` / `CLOUDFLARE_R2_SECRET_ACCESS_KEY`, the same pair
   the layer build uses, read by the `sample` job alone for the manifest and pointer writes.
-- Repo secret `CLOUDFLARE_KV_WRITE_TOKEN`, carrying **Workers KV Storage: Edit**, read by the
-  `publish-kv` job alone. It is separate from the D1-scoped tokens the other jobs use; if it is
-  missing or unscoped, the first bulk put fails after every other step has succeeded.
+- Repo secret `CLOUDFLARE_D1_EDIT_TOKEN`, the same secret `discovery.yml` uses for its own
+  delta, read by the `publish-d1` job alone. If it is missing or mis-scoped, the apply fails
+  after every other step has succeeded. `CLOUDFLARE_WORKERS_EDIT_TOKEN` is refused for D1 with
+  code 7403 and is deliberately not a repo secret. The `sample` job keeps
+  `CLOUDFLARE_D1_READ_TOKEN`, so the sampler still cannot write.
+- Migration `0015_beach_state_wave.sql` applied to remote D1, so `beach_state` carries the
+  `wave` and `wave_expires` columns the delta upserts. Apply it before the first `apply: true`
+  dispatch and before deploying a Worker that selects `WAVE_STATE_SELECT`; against a schema
+  without the columns the delta and the hourly SELECT both fail outright.
 - GDAL with the JPEG 2000 driver on the runner. `gdal-bin` is installed with
   `--no-install-recommends`, the first suspect for a missing format driver; the smoke decode is
   what proves it.
@@ -433,11 +453,33 @@ the band plan, then one `gdal_translate` per planned band into a flat ENVI plane
 `gdal_translate -of VRT -b` followed by `gdalwarp` for the two projected grids. The VRT hop is
 deliberate: `gdalwarp -srcband` would do the same job in one call but is GDAL 3.7+, and a plain
 VRT copies no pixels. `npm run seed:waves` snapshots local D1, samples every beach, applies the
-build gate and writes the KV pairs with `wrangler kv bulk put --local --binding FLAGS`; run it
-before `npm run seed:flags`.
+build gate, emits `./.wavesql/wave-delta.sql` and applies it with
+`node scripts/apply-local-sql.js`; run it before `npm run seed:flags`. That applier splits the
+delta into line-aligned chunks under the local `wrangler d1 execute --file` byte cap, which is
+why the emitter writes one statement per line. A refused gate exits 1, so the `&&` chain never
+reaches the apply.
 
 Every Deno invocation must set `DENO_NO_PACKAGE_JSON=1`, or a plain `deno run` silently
 rewrites the checked-in `deno.lock`.
+
+## Inspecting what landed
+
+Both queries are SELECTs, so they take `CLOUDFLARE_D1_READ_TOKEN` exported as
+`CLOUDFLARE_API_TOKEN`. `CLOUDFLARE_WORKERS_EDIT_TOKEN` is refused for D1 with code 7403.
+
+One beach's stored record and its lease:
+
+```bash
+npx wrangler d1 execute swim-report --remote \
+  --command "SELECT wave_expires, wave FROM beach_state WHERE beach_id = 'osm-node-1234'"
+```
+
+Whether a cycle landed, across the whole table:
+
+```bash
+npx wrangler d1 execute swim-report --remote \
+  --command "SELECT COUNT(*) FROM beach_state WHERE wave IS NOT NULL AND wave_expires > unixepoch()"
+```
 
 ## Seeding a new `gridsDigest`
 
@@ -448,7 +490,7 @@ answer, seeded from a real cycle and moved only by a reviewed commit.
 
 1. Run the workflow by `workflow_dispatch` with publish true. Auto-publish is withheld for an
    unseeded digest, so the cycle lands in the run's `wave-cycle` and `wave-cycle-reports`
-   artifacts but the pointer does not move and no KV is written.
+   artifacts but the pointer does not move and no rows are written.
 2. Read the produced `manifest.json`, cross-checking `beaches.resolved` against the D1 row count
    and the per-grid split against where the beaches actually are.
 3. Commit an entry under the new digest with status `"seeded"`, `seededFromCycleId` set to that
@@ -471,7 +513,7 @@ landing is the sequence below.
 ## Adding a grid
 
 A grid-set change is a staged rollout, not a merge. Landing the code alone leaves every
-scheduled cycle withholding auto-publish, which writes **no KV for any grid** and ages the
+scheduled cycle withholding auto-publish, which writes **no rows for any grid** and ages the
 whole site out to `unknown` within a day, on a green run with one annotation. The order below
 is what prevents that, and the two commits merge together as one push.
 
@@ -487,7 +529,8 @@ is what prevents that, and the two commits merge together as one push.
    deliberately so: it proves the entry is structurally complete, not that it is seeded. The
    merge block is this sequence, not the suite.
 3. Dispatch `waves.yml` from the branch with `publish=false`. The pointer cannot move and
-   `publish-kv` cannot run, so production is untouched by construction.
+   `publish-d1` cannot run, so the delta apply cannot run either and production is untouched by
+   construction.
 4. Read `manifest.json` and `sample-report.json` from the run's artifact, not the run summary:
    no refusal survived, the new grid's `validPercent` is above zero, its `resolvedBeaches` and
    `maxSearchKm` are what the cap predicts, every existing grid's `resolvedBeaches` is
@@ -503,6 +546,6 @@ is what prevents that, and the two commits merge together as one push.
    keep `ratioCoverage` true. Never dispatch with `force_publish` during a rollout: it moves
    the live pointer from an unreviewed branch build.
 7. Merge both commits as one push, then watch the first scheduled slot: `AUTO_PUBLISH` true,
-   the pointer moved, a bulk write, and no `unexpected properties` in the wrangler output. A
+   the pointer moved, and the apply completing with a non-zero `rows=` on the summary line. A
    degraded-tier warning naming an on-demand grid as unfetched is the healthy outcome of that
    cadence.

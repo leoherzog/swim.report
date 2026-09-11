@@ -23,9 +23,9 @@ const NOW_EPOCH = Math.floor(Date.now() / 1000);
 // Every seeded record leases an hour out unless the fixture names its own epoch.
 const LIVE_EXPIRES = NOW_EPOCH + 3600;
 
-// KV stand-in for the two keys the request path still reads, waves: and
-// watertemp:. Every requested key is recorded, so a test can assert that the
-// four state records never go back to KV.
+// KV stand-in for the one key the request path still reads, watertemp:. Every
+// requested key is recorded, so a test can assert that the five beach_state
+// records never go back to KV.
 function makeFlags(values) {
   const store = values || {};
   const keys = [];
@@ -68,6 +68,11 @@ function stateFields(records) {
     fields.reading = records.reading;
     fields.reading_expires = records.readingExpires === undefined
       ? LIVE_EXPIRES : records.readingExpires;
+  }
+  if (records.wave) {
+    fields.wave = records.wave;
+    fields.wave_expires = records.waveExpires === undefined
+      ? LIVE_EXPIRES : records.waveExpires;
   }
   return fields;
 }
@@ -712,7 +717,7 @@ describe("renderListPage proximity output", () => {
   });
 });
 
-describe("handleDetail: state from the row, waves and water temperature from KV", () => {
+describe("handleDetail: state from the row, water temperature from KV", () => {
   const beach = { id: "b-1", name: "Oval Beach", lat: 42.6579, lon: -86.2114, osm_id: "way/1" };
 
   function detailEnv(options) {
@@ -745,11 +750,12 @@ describe("handleDetail: state from the row, waves and water temperature from KV"
     sourceLabel: "NWS Grand Rapids"
   };
 
-  it("reads only waves: and watertemp: from KV — the four state records ride on the row", async () => {
+  it("reads only watertemp: from KV — all five beach_state records ride on the row", async () => {
     const made = detailEnv({ state: { estimate: { color: "green", updated: NOW_ISO } } });
     const res = await handleRequest(detailRequest("b-1"), made.env);
     expect(res.status).toBe(200);
-    expect(made.flags.keys.sort()).toEqual(["watertemp:b-1", "waves:b-1"]);
+    // The only assertion in the suite that the wave series comes off the row.
+    expect(made.flags.keys.sort()).toEqual(["watertemp:b-1"]);
   });
 
   it("renders the water-quality advisory callout from the wqfloor column", async () => {
@@ -778,18 +784,40 @@ describe("handleDetail: state from the row, waves and water temperature from KV"
     expect(goneHtml).not.toContain("Grand Haven Pier");
   });
 
-  it("still renders 200 when a WaveSeries is present", async () => {
-    const series = {
+  // isNullableNumberArray requires exactly WAVE_SERIES_HOURS entries, so a
+  // shortened fixture drops the whole strip with no error: the series has to be
+  // 24 long for the section to render at all.
+  function waveSeries() {
+    const hoursFt = [];
+    for (let h = 0; h < 24; h = h + 1) {
+      hoursFt.push(1.6);
+    }
+    const startIso = new Date(Date.now() - 3600000).toISOString();
+    return {
       beachId: "b-1",
-      startIso: "2026-07-15T16:00:00.000Z",
-      hoursFt: [1.6, 1.7, 1.8],
+      startIso: startIso,
+      hoursFt: hoursFt,
       models: ["noaa_glwu"],
+      byModel: { "noaa_glwu": hoursFt },
       sources: [{ label: "NOAA Great Lakes Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }],
-      updated: "2026-07-15T16:20:33.000Z"
+      updated: startIso
     };
-    const made = detailEnv({ kv: { "waves:b-1": series } });
+  }
+
+  it("renders the wave strip from the wave column", async () => {
+    const made = detailEnv({ state: { wave: waveSeries() } });
     const res = await handleRequest(detailRequest("b-1"), made.env);
     expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<section class=\"wave-forecast");
+  });
+
+  it("drops the strip once wave_expires has passed, and still renders 200", async () => {
+    // The blob stays in the row past its lease, so the lease is the only thing
+    // keeping a spent cycle off the page.
+    const made = detailEnv({ state: { wave: waveSeries(), waveExpires: NOW_EPOCH } });
+    const res = await handleRequest(detailRequest("b-1"), made.env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).not.toContain("<section class=\"wave-forecast");
   });
 
   it("renders an expired estimate as UNKNOWN rather than its stored green", async () => {

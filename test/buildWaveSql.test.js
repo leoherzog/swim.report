@@ -1,5 +1,5 @@
-// THE WRITER CONTRACT for the NOAA GRIB2 wave pipeline: the record shapes the Worker
-// reads, the two unit conversions, and the KV pair spelling.
+// THE WRITER CONTRACT for the NOAA GRIB2 wave pipeline: the record shape the Worker
+// reads, the two unit conversions, and the emitted row's lease and statement shape.
 //
 // This is the most important file in the pipeline. Every failure it guards is
 // SILENT in production:
@@ -9,36 +9,44 @@
 //     "1 m -> 3.28084 ft" exactness pin is this repo's only assertion on that path.
 //   * Handing src/rules.js METRES PER SECOND makes an actual 25 mph arrive as 11, so
 //     every wind reads green. No other test covers that conversion.
-//   * A camelCase expirationTtl is accepted by wrangler as an unexpected property,
-//     WARNED about, and IGNORED, with exit 0 — writing a key that NEVER EXPIRES.
-//     runFlagRecompute never reads waveinput.updated, so expiration and the series
-//     hour index are the whole staleness control on the color path.
-//   * A waveinput carrying the hourly series that is written under the SHORT scalar
-//     lease loses 17 h of coverage; one written the other way round puts an hour-0
-//     wind on the color path for a day.
-//   * hoursFt[0] drifting from waveinput.waveHeightFt makes the detail page's "now"
-//     stat contradict its own first bar.
+//   * A wave_expires that is not one of the cycle's two computed epochs, or one that
+//     has already passed, breaks the only staleness control the color path has:
+//     runFlagRecompute never reads the record's updated field, so the absolute lease
+//     and the series hour index are the whole of it. The blob stays in the row past
+//     its lease, so a wrong lease leaves readable data sitting there.
+//   * A record carrying the hourly series written under the SHORT scalar lease loses
+//     17 h of coverage; one written the other way round puts an hour-0 wind on the
+//     color path for a day.
+//   * hoursFt[0] drifting from waveHeightFt makes the detail page's "now" stat
+//     contradict its own first bar.
+//   * A statement carrying a raw newline, or an unescaped quote in the JSON blob,
+//     tears the delta: scripts/apply-local-sql.js splits on line boundaries only.
 
 import { describe, it, expect } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import { metersToFeet } from "../src/geo.js";
 import { metersPerSecondToMph } from "../src/waveGrids.js";
 import {
-  WAVE_KV_LEASE_SECONDS,
+  WAVE_SCALAR_LEASE_SECONDS,
   WAVE_SERIES_LEASE_SECONDS,
   classifyWaveManifestFailure,
-  waveKvWriteAllowed
+  waveWriteAllowed
 } from "../src/waveManifest.js";
+import { liveWaveRecord } from "../src/beachState.js";
 import { waveRecordsForBeach } from "../scripts/sample-waves.js";
+import { applyMigrations } from "./helpers/migrations.js";
 import {
-  MAX_PAIRS_PER_CHUNK,
+  MAX_STATEMENT_BYTES,
   parseArgs,
   verifyArtifact,
   manifestArtifact,
   buildConsumerReport,
-  kvPairGroups,
-  chunkGroups,
-  chunkFileName
-} from "../scripts/build-wave-kv.js";
+  sqlStr,
+  sqlNum,
+  waveRowsFor,
+  waveRowStatement,
+  waveRowRefusals
+} from "../scripts/build-wave-sql.js";
 
 const VALID_START_EPOCH = 1788415200;
 const START_ISO = new Date(VALID_START_EPOCH * 1000).toISOString();
@@ -170,8 +178,8 @@ describe("waveRecordsForBeach", function () {
     });
 
   it("skip guard: wave null AND wind null emits NO record at all", function () {
-    // The previous KV key then rides its own lease and the flag ages out to unknown,
-    // which is gray and honest.
+    // The previous beach_state.wave row then rides its own lease and the flag ages
+    // out to unknown, which is gray and honest.
     const out = recordsFor({ waveMeters: null, windMs: null });
     expect(out.waveinput).toBe(null);
     expect(out.waves).toBe(null);
@@ -200,159 +208,285 @@ describe("waveRecordsForBeach", function () {
   });
 });
 
-describe("kvPairGroups", function () {
-  function inputs(n) {
-    const out = [];
-    for (let i = 0; i < n; i = i + 1) {
-      out.push({ beachId: "b-" + String(i), waveHeightFt: 1, model: "noaa_gfswave",
-        windSpeedMph: null, windGustMph: null, startIso: START_ISO, hoursFt: [1],
-        updated: START_ISO });
-    }
-    return out;
-  }
+// --- the emitted rows -----------------------------------------------------------------
 
-  function series(n) {
-    const out = [];
-    for (let i = 0; i < n; i = i + 1) {
-      out.push({ beachId: "b-" + String(i), startIso: START_ISO, hoursFt: [], models: [],
-        byModel: {}, sources: [], updated: START_ISO });
-    }
-    return out;
+function inputs(n) {
+  const out = [];
+  for (let i = 0; i < n; i = i + 1) {
+    out.push({ beachId: "b-" + String(i), waveHeightFt: 1, model: "noaa_gfswave",
+      windSpeedMph: null, windGustMph: null, startIso: START_ISO, hoursFt: [1],
+      updated: START_ISO });
   }
+  return out;
+}
 
-  // Every group in this block is series-bearing unless a test says otherwise, and
-  // nowEpoch sits just after the valid start, so no lease has run out.
-  function leases(overrides) {
-    return Object.assign({
-      series: VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS,
-      scalar: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS,
-      nowEpoch: VALID_START_EPOCH + 600
-    }, overrides || {});
+function series(n) {
+  const out = [];
+  for (let i = 0; i < n; i = i + 1) {
+    out.push({ beachId: "b-" + String(i), startIso: START_ISO, hoursFt: [1],
+      models: ["noaa_gfswave"], byModel: { noaa_gfswave: [1] }, sources: [],
+      updated: START_ISO });
   }
+  return out;
+}
 
-  it("stringifies every value and stamps an absolute expiration", function () {
-    const groups = kvPairGroups(inputs(1), series(1), leases());
-    const pairs = groups[0];
-    expect(pairs.length).toBe(2);
-    for (let i = 0; i < pairs.length; i = i + 1) {
-      expect(typeof pairs[i].value).toBe("string");
-      expect(typeof pairs[i].expiration).toBe("number");
-      // The snake_case field is the ONLY one wrangler honours; a camelCase
-      // expirationTtl is warned about, dropped, and the key never expires.
-      expect(Object.keys(pairs[i]).sort()).toEqual(["expiration", "key", "value"]);
-    }
-    expect(JSON.parse(pairs[0].value).beachId).toBe("b-0");
+function windOnly() {
+  return [{ beachId: "b-0", waveHeightFt: null, model: null, windSpeedMph: 14,
+    windGustMph: null, startIso: null, hoursFt: null, updated: START_ISO }];
+}
+
+// Every row in these blocks is series-bearing unless a test says otherwise, and
+// nowEpoch sits just after the valid start, so no lease has run out.
+function leases(overrides) {
+  return Object.assign({
+    series: VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS,
+    scalar: VALID_START_EPOCH + WAVE_SCALAR_LEASE_SECONDS,
+    nowEpoch: VALID_START_EPOCH + 600
+  }, overrides || {});
+}
+
+describe("waveRowsFor", function () {
+  it("merges a beach's two artifact records into one row", function () {
+    const rows = waveRowsFor(inputs(1), series(1), leases());
+    expect(rows.length).toBe(1);
+    expect(rows[0].beachId).toBe("b-0");
+    // The exact union of the two emitted shapes: no reader has to learn a new field
+    // name, and the stored row stays a straight diff against the NDJSON artifact.
+    expect(Object.keys(rows[0].record).sort()).toEqual([
+      "beachId", "byModel", "hoursFt", "model", "models", "sources", "startIso",
+      "updated", "waveHeightFt", "windGustMph", "windSpeedMph"
+    ]);
   });
 
-  it("uses validStartEpoch + 86400 for a series pair, regardless of when the build ran",
+  it("emits exactly one row per beach", function () {
+    const rows = waveRowsFor(inputs(3), series(3), leases());
+    expect(rows.length).toBe(3);
+    const ids = rows.map(function (r) { return r.beachId; });
+    expect(ids.sort()).toEqual(["b-0", "b-1", "b-2"]);
+  });
+
+  it("takes the series the color path indexes from the waveinput copy", function () {
+    // scanRecords has already proved the two copies identical across the NDJSON
+    // round trip, so the color path's array is the one that is stored.
+    const waveinputs = inputs(1);
+    const wavesList = series(1);
+    wavesList[0].hoursFt = [9];
+    const rows = waveRowsFor(waveinputs, wavesList, leases());
+    expect(rows[0].record.hoursFt).toEqual([1]);
+  });
+
+  it("uses validStartEpoch + 86400 for a series row, regardless of when the build ran",
     function () {
       expect(WAVE_SERIES_LEASE_SECONDS).toBe(86400);
-      const groups = kvPairGroups(inputs(1), series(1), leases());
-      expect(groups[0][0].expiration).toBe(VALID_START_EPOCH + 86400);
-      expect(groups[0][1].expiration).toBe(VALID_START_EPOCH + 86400);
+      const rows = waveRowsFor(inputs(1), series(1), leases());
+      expect(rows[0].expiration).toBe(VALID_START_EPOCH + 86400);
     });
 
-  it("gives a wind-only waveinput the short scalar lease", function () {
-    expect(WAVE_KV_LEASE_SECONDS).toBe(25200);
-    const windOnly = [{ beachId: "b-0", waveHeightFt: null, model: null,
-      windSpeedMph: 14, windGustMph: null, startIso: null, hoursFt: null,
-      updated: START_ISO }];
-    const groups = kvPairGroups(windOnly, [], leases());
-    expect(groups.length).toBe(1);
-    expect(groups[0].length).toBe(1);
-    expect(groups[0][0].expiration).toBe(VALID_START_EPOCH + 25200);
+  it("gives a wind-only record the short scalar lease", function () {
+    expect(WAVE_SCALAR_LEASE_SECONDS).toBe(25200);
+    const rows = waveRowsFor(windOnly(), [], leases());
+    expect(rows.length).toBe(1);
+    expect(rows[0].expiration).toBe(VALID_START_EPOCH + 25200);
+    expect(rows[0].record.models).toBe(undefined);
   });
 
   it("drops a wind-only record whose scalar lease has already run out", function () {
     // The series lease outlives the scalar one, so a cycle the gate still accepts
-    // can carry wind-only records with nothing left. Emitting one would hand
-    // wrangler a past expiration; the key is simply left to have expired.
-    const windOnly = [{ beachId: "b-0", waveHeightFt: null, model: null,
-      windSpeedMph: 14, windGustMph: null, startIso: null, hoursFt: null,
-      updated: START_ISO }];
-    const late = leases({ nowEpoch: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS + 1 });
-    expect(kvPairGroups(windOnly, [], late)).toEqual([]);
-    // The series pairs of the same late cycle still go out whole.
-    expect(kvPairGroups(inputs(1), series(1), late)[0].length).toBe(2);
+    // can carry wind-only records with nothing left. A reader treats an expired
+    // wave_expires as absent, so writing the row would land data nothing can read.
+    const late = leases({ nowEpoch: VALID_START_EPOCH + WAVE_SCALAR_LEASE_SECONDS + 1 });
+    expect(waveRowsFor(windOnly(), [], late)).toEqual([]);
+    // The series rows of the same late cycle still go out.
+    expect(waveRowsFor(inputs(1), series(1), late).length).toBe(1);
   });
 
-  it("prefixes the two key families", function () {
-    const groups = kvPairGroups(inputs(1), series(1), leases());
-    expect(groups[0][0].key).toBe("waveinput:b-0");
-    expect(groups[0][1].key).toBe("waves:b-0");
+  it("gives a waves record with no waveinput its own row", function () {
+    const rows = waveRowsFor([], series(1), leases());
+    expect(rows.length).toBe(1);
+    expect(rows[0].beachId).toBe("b-0");
+    expect(rows[0].expiration).toBe(VALID_START_EPOCH + 86400);
   });
 
-  it("keeps a beach's two pairs in one group", function () {
-    const groups = kvPairGroups(inputs(3), series(3), leases());
-    expect(groups.length).toBe(3);
-    for (let i = 0; i < groups.length; i = i + 1) {
-      expect(groups[i].length).toBe(2);
-    }
+  it("skips a record with no beach id", function () {
+    expect(waveRowsFor([{ hoursFt: [1], startIso: START_ISO }], [], leases()))
+      .toEqual([]);
   });
 });
 
-describe("chunkGroups", function () {
-  function group(id, size) {
-    const out = [];
-    for (let i = 0; i < size; i = i + 1) {
-      out.push({ key: "k:" + id + ":" + String(i), value: "{}", expiration: 1 });
+describe("the statement shape", function () {
+  it("is a single-row upsert naming only the two wave columns", function () {
+    const rows = waveRowsFor(inputs(1), series(1), leases());
+    const statement = waveRowStatement(rows[0]);
+    expect(statement.indexOf(
+      "INSERT INTO beach_state (beach_id, wave, wave_expires) VALUES (")).toBe(0);
+    expect(statement.indexOf(
+      ") ON CONFLICT(beach_id) DO UPDATE SET wave = excluded.wave, " +
+      "wave_expires = excluded.wave_expires;")).not.toBe(-1);
+    // Naming no other column is what keeps the hourly cron's estimate, official,
+    // wqfloor and reading untouched by the offline cycle.
+    expect(statement.indexOf("estimate")).toBe(-1);
+    expect(statement.indexOf("official")).toBe(-1);
+  });
+
+  it("puts every statement on one line", function () {
+    // scripts/apply-local-sql.js splits on line boundaries only and hard-fails on a
+    // line over its chunk cap, so an embedded newline tears the delta in half.
+    const rows = waveRowsFor(inputs(5), series(5), leases());
+    for (let i = 0; i < rows.length; i = i + 1) {
+      const statement = waveRowStatement(rows[i]);
+      expect(statement.indexOf("\n")).toBe(-1);
+      expect(statement.indexOf("\r")).toBe(-1);
     }
-    return out;
+  });
+
+  it("keeps every statement under the per-statement budget", function () {
+    expect(MAX_STATEMENT_BYTES).toBe(80000);
+    const rows = waveRowsFor(inputs(1), series(1), leases());
+    const bytes = new TextEncoder().encode(waveRowStatement(rows[0])).length;
+    expect(bytes).toBeLessThanOrEqual(MAX_STATEMENT_BYTES);
+  });
+
+  it("keeps a quote, a semicolon, a backslash, a newline and a comment marker inside " +
+    "the literal", function () {
+      const hostile = inputs(1);
+      hostile[0].beachId = "osm-node-'1;--";
+      hostile[0].model = "a'b;--c\\d\ne";
+      const rows = waveRowsFor(hostile, [], leases());
+      const statement = waveRowStatement(rows[0]);
+      expect(statement.indexOf("\n")).toBe(-1);
+      // Every quote in the payload arrives doubled, so the literal never closes early.
+      expect(statement.indexOf("'osm-node-''1;--'")).not.toBe(-1);
+      expect(statement.split(";").length).toBeGreaterThan(1);
+    });
+
+  it("quotes text and inlines a finite number, or NULL", function () {
+    expect(sqlStr("o'hare")).toBe("'o''hare'");
+    expect(sqlStr(null)).toBe("NULL");
+    expect(sqlNum(1788415200)).toBe("1788415200");
+    expect(sqlNum(Number.NaN)).toBe("NULL");
+    expect(sqlNum("1788415200")).toBe("NULL");
+  });
+});
+
+describe("waveRowRefusals", function () {
+  function rowsOf() {
+    return waveRowsFor(inputs(1), series(1), leases());
   }
 
-  it("never splits a beach's pairs across two chunk files", function () {
-    const groups = [];
-    for (let i = 0; i < 5; i = i + 1) { groups.push(group(i, 2)); }
-    const chunks = chunkGroups(groups, 3);
-    // A limit of 3 against a group size of 2 means one group per chunk: the chunker
-    // closes a chunk rather than taking half a beach, so five beaches become five
-    // chunks and never two-and-a-half.
-    expect(chunks.length).toBe(5);
-    expect(chunks[0].length).toBe(2);
-    for (let c = 0; c < chunks.length; c = c + 1) {
-      const ids = new Set();
-      for (let p = 0; p < chunks[c].length; p = p + 1) {
-        ids.add(chunks[c][p].key.split(":")[1]);
-      }
-      // Each beach id appears in exactly one chunk.
-      ids.forEach(function (id) {
-        let seen = 0;
-        for (let x = 0; x < chunks.length; x = x + 1) {
-          for (let p = 0; p < chunks[x].length; p = p + 1) {
-            if (chunks[x][p].key.split(":")[1] === id) { seen = 1 + seen; }
-          }
-        }
-        expect(seen).toBe(2);
-      });
+  it("passes a clean row set", function () {
+    expect(waveRowRefusals(rowsOf(), leases())).toEqual([]);
+  });
+
+  it("refuses a zero-row delta", function () {
+    // An empty .sql applies cleanly and makes a broken cycle look landed.
+    expect(waveRowRefusals([], leases()).length).toBe(1);
+  });
+
+  it("refuses an expiration that is neither computed epoch", function () {
+    const rows = rowsOf();
+    rows[0].expiration = VALID_START_EPOCH + 3600;
+    expect(waveRowRefusals(rows, leases()).length).toBe(1);
+  });
+
+  it("refuses a non-finite expiration", function () {
+    const rows = rowsOf();
+    rows[0].expiration = null;
+    expect(waveRowRefusals(rows, leases()).length).toBe(1);
+  });
+
+  it("refuses an expiration that has already passed", function () {
+    const late = leases({ nowEpoch: VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS + 1 });
+    const refusals = waveRowRefusals(rowsOf(), late);
+    expect(refusals.length).toBe(1);
+    expect(refusals[0].indexOf("already passed")).not.toBe(-1);
+  });
+
+  it("refuses an empty beach id", function () {
+    const rows = rowsOf();
+    rows[0].beachId = "";
+    expect(waveRowRefusals(rows, leases()).length).toBe(1);
+  });
+
+  it("refuses a statement over the byte budget", function () {
+    const rows = rowsOf();
+    const big = [];
+    for (let i = 0; i < MAX_STATEMENT_BYTES; i = i + 1) { big.push(i); }
+    rows[0].record.hoursFt = big;
+    const refusals = waveRowRefusals(rows, leases());
+    expect(refusals.length).toBe(1);
+    expect(refusals[0].indexOf("byte budget")).not.toBe(-1);
+  });
+});
+
+describe("the delta against real SQLite", function () {
+  function applyRows(db, rows) {
+    for (let i = 0; i < rows.length; i = i + 1) {
+      db.exec(waveRowStatement(rows[i]));
     }
+  }
+
+  it("lands a row liveWaveRecord reads back intact", function () {
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db);
+    const hostile = inputs(1);
+    hostile[0].beachId = "osm-node-'1";
+    hostile[0].model = "a'b;--c\\d";
+    const rows = waveRowsFor(hostile, [], leases());
+    applyRows(db, rows);
+    const row = db.prepare(
+      "SELECT wave, wave_expires FROM beach_state WHERE beach_id = ?").get("osm-node-'1");
+    const record = liveWaveRecord(row, VALID_START_EPOCH * 1000 + 600000);
+    expect(record.model).toBe("a'b;--c\\d");
+    expect(record.hoursFt).toEqual([1]);
+    expect(row.wave_expires).toBe(VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS);
   });
 
-  it("defaults to the documented 5000-pair ceiling", function () {
-    expect(MAX_PAIRS_PER_CHUNK).toBe(5000);
-    const groups = [];
-    for (let i = 0; i < 3000; i = i + 1) { groups.push(group(i, 2)); }
-    const chunks = chunkGroups(groups);
-    expect(chunks.length).toBe(2);
-    expect(chunks[0].length).toBeLessThanOrEqual(5000);
+  it("reads back as absent once the stored lease has passed", function () {
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db);
+    applyRows(db, waveRowsFor(inputs(1), series(1), leases()));
+    const row = db.prepare(
+      "SELECT wave, wave_expires FROM beach_state WHERE beach_id = ?").get("b-0");
+    const afterMs = (VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS + 1) * 1000;
+    expect(liveWaveRecord(row, afterMs)).toBe(null);
   });
 
-  it("names chunks in zero-padded sequence", function () {
-    expect(chunkFileName(0)).toBe("wave-kv-000.json");
-    expect(chunkFileName(12)).toBe("wave-kv-012.json");
+  it("is idempotent and leaves the sibling columns alone", function () {
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db);
+    db.exec("INSERT INTO beach_state (beach_id, estimate, estimate_color, " +
+      "estimate_expires) VALUES ('b-0', '{\"color\":\"green\"}', 'green', 99)");
+    const rows = waveRowsFor(inputs(1), series(1), leases());
+    applyRows(db, rows);
+    applyRows(db, rows);
+    const row = db.prepare("SELECT * FROM beach_state WHERE beach_id = ?").get("b-0");
+    expect(row.estimate_color).toBe("green");
+    expect(row.estimate_expires).toBe(99);
+    expect(JSON.parse(row.wave).beachId).toBe("b-0");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM beach_state").get().n).toBe(1);
+  });
+
+  it("creates a row for a beach with no prior beach_state row", function () {
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db);
+    applyRows(db, waveRowsFor(inputs(1), series(1), leases()));
+    const row = db.prepare("SELECT * FROM beach_state WHERE beach_id = ?").get("b-0");
+    expect(row.estimate).toBe(null);
+    expect(row.wave_expires).toBe(VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS);
   });
 });
 
 describe("parseArgs", function () {
   it("requires the cycle directory and the output directory", function () {
-    expect(parseArgs(["--dir", "/c", "--out", "/kv"])).toEqual(
-      { dir: "/c", now: null, out: "/kv" });
-    expect(function () { parseArgs(["--out", "/kv"]); }).toThrow(/--dir/);
+    expect(parseArgs(["--dir", "/c", "--out", "/sql"])).toEqual(
+      { dir: "/c", now: null, out: "/sql" });
+    expect(function () { parseArgs(["--out", "/sql"]); }).toThrow(/--dir/);
     expect(function () { parseArgs(["--dir", "/c"]); }).toThrow(/--out/);
   });
 
   it("rejects an argument it does not know", function () {
     expect(function () {
-      parseArgs(["--dir", "/c", "--out", "/kv", "--pointer", "/p"]);
+      parseArgs(["--dir", "/c", "--out", "/sql", "--pointer", "/p"]);
     }).toThrow(/unknown argument/);
   });
 });
@@ -396,7 +530,7 @@ describe("buildConsumerReport", function () {
       validStartIso: START_ISO,
       validStartEpoch: VALID_START_EPOCH,
       kvExpirationEpoch: VALID_START_EPOCH + WAVE_SERIES_LEASE_SECONDS,
-      kvScalarExpirationEpoch: VALID_START_EPOCH + WAVE_KV_LEASE_SECONDS,
+      kvScalarExpirationEpoch: VALID_START_EPOCH + WAVE_SCALAR_LEASE_SECONDS,
       gridsDigest: DIGEST,
       gridsComplete: true,
       gridStatus: {
@@ -474,11 +608,11 @@ describe("buildConsumerReport", function () {
     // undefined; the consumer gate's strict !== true refuses both.
     const noSanity = report({ manifest: manifest({ sanity: undefined }) });
     expect(noSanity.minimumRecordsPassed).toBe(null);
-    expect(waveKvWriteAllowed(noSanity)).toBe(false);
+    expect(waveWriteAllowed(noSanity)).toBe(false);
     const noField = report({ manifest: manifest({ sanity: { validTimesPassed: true,
       sentinelScanPassed: true, overridden: false } }) });
     expect(noField.minimumRecordsPassed).toBe(undefined);
-    expect(waveKvWriteAllowed(noField)).toBe(false);
+    expect(waveWriteAllowed(noField)).toBe(false);
   });
 
   it("carries gridStatus as provenance and never as a tier decision", function () {
@@ -491,15 +625,15 @@ describe("buildConsumerReport", function () {
     const stripped = report({ manifest: manifest({ gridStatus: undefined }) });
     expect(stripped.gridStatus).toBe(null);
     expect(classifyWaveManifestFailure(stripped).tier).toBe("ok");
-    expect(waveKvWriteAllowed(stripped)).toBe(true);
+    expect(waveWriteAllowed(stripped)).toBe(true);
   });
 
   it("still writes for the grids that sampled when one grid was out", function () {
     // The degraded tier the per-grid isolation exists to make reachable: GLWU down,
-    // gfswave sampled, so the ocean beaches keep their KV and the Great Lakes ones
+    // gfswave sampled, so the ocean beaches keep their rows and the Great Lakes ones
     // age out to unknown.
     const r = report({ manifest: manifest({ gridsComplete: false }) });
     expect(classifyWaveManifestFailure(r).tier).toBe("degraded");
-    expect(waveKvWriteAllowed(r)).toBe(true);
+    expect(waveWriteAllowed(r)).toBe(true);
   });
 });

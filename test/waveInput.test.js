@@ -1,5 +1,5 @@
 // THE READER CONTRACT for the NOAA GRIB2 wave pipeline, the mirror of
-// test/buildWaveKv.test.js. Every failure here is silent in production:
+// test/buildWaveSql.test.js. Every failure here is silent in production:
 //
 //   * Reading hour 0 of a series written 19 h ago colors today's flag with
 //     yesterday's sea state, and nothing in the payload marks it.
@@ -181,5 +181,37 @@ describe("resolveWaveInput", function () {
   it("keeps windGustMph null, which is what gfswave publishes", function () {
     expect(resolveWaveInput(windRecord({ windGustMph: null }), at(0)).windGustMph)
       .toBe(null);
+  });
+
+  it("ignores models, sources and byModel on the merged stored record", function () {
+    // byModel[gridId] is the same array object as hoursFt, and the strip is its
+    // only reader. Indexing it here instead of hoursFt would read a second
+    // model's series for the color while the strip drew the first.
+    const record = seriesRecord({
+      models: ["noaa_gfswave", "noaa_glwu"],
+      sources: [{ label: "NOAA GFS Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }],
+      byModel: { "noaa_glwu": [9, 9, 9] }
+    });
+    const out = resolveWaveInput(record, at(6));
+    expect(out.waveHeightFt).toBe(7);
+    expect(out.hourIndex).toBe(6);
+    expect(out.model).toBe("noaa_gfswave");
+  });
+
+  it("does not mistake byModel for a series when hoursFt is absent", function () {
+    const record = {
+      beachId: "osm-node-1",
+      waveHeightFt: 1,
+      model: "noaa_gfswave",
+      windSpeedMph: null,
+      windGustMph: null,
+      startIso: START,
+      byModel: { "noaa_glwu": [9, 9, 9] }
+    };
+    const out = resolveWaveInput(record, at(6));
+    // No hoursFt, so there is no series: the hour-0 scalar answers and the hour
+    // index stays null.
+    expect(out.waveHeightFt).toBe(1);
+    expect(out.hourIndex).toBe(null);
   });
 });
