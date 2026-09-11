@@ -1502,9 +1502,10 @@ function renderWqFloorCallout(wqfloor) {
   return html + "</wa-callout>";
 }
 
-// One "at a glance" tile: a quiet icon, the reading, its caption, and a quiet
-// source line saying where the reading comes from. Callers render a tile only
-// when they have a reading, so there is no empty-value branch here.
+// One "at a glance" tile: a quiet icon, the reading, its caption, and an
+// optional quiet source line saying where the reading comes from. Callers
+// render a tile only when they have a reading, so there is no empty-value
+// branch here.
 // options.quiet renders a present-but-negative answer ("None active") in the
 // same quiet weight, so only a real reading carries the loud value type.
 // options.valueHtml is inserted raw and wins over options.value, for the one
@@ -1515,12 +1516,15 @@ function renderGlanceTile(options) {
     ? "glance-value wa-font-size-l wa-color-text-quiet"
     : "glance-value wa-font-size-xl wa-font-weight-bold";
   const valueHtml = hasValueHtml ? options.valueHtml : escapeHtml(options.value);
+  const sourceHtml = typeof options.sourceHtml === "string" && options.sourceHtml.length > 0
+    ? "<span class=\"glance-source wa-caption-s wa-color-text-quiet\">" + options.sourceHtml + "</span>"
+    : "";
   return "<wa-card class=\"glance-tile\" appearance=\"outlined\">" +
     "<div class=\"wa-stack wa-gap-2xs\">" +
     "<wa-icon class=\"glance-icon wa-color-text-quiet wa-font-size-l\" name=\"" + options.icon + "\"></wa-icon>" +
     "<span class=\"" + valueClass + "\">" + valueHtml + "</span>" +
     "<span class=\"glance-caption wa-caption-s wa-font-weight-semibold\">" + escapeHtml(options.caption) + "</span>" +
-    "<span class=\"glance-source wa-caption-s wa-color-text-quiet\">" + options.sourceHtml + "</span>" +
+    sourceHtml +
     "</div>" +
     "</wa-card>";
 }
@@ -1544,8 +1548,7 @@ function renderSunTile(beach, nowIso) {
     valueHtml: "<wa-format-date date=\"" + iso + "\" hour=\"numeric\" minute=\"numeric\">" +
       "<time datetime=\"" + iso + "\">" + escapeHtml(utcClockLabel(event.iso)) + "</time>" +
       "</wa-format-date>",
-    caption: event.type === "sunset" ? "Sunset" : "Sunrise",
-    sourceHtml: escapeHtml("Calculated from this beach's coordinates")
+    caption: event.type === "sunset" ? "Sunset" : "Sunrise"
   });
 }
 

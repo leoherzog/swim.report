@@ -376,7 +376,7 @@ describe("at a glance tiles", () => {
       "<wa-format-date date=\"2026-07-06T01:26:00.000Z\" hour=\"numeric\" minute=\"numeric\">" +
       "<time datetime=\"2026-07-06T01:26:00.000Z\">01:26 UTC</time></wa-format-date></span>");
     expect(tile(html, "sun")).toContain(">Sunset</span>");
-    expect(tileSource(html, "sun")).toBe("Calculated from this beach&#39;s coordinates");
+    expect(tile(html, "sun")).not.toContain("glance-source");
   });
 
   it("names sunrise when the sunrise is the nearer event", () => {
