@@ -666,13 +666,17 @@ function renderWaveBackground() {
     "</div>";
 }
 
-function renderPageShell(headerHtml, mainHtml, footerHtml) {
+// mainClass is an optional extra class on <main>, the hook a page widens its
+// own measure with.
+function renderPageShell(headerHtml, mainHtml, footerHtml, mainClass) {
   const lines = [];
+  const extraClass = (typeof mainClass === "string" && mainClass.length > 0)
+    ? (" " + mainClass) : "";
   // No navigation slot on any page, so the drawer this toggles is empty by
   // construction. Drop this attribute if a navigation slot is ever added.
   lines.push("<wa-page disable-navigation-toggle>");
   lines.push("<header slot=\"header\" class=\"app-header\">" + headerHtml + "</header>");
-  lines.push("<main class=\"app-main wa-stack wa-gap-l\">" + mainHtml + "</main>");
+  lines.push("<main class=\"app-main" + extraClass + " wa-stack wa-gap-l\">" + mainHtml + "</main>");
   lines.push("<footer slot=\"footer\" class=\"app-footer wa-color-text-quiet\">" + footerHtml + "</footer>");
   lines.push("</wa-page>");
   return lines.join("\n");
@@ -1821,43 +1825,61 @@ export function renderDetailPage(data) {
   const estimateHtml = renderEstimateCard(estimate, nowIso);
 
   // Answer first, exploration second: the flag verdict (official above
-  // estimate) leads, the forecast elaborates, and the lazy-loading map/webcam
-  // embeds follow as supporting exploration.
-  const stackParts = [];
+  // estimate) leads and the forecast elaborates.
+  const verdictParts = [];
   if (officialHtml) {
-    stackParts.push(officialHtml);
+    verdictParts.push(officialHtml);
   }
-  stackParts.push(estimateHtml);
+  verdictParts.push(estimateHtml);
   // Directly under the estimate it qualifies: the floor is part of that color,
   // not a competing verdict.
   const wqFloorHtml = renderWqFloorCallout(wqfloor);
   if (wqFloorHtml) {
-    stackParts.push(wqFloorHtml);
+    verdictParts.push(wqFloorHtml);
   }
   const waveForecastHtml = renderWaveForecast(estimate, waves, nowIso,
     typeof beach.water_class === "string" ? beach.water_class : null);
   if (waveForecastHtml) {
-    stackParts.push(waveForecastHtml);
+    verdictParts.push(waveForecastHtml);
   }
+
+  // The lazy-loading embeds and the links away from this beach: supporting
+  // exploration, and the column that moves beside the verdict on a wide page.
+  const exploreParts = [];
   const waveMapHtml = renderWaveMap(beach);
   if (waveMapHtml) {
-    stackParts.push(waveMapHtml);
+    exploreParts.push(waveMapHtml);
   }
   // The webcam precedes the nearby beaches: a live picture of the water nearby
   // is the most engaging thing on the page, and links away from this beach
   // belong last.
   const webcamHtml = renderWebcam(beach);
   if (webcamHtml) {
-    stackParts.push(webcamHtml);
+    exploreParts.push(webcamHtml);
   }
   const nearbyHtml = renderNearby(nearby, nowIso);
   if (nearbyHtml) {
-    stackParts.push(nearbyHtml);
+    exploreParts.push(nearbyHtml);
   }
 
-  // Flat in main's own wa-stack wa-gap-l, so every card keeps --wa-space-l
-  // between it and the legend above and the card below.
-  const mainHtml = heroHtml + glanceHtml + renderFlagLegend() + stackParts.join("\n");
+  // Two columns from tablet width up, one below it, decided by wa-grid's own
+  // auto-fit against --min-column-size rather than by a breakpoint: Web Awesome
+  // ships no breakpoint tokens, and a container-sized rule cannot disagree with
+  // the viewport the way a media query can. The grid holds exactly two children,
+  // so it can never open a third column, and it collapses in source order, which
+  // keeps the phone page in the order it already had. A beach with nothing to
+  // explore renders the verdict column alone rather than an empty second one.
+  const columnsHtml = exploreParts.length === 0
+    ? verdictParts.join("\n")
+    : ("<div class=\"wa-grid wa-gap-l detail-columns\">" +
+      "<div class=\"wa-stack wa-gap-l\">" + verdictParts.join("\n") + "</div>" +
+      "<div class=\"wa-stack wa-gap-l\">" + exploreParts.join("\n") + "</div>" +
+      "</div>");
+
+  // The hero, the glance tiles and the legend span the full measure above the
+  // columns, each keeping --wa-space-l from its neighbour through main's own
+  // wa-stack.
+  const mainHtml = heroHtml + glanceHtml + renderFlagLegend() + columnsHtml;
 
   // The tick relabeller ships only when there are ticks to relabel: the wave
   // section also renders as a bare now-stat (the buoy case), which has no strip.
@@ -1865,7 +1887,8 @@ export function renderDetailPage(data) {
     ? ""
     : ("<script>" + WAVE_TICKS_SCRIPT + "</script>");
 
-  const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter()) +
+  const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter(),
+    "detail-main") +
     "<script>" + DETAIL_HERO_SCRIPT + "</script>" +
     "<script>" + DETAIL_FAVORITE_SCRIPT + "</script>" +
     "<script>" + ROW_TRANSITION_SCRIPT + "</script>" + ticksScriptHtml;

@@ -1,8 +1,8 @@
 // test/detailHero.test.js
 // Covers the detail page's flag hero, its "at a glance" tiles, the shared
-// section headings and the resulting section order (src/frontend/render.js),
-// plus the inline hero script that upgrades the back link and reveals the Share
-// button. The hero is a heading, not a third flag card: it never presents an
+// section headings, the resulting section order and the two-column split
+// (src/frontend/render.js), plus the inline hero script that upgrades the back
+// link and reveals the Share button. The hero is a heading, not a third flag card: it never presents an
 // estimate as an official flag status, and the two cards below are untouched.
 
 import { describe, it, expect } from "vitest";
@@ -562,5 +562,65 @@ describe("detail-page section headings and order", () => {
     for (let i = 0; i < order.length; i++) {
       expect(order[i]).toBeGreaterThan(i === 0 ? -1 : order[i - 1]);
     }
+  });
+});
+
+// The two columns are one wa-grid whose auto-fit decides the width they open
+// at, so there is no breakpoint to assert. What the renderer owes is the
+// structure: which sections land in which column, and no empty column.
+describe("detail-page two-column split", () => {
+  const COLUMN_OPEN = "<div class=\"wa-stack wa-gap-l\">";
+  const GRID_OPEN = "<div class=\"wa-grid wa-gap-l detail-columns\">";
+
+  const beach = beachWith({
+    lat: 42.775,
+    lon: -86.211,
+    webcam_player_url: "https://webcams.windy.com/webcams/public/embed/player/1/day"
+  });
+  const nearby = [
+    { beach: beachWith({ id: "n-1", name: "North Beach" }), estimate: null, official: null, distanceMi: 0.8 }
+  ];
+
+  it("puts the verdict sections in the first column and exploration in the second", () => {
+    const html = render({
+      beach: beach,
+      estimate: estimateWith({ waveHeightFt: 1.0 }),
+      nearby: nearby
+    });
+    const gridIdx = html.indexOf(GRID_OPEN);
+    expect(gridIdx).toBeGreaterThan(-1);
+    // The hero, the tiles and the legend span the full measure above the grid.
+    expect(gridIdx).toBeGreaterThan(html.indexOf("aria-labelledby=\"glance-heading\""));
+
+    const columns = html.slice(gridIdx);
+    const second = columns.indexOf(COLUMN_OPEN, columns.indexOf(COLUMN_OPEN) + 1);
+    expect(second).toBeGreaterThan(-1);
+    expect(columns.indexOf("class=\"estimate-card\"")).toBeLessThan(second);
+    expect(columns.indexOf("<section class=\"wave-forecast")).toBeLessThan(second);
+    expect(columns.indexOf("<section class=\"wave-map")).toBeGreaterThan(second);
+    expect(columns.indexOf("aria-labelledby=\"webcam-heading\"")).toBeGreaterThan(second);
+    expect(columns.indexOf("aria-labelledby=\"nearby-heading\"")).toBeGreaterThan(second);
+  });
+
+  it("renders the beach's own page with the grid even when only the map explores", () => {
+    const html = render({ beach: beach, estimate: estimateWith({}) });
+    expect(html).toContain(GRID_OPEN);
+    expect(html).toContain("<section class=\"wave-map");
+  });
+
+  it("carries the wider measure and the column size in the stylesheet", () => {
+    expect(render({ beach: beach, estimate: estimateWith({}) }))
+      .toContain("<main class=\"app-main detail-main wa-stack wa-gap-l\">");
+    expect(PAGE_STYLES).toContain("main.detail-main {\n  --content-measure: 64rem;\n}");
+    expect(PAGE_STYLES).toContain(".detail-columns {\n  --min-column-size: 20rem;\n}");
+  });
+
+  it("renders no grid at all when there is nothing to explore", () => {
+    // Non-finite coordinates drop the wave map, which is the only exploration
+    // section a beach always has; an empty second column must not ship.
+    const html = render({ beach: beachWith({ lat: null, lon: null }), estimate: estimateWith({}) });
+    expect(html).not.toContain(GRID_OPEN);
+    expect(html).not.toContain(COLUMN_OPEN);
+    expect(html).toContain("class=\"estimate-card\"");
   });
 });

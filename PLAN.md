@@ -4569,7 +4569,18 @@ exporting a CSS string); render.js is the sole module the router imports.
   second: official card (if any) → estimate card → water-quality advisory callout (if any) →
   wave forecast section → wave map section → nearby-webcam section (if any) → nearby beaches
   (if any), so the lazy-loading embeds follow the verdict and forecast and the links away
-  from the beach come last. The advisory callout is the WqFloorAdvisory record (section 1)
+  from the beach come last. That order is the source order at every width. Below the
+  legend the sections split into two columns — the verdict four in the first, the
+  exploration three in the second — inside one <div class="wa-grid wa-gap-l
+  detail-columns"> whose children are each a wa-stack wa-gap-l. --min-column-size is
+  20rem, so wa-grid's own auto-fit opens the second column at roughly a 768px viewport
+  and stacks the two in source order below it; no media query and no wa-page view
+  attribute decides it. The grid holds exactly two children, so a third column is
+  unreachable, and a beach with no map, webcam or nearby list renders the verdict
+  sections alone rather than an empty second column. renderDetailPage passes
+  "detail-main" as renderPageShell's mainClass, which raises --content-measure to 64rem
+  for the two columns; the hero, the at-a-glance tiles and the legend span that measure
+  above them. The advisory callout is the WqFloorAdvisory record (section 1)
   rendered as a wa-callout — warning
   for yellow, danger for red, a "Water quality advisory" heading, the reason, the source as
   plain text and an "Updated <wa-relative-time>" line. It reads as context beside the

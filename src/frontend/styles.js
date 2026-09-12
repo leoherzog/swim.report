@@ -167,6 +167,13 @@ const RULES = [
   "  margin-inline: auto;",
   "}",
 
+  // The detail page carries two columns, so it takes a wider measure than the
+  // single-column list. The variable is read by the rule above on this same
+  // element; .footer-lines sits outside main and keeps the reading measure.
+  "main.detail-main {",
+  "  --content-measure: 64rem;",
+  "}",
+
   ".beach-row-link {",
   "  padding: var(--wa-space-m);",
   "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
@@ -267,6 +274,14 @@ const RULES = [
   // row. A reading with no data renders no tile, so the count varies.
   ".glance-grid {",
   "  --min-column-size: 9rem;",
+  "}",
+
+  // Verdict column beside exploration column. wa-page pads the slotted main by
+  // --wa-space-3xl on each side, so two 20rem tracks plus the --wa-space-l gap
+  // first fit at roughly a 768px viewport — the width wa-page itself treats as
+  // the mobile edge. Narrower than that the grid stacks the two columns.
+  ".detail-columns {",
+  "  --min-column-size: 20rem;",
   "}",
 
   // --- end detail hero + glance tiles ----------------------------------------
