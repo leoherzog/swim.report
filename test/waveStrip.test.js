@@ -530,9 +530,7 @@ describe("computeHazardBands", () => {
     expect(bands[0].text).toBe("NWS alert: Beach Hazards Statement — now through +14 h");
     expect(bands[0].leftPct).toBe(0);
     expect(bands[0].widthPct).toBeCloseTo((14 / 24) * 100, 10);
-    expect(bands[0].bgVar).toBe("var(--wa-color-danger-fill-quiet)");
-    expect(bands[0].fgVar).toBe("var(--wa-color-danger-on-quiet)");
-    expect(bands[0].edgeVar).toBe("var(--wa-color-danger-border-loud)");
+    expect(bands[0].variantClass).toBe("wa-danger");
   });
 
   it("a future-onset alert starts mid-window and clamps its end to the window", () => {
@@ -594,12 +592,11 @@ describe("computeHazardBands", () => {
     expect(high[0].text).toBe("Rip current risk HIGH — from the latest NWS surf zone forecast");
     expect(high[0].leftPct).toBe(0);
     expect(high[0].widthPct).toBe(100);
-    expect(high[0].bgVar).toBe("var(--wa-color-danger-fill-quiet)");
+    expect(high[0].variantClass).toBe("wa-danger");
 
     const moderate = computeHazardBands(estimateWithHazards({ ripCurrentRisk: "MODERATE" }), 24, NOW);
     expect(moderate).toHaveLength(1);
-    expect(moderate[0].bgVar).toBe("var(--wa-color-warning-fill-quiet)");
-    expect(moderate[0].fgVar).toBe("var(--wa-color-warning-on-quiet)");
+    expect(moderate[0].variantClass).toBe("wa-warning");
   });
 
   it("LOW/garbage rip risk and legacy estimates yield no bands", () => {

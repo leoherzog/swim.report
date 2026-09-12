@@ -68,7 +68,7 @@ function render(extra) {
 
 // The verdict paragraph's text, or null when the line is absent.
 function verdict(html) {
-  const m = html.match(/<p class="hero-verdict">([^<]*)<\/p>/);
+  const m = html.match(/<p class="wa-font-size-l">([^<]*)<\/p>/);
   return m ? m[1] : null;
 }
 
@@ -79,9 +79,9 @@ describe("detail-page verdict line", function () {
 
   it("sits between the flag label and the coordinates line", function () {
     const html = render({});
-    const label = html.indexOf("<p class=\"hero-flag");
-    const line = html.indexOf("<p class=\"hero-verdict\">");
-    const meta = html.indexOf("<p class=\"beach-meta");
+    const label = html.indexOf("<span class=\"wa-font-size-l wa-font-weight-bold\">");
+    const line = html.indexOf("<p class=\"wa-font-size-l\">");
+    const meta = html.indexOf("<a class=\"coords-link");
     expect(label).toBeGreaterThan(-1);
     expect(line).toBeGreaterThan(label);
     expect(meta).toBeGreaterThan(line);
@@ -111,7 +111,7 @@ describe("detail-page verdict line", function () {
       estimate: { color: "green", reason: "Estimated wave height 1.2 ft", updated: FRESH }
     });
     expect(verdict(html)).toBe(null);
-    expect(html.indexOf("<p class=\"hero-verdict\">")).toBe(-1);
+    expect(html.indexOf("<p class=\"wa-font-size-l\">")).toBe(-1);
   });
 
   it("escapes an alert name from upstream", function () {
@@ -124,24 +124,21 @@ describe("detail-page verdict line", function () {
         alertDetails: [{ event: "Beach \"Hazards\" <Statement>", onset: null, ends: null }]
       })
     });
-    expect(html).toContain("<p class=\"hero-verdict\">Beach &quot;Hazards&quot; " +
+    expect(html).toContain("<p class=\"wa-font-size-l\">Beach &quot;Hazards&quot; " +
       "&lt;Statement&gt; in effect.</p>");
   });
 
-  it("styles the line", function () {
-    expect(PAGE_STYLES).toContain(".hero-verdict {");
-  });
 });
 
 describe("detail-page flag legend", function () {
   it("renders one collapsed legend per page, between the tiles and the stack", function () {
     const html = render({});
     expect(html.split("What the flags mean").length - 1).toBe(1);
-    expect(html).toContain("<wa-details class=\"flag-legend\" summary=\"What the flags mean\" " +
+    expect(html).toContain("<wa-details class=\"wa-font-size-s\" summary=\"What the flags mean\" " +
       "appearance=\"plain\" icon-placement=\"start\">");
-    const legend = html.indexOf("<wa-details class=\"flag-legend\"");
-    const glance = html.indexOf("<section class=\"at-a-glance");
-    const stack = html.indexOf("<div class=\"detail-stack");
+    const legend = html.indexOf("<wa-details class=\"wa-font-size-s\"");
+    const glance = html.indexOf("aria-labelledby=\"glance-heading\"");
+    const stack = html.indexOf("class=\"estimate-card\"");
     expect(glance).toBeGreaterThan(-1);
     expect(legend).toBeGreaterThan(glance);
     expect(stack).toBeGreaterThan(legend);
@@ -163,13 +160,12 @@ describe("detail-page flag legend", function () {
   });
 
   it("says who computes an estimate, who posts an official flag, and which one wins", function () {
-    expect(render({})).toContain("<p class=\"flag-legend-note\">Estimated flags are computed " +
+    expect(render({})).toContain("<p class=\"wa-color-text-quiet\">Estimated flags are computed " +
       "here from forecasts and alerts. Official flags are the ones posted at the beach. " +
       "Posted flags and lifeguards always win.</p>");
   });
 
   it("styles the legend", function () {
-    expect(PAGE_STYLES).toContain(".flag-legend {");
     expect(PAGE_STYLES).toContain(".flag-legend-list {");
   });
 });

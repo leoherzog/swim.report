@@ -30,15 +30,15 @@ function renderWith(wqfloor) {
 describe("water-quality advisory callout", () => {
   it("renders a danger callout with reason, source and updated line for a red advisory", () => {
     const html = renderWith(ADVISORY);
-    expect(html).toContain("<wa-callout class=\"wq-advisory\" variant=\"danger\" size=\"s\">");
+    expect(html).toContain("<wa-callout variant=\"danger\" size=\"s\">");
     expect(html).toContain("<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>");
     expect(html).toContain("<strong>Water quality advisory</strong>");
     expect(html).toContain("beach posted for elevated E. coli");
     expect(html).toContain(
-      "<span class=\"wq-advisory-meta wa-caption-s\">Source: " +
+      "<span class=\"wa-caption-s\">Source: " +
       "Lake County General Health District Beach Water Quality Program</span>");
     expect(html).toContain(
-      "<span class=\"wq-advisory-meta wa-caption-s\">Updated " +
+      "<span class=\"wa-caption-s\">Updated " +
       "<wa-relative-time date=\"2026-07-05T11:00:00.000Z\" sync></wa-relative-time></span>");
   });
 
@@ -47,13 +47,13 @@ describe("water-quality advisory callout", () => {
       color: "yellow",
       reason: "swim advisory in effect"
     }));
-    expect(html).toContain("<wa-callout class=\"wq-advisory\" variant=\"warning\" size=\"s\">");
+    expect(html).toContain("<wa-callout variant=\"warning\" size=\"s\">");
     expect(html).toContain("swim advisory in effect");
   });
 
   it("never presents the advisory as an official reading", () => {
     const html = renderWith(ADVISORY);
-    const start = html.indexOf("<wa-callout class=\"wq-advisory\"");
+    const start = html.indexOf("<wa-callout variant=\"danger\" size=\"s\">");
     const end = html.indexOf("</wa-callout>", start);
     const callout = html.slice(start, end);
     expect(callout).not.toContain("OFFICIAL");
@@ -87,7 +87,7 @@ describe("water-quality advisory callout", () => {
     // Match the rendered markers, not the bare class names — .estimate-card and
     // .wave-forecast selectors also ship in the embedded <head> stylesheet.
     const estimateIndex = html.indexOf("class=\"estimate-card\"");
-    const advisoryIndex = html.indexOf("<wa-callout class=\"wq-advisory\"");
+    const advisoryIndex = html.indexOf("<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>");
     const forecastIndex = html.indexOf("<section class=\"wave-forecast");
     expect(estimateIndex).toBeGreaterThan(-1);
     expect(advisoryIndex).toBeGreaterThan(estimateIndex);
@@ -106,26 +106,26 @@ describe("water-quality advisory callout", () => {
 
   it("omits the source line when the record carries no source", () => {
     const html = renderWith(Object.assign({}, ADVISORY, { source: "" }));
-    expect(html).toContain("<wa-callout class=\"wq-advisory\"");
-    expect(html).not.toContain("wq-advisory-meta wa-caption-s\">Source: ");
+    expect(html).toContain("<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>");
+    expect(html).not.toContain("<span class=\"wa-caption-s\">Source: ");
   });
 
   it("omits the updated line when the record carries no timestamp", () => {
     const html = renderWith(Object.assign({}, ADVISORY, { updated: null }));
-    expect(html).toContain("<wa-callout class=\"wq-advisory\"");
-    expect(html).not.toContain("wq-advisory-meta wa-caption-s\">Updated ");
+    expect(html).toContain("<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>");
+    expect(html).not.toContain("<span class=\"wa-caption-s\">Updated ");
   });
 
   it("renders nothing when there is no advisory", () => {
-    expect(renderWith(null)).not.toContain("wq-advisory");
-    expect(renderWith(undefined)).not.toContain("wq-advisory");
+    expect(renderWith(null)).not.toContain("name=\"droplet\"");
+    expect(renderWith(undefined)).not.toContain("name=\"droplet\"");
     const bare = renderDetailPage({
       beach: beachWith({}),
       estimate: null,
       official: null,
       nowIso: NOW_ISO
     });
-    expect(bare).not.toContain("wq-advisory");
+    expect(bare).not.toContain("name=\"droplet\"");
   });
 
   it("renders nothing for a malformed record", () => {
@@ -142,7 +142,7 @@ describe("water-quality advisory callout", () => {
       Object.assign({}, ADVISORY, { reason: 12 })
     ];
     for (const value of malformed) {
-      expect(renderWith(value)).not.toContain("wq-advisory");
+      expect(renderWith(value)).not.toContain("name=\"droplet\"");
     }
   });
 });

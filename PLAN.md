@@ -4029,7 +4029,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // Each row reads estimate and official only through displayFlag(entry, data.nowIso).
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite or
       // null renders nothing. sortedByProximity heads the main list with
-      // <h2 id="nearby-heading" class="nearby-heading">Nearby</h2> and names the list
+      // <h2 id="nearby-heading" class="wa-font-size-l">Nearby</h2> and names the list
       // section by it (aria-labelledby="nearby-heading"), so a distance-sorted list is
       // a labelled region; an alphabetical list gets neither, because it is not nearby
       // anything and may not claim to be. Nothing names the origin the distance labels
@@ -4039,10 +4039,10 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // action="/", input name="q") that submits server-side while the inline script
       // filters rendered rows; a q-filtered page with zero rows shows "No beaches match
       // your search.", not the empty-database copy.
-      // The green-only control lives in a <div class="list-controls"> between the
-      // active-query line and the live region, as <div class="list-filter"><wa-switch
-      // id="green-only-filter" size="s">Green flags only</wa-switch></div> pushed to
-      // the end edge. styles.js hides an empty controls row. The label names no source:
+      // The green-only control sits between the active-query line and the live region,
+      // as <wa-switch id="green-only-filter" size="s" class="wa-align-self-end">Green
+      // flags only</wa-switch> on the end edge of the page stack; a list with no rows
+      // to filter omits it entirely. The label names no source:
       // data-flag is the row's displayFlag keyword, which either record may supply. The
       // filter block is rendered only when the page
       // has rows, so an empty list carries no control over nothing. The filter is purely
@@ -4067,7 +4067,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // params such as q are preserved), parses the response with DOMParser, and swaps
       // the server-rendered pieces in place: #beach-list-items innerHTML, the
       // #beach-list-empty block (updated in place, never replaced, because the search
-      // script holds it by reference), the .clear-search href, a hidden "near" input
+      // script holds it by reference), the #list-active-query block, a hidden "near" input
       // appended to #beach-search-form, and the #home-map data-center /
       // data-center-precise attributes (the #home-map node itself is never replaced, so
       // the MapLibre instance stays alive). The green-only control is not swapped; it is
@@ -4091,11 +4091,11 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // upgrade happens at most once and can never loop.
       // Between the intro and the search form the page embeds a home-page map mount
       // (no per-beach data — that ships from /api/beaches.geojson):
-      // <section class="home-map-section"><div id="home-map"
+      // <div id="home-map"
       // class="home-map framed-embed wa-border-radius-m" aria-hidden="true"
       // tabindex="-1" data-center="lat,lon"? data-center-precise="1|0"?>
-      // <wa-skeleton class="home-map-skeleton" effect="sheen"></wa-skeleton></div>
-      // </section>, reusing the shared .framed-embed border and wa-border-radius-m
+      // <wa-skeleton class="home-map-skeleton" effect="sheen"></wa-skeleton></div>,
+      // reusing the shared .framed-embed border and wa-border-radius-m
       // utility. The skeleton fills the mount so the map area is a shaped surface
       // rather than a blank framed box while tiles arrive; it sits inside the
       // aria-hidden subtree, so it carries no label, and the map script removes it.
@@ -4207,7 +4207,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
 
       // Between the live region and the main list the page renders an empty, hidden
       // "Your Beaches" shell: <section id="your-beaches"
-      // class="your-beaches wa-stack wa-gap-s" aria-labelledby="your-beaches-heading"
+      // class="wa-stack wa-gap-s" aria-labelledby="your-beaches-heading"
       // hidden> holding an h2 "Your Beaches", a hidden p#your-beaches-saved-label
       // "Saved" plus ul#your-beaches-saved, and a hidden p#your-beaches-recent-label
       // "Recently viewed" plus ul#your-beaches-recent. The server renders no rows there
@@ -4420,7 +4420,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   subtitle with beach.name renders only when park_name is set and differs from name.
   Unnamed park beaches have name === park_name, so no subtitle. List rows put the subtitle
   in span.beach-row-subtitle inside the name span; the detail page puts it in
-  p.beach-subtitle under the h1 and uses displayName in the h1 and the document <title>.
+  a quiet paragraph under the h1 and uses displayName in the h1 and the document <title>.
   The row's data-name search attribute is the lowercased park_name + " " + name, so search
   matches either.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
@@ -4469,12 +4469,12 @@ exporting a CSS string); render.js is the sole module the router imports.
   main stack) holding the back link; an h1 title with a colorized flag icon on the left
   (displayFlag's color) plus the display name; an optional beach-name subtitle; the display
   flag's FLAG_LABELS text with the badge displayFlag's source names — OFFICIAL, ESTIMATE, or
-  none when the color is unknown; a plain-language verdict line under that label (p.hero-verdict); a lat/lon meta line linking
+  none when the color is unknown; a plain-language verdict line under that label; a lat/lon meta line linking
   to OpenStreetMap; and the share row. The badge follows the record the color came from,
   never freshness alone, so the hero can neither call an estimate official nor credit the
   estimate with a color it did not produce. The flag label text below the title is what
   names the color, so the title flag icon is decorative there. The stack
-  zero-margins its children, so .beach-title/.beach-subtitle carry no margins. The h1 and
+  zero-margins its children, so the h1 and the subtitle carry no margins. The h1 and
   its flag icon are the document's two static view-transition-names (beach-title /
   beach-flag) — see the motion bullet in "Page skeleton". The hero's
   background is
@@ -4520,7 +4520,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     and ?near= survive the trip back. Both are progressive enhancements: with no JS the
     page keeps a working back link and the copy button alone.
     The row's third control is the save toggle, <wa-button id="favorite-toggle"
-    class="favorite-toggle" appearance="outlined" size="s" aria-pressed="false"
+    appearance="outlined" size="s" aria-pressed="false"
     data-beach-id=beach.id hidden> holding a star wa-icon and a span#favorite-label
     reading "Save". It too ships hidden and DETAIL_FAVORITE_SCRIPT
     (src/frontend/favoritesScript.js) removes the attribute, so a page without JS never
@@ -4528,7 +4528,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     recently-viewed list on every view. Saved state flips aria-pressed, the label to
     "Saved" and the icon variant to solid. It is a purely local preference and says
     nothing about the flag, so it carries no flag color.
-  - "At a glance" tiles (section.at-a-glance, directly under the hero): a wa-grid of up to
+  - "At a glance" tiles (the section labelled by glance-heading, directly under the hero): a wa-grid of up to
     five outlined <wa-card class="glance-tile"> tiles, each an icon, a value, a caption and a
     quiet source line — waves now (estimate.waveHeightFt.toFixed(1) + " ft", the same field
     the wave strip's now stat reads, sourced by the ESTIMATE badge); water temperature (the
@@ -4559,13 +4559,13 @@ exporting a CSS string); render.js is the sole module the router imports.
     alerts were never checkable renders no alerts tile, because "none active" would be a
     claim nobody made. The tiles are informational and estimated: outlined cards only,
     never the official card's treatment.
-  - Flag legend: a collapsed wa-details (class flag-legend, summary "What the flags mean",
+  - Flag legend: a collapsed wa-details (summary "What the flags mean",
     appearance plain, icon-placement start) directly after the at-a-glance tiles, once per
     page. One li per color — green, yellow, red, double red, unknown — each with its flag
     icon and the site's own words, plus a note that estimated flags are computed here from
     forecasts and alerts, official flags are posted at the beach, and posted flags and
     lifeguards always win. Static copy, so nothing in it is escaped.
-  Then the collapsed flag legend, then the detail stack, answer first and exploration
+  Then the collapsed flag legend, then the flag cards, answer first and exploration
   second: official card (if any) → estimate card → water-quality advisory callout (if any) →
   wave forecast section → wave map section → nearby-webcam section (if any) → nearby beaches
   (if any), so the lazy-loading embeds follow the verdict and forecast and the links away
@@ -4600,12 +4600,13 @@ exporting a CSS string); render.js is the sole module the router imports.
   its sentence-cased label in <strong>; anything that does not parse, ECCC's unlabelled
   alert_text_en included, stays a plain paragraph. An entry carrying none of the four text
   fields renders as
-  <div class="alert-detail alert-detail-bare"> — the same header row without a toggle —
+  <div class="alert-detail alert-detail-bare wa-cluster wa-align-items-baseline"> — the same
+  header row without a toggle —
   rather than an expander onto an empty panel. All upstream text is escaped. "" when the
   echo is missing or empty.
 - Section headings: every detail-page section below the hero is labeled by the shared
-  renderSectionHeading(id, iconName, text) — an <h2 class="section-heading wa-cluster
-  wa-gap-xs"> with a leading decorative wa-icon, pointed at by the section's
+  renderSectionHeading(id, iconName, text) — an <h2 class="wa-cluster wa-gap-xs
+  wa-font-size-l"> with a leading decorative wa-icon, pointed at by the section's
   aria-labelledby. The four are "At a glance" (gauge), "Wave forecast" (chart-line),
   "Nearby webcam" (video) and "Nearby beaches" (location-dot).
 - Wave forecast section (detail page only, between the estimate card and the wave map
@@ -4764,14 +4765,14 @@ exporting a CSS string); render.js is the sole module the router imports.
   plain <iframe class="webcam-frame" loading="lazy" allowfullscreen> wrapped in the same
   framed-embed container as the wave map, its title attribute the webcam title or "Nearby
   webcam" when untitled, 16:9 responsive, fetched by the browser. The section is
-  <section class="webcam-section wa-stack wa-gap-s" aria-labelledby="webcam-heading">
+  <section class="wa-stack wa-gap-s" aria-labelledby="webcam-heading">
   and opens with the shared renderSectionHeading("webcam-heading", "video", "Nearby
   webcam"), the same level and class as every other detail-page section heading. Under the frame, an optional
-  p.webcam-caption shows beach.webcam_title when non-empty, plus a "View on Windy" anchor
+  caption paragraph shows beach.webcam_title when non-empty, plus a "View on Windy" anchor
   (rel="noopener noreferrer", target="_blank") to beaches.webcam_detail_url whenever that
   column holds an absolute http(s) URL; a null, empty, relative or non-http(s) value emits
   no anchor, and an untitled cam still gets the link-only caption. Last comes the
-  unconditional note <p class="webcam-note wa-caption-s">This camera is near this beach
+  unconditional note <p class="wa-caption-s">This camera is near this beach
   and may not show the beach itself.</p>, which renders even for an untitled, unlinked
   cam, because the cam is only the nearest active one within a few kilometres and the page
   must never read as a view of this beach. The per-cam link is what Windy's Webcams API
@@ -5027,7 +5028,7 @@ test uses symbolically.
   hour, no-data at the head and in the tail), model helpers, buildWaveModelChartConfig shape,
   and computeHazardBands (positioning/clamping/hour-snapping, missing onset/ends defaults,
   out-of-window/non-precedence drops, exact-repeat dedupe, rip band, malformed→[]).
-- test/verdict.test.js — the pure hero-verdict sentence: one case per rules.js trigger
+- test/verdict.test.js — the pure hero verdict sentence: one case per rules.js trigger
   (alerts, both floors, rip, wave band under both threshold sets, wind, wq-floor, no-data),
   the "not yet in effect" clause for alerts echoed ahead of their onset (alone, beside an
   in-effect alert, behind an event-led red, counted past two, and every entry in effect for
@@ -5043,8 +5044,8 @@ test uses symbolically.
   displayFlag's source (a fresh official, an aged official that only agrees, an aged
   official that is more severe), escaping of an upstream alert name, omission for a
   legacy estimate, and the legend's exact markup, per-color lines and once-per-page
-  placement between the tiles and the detail stack.
-- test/renderWaveForecast.test.js — the rendered section via renderDetailPage: detail-stack
+  placement between the tiles and the flag cards.
+- test/renderWaveForecast.test.js — the rendered section via renderDetailPage: section
   order, proportional flex-grow segments + exact per-segment tooltip/aria-label texts,
   visually-hidden prose summary, per-model "now" caption + collapsed comparison disclosure,
   parsing the model chart's slotted JSON config back out (datasets/labels/rounding), the

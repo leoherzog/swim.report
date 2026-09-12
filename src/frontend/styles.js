@@ -17,7 +17,8 @@ const RULES = [
   // on <body>: WA's native.css already backgrounds <html>, which blocks
   // body-to-canvas propagation, and a body-painted background renders above
   // negative z-index positioned elements in the root stacking context, hiding
-  // the waves. Restated here unlayered, so it outranks the @layer wa-native copy.
+  // the waves. Restated here so the page keeps its opaque fill if native.css is
+  // ever dropped from the head.
   // The four flag colors, declared once. Every rule below and both client
   // scripts read these, so a palette change lands in one edit. Yellow takes
   // tint 70 because tint 50 reads olive in the mild palette (PLAN.md section 9);
@@ -37,7 +38,7 @@ const RULES = [
   // empty) main area. :root (a pseudo-class, so (0,1,0)) + the wa-page type
   // (0,0,1) lifts this author rule to (0,1,1), just over the shadow :host at
   // (0,1,0), so no !important is needed — and it stays correct if the theme
-  // class on <html> ever changes (a bare `wa-page` at (0,0,1) would lose to
+  // class on <html> ever changes (a bare wa-page type selector at (0,0,1) would lose to
   // :host). Header/footer keep their own opaque surface fill.
   ":root wa-page {",
   "  background-color: transparent;",
@@ -127,19 +128,15 @@ const RULES = [
   "  padding-inline: var(--wa-space-xl);",
   "}",
 
-  // An undecorated icon-and-label link. inline-flex + gap stay custom:
-  // wa-cluster is block-level flex, so it is not an equivalent swap here, and
-  // wa-link-plain adds a hover color-mix these links deliberately do not have.
-  // Each link picks its own color with a wa-color-text-* utility.
+  // An undecorated icon-and-label link. inline-flex stays custom: wa-cluster is
+  // block-level flex, so it is not an equivalent swap here, and wa-link-plain
+  // adds a hover color-mix these links deliberately do not have. Each link picks
+  // its own gap with a wa-gap-* utility and its own color with a
+  // wa-color-text-* utility.
   ".icon-link {",
   "  display: inline-flex;",
   "  align-items: center;",
-  "  gap: var(--wa-space-2xs);",
   "  text-decoration: none;",
-  "}",
-
-  ".brand-link {",
-  "  gap: var(--wa-space-xs);",
   "}",
 
   // wa-page's shadow sheet paints every slotted section opaque via
@@ -170,21 +167,9 @@ const RULES = [
   "  margin-inline: auto;",
   "}",
 
-  // margin stays: the ul's parent (.beach-list-section) is not a layout
-  // utility, so the utilities' child-margin reset doesn't reach it, and the
-  // native :has(+ *) rule would otherwise add margin-block-end before the
-  // (sometimes hidden) empty-state paragraph that follows.
-  ".beach-list {",
-  "  margin: 0;",
-  "}",
-
   ".beach-row-link {",
-  "  display: flex;",
-  "  align-items: center;",
-  "  gap: var(--wa-space-m);",
   "  padding: var(--wa-space-m);",
   "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
-  "  border-radius: var(--wa-border-radius-m);",
   "  text-decoration: none;",
   "  color: var(--wa-color-text-normal);",
   "}",
@@ -198,11 +183,10 @@ const RULES = [
   "  flex: 1 1 auto;",
   "}",
 
+  // The subtitle is an inline span inside .beach-row-name and must start its own
+  // line; wa-caption-s carries its size, weight and quiet color.
   ".beach-row-subtitle {",
   "  display: block;",
-  "  color: var(--wa-color-text-quiet);",
-  "  font-weight: var(--wa-font-weight-normal);",
-  "  font-size: var(--wa-font-size-s);",
   "}",
 
   // Only the offset and the no-wrap behavior are custom.
@@ -215,7 +199,7 @@ const RULES = [
   "  padding: var(--wa-space-xl);",
   "}",
 
-  // --- List polish: the color-coded feed and the controls above it. ---
+  // --- List polish: the color-coded feed. ---
   // The row's inline-start border carries its flag color so the list scans as a
   // feed rather than a wall of names. It reads data-flag, the row's displayFlag
   // keyword that its chip and the map marker share, and every keyword has a rule
@@ -227,33 +211,7 @@ const RULES = [
   ".beach-row[data-flag=\"yellow\"] .beach-row-link { border-inline-start-color: var(--flag-yellow); }",
   ".beach-row[data-flag=\"red\"] .beach-row-link { border-inline-start-color: var(--flag-red); }",
   ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--flag-unknown); }",
-
-  // With nothing to filter the row still sits in the page stack, where a
-  // zero-height child would leave a full gap of white space. Unlayered, so it
-  // outranks the wa-cluster utility's layered display: flex.
-  ".list-controls:empty {",
-  "  display: none;",
-  "}",
-
-  ".list-filter {",
-  "  margin-inline-start: auto;",
-  "}",
   // --- End list polish. ---
-
-  // --- Section headings: the saved / recently viewed section and the main list. ---
-  // Their rows are the server's own .beach-row markup and the sub-labels take
-  // their quiet color from wa-caption-s, so only the heading size and the stack's
-  // zeroed margins are left to set here.
-  ".your-beaches-heading,",
-  ".nearby-heading {",
-  "  margin: 0;",
-  "  font-size: var(--wa-font-size-l);",
-  "}",
-
-  ".your-beaches-label {",
-  "  margin: 0;",
-  "}",
-  // --- End section headings. ---
 
   ".flag-icon-green { color: var(--flag-green); }",
   ".flag-icon-yellow { color: var(--flag-yellow); }",
@@ -275,7 +233,7 @@ const RULES = [
   "  height: 100%;",
   "}",
 
-  // --- detail hero + at-a-glance tiles ---------------------------------------
+  // --- detail hero + glance tiles --------------------------------------------
   // The hero is washed in the display flag's own color at 12%, mixed into the
   // surface token so the tint follows light and dark without a second palette.
   // The keyword comes from a data-flag attribute rather than an inline style, so
@@ -304,19 +262,6 @@ const RULES = [
   "  background: color-mix(in oklab, var(--flag-unknown) 12%, var(--wa-color-surface-default));",
   "}",
 
-  // Plain-language verdict under the flag label: the hero's answer in one
-  // sentence, so it reads louder than the quiet coordinates line below it.
-  ".hero-verdict {",
-  "  font-size: var(--wa-font-size-l);",
-  "}",
-
-  // Shared heading for every detail-page section below the hero, sized between
-  // the h1 and body text so the sections read as parts of one page.
-  ".section-heading {",
-  "  margin: 0;",
-  "  font-size: var(--wa-font-size-l);",
-  "}",
-
   // At-a-glance tiles: up to five small readings in the same responsive grid
   // shape the nearby cards use, at a narrower column so two fit a phone on one
   // row. A reading with no data renders no tile, so the count varies.
@@ -324,24 +269,14 @@ const RULES = [
   "  --min-column-size: 9rem;",
   "}",
 
-  // --- end detail hero + at-a-glance tiles -----------------------------------
+  // --- end detail hero + glance tiles ----------------------------------------
 
   // --- flag legend -----------------------------------------------------------
-  // Collapsed legend under the at-a-glance tiles. The list drops its markers so
-  // each line starts on its own flag icon.
-  ".flag-legend {",
-  "  font-size: var(--wa-font-size-s);",
-  "}",
-
+  // The list sits in wa-details' default slot rather than a layout utility, so
+  // native.css's ul:has(+ *) margin would fire against the note below it. Only
+  // that margin is custom; wa-list-plain drops the markers.
   ".flag-legend-list {",
-  "  list-style: none;",
-  "  padding-inline-start: 0;",
   "  margin-block: 0;",
-  "}",
-
-  ".flag-legend-note {",
-  "  color: var(--wa-color-text-quiet);",
-  "  margin-block-end: 0;",
   "}",
   // --- end flag legend -------------------------------------------------------
 
@@ -368,11 +303,10 @@ const RULES = [
   "  border-block-start: var(--wa-border-width-s) solid var(--wa-color-surface-border);",
   "}",
 
+  // An asymmetric row/column gap, which no wa-gap-* utility expresses: unlayered
+  // here, it beats the cluster's layered :where() default.
   ".alert-detail-summary,",
   ".alert-detail-bare {",
-  "  display: flex;",
-  "  flex-wrap: wrap;",
-  "  align-items: baseline;",
   "  gap: var(--wa-space-2xs) var(--wa-space-s);",
   "}",
 
@@ -380,21 +314,6 @@ const RULES = [
   // sit on the same rhythm as the expandable rows above and below it.
   ".alert-detail-bare {",
   "  padding-block: var(--wa-space-s);",
-  "}",
-
-  ".alert-detail-body p {",
-  "  margin-block: 0;",
-  "}",
-
-  ".alert-detail-body {",
-  "  font-size: var(--wa-font-size-s);",
-  "}",
-
-  // The office's own call to action, weighted above the description it follows.
-  ".alert-detail-instruction {",
-  "  align-items: start;",
-  "  color: var(--wa-color-text-loud);",
-  "  font-weight: var(--wa-font-weight-semibold);",
   "}",
 
   // --- end per-alert disclosures ---------------------------------------------
@@ -410,14 +329,17 @@ const RULES = [
   "}",
 
   // Hazard lane above the strip: one relative row per active hazard, each
-  // band absolutely positioned by per-instance left/width percentages (its
-  // colors are per-instance inline values too). The label ellipsizes when the
-  // band is short; the full text rides the tooltip and aria-label.
+  // band absolutely positioned by per-instance left/width percentages, the only
+  // inline values it carries. The label ellipsizes when the band is short; the
+  // full text rides the tooltip and aria-label.
   ".wave-alert-lane {",
   "  position: relative;",
   "  height: var(--wa-space-xl);",
   "}",
 
+  // Colors come from the group-less variant tokens, so the wa-danger /
+  // wa-warning class src/frontend/waveStrip.js assigns per flag color decides
+  // the hue.
   ".wave-alert-band {",
   "  position: absolute;",
   "  top: 0;",
@@ -426,8 +348,18 @@ const RULES = [
   "  align-items: center;",
   "  padding: 0 var(--wa-space-xs);",
   "  font-size: var(--wa-font-size-xs);",
+  "  background: var(--wa-color-fill-quiet);",
+  "  color: var(--wa-color-on-quiet);",
   "  border: var(--wa-border-width-s) solid;",
+  "  border-color: var(--wa-color-border-normal);",
   "  border-radius: var(--wa-border-radius-s);",
+  "}",
+
+  // A red band takes the loud edge. The shared border-normal step is what the
+  // yellow band needs: warning-border-loud resolves to yellow-50, the olive
+  // tint PLAN.md section 9 keeps off the strip.
+  ".wave-alert-band.wa-danger {",
+  "  border-color: var(--wa-color-border-loud);",
   "}",
 
   ".wave-alert-band:focus-visible {",
@@ -462,6 +394,12 @@ const RULES = [
   "  outline-offset: calc(-1 * var(--wa-focus-ring-width));",
   "}",
 
+  // A provenance caption is focusable only so its tooltip has a keyboard
+  // trigger, so it takes the theme's ring like the strip and the hazard bands.
+  ".water-temp-src:focus-visible {",
+  "  outline: var(--wa-focus-ring);",
+  "}",
+
   // Fill-in on load: each run scales out from the now edge, staggered by its
   // index (--i, set inline per segment in renderWaveStrip). Decoration only —
   // the strip is complete and correctly colored with the animation skipped.
@@ -480,8 +418,6 @@ const RULES = [
   ".wave-chart-hours {",
   "  position: relative;",
   "  height: var(--wa-font-size-l);",
-  "  color: var(--wa-color-text-quiet);",
-  "  font-size: var(--wa-font-size-xs);",
   "}",
 
   ".wave-chart-hour {",
@@ -542,8 +478,7 @@ const RULES = [
 
   // Nearby cards: the whole card is one link, so the anchor fills the body and
   // carries the text color; the grid wraps at a card width that keeps a name,
-  // chip and distance readable in one column on a phone. The section's heading
-  // is the shared .section-heading.
+  // chip and distance readable in one column on a phone.
   ".nearby-grid {",
   "  --min-column-size: 12rem;",
   "}",
@@ -574,15 +509,6 @@ const RULES = [
   "  .home-map-skeleton::part(indicator) {",
   "    animation: none;",
   "  }",
-  "}",
-
-  // The error page's status heading is slotted (light DOM) into a <wa-callout>,
-  // directly above the message line. Web Awesome's native-element styling gives
-  // headings a block-start margin, which would stack on top of the callout's own
-  // padding and push the heading away from the icon; zero it so the callout keeps
-  // its intended internal spacing.
-  "wa-callout h1 {",
-  "  margin-block-start: 0;",
   "}"
 ];
 

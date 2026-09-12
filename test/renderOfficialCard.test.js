@@ -34,13 +34,13 @@ function officialCard(official) {
     html.indexOf("class=\"estimate-card\""));
 }
 
-describe("official card: reported-for provenance line", function () {
+describe("official card: reported-for-another-site provenance line", function () {
   it("names the report site and its distance when the record carries one", function () {
     const card = officialCard(officialWith({
       reportedFor: { name: "Grand Haven State Park", distanceMi: 1.4 }
     }));
     expect(card).toContain(
-      "<p class=\"reported-for wa-caption-s\">Reported for Grand Haven State Park, " +
+      "<p class=\"wa-caption-s\">Reported for Grand Haven State Park, " +
       "~1 mi away</p>"
     );
   });
@@ -50,7 +50,7 @@ describe("official card: reported-for provenance line", function () {
       reportedFor: { name: "Grand Haven State Park", distanceMi: 0.4 }
     }));
     expect(card).toContain(
-      "<p class=\"reported-for wa-caption-s\">Reported for Grand Haven State Park, " +
+      "<p class=\"wa-caption-s\">Reported for Grand Haven State Park, " +
       "&lt;1 mi away</p>"
     );
   });
@@ -60,14 +60,13 @@ describe("official card: reported-for provenance line", function () {
       reportedFor: { name: "Grand Haven State Park", distanceMi: null }
     }));
     expect(card).toContain(
-      "<p class=\"reported-for wa-caption-s\">Reported for Grand Haven State Park</p>"
+      "<p class=\"wa-caption-s\">Reported for Grand Haven State Park</p>"
     );
     expect(card).not.toContain("away");
   });
 
   it("renders no line at all when the record carries no reportedFor", function () {
     const card = officialCard(officialWith(null));
-    expect(card).not.toContain("reported-for");
     expect(card).not.toContain("Reported for");
   });
 
@@ -85,7 +84,7 @@ describe("official card: reported-for provenance line", function () {
       reportedFor: { name: "Grand Haven State Park", distanceMi: NaN }
     }));
     expect(card).toContain(
-      "<p class=\"reported-for wa-caption-s\">Reported for Grand Haven State Park</p>"
+      "<p class=\"wa-caption-s\">Reported for Grand Haven State Park</p>"
     );
     expect(card).not.toContain("NaN");
   });

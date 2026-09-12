@@ -116,7 +116,7 @@ describe("wave-forecast section", () => {
     // which would make this order assertion vacuous.
     const estimateIdx = html.indexOf("class=\"estimate-card\"");
     const waveIdx = html.indexOf("class=\"wave-forecast");
-    const webcamIdx = html.indexOf("webcam-section");
+    const webcamIdx = html.indexOf("aria-labelledby=\"webcam-heading\"");
     expect(estimateIdx).toBeGreaterThan(-1);
     expect(waveIdx).toBeGreaterThan(estimateIdx);
     expect(webcamIdx).toBeGreaterThan(waveIdx);
@@ -452,12 +452,15 @@ describe("wave-forecast hazard lane", () => {
       official: null,
       waves: wavesWith({})
     });
-    const bandStart = html.indexOf("<div class=\"wave-alert-band\"");
+    const bandStart = html.indexOf("<div class=\"wave-alert-band ");
     expect(bandStart).toBeGreaterThan(-1);
     const band = html.slice(bandStart, html.indexOf("</div></div>", bandStart));
     // Onset before now clamps to the window start; ends at +14 h of 24.
     expect(band).toContain("left: 0%; width: " + ((14 / 24) * 100) + "%;");
-    expect(band).toContain("background: var(--wa-color-danger-fill-quiet);");
+    // The color variant class is what points the band's group-less fill/on/
+    // border tokens at the danger group; no color is inlined on the element.
+    expect(band).toContain("class=\"wave-alert-band wa-danger\"");
+    expect(band).not.toContain("background:");
     expect(band).toContain(
       "<span class=\"wave-alert-label wa-text-truncate\">Beach Hazards Statement</span>");
     // Tooltip and aria-label carry the name plus the period.
@@ -496,7 +499,7 @@ describe("wave-forecast hazard lane", () => {
       official: null,
       waves: wavesWith({})
     });
-    expect(html).not.toContain("<div class=\"wave-alert-band\"");
+    expect(html).not.toContain("<div class=\"wave-alert-band ");
   });
 
   it("renders a full-window rip-current band naming the SRF source", () => {
@@ -505,10 +508,11 @@ describe("wave-forecast hazard lane", () => {
       official: null,
       waves: wavesWith({})
     });
-    const bandStart = html.indexOf("<div class=\"wave-alert-band\"");
+    const bandStart = html.indexOf("<div class=\"wave-alert-band ");
     expect(bandStart).toBeGreaterThan(-1);
     const band = html.slice(bandStart, html.indexOf("</div></div>", bandStart));
     expect(band).toContain("left: 0%; width: 100%;");
+    expect(band).toContain("class=\"wave-alert-band wa-danger\"");
     expect(band).toContain(
       "<span class=\"wave-alert-label wa-text-truncate\">Rip current risk: HIGH</span>");
     expect(html).toContain("<wa-tooltip for=\"wave-alert-0\">" +
@@ -521,7 +525,7 @@ describe("wave-forecast hazard lane", () => {
       official: null,
       waves: wavesWith({})
     });
-    expect(html).not.toContain("<div class=\"wave-alert-band\"");
+    expect(html).not.toContain("<div class=\"wave-alert-band ");
   });
 
   it("renders no lane without a series to overlay (buoy-fallback beach)", () => {
@@ -533,7 +537,7 @@ describe("wave-forecast hazard lane", () => {
       official: null,
       waves: null
     });
-    expect(html).not.toContain("<div class=\"wave-alert-band\"");
+    expect(html).not.toContain("<div class=\"wave-alert-band ");
   });
 });
 
@@ -550,7 +554,7 @@ describe("wave-forecast hour ticks", () => {
   // The ticks row markup only, sliced out of the page so absence assertions
   // can't be satisfied (or spoiled) by inline styles elsewhere on the page.
   function ticksRow(html) {
-    const open = "<div class=\"wave-chart-hours\" aria-hidden=\"true\">";
+    const open = "<div class=\"wave-chart-hours wa-caption-xs\" aria-hidden=\"true\">";
     const start = html.indexOf(open);
     expect(start).toBeGreaterThan(-1);
     const end = html.indexOf("</div>", start);
@@ -601,7 +605,7 @@ describe("wave-forecast hour ticks", () => {
       waves: wavesWith({})
     });
     const stripIdx = html.indexOf("<div class=\"wave-strip\"");
-    const ticksIdx = html.indexOf("<div class=\"wave-chart-hours\" aria-hidden=\"true\">");
+    const ticksIdx = html.indexOf("<div class=\"wave-chart-hours wa-caption-xs\" aria-hidden=\"true\">");
     expect(stripIdx).toBeGreaterThan(-1);
     expect(ticksIdx).toBeGreaterThan(stripIdx);
   });
@@ -753,7 +757,7 @@ describe("wave-forecast local-time tick script", () => {
       official: null,
       waves: null
     });
-    expect(html).not.toContain("<div class=\"wave-chart-hours\"");
+    expect(html).not.toContain("<div class=\"wave-chart-hours");
     expect(html).not.toContain(WAVE_TICKS_SCRIPT);
   });
 

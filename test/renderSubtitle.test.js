@@ -1,6 +1,6 @@
 // test/renderSubtitle.test.js
 // Covers the detail-page header composition (src/frontend/render.js), exercised
-// through renderDetailPage: the park-first beach name in .beach-subtitle, the
+// through renderDetailPage: the park-first beach name in the hero subtitle, the
 // coordinates line, and the NDBC water-temperature reading in its "at a glance"
 // tile, whose source line and tooltip state the same station and distance. The
 // temp is display-only, never a flag input, and is shown only when fresh; the
@@ -44,17 +44,17 @@ function detailHtml(beachExtra, waterTemp) {
   });
 }
 
-// The subtitle paragraph body, or null when the <p class="beach-subtitle"> is
-// absent from the page entirely.
+// The subtitle paragraph body, or null when the subtitle paragraph is absent
+// from the page entirely.
 function subtitleText(html) {
-  const m = html.match(/<p class="beach-subtitle[^"]*">([^<]*)<\/p>/);
+  const m = html.match(/<p class="wa-color-text-quiet wa-font-size-l">([^<]*)<\/p>/);
   return m ? m[1] : null;
 }
 
 // Everything the coordinates line carries after the OpenStreetMap link, as raw
 // HTML. "" for the current line, which carries the coordinates alone.
 function metaTail(html) {
-  const m = html.match(/<p class="beach-meta wa-caption-s"><a class="coords-link[^"]*"[^>]*>[\s\S]*?<\/a>([\s\S]*?)<\/p>/);
+  const m = html.match(/<p class="wa-caption-s"><a class="coords-link[^"]*"[^>]*>[\s\S]*?<\/a>([\s\S]*?)<\/p>/);
   return m ? m[1] : null;
 }
 
@@ -71,14 +71,14 @@ function tempTile(html) {
 // so this is null there rather than a placeholder.
 function tempValue(html) {
   const tile = tempTile(html);
-  const m = tile ? tile.match(/<span class="glance-value[^"]*">([^<]*)<\/span>/) : null;
+  const m = tile ? tile.match(/<span class="wa-font-size-[^"]*">([^<]*)<\/span>/) : null;
   return m ? m[1] : null;
 }
 
 // The tile's quiet source line, with the relative-time element left intact.
 function tempSource(html) {
   const tile = tempTile(html);
-  const m = tile ? tile.match(/<span class="glance-source[^"]*">(.*?)<\/span><\/div>/) : null;
+  const m = tile ? tile.match(/<span class="wa-caption-s">(.*?)<\/span><\/div>/) : null;
   return m ? m[1] : null;
 }
 
@@ -100,7 +100,7 @@ describe("beach header composition (renderDetailPage)", function () {
   it("renders no subtitle paragraph when the beach has no distinct name", function () {
     const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, null);
     expect(subtitleText(html)).toBe(null);
-    expect(html.indexOf("class=\"beach-subtitle\"")).toBe(-1);
+    expect(html.indexOf("<p class=\"wa-color-text-quiet wa-font-size-l\">")).toBe(-1);
     expect(metaTail(html)).toBe("");
   });
 });
@@ -117,8 +117,8 @@ describe("water-temperature tile (renderDetailPage)", function () {
     // server-computed phrase. The tooltip states the same station and distance
     // as the visible source line, so the two can never disagree.
     expect(tempSource(html)).toBe(
-      "<span class=\"water-temp-src\" id=\"water-temp\">Muskegon, MI · ~3 mi · " +
-      relativeTime(OBSERVED_ISO) + "</span>" +
+      "<span class=\"water-temp-src\" id=\"water-temp\" role=\"note\" tabindex=\"0\">" +
+      "Muskegon, MI · ~3 mi · " + relativeTime(OBSERVED_ISO) + "</span>" +
       "<wa-tooltip for=\"water-temp\">Water temperature measured at Muskegon, MI, " +
       "~3 mi away</wa-tooltip>");
   });
@@ -155,13 +155,13 @@ describe("water-temperature tile (renderDetailPage)", function () {
     const noName = detailHtml({}, waterTempWith({ station: { id: "45161", distanceKm: 5.0 } }));
     expect(tempValue(noName)).toBe("72°F");
     expect(tempSource(noName)).toBe(
-      "<span class=\"water-temp-src\" id=\"water-temp\">~3 mi · " +
+      "<span class=\"water-temp-src\" id=\"water-temp\" role=\"note\" tabindex=\"0\">~3 mi · " +
       relativeTime(OBSERVED_ISO) + "</span>" +
       "<wa-tooltip for=\"water-temp\">Water temperature measured ~3 mi away</wa-tooltip>");
 
     const noDistance = detailHtml({}, waterTempWith({ station: { id: "45161", name: "Muskegon, MI" } }));
     expect(tempSource(noDistance)).toBe(
-      "<span class=\"water-temp-src\" id=\"water-temp\">Muskegon, MI · " +
+      "<span class=\"water-temp-src\" id=\"water-temp\" role=\"note\" tabindex=\"0\">Muskegon, MI · " +
       relativeTime(OBSERVED_ISO) + "</span>" +
       "<wa-tooltip for=\"water-temp\">Water temperature measured at Muskegon, MI</wa-tooltip>");
 

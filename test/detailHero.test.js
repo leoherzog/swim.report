@@ -59,13 +59,13 @@ function tile(html, iconName) {
 
 function tileValue(html, iconName) {
   const block = tile(html, iconName);
-  const m = block ? block.match(/<span class="glance-value([^"]*)">([^<]*)<\/span>/) : null;
+  const m = block ? block.match(/<span class="(wa-font-size-[^"]*)">([^<]*)<\/span>/) : null;
   return m ? { text: m[2], quiet: m[1].indexOf("wa-color-text-quiet") > -1 } : null;
 }
 
 function tileSource(html, iconName) {
   const block = tile(html, iconName);
-  const m = block ? block.match(/<span class="glance-source[^"]*">(.*?)<\/span><\/div>/) : null;
+  const m = block ? block.match(/<span class="wa-caption-s">(.*?)<\/span><\/div>/) : null;
   return m ? m[1] : null;
 }
 
@@ -74,7 +74,7 @@ describe("detail-page hero", () => {
     const html = render({ estimate: estimateWith({ color: "yellow" }) });
     const block = hero(html);
     expect(block).toContain("data-flag=\"yellow\"");
-    expect(block).toContain("<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">YELLOW</span>");
+    expect(block).toContain("<span class=\"wa-font-size-l wa-font-weight-bold\">YELLOW</span>");
   });
 
   it("collapses double-red onto the red wash but keeps the full label", () => {
@@ -201,14 +201,14 @@ describe("detail-page hero", () => {
 
   it("renders the back link at / and the share controls for the canonical URL", () => {
     const block = hero(render({}));
-    expect(block).toContain("<a class=\"back-link icon-link wa-color-text-link\" href=\"/\">");
+    expect(block).toContain("<a class=\"back-link icon-link wa-gap-2xs wa-color-text-link\" href=\"/\">");
     expect(block).toContain("Back to all beaches");
     expect(block).toContain(
-      "<wa-copy-button class=\"hero-copy\" value=\"https://swim.report/beach/osm-way-505668572\" " +
+      "<wa-copy-button value=\"https://swim.report/beach/osm-way-505668572\" " +
       "copy-label=\"Copy link\" success-label=\"Link copied\"></wa-copy-button>");
     // The Share button ships hidden: navigator.share exists on some browsers
     // only, and a dead button is worse than no button.
-    expect(block).toContain("<wa-button id=\"hero-share\" class=\"hero-share\" " +
+    expect(block).toContain("<wa-button id=\"hero-share\" " +
       "appearance=\"outlined\" size=\"s\" hidden>");
   });
 
@@ -257,11 +257,11 @@ describe("at a glance tiles", () => {
   it("sits directly under the hero, above the flag cards", () => {
     const html = render({ estimate: estimateWith({}) });
     const heroIdx = html.indexOf("<section class=\"detail-hero");
-    const glanceIdx = html.indexOf("<section class=\"at-a-glance");
+    const glanceIdx = html.indexOf("aria-labelledby=\"glance-heading\"");
     const cardIdx = html.indexOf("class=\"estimate-card\"");
     expect(glanceIdx).toBeGreaterThan(heroIdx);
     expect(cardIdx).toBeGreaterThan(glanceIdx);
-    expect(html).toContain("<h2 id=\"glance-heading\" class=\"section-heading wa-cluster wa-gap-xs\">");
+    expect(html).toContain("<h2 id=\"glance-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
     expect(html).toContain("<wa-icon name=\"gauge\"></wa-icon>At a glance</h2>");
   });
 
@@ -372,11 +372,11 @@ describe("at a glance tiles", () => {
     // NOW_ISO is morning at the fixture beach, so sunset is the next event.
     const html = render({});
     expect(tile(html, "sun")).toContain(
-      "<span class=\"glance-value wa-font-size-xl wa-font-weight-bold\">" +
+      "<span class=\"wa-font-size-xl wa-font-weight-bold\">" +
       "<wa-format-date date=\"2026-07-06T01:26:00.000Z\" hour=\"numeric\" minute=\"numeric\">" +
       "<time datetime=\"2026-07-06T01:26:00.000Z\">01:26 UTC</time></wa-format-date></span>");
     expect(tile(html, "sun")).toContain(">Sunset</span>");
-    expect(tile(html, "sun")).not.toContain("glance-source");
+    expect(tileSource(html, "sun")).toBe(null);
   });
 
   it("names sunrise when the sunrise is the nearer event", () => {
@@ -399,7 +399,7 @@ describe("at a glance tiles", () => {
   it("keeps only the tiles that have a reading", () => {
     // Nothing but the beach's own coordinates, so the sun tile stands alone.
     const html = render({});
-    const glance = html.slice(html.indexOf("<section class=\"at-a-glance"));
+    const glance = html.slice(html.indexOf("aria-labelledby=\"glance-heading\""));
     expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(1);
     expect(tile(html, "sun")).not.toBe(null);
     // No tile is ever blank, and none of them looks like the official card.
@@ -421,13 +421,13 @@ describe("at a glance tiles", () => {
         alertDetails: [{ event: "Beach Hazards Statement", onset: null, ends: null }]
       })
     });
-    const glance = html.slice(html.indexOf("<section class=\"at-a-glance"));
+    const glance = html.slice(html.indexOf("aria-labelledby=\"glance-heading\""));
     expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(5);
   });
 
   it("omits the whole section when no reading has any data", () => {
     const html = render({ beach: beachWith({ lat: null, lon: null }) });
-    expect(html.indexOf("<section class=\"at-a-glance")).toBe(-1);
+    expect(html.indexOf("aria-labelledby=\"glance-heading\"")).toBe(-1);
     expect(html.indexOf("glance-heading")).toBe(-1);
   });
 });
@@ -455,7 +455,7 @@ describe("at a glance: the official morning reading", () => {
   }
 
   function glanceOf(html) {
-    return html.slice(html.indexOf("<section class=\"at-a-glance"));
+    return html.slice(html.indexOf("aria-labelledby=\"glance-heading\""));
   }
 
   it("shows the observed wave height beside the modeled one, in whole feet", () => {
@@ -502,7 +502,7 @@ describe("at a glance: the official morning reading", () => {
       reading: readingWith({ observedIso: EXPIRED }),
       beach: beachWith({ lat: null, lon: null })
     });
-    expect(html.indexOf("<section class=\"at-a-glance")).toBe(-1);
+    expect(html.indexOf("aria-labelledby=\"glance-heading\"")).toBe(-1);
   });
 
   it("drops a reading whose observed instant does not parse", () => {
@@ -510,7 +510,7 @@ describe("at a glance: the official morning reading", () => {
       reading: readingWith({ observedIso: "not a date" }),
       beach: beachWith({ lat: null, lon: null })
     });
-    expect(html.indexOf("<section class=\"at-a-glance")).toBe(-1);
+    expect(html.indexOf("aria-labelledby=\"glance-heading\"")).toBe(-1);
   });
 
   it("publishes a reading for a beach with no posted flag at all", () => {
@@ -537,10 +537,10 @@ describe("detail-page section headings and order", () => {
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       nearby: nearby
     });
-    expect(html).toContain("<h2 id=\"glance-heading\" class=\"section-heading wa-cluster wa-gap-xs\">");
-    expect(html).toContain("<h2 id=\"wave-forecast-heading\" class=\"section-heading wa-cluster wa-gap-xs\">");
-    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"section-heading wa-cluster wa-gap-xs\">");
-    expect(html).toContain("<h2 id=\"nearby-heading\" class=\"section-heading wa-cluster wa-gap-xs\">");
+    expect(html).toContain("<h2 id=\"glance-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
+    expect(html).toContain("<h2 id=\"wave-forecast-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
+    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
+    expect(html).toContain("<h2 id=\"nearby-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
     expect(html).toContain("<wa-icon name=\"location-dot\"></wa-icon>Nearby beaches</h2>");
   });
 
@@ -552,12 +552,12 @@ describe("detail-page section headings and order", () => {
     });
     const order = [
       html.indexOf("<section class=\"detail-hero"),
-      html.indexOf("<section class=\"at-a-glance"),
+      html.indexOf("aria-labelledby=\"glance-heading\""),
       html.indexOf("class=\"estimate-card\""),
       html.indexOf("<section class=\"wave-forecast"),
       html.indexOf("<section class=\"wave-map"),
-      html.indexOf("<section class=\"webcam-section"),
-      html.indexOf("<section class=\"nearby ")
+      html.indexOf("<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"webcam-heading\">"),
+      html.indexOf("<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">")
     ];
     for (let i = 0; i < order.length; i++) {
       expect(order[i]).toBeGreaterThan(i === 0 ? -1 : order[i - 1]);

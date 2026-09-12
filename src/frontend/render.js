@@ -245,13 +245,17 @@ function renderFlagIcon(color, sizeClass, slotName, labelText, transitionName) {
     " name=\"flag\" class=\"" + iconClass + "\"></wa-icon>";
 }
 
-function renderEstimateBadge() {
-  return "<wa-badge variant=\"neutral\" appearance=\"outlined\">ESTIMATE</wa-badge>";
+// slotName (optional): the wa-card slot this badge is slotted into directly, so
+// a card header needs no wrapper element around it.
+function renderEstimateBadge(slotName) {
+  const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
+  return "<wa-badge" + slotAttr + " variant=\"neutral\" appearance=\"outlined\">ESTIMATE</wa-badge>";
 }
 
-function renderOfficialBadge(sizeClass) {
+function renderOfficialBadge(sizeClass, slotName) {
   const cls = sizeClass ? (" class=\"" + sizeClass + "\"") : "";
-  return "<wa-badge variant=\"success\" appearance=\"filled\"" + cls + ">" +
+  const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
+  return "<wa-badge" + slotAttr + " variant=\"success\" appearance=\"filled\"" + cls + ">" +
     "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>";
 }
 
@@ -280,18 +284,12 @@ function renderHeroSourceBadge(flag) {
   return "";
 }
 
-// Wrapper for the small source cluster on a card header; estimate sources
-// render as badge chips instead.
-function sourceCluster(innerHtml) {
-  return "<span class=\"wa-cluster wa-gap-xs wa-font-size-s\">" + innerHtml + "</span>";
-}
-
 // Estimate sources are { label, url } objects whose url is provenance only and
 // is never rendered as a hyperlink; only official scraper sources link out. A
 // bare string is also accepted, since KV entries written before the labeled
 // format live for up to 2 h, and renders as its hostname when URL-like. Returns
 // quiet filled-neutral badge chips, never variant="success": green is reserved
-// for the official badge.
+// for the official badge. The cluster slots into the card header directly.
 function renderSourceLabels(sources) {
   const list = Array.isArray(sources) ? sources : [];
   const items = [];
@@ -315,8 +313,8 @@ function renderSourceLabels(sources) {
   if (items.length === 0) {
     return "";
   }
-  return "<span class=\"source-badges wa-cluster wa-gap-2xs wa-justify-content-end " +
-    "wa-font-size-2xs\">" + items.join("\n") + "</span>";
+  return "<span slot=\"header-actions\" class=\"wa-cluster wa-gap-2xs " +
+    "wa-justify-content-end wa-font-size-2xs\">" + items.join("\n") + "</span>";
 }
 
 // Official cards are the one place a source renders as a hyperlink: the
@@ -327,8 +325,8 @@ function renderOfficialSourceLink(url) {
   if (!isUrlLike(url)) {
     return "";
   }
-  return sourceCluster("<a href=\"" + escapeHtml(url) + "\" rel=\"noopener noreferrer\">" +
-    escapeHtml(hostnameOf(url)) + "</a>");
+  return "<a slot=\"header-actions\" class=\"wa-font-size-s\" href=\"" + escapeHtml(url) +
+    "\" rel=\"noopener noreferrer\">" + escapeHtml(hostnameOf(url)) + "</a>";
 }
 
 function renderFlagRow(color, reason) {
@@ -362,7 +360,7 @@ function renderReportedFor(reportedFor) {
   // second hedge of its own.
   const text = "Reported for " + name +
     (miles ? ", " + miles + " away" : "");
-  return "<p class=\"reported-for wa-caption-s\">" + escapeHtml(text) + "</p>";
+  return "<p class=\"wa-caption-s\">" + escapeHtml(text) + "</p>";
 }
 
 const UTC_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -451,17 +449,18 @@ function renderAlertDescription(text) {
 // row without a toggle rather than an expander onto an empty panel.
 function renderAlertEntry(entry, nowIso) {
   const windowHtml = renderAlertWindow(entry, nowIso);
-  const summaryHtml = "<span class=\"alert-detail-event wa-font-weight-semibold\">" + escapeHtml(entry.event) + "</span>" +
+  const summaryHtml = "<span class=\"wa-font-weight-semibold\">" + escapeHtml(entry.event) + "</span>" +
     (windowHtml === "" ? "" :
-      "<span class=\"alert-detail-window wa-caption-s wa-color-text-quiet\">" +
-      windowHtml + "</span>");
+      "<span class=\"wa-caption-s\">" + windowHtml + "</span>");
 
   const body = [];
   if (typeof entry.description === "string" && entry.description.length > 0) {
     body.push(renderAlertDescription(entry.description));
   }
   if (typeof entry.instruction === "string" && entry.instruction.length > 0) {
-    body.push("<p class=\"alert-detail-instruction wa-flank wa-gap-xs\">" +
+    // The office's own call to action, weighted above the description it
+    // follows and top-aligned so the icon sits on the first line.
+    body.push("<p class=\"wa-flank wa-gap-xs wa-align-items-start wa-font-weight-semibold\">" +
       "<wa-icon name=\"circle-exclamation\"></wa-icon>" +
       "<span>" + escapeHtml(entry.instruction) + "</span></p>");
   }
@@ -473,16 +472,17 @@ function renderAlertEntry(entry, nowIso) {
     const provenance = sender === null
       ? ("For " + area)
       : ("Issued by " + sender + (area === null ? "" : " for " + area));
-    body.push("<p class=\"alert-detail-provenance wa-caption-s\">" +
-      escapeHtml(provenance) + "</p>");
+    body.push("<p class=\"wa-caption-s\">" + escapeHtml(provenance) + "</p>");
   }
 
   if (body.length === 0) {
-    return "<div class=\"alert-detail alert-detail-bare\">" + summaryHtml + "</div>";
+    return "<div class=\"alert-detail alert-detail-bare wa-cluster wa-align-items-baseline\">" +
+      summaryHtml + "</div>";
   }
   return "<wa-details class=\"alert-detail\" appearance=\"plain\" icon-placement=\"start\">" +
-    "<span slot=\"summary\" class=\"alert-detail-summary\">" + summaryHtml + "</span>" +
-    "<div class=\"alert-detail-body wa-stack wa-gap-s\">" + body.join("") + "</div>" +
+    "<span slot=\"summary\" class=\"alert-detail-summary wa-cluster wa-align-items-baseline\">" +
+    summaryHtml + "</span>" +
+    "<div class=\"wa-stack wa-gap-s wa-font-size-s\">" + body.join("") + "</div>" +
     "</wa-details>";
 }
 
@@ -517,8 +517,9 @@ function renderAlertDetails(estimate, nowIso) {
 // Shared flag-card skeleton used by both the official and the estimate card so
 // their layouts stay identical: badge in the header (left), source labels in
 // header-actions (top right), flag row + stale warning in the body, "Updated"
-// in the footer. The with-* attributes track slotted content per the wa-card
-// SSR contract.
+// in the footer. badgeHtml and sourcesHtml carry their own slot attribute and
+// are slotted with no wrapper element. The with-* attributes track slotted
+// content per the wa-card SSR contract.
 //
 // Four optional options tune the body. Only renderOfficialCard passes the first
 // three, so the estimate card always gets the plain 2 h behaviour; only
@@ -539,9 +540,9 @@ function renderFlagCard(options) {
   const lines = [];
   lines.push("<wa-card class=\"" + options.cardClass + "\" appearance=\"" +
     options.appearance + "\"" + attrs + ">");
-  lines.push("<div slot=\"header\">" + options.badgeHtml + "</div>");
+  lines.push(options.badgeHtml);
   if (options.sourcesHtml) {
-    lines.push("<div slot=\"header-actions\">" + options.sourcesHtml + "</div>");
+    lines.push(options.sourcesHtml);
   }
   lines.push(renderFlagRow(options.color, options.reason));
   if (options.reportedForHtml) {
@@ -573,7 +574,7 @@ function renderEstimateCard(estimate, nowIso) {
   return renderFlagCard({
     cardClass: "estimate-card",
     appearance: "outlined",
-    badgeHtml: renderEstimateBadge(),
+    badgeHtml: renderEstimateBadge("header"),
     color: isMissing ? "unknown" : normalizeColor(estimate.color),
     reason: isMissing ? "No estimate available yet" : (estimate.reason || "No data available"),
     sourcesHtml: isMissing ? "" : renderSourceLabels(estimate.sources),
@@ -592,7 +593,7 @@ function renderOfficialCard(official, nowIso) {
   return renderFlagCard({
     cardClass: "official-card",
     appearance: "filled-outlined",
-    badgeHtml: renderOfficialBadge(null),
+    badgeHtml: renderOfficialBadge(null, "header"),
     color: normalizeColor(official.color),
     reason: official.reason || "",
     sourcesHtml: sourcesHtml,
@@ -609,10 +610,8 @@ function renderOfficialCard(official, nowIso) {
 }
 
 function renderBrandHeader() {
-  return "<a class=\"brand-link icon-link wa-color-text-normal wa-font-size-l wa-font-weight-bold\" href=\"/\">" +
-    "<wa-icon name=\"person-swimming\"></wa-icon>" +
-    "<span class=\"brand-name\">Swim Report</span>" +
-    "</a>";
+  return "<a class=\"icon-link wa-gap-xs wa-color-text-normal wa-font-size-l wa-font-weight-bold\" href=\"/\">" +
+    "<wa-icon name=\"person-swimming\"></wa-icon>Swim Report</a>";
 }
 
 // The disclaimer sentence below is a product invariant (PLAN.md section 9):
@@ -669,7 +668,9 @@ function renderWaveBackground() {
 
 function renderPageShell(headerHtml, mainHtml, footerHtml) {
   const lines = [];
-  lines.push("<wa-page>");
+  // No navigation slot on any page, so the drawer this toggles is empty by
+  // construction. Drop this attribute if a navigation slot is ever added.
+  lines.push("<wa-page disable-navigation-toggle>");
   lines.push("<header slot=\"header\" class=\"app-header\">" + headerHtml + "</header>");
   lines.push("<main class=\"app-main wa-stack wa-gap-l\">" + mainHtml + "</main>");
   lines.push("<footer slot=\"footer\" class=\"app-footer wa-color-text-quiet\">" + footerHtml + "</footer>");
@@ -807,6 +808,12 @@ const KM_TO_MILES = 3958.8 / 6371;
 // state the same station and distance; the age renders live through
 // <wa-relative-time>, so no time string is formatted here. A record with no
 // station name and no usable distance yields the age alone, with no tooltip.
+//
+// wa-tooltip's default "hover focus" trigger only reaches an anchor the keyboard
+// can land on, so a caption carrying a tooltip is focusable. The caption carries
+// no aria-label: wa-tooltip points the anchor's aria-labelledby at itself while
+// open and releases it on close, so the visible caption — the age included —
+// stays the accessible name the rest of the time.
 function waterTempProvenance(waterTemp) {
   const station = waterTemp && waterTemp.station && typeof waterTemp.station === "object"
     ? waterTemp.station : null;
@@ -820,22 +827,23 @@ function waterTempProvenance(waterTemp) {
   if (miles) {
     facts.push(miles);
   }
-  const idAttr = facts.length > 0 ? (" id=\"" + WATER_TEMP_TOOLTIP_ID + "\"") : "";
-  const lead = facts.length > 0 ? (facts.join(" · ") + " · ") : "";
-  const caption = "<span class=\"water-temp-src\"" + idAttr + ">" + escapeHtml(lead) +
-    renderRelativeTime(waterTemp.observedIso) + "</span>";
   if (facts.length === 0) {
-    return caption;
+    return "<span class=\"water-temp-src\">" +
+      renderRelativeTime(waterTemp.observedIso) + "</span>";
   }
-  let text = "Water temperature measured ";
+  let labelText = "Water temperature measured ";
   if (name && miles) {
-    text += "at " + name + ", " + miles + " away";
+    labelText += "at " + name + ", " + miles + " away";
   } else if (name) {
-    text += "at " + name;
+    labelText += "at " + name;
   } else {
-    text += miles + " away";
+    labelText += miles + " away";
   }
-  return caption + renderTooltipFor(WATER_TEMP_TOOLTIP_ID, text);
+  const caption = "<span class=\"water-temp-src\" id=\"" + WATER_TEMP_TOOLTIP_ID +
+    "\" role=\"note\" tabindex=\"0\">" +
+    escapeHtml(facts.join(" · ") + " · ") +
+    renderRelativeTime(waterTemp.observedIso) + "</span>";
+  return caption + renderTooltipFor(WATER_TEMP_TOOLTIP_ID, labelText);
 }
 
 // The ids the official morning reading's tooltips anchor to; one detail page
@@ -866,20 +874,23 @@ function usableReading(reading, nowIso) {
 // it. The site name is always rendered, so a beach reading a neighboring site's
 // observation says whose it is. A record naming no site yields the age alone,
 // with no tooltip.
+//
+// A caption carrying a tooltip is focusable, and names itself, for the same
+// reasons waterTempProvenance's does.
 function readingProvenance(reading, tooltipId) {
   const site = typeof reading.siteName === "string" ? reading.siteName.trim() : "";
   const label = typeof reading.sourceLabel === "string" ? reading.sourceLabel.trim() : "";
-  const idAttr = site ? (" id=\"" + tooltipId + "\"") : "";
-  const lead = site ? (site + " · ") : "";
-  const caption = "<span class=\"water-temp-src\"" + idAttr + ">" + escapeHtml(lead) +
-    renderRelativeTime(reading.observedIso) + "</span>";
   if (!site) {
-    return caption;
+    return "<span class=\"water-temp-src\">" +
+      renderRelativeTime(reading.observedIso) + "</span>";
   }
-  const text = "Observed at " + site +
+  const labelText = "Observed at " + site +
     (label ? (" and published by " + label) : "") +
     ". A morning reading, not a live one.";
-  return caption + renderTooltipFor(tooltipId, text);
+  const caption = "<span class=\"water-temp-src\" id=\"" + tooltipId +
+    "\" role=\"note\" tabindex=\"0\">" +
+    escapeHtml(site + " · ") + renderRelativeTime(reading.observedIso) + "</span>";
+  return caption + renderTooltipFor(tooltipId, labelText);
 }
 
 // Rough distance label for a row, e.g. "<1 mi" or "~12 mi". Distances come
@@ -904,10 +915,12 @@ function span(cls, text) {
 }
 
 // The one heading shape every detail-page section below the hero uses: a
-// leading decorative icon and a shared class, so the page reads as a sequence of
-// named parts. The id is what each section's aria-labelledby points at.
+// leading decorative icon, sized between the h1 and body text so the page reads
+// as a sequence of named parts. Every call site puts the h2 directly in a
+// wa-stack, whose child reset supplies the zero margin. The id is what each
+// section's aria-labelledby points at.
 function renderSectionHeading(id, iconName, text) {
-  return "<h2 id=\"" + id + "\" class=\"section-heading wa-cluster wa-gap-xs\">" +
+  return "<h2 id=\"" + id + "\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">" +
     "<wa-icon name=\"" + iconName + "\"></wa-icon>" + escapeHtml(text) + "</h2>";
 }
 
@@ -923,13 +936,14 @@ function renderBeachRow(entry, nowIso) {
   const milesLabel = formatMiles(entry.distanceMi);
   const distanceHtml = span("beach-row-distance wa-caption-s", milesLabel);
   const subtitle = subtitleName(beach);
-  const subtitleHtml = span("beach-row-subtitle", subtitle);
+  const subtitleHtml = span("beach-row-subtitle wa-caption-s", subtitle);
   // data-flag is the row's displayFlag keyword, read by the green-only filter
   // and the inline-start border in styles.js, so chip, border, map marker and
   // detail title are one decision; unknown is a visible gray keyword, never omitted.
   const lines = [];
   lines.push("<li class=\"beach-row\" data-flag=\"" + flag.keyword + "\" data-name=\"" + dataName + "\">");
-  lines.push("<a class=\"beach-row-link\" href=\"" + escapeHtml(href) + "\">");
+  lines.push("<a class=\"beach-row-link wa-cluster wa-flex-nowrap wa-border-radius-m\" " +
+    "href=\"" + escapeHtml(href) + "\">");
   lines.push("<span class=\"beach-row-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + distanceHtml +
     subtitleHtml + "</span>");
   lines.push(renderCompactFlag(flag));
@@ -962,12 +976,10 @@ function renderHomeMap(near, location) {
   // assistive-tech and the keyboard tab order. The skeleton stands in until
   // mapScript.js removes it on the map's load event; MapLibre appends its canvas
   // to the mount rather than clearing it, so the two never collide.
-  return "<section class=\"home-map-section\">" +
-    "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\" " +
+  return "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\" " +
     "aria-hidden=\"true\" tabindex=\"-1\"" + centerAttrs + ">" +
     "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton>" +
-    "</div>" +
-    "</section>";
+    "</div>";
 }
 
 // Empty, hidden shell for the visitor's saved and recently viewed beaches,
@@ -977,12 +989,12 @@ function renderHomeMap(near, location) {
 // stays hidden. The two sub-labels ship hidden and are revealed only when both
 // groups have rows.
 function renderYourBeaches() {
-  return "<section id=\"your-beaches\" class=\"your-beaches wa-stack wa-gap-s\" " +
+  return "<section id=\"your-beaches\" class=\"wa-stack wa-gap-s\" " +
     "aria-labelledby=\"your-beaches-heading\" hidden>" +
-    "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your Beaches</h2>" +
-    "<p id=\"your-beaches-saved-label\" class=\"your-beaches-label wa-caption-s\" hidden>Saved</p>" +
+    "<h2 id=\"your-beaches-heading\" class=\"wa-font-size-l\">Your Beaches</h2>" +
+    "<p id=\"your-beaches-saved-label\" class=\"wa-caption-s\" hidden>Saved</p>" +
     "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
-    "<p id=\"your-beaches-recent-label\" class=\"your-beaches-label wa-caption-s\" hidden>Recently viewed</p>" +
+    "<p id=\"your-beaches-recent-label\" class=\"wa-caption-s\" hidden>Recently viewed</p>" +
     "<ul id=\"your-beaches-recent\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
     "</section>";
 }
@@ -1029,10 +1041,10 @@ export function renderListPage(data) {
   const emptyMessage = listEmptyMessage(idsMode, hasEntries, query);
   const emptyStyle = hasEntries ? " style=\"display: none;\"" : "";
   const searchAllHtml = offerSearchAll ?
-    ("<wa-button class=\"search-all-btn\" type=\"submit\" form=\"beach-search-form\" " +
+    ("<wa-button type=\"submit\" form=\"beach-search-form\" " +
       "appearance=\"outlined\" size=\"s\">Search all beaches</wa-button>") : "";
 
-  const introHtml = "<section class=\"list-intro wa-stack wa-gap-xs\">" +
+  const introHtml = "<section class=\"wa-stack wa-gap-xs\">" +
     "<h1>Swim Report</h1>" +
     "<p class=\"wa-color-text-quiet\">Estimated beach hazard flags across the " +
     "United States and Canada.</p>" +
@@ -1044,7 +1056,7 @@ export function renderListPage(data) {
   // survives a server-side submit.
   const nearHiddenHtml = nearParam ?
     ("<input type=\"hidden\" name=\"near\" value=\"" + escapeHtml(nearParam) + "\">") : "";
-  const searchHtml = "<form id=\"beach-search-form\" class=\"list-search\" method=\"get\" " +
+  const searchHtml = "<form id=\"beach-search-form\" method=\"get\" " +
     "action=\"/\" role=\"search\">" +
     "<wa-input id=\"beach-search\" name=\"q\" type=\"search\" value=\"" + escapeHtml(query) + "\" " +
     "label=\"Search beaches\" placeholder=\"Search by beach or park name\" with-clear>" +
@@ -1058,20 +1070,18 @@ export function renderListPage(data) {
   // scripts can swap it in place as the query changes.
   const backHref = "/" + (nearParam ? ("?near=" + encodeURIComponent(nearParam)) : "");
   const activeQueryInner = query.length > 0 ?
-    ("<p class=\"list-active-query wa-color-text-quiet\">Showing results for <strong>" +
+    ("<p class=\"wa-color-text-quiet\">Showing results for <strong>" +
       escapeHtml(query) + "</strong>. " +
-      "<a class=\"clear-search\" href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
+      "<a href=\"" + escapeHtml(backHref) + "\">Clear search</a></p>") : "";
   const activeQueryHtml = "<div id=\"list-active-query\">" + activeQueryInner + "</div>";
 
   // Client-side green-only filter over each row's displayFlag keyword, which
   // either record may supply, so the label names no source. With no JS the
-  // switch is inert and every row stays visible. A list with no rows omits it.
-  const filterHtml = hasEntries ? ("<div class=\"list-filter\">" +
-    "<wa-switch id=\"green-only-filter\" size=\"s\">Green flags only</wa-switch>" +
-    "</div>") : "";
-  // The switch sits on the end edge of its own row. The row is empty and hidden
-  // on a list with no rows to filter.
-  const controlsHtml = "<div class=\"list-controls wa-cluster wa-gap-s\">" + filterHtml + "</div>";
+  // switch is inert and every row stays visible. It sits on the end edge of the
+  // page stack, and a list with no rows to filter omits it entirely.
+  const controlsHtml = hasEntries ?
+    ("<wa-switch id=\"green-only-filter\" size=\"s\" class=\"wa-align-self-end\">" +
+      "Green flags only</wa-switch>") : "";
 
   // Polite live region for the geolocation upgrade: geoScript.js swaps the list
   // in place with no navigation, so the reorder would otherwise be invisible to
@@ -1091,7 +1101,7 @@ export function renderListPage(data) {
   // heading is not swapped, and it does not have to be — filtering or
   // re-fetching a distance-sorted list yields distance-sorted rows.
   const nearbyHeadingHtml = sortedByProximity ?
-    "<h2 id=\"nearby-heading\" class=\"nearby-heading\">Nearby</h2>" : "";
+    "<h2 id=\"nearby-heading\" class=\"wa-font-size-l\">Nearby</h2>" : "";
   const listLabelAttr = sortedByProximity ? " aria-labelledby=\"nearby-heading\"" : "";
   const listHtml = "<section class=\"beach-list-section wa-stack wa-gap-s\"" + listLabelAttr + ">" +
     nearbyHeadingHtml +
@@ -1156,8 +1166,8 @@ function renderNearbyCard(entry, nowIso) {
   const beach = entry.beach;
   const href = "/beach/" + encodeURIComponent(beach.id);
   const flag = displayFlag(entry, nowIso);
-  const subtitleHtml = span("nearby-card-subtitle wa-caption-s", subtitleName(beach));
-  const distanceHtml = span("nearby-card-distance wa-caption-s", formatMiles(entry.distanceMi));
+  const subtitleHtml = span("wa-caption-s", subtitleName(beach));
+  const distanceHtml = span("wa-caption-s", formatMiles(entry.distanceMi));
   return "<wa-card class=\"nearby-card\" appearance=\"outlined\">" +
     "<a class=\"nearby-card-link wa-link-plain wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
     "<span class=\"nearby-card-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + "</span>" +
@@ -1174,7 +1184,7 @@ function renderNearby(nearby, nowIso) {
     return "";
   }
   const cards = entries.map(function (entry) { return renderNearbyCard(entry, nowIso); }).join("\n");
-  return "<section class=\"nearby wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">" +
+  return "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">" +
     renderSectionHeading("nearby-heading", "location-dot", "Nearby beaches") +
     "<div class=\"wa-grid wa-gap-m nearby-grid\">" + cards + "</div>" +
     "</section>";
@@ -1201,7 +1211,7 @@ function renderWebcam(beach) {
   const detailUrl = isUrlLike(beach.webcam_detail_url) ? beach.webcam_detail_url : null;
   const frameTitle = title ? title : "Nearby webcam";
   const lines = [];
-  lines.push("<section class=\"webcam-section wa-stack wa-gap-s\" " +
+  lines.push("<section class=\"wa-stack wa-gap-s\" " +
     "aria-labelledby=\"webcam-heading\">");
   lines.push(renderSectionHeading("webcam-heading", "video", "Nearby webcam"));
   lines.push("<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
@@ -1211,16 +1221,16 @@ function renderWebcam(beach) {
   if (title || detailUrl !== null) {
     const captionParts = [];
     if (title) {
-      captionParts.push("<span class=\"webcam-title\">" + escapeHtml(title) + "</span>");
+      captionParts.push("<span>" + escapeHtml(title) + "</span>");
     }
     if (detailUrl !== null) {
-      captionParts.push("<a class=\"webcam-link\" href=\"" + escapeHtml(detailUrl) + "\"" +
+      captionParts.push("<a href=\"" + escapeHtml(detailUrl) + "\"" +
         " rel=\"noopener noreferrer\" target=\"_blank\">View on Windy</a>");
     }
-    lines.push("<p class=\"webcam-caption wa-caption-s wa-cluster wa-gap-xs\">" +
+    lines.push("<p class=\"wa-caption-s wa-cluster wa-gap-xs\">" +
       captionParts.join("") + "</p>");
   }
-  lines.push("<p class=\"webcam-note wa-caption-s\">This camera is near this beach and " +
+  lines.push("<p class=\"wa-caption-s\">This camera is near this beach and " +
     "may not show the beach itself.</p>");
   lines.push("</section>");
   return lines.join("\n");
@@ -1229,7 +1239,7 @@ function renderWebcam(beach) {
 // Rendered marker for the tick row, matched by the detail page to decide
 // whether to ship the relabelling script. Kept beside the renderer that emits
 // it so the two cannot drift apart.
-const WAVE_TICKS_ROW_MARKER = "<div class=\"wave-chart-hours\"";
+const WAVE_TICKS_ROW_MARKER = "<div class=\"wave-chart-hours";
 
 // The data-iso attribute a tick carries so waveTicksScript.js can relabel it in
 // the viewer's own clock: the trimmed series start advanced by the tick's hour
@@ -1251,7 +1261,7 @@ function tickIsoAttr(startMs, hourOffset) {
 function renderWaveHourTicks(totalHours, startIso) {
   const startMs = Date.parse(startIso);
   const parts = [];
-  parts.push("<div class=\"wave-chart-hours\" aria-hidden=\"true\">");
+  parts.push("<div class=\"wave-chart-hours wa-caption-xs\" aria-hidden=\"true\">");
   parts.push("<span class=\"wave-chart-hour wave-chart-hour-start\"" +
     tickIsoAttr(startMs, 0) + ">Now</span>");
   const marks = [6, 12, 18];
@@ -1383,11 +1393,10 @@ function renderHazardLane(bands) {
     const band = bands[i];
     const id = "wave-alert-" + i;
     rows.push("<div class=\"wave-alert-lane\">" +
-      "<div class=\"wave-alert-band\" id=\"" + id + "\" role=\"note\" tabindex=\"0\"" +
+      "<div class=\"wave-alert-band " + band.variantClass + "\" id=\"" + id + "\"" +
+      " role=\"note\" tabindex=\"0\"" +
       " aria-label=\"" + escapeHtml(band.text) + "\"" +
-      " style=\"left: " + band.leftPct + "%; width: " + band.widthPct + "%;" +
-      " background: " + band.bgVar + "; color: " + band.fgVar + ";" +
-      " border-color: " + band.edgeVar + ";\">" +
+      " style=\"left: " + band.leftPct + "%; width: " + band.widthPct + "%;\">" +
       "<span class=\"wave-alert-label wa-text-truncate\">" + escapeHtml(band.label) + "</span>" +
       "</div></div>");
     tips.push(renderTooltipFor(id, band.text));
@@ -1487,16 +1496,16 @@ function renderWqFloorCallout(wqfloor) {
   const source = typeof wqfloor.source === "string" ? wqfloor.source.trim() : "";
   const updated = typeof wqfloor.updated === "string" ? wqfloor.updated.trim() : "";
   const variant = color === "red" ? "danger" : "warning";
-  let html = "<wa-callout class=\"wq-advisory\" variant=\"" + variant + "\" size=\"s\">" +
+  let html = "<wa-callout variant=\"" + variant + "\" size=\"s\">" +
     "<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>" +
     "<strong>Water quality advisory</strong><br>" +
     escapeHtml(reason);
   if (source !== "") {
-    html += "<br><span class=\"wq-advisory-meta wa-caption-s\">Source: " +
+    html += "<br><span class=\"wa-caption-s\">Source: " +
       escapeHtml(source) + "</span>";
   }
   if (updated !== "") {
-    html += "<br><span class=\"wq-advisory-meta wa-caption-s\">Updated " +
+    html += "<br><span class=\"wa-caption-s\">Updated " +
       renderRelativeTime(updated) + "</span>";
   }
   return html + "</wa-callout>";
@@ -1513,17 +1522,17 @@ function renderWqFloorCallout(wqfloor) {
 function renderGlanceTile(options) {
   const hasValueHtml = typeof options.valueHtml === "string" && options.valueHtml.length > 0;
   const valueClass = options.quiet
-    ? "glance-value wa-font-size-l wa-color-text-quiet"
-    : "glance-value wa-font-size-xl wa-font-weight-bold";
+    ? "wa-font-size-l wa-color-text-quiet"
+    : "wa-font-size-xl wa-font-weight-bold";
   const valueHtml = hasValueHtml ? options.valueHtml : escapeHtml(options.value);
   const sourceHtml = typeof options.sourceHtml === "string" && options.sourceHtml.length > 0
-    ? "<span class=\"glance-source wa-caption-s wa-color-text-quiet\">" + options.sourceHtml + "</span>"
+    ? "<span class=\"wa-caption-s\">" + options.sourceHtml + "</span>"
     : "";
   return "<wa-card class=\"glance-tile\" appearance=\"outlined\">" +
     "<div class=\"wa-stack wa-gap-2xs\">" +
-    "<wa-icon class=\"glance-icon wa-color-text-quiet wa-font-size-l\" name=\"" + options.icon + "\"></wa-icon>" +
+    "<wa-icon class=\"wa-color-text-quiet wa-font-size-l\" name=\"" + options.icon + "\"></wa-icon>" +
     "<span class=\"" + valueClass + "\">" + valueHtml + "</span>" +
-    "<span class=\"glance-caption wa-caption-s wa-font-weight-semibold\">" + escapeHtml(options.caption) + "</span>" +
+    "<span class=\"wa-caption-s wa-font-weight-semibold\">" + escapeHtml(options.caption) + "</span>" +
     sourceHtml +
     "</div>" +
     "</wa-card>";
@@ -1664,7 +1673,7 @@ function renderAtAGlance(beach, estimate, waterTemp, reading, nowIso) {
 
   if (tiles.length === 0) return "";
 
-  return "<section class=\"at-a-glance wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\">" +
+  return "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\">" +
     renderSectionHeading("glance-heading", "gauge", "At a glance") +
     "<div class=\"wa-grid wa-gap-m glance-grid\">" + tiles.join("\n") + "</div>" +
     "</section>";
@@ -1683,16 +1692,16 @@ function renderFlagLegend() {
     { color: "unknown", label: "Unknown", text: "No usable data right now. A gray flag is never a guess." }
   ];
   const lines = [];
-  lines.push("<wa-details class=\"flag-legend\" summary=\"What the flags mean\" " +
+  lines.push("<wa-details class=\"wa-font-size-s\" summary=\"What the flags mean\" " +
     "appearance=\"plain\" icon-placement=\"start\">");
-  lines.push("<ul class=\"flag-legend-list wa-stack wa-gap-xs\">");
+  lines.push("<ul class=\"flag-legend-list wa-list-plain wa-stack wa-gap-xs\">");
   for (const entry of entries) {
     lines.push("<li class=\"wa-flank wa-gap-s\">" +
       renderFlagIcon(entry.color, "wa-font-size-l") +
       "<span><strong>" + entry.label + "</strong> — " + entry.text + "</span></li>");
   }
   lines.push("</ul>");
-  lines.push("<p class=\"flag-legend-note\">Estimated flags are computed here from " +
+  lines.push("<p class=\"wa-color-text-quiet\">Estimated flags are computed here from " +
     "forecasts and alerts. Official flags are the ones posted at the beach. " +
     "Posted flags and lifeguards always win.</p>");
   lines.push("</wa-details>");
@@ -1733,14 +1742,14 @@ export function renderDetailPage(data) {
   // keeps the <p> off the page when there is none.
   const subtitle = subtitleName(beach);
   const subtitleHtml = subtitle ?
-    ("<p class=\"beach-subtitle wa-color-text-quiet wa-font-size-l\">" + escapeHtml(subtitle) + "</p>") : "";
+    ("<p class=\"wa-color-text-quiet wa-font-size-l\">" + escapeHtml(subtitle) + "</p>") : "";
 
   // Coordinates link out to OpenStreetMap (consistent with the footer's OSM
   // attribution), demoted to caption size. The water temperature is a tile
   // under the hero, not a fragment of this line.
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
-  const metaHtml = "<p class=\"beach-meta wa-caption-s\"><a class=\"coords-link icon-link wa-color-text-quiet\" href=\"" +
+  const metaHtml = "<p class=\"wa-caption-s\"><a class=\"coords-link icon-link wa-gap-2xs wa-color-text-quiet\" href=\"" +
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
@@ -1755,7 +1764,7 @@ export function renderDetailPage(data) {
   const verdictText = verdictSentence(estimate, flag,
     typeof beach.water_class === "string" ? beach.water_class : null);
   const verdictHtml = verdictText ?
-    ("<p class=\"hero-verdict\">" + escapeHtml(verdictText) + "</p>") : "";
+    ("<p class=\"wa-font-size-l\">" + escapeHtml(verdictText) + "</p>") : "";
   const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(beach.id);
 
   // Save toggle for the visitor's own list, in the hero's share row beside the
@@ -1763,7 +1772,7 @@ export function renderDetailPage(data) {
   // it, so a page without JS never shows a control that cannot work. The state
   // lives only in the visitor's browser; nothing about it reaches the server,
   // and it says nothing about the flag, so it carries no flag color.
-  const favoriteHtml = "<wa-button id=\"favorite-toggle\" class=\"favorite-toggle\" " +
+  const favoriteHtml = "<wa-button id=\"favorite-toggle\" " +
     "appearance=\"outlined\" size=\"s\" aria-pressed=\"false\" data-beach-id=\"" +
     escapeHtml(String(beach.id)) + "\" hidden>" +
     "<wa-icon id=\"favorite-icon\" slot=\"start\" name=\"star\" variant=\"regular\"></wa-icon>" +
@@ -1786,21 +1795,21 @@ export function renderDetailPage(data) {
   // nearby card morphs into.
   const heroHtml = "<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
     flag.keyword + "\">" +
-    "<a class=\"back-link icon-link wa-color-text-link\" href=\"/\">" +
+    "<a class=\"back-link icon-link wa-gap-2xs wa-color-text-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\" style=\"view-transition-name: beach-title;\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
-    "<p class=\"hero-flag wa-cluster wa-gap-s\">" +
-    "<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">" +
+    "<p class=\"wa-cluster wa-gap-s\">" +
+    "<span class=\"wa-font-size-l wa-font-weight-bold\">" +
     escapeHtml(FLAG_LABELS[flag.color]) + "</span>" +
     heroBadgeHtml +
     "</p>" +
     verdictHtml +
     metaHtml +
-    "<div class=\"hero-actions wa-cluster wa-gap-xs\">" +
-    "<wa-copy-button class=\"hero-copy\" value=\"" + escapeHtml(canonicalUrl) + "\" " +
+    "<div class=\"wa-cluster wa-gap-xs\">" +
+    "<wa-copy-button value=\"" + escapeHtml(canonicalUrl) + "\" " +
     "copy-label=\"Copy link\" success-label=\"Link copied\"></wa-copy-button>" +
-    "<wa-button id=\"hero-share\" class=\"hero-share\" appearance=\"outlined\" size=\"s\" hidden>" +
+    "<wa-button id=\"hero-share\" appearance=\"outlined\" size=\"s\" hidden>" +
     "<wa-icon slot=\"start\" name=\"share-nodes\"></wa-icon>Share</wa-button>" +
     favoriteHtml +
     "</div>" +
@@ -1846,8 +1855,9 @@ export function renderDetailPage(data) {
     stackParts.push(nearbyHtml);
   }
 
-  const mainHtml = heroHtml + glanceHtml + renderFlagLegend() +
-    "<div class=\"detail-stack wa-stack wa-gap-l\">" + stackParts.join("\n") + "</div>";
+  // Flat in main's own wa-stack wa-gap-l, so every card keeps --wa-space-l
+  // between it and the legend above and the card below.
+  const mainHtml = heroHtml + glanceHtml + renderFlagLegend() + stackParts.join("\n");
 
   // The tick relabeller ships only when there are ticks to relabel: the wave
   // section also renders as a bare now-stat (the buoy case), which has no strip.
@@ -1872,17 +1882,21 @@ export function renderErrorPage(data) {
   const status = (data && data.status) ? data.status : 500;
   const message = (data && data.message) ? data.message : "Something went wrong.";
 
+  // The error page is a whole page body, so it takes the centered empty-state
+  // block rather than a callout, which belongs inline beside other content. The
+  // icon carries the signal the callout's color band used to.
+  //
   // The status code is this page's title, so it must be a real heading rather
   // than a styled <strong>; the error page would otherwise be the only page with
   // no h1. wa-font-size-xl keeps it from reading louder than the sibling pages'
-  // titles, and its block-start margin is zeroed by the "wa-callout h1" rule in
-  // styles.js so the callout keeps its own top padding.
-  const mainHtml = "<wa-callout variant=\"danger\">" +
-    "<wa-icon slot=\"icon\" name=\"triangle-exclamation\"></wa-icon>" +
+  // titles, and the stack zero-margins its children, so the heading needs no
+  // margin rule of its own.
+  const mainHtml = "<div class=\"wa-stack wa-gap-l wa-align-items-center wa-text-center\">" +
+    "<wa-icon name=\"triangle-exclamation\" class=\"wa-font-size-4xl wa-color-text-quiet\"></wa-icon>" +
     "<h1 class=\"wa-font-size-xl\">" + escapeHtml(String(status)) + "</h1>" +
-    escapeHtml(message) + "<br>" +
-    "<a href=\"/\">Return to the beach list</a>" +
-    "</wa-callout>";
+    "<p class=\"wa-color-text-quiet\">" + escapeHtml(message) + "</p>" +
+    "<wa-button variant=\"brand\" href=\"/\">Return to the beach list</wa-button>" +
+    "</div>";
 
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter());
   // No meta: an error page keeps the site's icon and theme colors but claims no

@@ -190,33 +190,19 @@ export function trimWaveSeries(waves, nowIso) {
   };
 }
 
-// Hazard-band presentation: quiet fill, matching on-quiet text and loud edge
-// per flag color, expressed through the semantic danger/warning
-// theme-assignment tokens rather than raw red/yellow tints. Semantic tokens
-// invert with the color scheme, since matter.css maps each to a different tint
-// in its light and dark blocks, where raw tints are single static values. The
-// default variant mapping resolves danger to red and warning to yellow, so
-// these preserve the current hues, and double-red shares the danger treatment
-// because the band label carries the severity. The yellow edge uses
-// warning-border-normal rather than -loud: -loud resolves to yellow-50, which
-// reads olive in the mild palette (the tint PLAN.md section 9 avoids for the
-// strip's yellow band).
+// Hazard-band presentation: one Web Awesome color-variant class per flag color.
+// The class remaps the group-less --wa-color-fill-quiet / -on-quiet /
+// -border-* tokens the .wave-alert-band rule in src/frontend/styles.js is
+// written against, so a new severity costs a class name rather than a token
+// triplet travelling through two modules. Semantic variants invert with the
+// color scheme, since matter.css maps each to a different tint in its light and
+// dark blocks, where raw tints are single static values. The default variant
+// mapping resolves danger to red and warning to yellow, and double-red shares
+// the danger treatment because the band label carries the severity.
 const HAZARD_STYLES = {
-  "double-red": {
-    bgVar: "var(--wa-color-danger-fill-quiet)",
-    fgVar: "var(--wa-color-danger-on-quiet)",
-    edgeVar: "var(--wa-color-danger-border-loud)"
-  },
-  "red": {
-    bgVar: "var(--wa-color-danger-fill-quiet)",
-    fgVar: "var(--wa-color-danger-on-quiet)",
-    edgeVar: "var(--wa-color-danger-border-loud)"
-  },
-  "yellow": {
-    bgVar: "var(--wa-color-warning-fill-quiet)",
-    fgVar: "var(--wa-color-warning-on-quiet)",
-    edgeVar: "var(--wa-color-warning-border-normal)"
-  }
+  "double-red": { variantClass: "wa-danger" },
+  "red": { variantClass: "wa-danger" },
+  "yellow": { variantClass: "wa-warning" }
 };
 
 // Hazard bands overlaid above the wave strip: one band per flag-relevant NWS
@@ -226,7 +212,7 @@ const HAZARD_STYLES = {
 // of claiming one). estimate is the stored FlagEstimate record — one without
 // alertDetails/ripCurrentRisk simply produces no bands. Colors come
 // from rules.js (alertColorForEvent / ripRiskColor), never restated here.
-// -> [{ kind, label, text, leftPct, widthPct, bgVar, fgVar, edgeVar }]
+// -> [{ kind, label, text, leftPct, widthPct, variantClass }]
 export function computeHazardBands(estimate, totalHours, nowIso) {
   const out = [];
   if (estimate === null || typeof estimate !== "object") {
@@ -285,9 +271,7 @@ export function computeHazardBands(estimate, totalHours, nowIso) {
       text: alertAuthorityForEvent(entry.event) + " alert: " + entry.event + " — " + range,
       leftPct: (startHour / total) * 100,
       widthPct: ((endHour - startHour) / total) * 100,
-      bgVar: style.bgVar,
-      fgVar: style.fgVar,
-      edgeVar: style.edgeVar
+      variantClass: style.variantClass
     });
   }
 
@@ -301,9 +285,7 @@ export function computeHazardBands(estimate, totalHours, nowIso) {
       text: "Rip current risk " + risk + " — from the latest NWS surf zone forecast",
       leftPct: 0,
       widthPct: 100,
-      bgVar: style.bgVar,
-      fgVar: style.fgVar,
-      edgeVar: style.edgeVar
+      variantClass: style.variantClass
     });
   }
 

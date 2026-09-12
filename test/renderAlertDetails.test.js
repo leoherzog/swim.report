@@ -53,7 +53,7 @@ describe("estimate card: per-alert disclosures", function () {
       "icon-placement=\"start\">");
     // Collapsed by default: the page still leads with this beach's own answer.
     expect(card).not.toContain("<wa-details class=\"alert-detail\" open");
-    expect(card).toContain("<span class=\"alert-detail-event wa-font-weight-semibold\">Beach Hazards Statement</span>");
+    expect(card).toContain("<span class=\"wa-font-weight-semibold\">Beach Hazards Statement</span>");
     expect(card).toContain("<strong>What</strong> High waves and dangerous currents expected.");
     expect(card).toContain("Remain out of the water to avoid hazardous swimming conditions.");
     expect(card).toContain("Issued by NWS Green Bay WI for Door; Kewaunee; Manitowoc");
@@ -113,7 +113,8 @@ describe("estimate card: per-alert disclosures", function () {
       onset: "2026-07-05T10:00:00.000Z",
       ends: "2026-07-06T02:00:00.000Z"
     }]));
-    expect(card).toContain("<div class=\"alert-detail alert-detail-bare\">");
+    expect(card).toContain("<div class=\"alert-detail alert-detail-bare wa-cluster " +
+      "wa-align-items-baseline\">");
     expect(card).not.toContain("<wa-details class=\"alert-detail\"");
     expect(card).toContain("Rip Current Statement");
   });

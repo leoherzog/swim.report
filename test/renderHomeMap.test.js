@@ -86,8 +86,8 @@ describe("renderListPage home map", () => {
 
   it("orders intro before map before search", () => {
     const html = renderListPage({ entries: [{ beach: makeBeach(), estimate: null, official: null, distanceMi: null }] });
-    const introIdx = html.indexOf("list-intro");
-    const mapIdx = html.indexOf("home-map-section");
+    const introIdx = html.indexOf("<h1>Swim Report</h1>");
+    const mapIdx = html.indexOf("id=\"home-map\"");
     const searchIdx = html.indexOf("beach-search-form");
     expect(introIdx).toBeGreaterThan(-1);
     expect(mapIdx).toBeGreaterThan(-1);

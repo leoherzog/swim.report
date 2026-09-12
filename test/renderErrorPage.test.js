@@ -2,9 +2,9 @@
 // Covers renderErrorPage (src/frontend/render.js) — the HTML body served by
 // src/router.js for 404s and by the src/index.js fetch catch-all for 500s.
 // Router tests only assert status codes and cache headers; this file asserts
-// the actual page markup: the danger callout, status/message rendering,
-// defaulting when data is missing, HTML-escaping of the message, and the
-// footer disclaimer invariant that every page must carry.
+// the actual page markup: the centered empty-state block, status/message
+// rendering, defaulting when data is missing, HTML-escaping of the message, and
+// the footer disclaimer invariant that every page must carry.
 
 import { describe, it, expect } from "vitest";
 import { renderErrorPage } from "../src/frontend/render.js";
@@ -12,14 +12,14 @@ import { renderErrorPage } from "../src/frontend/render.js";
 describe("renderErrorPage — 404 shape", () => {
   const html = renderErrorPage({ status: 404, message: "Beach not found" });
 
-  it("renders a danger callout with the status and message", () => {
-    expect(html).toContain("<wa-callout variant=\"danger\">");
+  it("renders a centered status block with the status and message", () => {
+    expect(html).toContain("<div class=\"wa-stack wa-gap-l wa-align-items-center wa-text-center\">");
     expect(html).toContain("<h1 class=\"wa-font-size-xl\">404</h1>");
     expect(html).toContain("Beach not found");
   });
 
   it("links back to the beach list", () => {
-    expect(html).toContain("<a href=\"/\">Return to the beach list</a>");
+    expect(html).toContain("<wa-button variant=\"brand\" href=\"/\">Return to the beach list</wa-button>");
   });
 
   it("titles the document with the status code", () => {

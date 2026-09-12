@@ -159,7 +159,7 @@ describe("park-name-first rendering", () => {
     });
     const nameIdx = html.indexOf("<span class=\"beach-row-name wa-font-weight-semibold\">Holland State Park");
     expect(nameIdx).toBeGreaterThan(-1);
-    expect(html).toContain("<span class=\"beach-row-subtitle\">Ottawa Beach</span>");
+    expect(html).toContain("<span class=\"beach-row-subtitle wa-caption-s\">Ottawa Beach</span>");
     // search filter must match both names
     expect(html).toContain("data-name=\"holland state park ottawa beach\"");
   });
@@ -195,7 +195,7 @@ describe("park-name-first rendering", () => {
     });
     expect(html).toContain("<title>Holland State Park — Swim Report</title>");
     expect(html).toContain("<span>Holland State Park</span></h1>");
-    expect(html).toContain("<p class=\"beach-subtitle wa-color-text-quiet wa-font-size-l\">Ottawa Beach</p>");
+    expect(html).toContain("<p class=\"wa-color-text-quiet wa-font-size-l\">Ottawa Beach</p>");
   });
 });
 

@@ -40,7 +40,7 @@ describe("detail-page favorite toggle", () => {
   it("renders a hidden aria-pressed star button carrying the beach id", () => {
     const html = detailHtml({});
     expect(html).toContain(
-      "<wa-button id=\"favorite-toggle\" class=\"favorite-toggle\" " +
+      "<wa-button id=\"favorite-toggle\" " +
       "appearance=\"outlined\" size=\"s\" aria-pressed=\"false\" " +
       "data-beach-id=\"osm-way-505668572\" hidden>" +
       "<wa-icon id=\"favorite-icon\" slot=\"start\" name=\"star\" variant=\"regular\"></wa-icon>" +
@@ -50,11 +50,11 @@ describe("detail-page favorite toggle", () => {
 
   it("sits in the hero share row, after the copy and share controls", () => {
     const html = detailHtml({});
-    const actionsAt = html.indexOf("<div class=\"hero-actions");
-    const copyAt = html.indexOf("<wa-copy-button class=\"hero-copy\"");
+    const actionsAt = html.indexOf("<div class=\"wa-cluster wa-gap-xs\">");
+    const copyAt = html.indexOf("<wa-copy-button value=");
     const shareAt = html.indexOf("<wa-button id=\"hero-share\"");
     const buttonAt = html.indexOf("<wa-button id=\"favorite-toggle\"");
-    const glanceAt = html.indexOf("<section class=\"at-a-glance");
+    const glanceAt = html.indexOf("aria-labelledby=\"glance-heading\"");
     expect(actionsAt).toBeLessThan(copyAt);
     expect(copyAt).toBeLessThan(shareAt);
     expect(shareAt).toBeLessThan(buttonAt);
@@ -77,12 +77,12 @@ describe("list-page \"Your Beaches\" section", () => {
   it("renders the section empty and hidden, above the main list", () => {
     const html = listHtml();
     expect(yourBeaches(html)).toBe(
-      "<section id=\"your-beaches\" class=\"your-beaches wa-stack wa-gap-s\" " +
+      "<section id=\"your-beaches\" class=\"wa-stack wa-gap-s\" " +
       "aria-labelledby=\"your-beaches-heading\" hidden>" +
-      "<h2 id=\"your-beaches-heading\" class=\"your-beaches-heading\">Your Beaches</h2>" +
-      "<p id=\"your-beaches-saved-label\" class=\"your-beaches-label wa-caption-s\" hidden>Saved</p>" +
+      "<h2 id=\"your-beaches-heading\" class=\"wa-font-size-l\">Your Beaches</h2>" +
+      "<p id=\"your-beaches-saved-label\" class=\"wa-caption-s\" hidden>Saved</p>" +
       "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
-      "<p id=\"your-beaches-recent-label\" class=\"your-beaches-label wa-caption-s\" hidden>" +
+      "<p id=\"your-beaches-recent-label\" class=\"wa-caption-s\" hidden>" +
       "Recently viewed</p>" +
       "<ul id=\"your-beaches-recent\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
       "</section>");

@@ -638,7 +638,8 @@ describe("renderListPage proximity output", () => {
       nowIso: "2026-07-05T12:30:00.000Z"
     });
     expect(html).toContain("with-header-actions");
-    expect(html).toContain("<div slot=\"header-actions\">");
+    expect(html).toContain("<span slot=\"header-actions\" class=\"wa-cluster wa-gap-2xs " +
+      "wa-justify-content-end wa-font-size-2xs\">");
     // Labels render as quiet badge chips — the source url is never hyperlinked in
     // the card, and the footer credits NOAA/NWS rather than the wave-model page,
     // so a provenance url must not appear in the document at all.
@@ -675,11 +676,11 @@ describe("renderListPage proximity output", () => {
     const officialCard = html.slice(html.indexOf("class=\"official-card\""),
       html.indexOf("class=\"estimate-card\""));
     expect(officialCard).toContain("with-header-actions");
-    expect(officialCard).toContain("<div slot=\"header-actions\">");
     // Scraped official sources are the one case that links out — hostname
     // ("www." stripped) linking to the source page.
     expect(officialCard).toContain(
-      "<a href=\"https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php\" " +
+      "<a slot=\"header-actions\" class=\"wa-font-size-s\" " +
+      "href=\"https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php\" " +
       "rel=\"noopener noreferrer\">southhavenmi.gov</a>"
     );
     expect(officialCard).toContain(
@@ -771,7 +772,7 @@ describe("handleDetail: state from the row, water temperature from KV", () => {
     const res = await handleRequest(detailRequest("osm-way-1"), made.env);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("<wa-callout class=\"wq-advisory\" variant=\"danger\" size=\"s\">");
+    expect(html).toContain("<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>");
     expect(html).toContain("beach posted for elevated E. coli");
   });
 
@@ -886,7 +887,7 @@ describe("handleDetail nearby beaches", () => {
     const res = await handleRequest(detailRequest("osm-way-9"), env, makeCtx());
     expect(res.status).toBe(200);
     const html = await res.text();
-    const section = sliceBetween(html, "<section class=\"nearby", "</section>");
+    const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
     expect(section).toContain("Nearby beaches");
     expect(section.split("<wa-card class=\"nearby-card\"").length - 1).toBe(3);
     expect(section.indexOf("/beach/b-1")).toBeLessThan(section.indexOf("/beach/b-2"));
@@ -915,7 +916,7 @@ describe("handleDetail nearby beaches", () => {
     });
     const html = await (await handleRequest(detailRequest("osm-way-9"), env, makeCtx())).text();
     const first = sliceBetween(
-      sliceBetween(html, "<section class=\"nearby", "</section>"),
+      sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>"),
       "<wa-card class=\"nearby-card\"", "</wa-card>"
     );
     expect(first).toContain("UNKNOWN");
@@ -926,7 +927,7 @@ describe("handleDetail nearby beaches", () => {
     const { env } = nearbyEnv([self]);
     const res = await handleRequest(detailRequest("osm-way-9"), env, makeCtx());
     const html = await res.text();
-    expect(html).not.toContain("<section class=\"nearby");
+    expect(html).not.toContain("aria-labelledby=\"nearby-heading\"");
     expect(html).not.toContain("Nearby beaches");
   });
 
@@ -934,7 +935,7 @@ describe("handleDetail nearby beaches", () => {
     const { env } = nearbyEnv([self, candidates[1]]);
     const res = await handleRequest(detailRequest("osm-way-9"), env, makeCtx());
     const html = await res.text();
-    expect(html).not.toContain("<section class=\"nearby");
+    expect(html).not.toContain("aria-labelledby=\"nearby-heading\"");
   });
 
   // The statement the nearby read issued: the one ordered read with the fetch cap.
@@ -958,7 +959,7 @@ describe("handleDetail nearby beaches", () => {
     expect(distanceMi(self.lat, self.lon, past.lat, past.lon)).toBeGreaterThan(50);
     const { env } = nearbyEnv([self, east, north, past]);
     const html = await (await handleRequest(detailRequest("osm-way-9"), env, makeCtx())).text();
-    const section = sliceBetween(html, "<section class=\"nearby", "</section>");
+    const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
     expect(section).toContain("/beach/b-east");
     expect(section).toContain("/beach/b-north");
     expect(section).not.toContain("/beach/b-past");
@@ -982,7 +983,7 @@ describe("handleDetail nearby beaches", () => {
     const east = { id: "b-east-seam", name: "East of the seam", lat: 52.0, lon: 179.95 };
     const { env, statements } = nearbyEnv([west, east]);
     const html = await (await handleRequest(detailRequest("osm-way-8"), env, makeCtx())).text();
-    expect(sliceBetween(html, "<section class=\"nearby", "</section>")).toContain("/beach/b-east-seam");
+    expect(sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>")).toContain("/beach/b-east-seam");
     const st = nearbySql(statements);
     expect(st.sql).not.toContain("lon BETWEEN");
     expect(st.args.length).toBe(3);
@@ -1060,8 +1061,8 @@ describe("renderDetailPage nearby section placement", () => {
   it("sits last, below the wave map and the webcam", () => {
     const html = renderDetailPage({ beach: base, estimate: null, official: null, nearby: nearby, nowIso: "2026-07-05T12:00:00.000Z" });
     const map = html.indexOf("<section class=\"wave-map\"");
-    const near = html.indexOf("<section class=\"nearby");
-    const cam = html.indexOf("<section class=\"webcam");
+    const near = html.indexOf("aria-labelledby=\"nearby-heading\"");
+    const cam = html.indexOf("aria-labelledby=\"webcam-heading\"");
     expect(map).toBeGreaterThan(-1);
     // A live picture of the beach outranks links away from it, so the webcam
     // comes first and the nearby cards close the page.
@@ -1072,7 +1073,7 @@ describe("renderDetailPage nearby section placement", () => {
 
   it("is absent when the router passes no nearby list", () => {
     const html = renderDetailPage({ beach: base, estimate: null, official: null, nowIso: "2026-07-05T12:00:00.000Z" });
-    expect(html).not.toContain("<section class=\"nearby");
+    expect(html).not.toContain("aria-labelledby=\"nearby-heading\"");
   });
 });
 
@@ -1781,7 +1782,7 @@ describe("every surface shows the one displayFlag decision", () => {
       const res = await handleRequest(getRequest("/beach/" + HOST.id), envFor(fixture, id), makeCtx());
       expect(res.status).toBe(200);
       const html = await res.text();
-      const section = sliceBetween(html, "<section class=\"nearby", "</section>");
+      const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
       const card = enclosing(section, id, "<wa-card class=\"nearby-card\"", "</wa-card>");
       expectCompactFlag(card, d);
     });
@@ -1792,12 +1793,12 @@ describe("every surface shows the one displayFlag decision", () => {
       const html = await res.text();
       expect(html).toContain("<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
         d.keyword + "\">");
-      expect(sliceBetween(html, "<span class=\"hero-flag-label", "</span>")).toBe(
-        "<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">" +
+      expect(sliceBetween(html, "<span class=\"wa-font-size-l wa-font-weight-bold\">", "</span>")).toBe(
+        "<span class=\"wa-font-size-l wa-font-weight-bold\">" +
         HERO_LABELS[d.color] + "</span>");
       const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
       expect(h1).toContain("flag-icon-" + d.keyword);
-      const heroFlag = sliceBetween(html, "<p class=\"hero-flag", "</p>");
+      const heroFlag = sliceBetween(html, "<p class=\"wa-cluster wa-gap-s\">", "</p>");
       expect(heroFlag.indexOf("OFFICIAL</wa-badge>") !== -1).toBe(d.source === "official");
       expect(heroFlag.indexOf(">ESTIMATE</wa-badge>") !== -1).toBe(d.source === "estimate");
       expect(html).toContain("<meta property=\"og:image\" content=\"https://swim.report/og/" +
@@ -2141,7 +2142,7 @@ describe("detail-page title flag precedence", () => {
   // The hero's flag label is what names the display color in text; the title
   // icon only tints it.
   function heroLabelOf(html) {
-    return sliceBetween(html, "<span class=\"hero-flag-label", "</span>");
+    return sliceBetween(html, "<span class=\"wa-font-size-l wa-font-weight-bold\">", "</span>");
   }
 
   it("prefers the official color over the estimate", () => {
@@ -2205,7 +2206,7 @@ describe("detail-page title flag: raise-only over an aged official reading", () 
     const h1 = titleOf(html);
     expect(h1).toContain("flag-icon-red");
     // The estimate supplied that red, so the hero credits the estimate for it.
-    expect(html).toContain("<span class=\"hero-flag-label wa-font-size-l wa-font-weight-bold\">RED</span>");
+    expect(html).toContain("<span class=\"wa-font-size-l wa-font-weight-bold\">RED</span>");
     expect(h1).not.toContain("flag-icon-yellow");
   });
 
@@ -2287,13 +2288,13 @@ describe("renderSourceLabels edge shapes", () => {
 
   it("omits badges and header-actions entirely for an empty sources array", () => {
     const card = cardWithSources([]);
-    expect(card).not.toContain("source-badges");
+    expect(card).not.toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>");
     expect(card).not.toContain("with-header-actions");
   });
 
   it("skips a source object with null label and url (no empty badge)", () => {
     const card = cardWithSources([{ label: null, url: null }]);
-    expect(card).not.toContain("source-badges");
+    expect(card).not.toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" pill>");
     expect(card).not.toContain("with-header-actions");
   });
 });
@@ -2515,14 +2516,14 @@ describe("renderListPage green-only filter and distance origin", () => {
 
   it("renders the green-only switch above the list, inert without JS", () => {
     const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
-    expect(html).toContain("<div class=\"list-filter\">");
     // data-flag is the row's displayFlag keyword, which either record may supply.
     expect(html).toContain(
-      "<wa-switch id=\"green-only-filter\" size=\"s\">Green flags only</wa-switch>");
+      "<wa-switch id=\"green-only-filter\" size=\"s\" class=\"wa-align-self-end\">" +
+      "Green flags only</wa-switch>");
     expect(html).not.toContain("Estimated green only");
     // The control sits above the list, and the server never pre-filters: the row
     // renders whether or not the switch would hide it.
-    expect(html.indexOf("class=\"list-filter\"")).toBeLessThan(html.indexOf("id=\"beach-list-items\""));
+    expect(html.indexOf("id=\"green-only-filter\"")).toBeLessThan(html.indexOf("id=\"beach-list-items\""));
     expect(html).toContain("data-flag=\"unknown\"");
   });
 
@@ -2531,9 +2532,6 @@ describe("renderListPage green-only filter and distance origin", () => {
     // string constant, so the assertion names the element, not the id.
     const empty = renderListPage({ entries: [], nowIso: NOW_ISO });
     expect(empty).not.toContain("<wa-switch id=\"green-only-filter\"");
-    expect(empty).not.toContain("class=\"list-filter\"");
-    // The controls row collapses rather than leaving a gap of white space.
-    expect(PAGE_STYLES).toContain(".list-controls:empty {");
     // A search miss is equally rowless, so it gets no filter over nothing either.
     const miss = renderListPage({ entries: [], nowIso: NOW_ISO, query: "zzz" });
     expect(miss).not.toContain("<wa-switch id=\"green-only-filter\"");
@@ -2548,21 +2546,17 @@ describe("renderListPage green-only filter and distance origin", () => {
       near: "42.658,-86.211"
     });
     expect(html).toContain(
-      "<h2 id=\"nearby-heading\" class=\"nearby-heading\">Nearby</h2>");
+      "<h2 id=\"nearby-heading\" class=\"wa-font-size-l\">Nearby</h2>");
     // The heading names its own section, so the list is a labelled region.
     expect(html).toContain(
       "<section class=\"beach-list-section wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">");
     const headingAt = html.indexOf("id=\"nearby-heading\"");
     expect(html.indexOf("id=\"your-beaches-heading\"")).toBeLessThan(headingAt);
     expect(headingAt).toBeLessThan(html.indexOf("id=\"beach-list-items\""));
-    // Both headings are one size, set by one grouped rule.
-    expect(PAGE_STYLES).toContain(".nearby-heading {");
   });
 
   it("omits the Nearby heading when the list is not proximity-sorted", () => {
     const html = renderListPage({ entries: [ROW], nowIso: NOW_ISO });
-    // The class still ships inside PAGE_STYLES, so the assertion names the
-    // rendered heading rather than the string.
     expect(html).not.toContain("<h2 id=\"nearby-heading\"");
     expect(html).not.toContain("aria-labelledby=\"nearby-heading\"");
     expect(html).toContain("<section class=\"beach-list-section wa-stack wa-gap-s\">");
