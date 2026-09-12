@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import { renderDetailPage } from "../src/frontend/render.js";
 import { NOW_ISO, beachWith } from "./helpers/render.js";
 
-const HEADING = "<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">" +
+const HEADING = "<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">" +
   "<wa-icon name=\"video\"></wa-icon>Nearby webcam</h2>";
 const NOTE = "<p class=\"wa-caption-s\">This camera is near this beach " +
   "and may not show the beach itself.</p>";
@@ -34,7 +34,7 @@ describe("nearby-webcam section", () => {
     // the section is labeled by the shared detail-page heading, which keeps the
     // cam honestly described as nearby rather than as this beach's own view
     expect(html).toContain("aria-labelledby=\"webcam-heading\"");
-    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
+    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">");
     expect(html).toContain("<wa-icon name=\"video\"></wa-icon>Nearby webcam</h2>");
     // same plain-iframe wrapper as the wave map, so the player's own controls
     // work and the title reaches the frame as its accessible name

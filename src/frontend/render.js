@@ -11,6 +11,7 @@ import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { ROW_TRANSITION_SCRIPT } from "./rowTransitionScript.js";
+import { renderFlagSvg } from "./flagGlyph.js";
 import { decidedAlertDetails, alertInEffectAt, normalizeColor } from "../rules.js";
 import { STALE_MS, isStale, collapseFlagColor, displayFlag } from "../displayFlag.js";
 import { alertsCheckable } from "../alertsCheckable.js";
@@ -235,7 +236,7 @@ function renderFlagIcon(color, sizeClass, slotName, labelText, transitionName) {
     const labelAttrs = labelText
       ? (" role=\"img\" aria-label=\"" + escapeHtml(labelText) + "\"")
       : "";
-    return "<span" + slotAttr + labelAttrs + transitionAttr + " class=\"wa-cluster wa-gap-3xs\">" +
+    return "<span" + slotAttr + labelAttrs + transitionAttr + " class=\"wa-cluster wa-gap-2xs\">" +
       "<wa-icon name=\"flag\" class=\"" + iconClass + "\"></wa-icon>" +
       "<wa-icon name=\"flag\" class=\"" + iconClass + "\"></wa-icon>" +
       "</span>";
@@ -314,7 +315,7 @@ function renderSourceLabels(sources) {
     return "";
   }
   return "<span slot=\"header-actions\" class=\"wa-cluster wa-gap-2xs " +
-    "wa-justify-content-end wa-font-size-2xs\">" + items.join("\n") + "</span>";
+    "wa-justify-content-end wa-font-size-xs\">" + items.join("\n") + "</span>";
 }
 
 // Official cards are the one place a source renders as a hyperlink: the
@@ -325,15 +326,15 @@ function renderOfficialSourceLink(url) {
   if (!isUrlLike(url)) {
     return "";
   }
-  return "<a slot=\"header-actions\" class=\"wa-font-size-s\" href=\"" + escapeHtml(url) +
+  return "<a slot=\"header-actions\" class=\"wa-body-s\" href=\"" + escapeHtml(url) +
     "\" rel=\"noopener noreferrer\">" + escapeHtml(hostnameOf(url)) + "</a>";
 }
 
 function renderFlagRow(color, reason) {
-  return "<div class=\"wa-flank wa-gap-m\">" +
+  return "<div class=\"wa-flank wa-gap-s\">" +
     renderFlagIcon(color, "wa-font-size-4xl") +
-    "<div class=\"wa-stack wa-gap-3xs\">" +
-    "<span class=\"wa-font-size-xl wa-font-weight-bold\">" + escapeHtml(FLAG_LABELS[color]) + "</span>" +
+    "<div class=\"wa-stack wa-gap-2xs\">" +
+    "<span class=\"wa-heading-xl\">" + escapeHtml(FLAG_LABELS[color]) + "</span>" +
     "<p>" + escapeHtml(reason) + "</p>" +
     "</div>" +
     "</div>";
@@ -482,7 +483,7 @@ function renderAlertEntry(entry, nowIso) {
   return "<wa-details class=\"alert-detail\" appearance=\"plain\" icon-placement=\"start\">" +
     "<span slot=\"summary\" class=\"alert-detail-summary wa-cluster wa-align-items-baseline\">" +
     summaryHtml + "</span>" +
-    "<div class=\"wa-stack wa-gap-s wa-font-size-s\">" + body.join("") + "</div>" +
+    "<div class=\"wa-stack wa-gap-s wa-body-s\">" + body.join("") + "</div>" +
     "</wa-details>";
 }
 
@@ -610,7 +611,7 @@ function renderOfficialCard(official, nowIso) {
 }
 
 function renderBrandHeader() {
-  return "<a class=\"icon-link wa-gap-xs wa-color-text-normal wa-font-size-l wa-font-weight-bold\" href=\"/\">" +
+  return "<a class=\"icon-link wa-gap-xs wa-color-text-normal wa-heading-l\" href=\"/\">" +
     "<wa-icon name=\"person-swimming\"></wa-icon>Swim Report</a>";
 }
 
@@ -682,12 +683,25 @@ function renderPageShell(headerHtml, mainHtml, footerHtml, mainClass) {
   return lines.join("\n");
 }
 
-// Site identity, on every page including the error page: the flag-on-wave mark,
-// the installable manifest, and the two surface colors a browser paints its
-// chrome with. All four files are static assets under public/, so nothing here
-// is a request-path read.
+// The tab icon. With no color it is the static brand flag under public/; on a
+// beach page it is the same glyph in the beach's display color, inlined as a
+// data: URI so the request path serves nothing new for it and the tab reads the
+// flag before the page does. The SVG carries its own dark-scheme fill.
+function renderIconTag(iconColor) {
+  if (!iconColor) {
+    return "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">";
+  }
+  const color = normalizeColor(iconColor);
+  const label = color === "unknown" ? "Flag status unknown" : color.replace("-", " ") + " flag";
+  return "<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml," +
+    encodeURIComponent(renderFlagSvg(color, label)) + "\">";
+}
+
+// Site identity, on every page including the error page: the touch icon, the
+// installable manifest, and the two surface colors a browser paints its chrome
+// with. All three files are static assets under public/, so nothing here is a
+// request-path read.
 const HEAD_IDENTITY_TAGS = [
-  "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">",
   "<link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/apple-touch-icon.png\">",
   "<link rel=\"manifest\" href=\"/manifest.webmanifest\">",
   "<meta name=\"theme-color\" media=\"(prefers-color-scheme: light)\" content=\"" +
@@ -697,7 +711,8 @@ const HEAD_IDENTITY_TAGS = [
 ];
 
 // Description, canonical URL and share cards for one page, from a meta object of
-// { title, description, path, flagColor }. Returns no lines at all when meta is
+// { title, description, path, flagColor, iconColor }; iconColor is read only by
+// renderIconTag. Returns no lines at all when meta is
 // absent, which is how the error page opts out: a 404 must never claim a
 // canonical URL or offer itself as a share card.
 function renderShareMeta(meta) {
@@ -745,6 +760,7 @@ function renderDocument(title, bodyHtml, meta) {
   for (let i = 0; i < metaLines.length; i = i + 1) {
     lines.push(metaLines[i]);
   }
+  lines.push(renderIconTag(meta ? meta.iconColor : null));
   for (let i = 0; i < HEAD_IDENTITY_TAGS.length; i = i + 1) {
     lines.push(HEAD_IDENTITY_TAGS[i]);
   }
@@ -924,7 +940,7 @@ function span(cls, text) {
 // wa-stack, whose child reset supplies the zero margin. The id is what each
 // section's aria-labelledby points at.
 function renderSectionHeading(id, iconName, text) {
-  return "<h2 id=\"" + id + "\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">" +
+  return "<h2 id=\"" + id + "\" class=\"wa-cluster wa-gap-xs wa-heading-l\">" +
     "<wa-icon name=\"" + iconName + "\"></wa-icon>" + escapeHtml(text) + "</h2>";
 }
 
@@ -995,7 +1011,7 @@ function renderHomeMap(near, location) {
 function renderYourBeaches() {
   return "<section id=\"your-beaches\" class=\"wa-stack wa-gap-s\" " +
     "aria-labelledby=\"your-beaches-heading\" hidden>" +
-    "<h2 id=\"your-beaches-heading\" class=\"wa-font-size-l\">Your Beaches</h2>" +
+    "<h2 id=\"your-beaches-heading\" class=\"wa-heading-l\">Your Beaches</h2>" +
     "<p id=\"your-beaches-saved-label\" class=\"wa-caption-s\" hidden>Saved</p>" +
     "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
     "<p id=\"your-beaches-recent-label\" class=\"wa-caption-s\" hidden>Recently viewed</p>" +
@@ -1009,12 +1025,19 @@ function renderYourBeaches() {
 // database is empty.
 function listEmptyMessage(idsMode, hasEntries, query) {
   if (idsMode) {
-    return "No beaches match those ids.";
+    return "No beaches match those ids";
   }
   if (hasEntries || query.length > 0) {
-    return "No beaches match your search.";
+    return "No beaches match your search";
   }
-  return "No beaches found yet. Check back soon.";
+  return "No beaches found yet";
+}
+
+// Supporting copy under the empty-state heading. Only the empty database has a
+// next step to offer; a search miss and an unrecognized id list say it all in
+// the heading.
+function listEmptyNote(idsMode, hasEntries, query) {
+  return (!idsMode && !hasEntries && query.length === 0) ? "Check back soon." : "";
 }
 
 export function renderListPage(data) {
@@ -1043,10 +1066,11 @@ export function renderListPage(data) {
   // it gets the no-match copy just like the client-side filter miss, and an ids
   // page with zero rows is an unrecognized id list rather than either.
   const emptyMessage = listEmptyMessage(idsMode, hasEntries, query);
-  const emptyStyle = hasEntries ? " style=\"display: none;\"" : "";
+  const emptyNote = listEmptyNote(idsMode, hasEntries, query);
+  const emptyHiddenAttr = hasEntries ? " hidden" : "";
   const searchAllHtml = offerSearchAll ?
-    ("<wa-button type=\"submit\" form=\"beach-search-form\" " +
-      "appearance=\"outlined\" size=\"s\">Search all beaches</wa-button>") : "";
+    ("<wa-button type=\"submit\" form=\"beach-search-form\" variant=\"brand\">" +
+      "Search all beaches</wa-button>") : "";
 
   const introHtml = "<section class=\"wa-stack wa-gap-xs\">" +
     "<h1>Swim Report</h1>" +
@@ -1105,15 +1129,22 @@ export function renderListPage(data) {
   // heading is not swapped, and it does not have to be — filtering or
   // re-fetching a distance-sorted list yields distance-sorted rows.
   const nearbyHeadingHtml = sortedByProximity ?
-    "<h2 id=\"nearby-heading\" class=\"wa-font-size-l\">Nearby</h2>" : "";
+    "<h2 id=\"nearby-heading\" class=\"wa-heading-l\">Nearby</h2>" : "";
   const listLabelAttr = sortedByProximity ? " aria-labelledby=\"nearby-heading\"" : "";
   const listHtml = "<section class=\"beach-list-section wa-stack wa-gap-s\"" + listLabelAttr + ">" +
     nearbyHeadingHtml +
     "<ul class=\"beach-list wa-list-plain wa-stack wa-gap-xs\" id=\"beach-list-items\"" + completeAttr + ">" + rowsHtml + "</ul>" +
-    "<p id=\"beach-list-empty\"" + emptyStyle + " class=\"empty-state wa-color-text-quiet wa-text-center\">" +
-    "<span class=\"empty-state-message\">" + escapeHtml(emptyMessage) + "</span>" +
+    // The centered empty-state block: glyph, heading, optional note, CTA. Both
+    // client scripts hold #beach-list-empty by reference and toggle its hidden
+    // attribute, and searchScript.js rewrites .empty-state-message in place, so
+    // the id, the class and the attribute are the contract.
+    "<div id=\"beach-list-empty\" class=\"empty-state wa-stack wa-gap-l wa-align-items-center wa-text-center\"" +
+    emptyHiddenAttr + ">" +
+    "<wa-icon name=\"umbrella-beach\" class=\"wa-font-size-4xl wa-color-text-quiet\"></wa-icon>" +
+    "<h2 class=\"empty-state-message wa-heading-l\">" + escapeHtml(emptyMessage) + "</h2>" +
+    (emptyNote ? ("<p class=\"wa-color-text-quiet\">" + escapeHtml(emptyNote) + "</p>") : "") +
     searchAllHtml +
-    "</p>" +
+    "</div>" +
     "</section>";
 
   const mainHtml = introHtml + mapHtml + searchHtml + activeQueryHtml + controlsHtml +
@@ -1345,7 +1376,7 @@ function renderWaveStripParts(estimate, series, nowIso, wavesUpdated, waterClass
   const hasNow = !!estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt);
   const nowStat = hasNow
-    ? ("<p class=\"wave-now wa-cluster wa-gap-s\"><span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">" +
+    ? ("<p class=\"wave-now wa-cluster wa-gap-s\"><span class=\"wave-now-value wa-heading-xl\">" +
         estimate.waveHeightFt.toFixed(1) + " ft</span> " +
         "<span class=\"wave-now-label wa-caption-s\">waves now</span> " +
         renderEstimateBadge() + outlookHtml + "</p>")
@@ -1526,8 +1557,8 @@ function renderWqFloorCallout(wqfloor) {
 function renderGlanceTile(options) {
   const hasValueHtml = typeof options.valueHtml === "string" && options.valueHtml.length > 0;
   const valueClass = options.quiet
-    ? "wa-font-size-l wa-color-text-quiet"
-    : "wa-font-size-xl wa-font-weight-bold";
+    ? "wa-body-l wa-color-text-quiet"
+    : "wa-heading-xl";
   const valueHtml = hasValueHtml ? options.valueHtml : escapeHtml(options.value);
   const sourceHtml = typeof options.sourceHtml === "string" && options.sourceHtml.length > 0
     ? "<span class=\"wa-caption-s\">" + options.sourceHtml + "</span>"
@@ -1696,7 +1727,7 @@ function renderFlagLegend() {
     { color: "unknown", label: "Unknown", text: "No usable data right now. A gray flag is never a guess." }
   ];
   const lines = [];
-  lines.push("<wa-details class=\"wa-font-size-s\" summary=\"What the flags mean\" " +
+  lines.push("<wa-details class=\"wa-body-s\" summary=\"What the flags mean\" " +
     "appearance=\"plain\" icon-placement=\"start\">");
   lines.push("<ul class=\"flag-legend-list wa-list-plain wa-stack wa-gap-xs\">");
   for (const entry of entries) {
@@ -1746,14 +1777,14 @@ export function renderDetailPage(data) {
   // keeps the <p> off the page when there is none.
   const subtitle = subtitleName(beach);
   const subtitleHtml = subtitle ?
-    ("<p class=\"wa-color-text-quiet wa-font-size-l\">" + escapeHtml(subtitle) + "</p>") : "";
+    ("<p class=\"wa-body-l wa-color-text-quiet\">" + escapeHtml(subtitle) + "</p>") : "";
 
   // Coordinates link out to OpenStreetMap (consistent with the footer's OSM
   // attribution), demoted to caption size. The water temperature is a tile
   // under the hero, not a fragment of this line.
   const osmHref = "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon +
     "#map=15/" + lat + "/" + lon;
-  const metaHtml = "<p class=\"wa-caption-s\"><a class=\"coords-link icon-link wa-gap-2xs wa-color-text-quiet\" href=\"" +
+  const metaHtml = "<p class=\"wa-caption-s\"><a class=\"coords-link icon-link wa-gap-xs wa-color-text-quiet\" href=\"" +
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
@@ -1768,7 +1799,7 @@ export function renderDetailPage(data) {
   const verdictText = verdictSentence(estimate, flag,
     typeof beach.water_class === "string" ? beach.water_class : null);
   const verdictHtml = verdictText ?
-    ("<p class=\"wa-font-size-l\">" + escapeHtml(verdictText) + "</p>") : "";
+    ("<p class=\"wa-body-l\">" + escapeHtml(verdictText) + "</p>") : "";
   const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(beach.id);
 
   // Save toggle for the visitor's own list, in the hero's share row beside the
@@ -1799,12 +1830,12 @@ export function renderDetailPage(data) {
   // nearby card morphs into.
   const heroHtml = "<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
     flag.keyword + "\">" +
-    "<a class=\"back-link icon-link wa-gap-2xs wa-color-text-link\" href=\"/\">" +
+    "<a class=\"back-link icon-link wa-gap-xs wa-color-text-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
     "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\" style=\"view-transition-name: beach-title;\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
     "<p class=\"wa-cluster wa-gap-s\">" +
-    "<span class=\"wa-font-size-l wa-font-weight-bold\">" +
+    "<span class=\"wa-heading-l\">" +
     escapeHtml(FLAG_LABELS[flag.color]) + "</span>" +
     heroBadgeHtml +
     "</p>" +
@@ -1897,7 +1928,8 @@ export function renderDetailPage(data) {
     title: title,
     description: detailMetaDescription(beach, estimate, flag),
     path: "/beach/" + encodeURIComponent(beach.id),
-    flagColor: flag.color
+    flagColor: flag.color,
+    iconColor: flag.color
   });
 }
 
@@ -1911,12 +1943,12 @@ export function renderErrorPage(data) {
   //
   // The status code is this page's title, so it must be a real heading rather
   // than a styled <strong>; the error page would otherwise be the only page with
-  // no h1. wa-font-size-xl keeps it from reading louder than the sibling pages'
+  // no h1. wa-heading-xl keeps it from reading louder than the sibling pages'
   // titles, and the stack zero-margins its children, so the heading needs no
   // margin rule of its own.
   const mainHtml = "<div class=\"wa-stack wa-gap-l wa-align-items-center wa-text-center\">" +
     "<wa-icon name=\"triangle-exclamation\" class=\"wa-font-size-4xl wa-color-text-quiet\"></wa-icon>" +
-    "<h1 class=\"wa-font-size-xl\">" + escapeHtml(String(status)) + "</h1>" +
+    "<h1 class=\"wa-heading-xl\">" + escapeHtml(String(status)) + "</h1>" +
     "<p class=\"wa-color-text-quiet\">" + escapeHtml(message) + "</p>" +
     "<wa-button variant=\"brand\" href=\"/\">Return to the beach list</wa-button>" +
     "</div>";

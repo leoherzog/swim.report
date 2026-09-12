@@ -59,7 +59,7 @@ function tile(html, iconName) {
 
 function tileValue(html, iconName) {
   const block = tile(html, iconName);
-  const m = block ? block.match(/<span class="(wa-font-size-[^"]*)">([^<]*)<\/span>/) : null;
+  const m = block ? block.match(/<span class="((?:wa-heading|wa-body)-[^"]*)">([^<]*)<\/span>/) : null;
   return m ? { text: m[2], quiet: m[1].indexOf("wa-color-text-quiet") > -1 } : null;
 }
 
@@ -74,7 +74,7 @@ describe("detail-page hero", () => {
     const html = render({ estimate: estimateWith({ color: "yellow" }) });
     const block = hero(html);
     expect(block).toContain("data-flag=\"yellow\"");
-    expect(block).toContain("<span class=\"wa-font-size-l wa-font-weight-bold\">YELLOW</span>");
+    expect(block).toContain("<span class=\"wa-heading-l\">YELLOW</span>");
   });
 
   it("collapses double-red onto the red wash but keeps the full label", () => {
@@ -201,7 +201,7 @@ describe("detail-page hero", () => {
 
   it("renders the back link at / and the share controls for the canonical URL", () => {
     const block = hero(render({}));
-    expect(block).toContain("<a class=\"back-link icon-link wa-gap-2xs wa-color-text-link\" href=\"/\">");
+    expect(block).toContain("<a class=\"back-link icon-link wa-gap-xs wa-color-text-link\" href=\"/\">");
     expect(block).toContain("Back to all beaches");
     expect(block).toContain(
       "<wa-copy-button value=\"https://swim.report/beach/osm-way-505668572\" " +
@@ -261,7 +261,7 @@ describe("at a glance tiles", () => {
     const cardIdx = html.indexOf("class=\"estimate-card\"");
     expect(glanceIdx).toBeGreaterThan(heroIdx);
     expect(cardIdx).toBeGreaterThan(glanceIdx);
-    expect(html).toContain("<h2 id=\"glance-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
+    expect(html).toContain("<h2 id=\"glance-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">");
     expect(html).toContain("<wa-icon name=\"gauge\"></wa-icon>At a glance</h2>");
   });
 
@@ -372,7 +372,7 @@ describe("at a glance tiles", () => {
     // NOW_ISO is morning at the fixture beach, so sunset is the next event.
     const html = render({});
     expect(tile(html, "sun")).toContain(
-      "<span class=\"wa-font-size-xl wa-font-weight-bold\">" +
+      "<span class=\"wa-heading-xl\">" +
       "<wa-format-date date=\"2026-07-06T01:26:00.000Z\" hour=\"numeric\" minute=\"numeric\">" +
       "<time datetime=\"2026-07-06T01:26:00.000Z\">01:26 UTC</time></wa-format-date></span>");
     expect(tile(html, "sun")).toContain(">Sunset</span>");
@@ -537,10 +537,10 @@ describe("detail-page section headings and order", () => {
       estimate: estimateWith({ waveHeightFt: 1.0 }),
       nearby: nearby
     });
-    expect(html).toContain("<h2 id=\"glance-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
-    expect(html).toContain("<h2 id=\"wave-forecast-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
-    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
-    expect(html).toContain("<h2 id=\"nearby-heading\" class=\"wa-cluster wa-gap-xs wa-font-size-l\">");
+    expect(html).toContain("<h2 id=\"glance-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">");
+    expect(html).toContain("<h2 id=\"wave-forecast-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">");
+    expect(html).toContain("<h2 id=\"webcam-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">");
+    expect(html).toContain("<h2 id=\"nearby-heading\" class=\"wa-cluster wa-gap-xs wa-heading-l\">");
     expect(html).toContain("<wa-icon name=\"location-dot\"></wa-icon>Nearby beaches</h2>");
   });
 

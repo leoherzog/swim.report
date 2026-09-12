@@ -47,7 +47,7 @@ function detailHtml(beachExtra, waterTemp) {
 // The subtitle paragraph body, or null when the subtitle paragraph is absent
 // from the page entirely.
 function subtitleText(html) {
-  const m = html.match(/<p class="wa-color-text-quiet wa-font-size-l">([^<]*)<\/p>/);
+  const m = html.match(/<p class="wa-body-l wa-color-text-quiet">([^<]*)<\/p>/);
   return m ? m[1] : null;
 }
 
@@ -71,7 +71,7 @@ function tempTile(html) {
 // so this is null there rather than a placeholder.
 function tempValue(html) {
   const tile = tempTile(html);
-  const m = tile ? tile.match(/<span class="wa-font-size-[^"]*">([^<]*)<\/span>/) : null;
+  const m = tile ? tile.match(/<span class="(?:wa-heading-xl|wa-body-l wa-color-text-quiet)">([^<]*)<\/span>/) : null;
   return m ? m[1] : null;
 }
 
@@ -100,7 +100,7 @@ describe("beach header composition (renderDetailPage)", function () {
   it("renders no subtitle paragraph when the beach has no distinct name", function () {
     const html = detailHtml({ park_name: null, name: "Ottawa Beach" }, null);
     expect(subtitleText(html)).toBe(null);
-    expect(html.indexOf("<p class=\"wa-color-text-quiet wa-font-size-l\">")).toBe(-1);
+    expect(html.indexOf("<p class=\"wa-body-l wa-color-text-quiet\">")).toBe(-1);
     expect(metaTail(html)).toBe("");
   });
 });

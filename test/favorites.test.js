@@ -79,7 +79,7 @@ describe("list-page \"Your Beaches\" section", () => {
     expect(yourBeaches(html)).toBe(
       "<section id=\"your-beaches\" class=\"wa-stack wa-gap-s\" " +
       "aria-labelledby=\"your-beaches-heading\" hidden>" +
-      "<h2 id=\"your-beaches-heading\" class=\"wa-font-size-l\">Your Beaches</h2>" +
+      "<h2 id=\"your-beaches-heading\" class=\"wa-heading-l\">Your Beaches</h2>" +
       "<p id=\"your-beaches-saved-label\" class=\"wa-caption-s\" hidden>Saved</p>" +
       "<ul id=\"your-beaches-saved\" class=\"beach-list wa-list-plain wa-stack wa-gap-xs\"></ul>" +
       "<p id=\"your-beaches-recent-label\" class=\"wa-caption-s\" hidden>" +
@@ -106,11 +106,11 @@ describe("list-page \"Your Beaches\" section", () => {
   // a search miss nor an empty database.
   it("gives an empty ids page its own copy", () => {
     expect(listHtml({ idsMode: true }))
-      .toContain("<span class=\"empty-state-message\">No beaches match those ids.</span>");
+      .toContain("<h2 class=\"empty-state-message wa-heading-l\">No beaches match those ids</h2>");
     expect(listHtml())
-      .toContain("<span class=\"empty-state-message\">No beaches found yet. Check back soon.</span>");
+      .toContain("<h2 class=\"empty-state-message wa-heading-l\">No beaches found yet</h2>");
     expect(listHtml({ query: "oval" }))
-      .toContain("<span class=\"empty-state-message\">No beaches match your search.</span>");
+      .toContain("<h2 class=\"empty-state-message wa-heading-l\">No beaches match your search</h2>");
   });
 });
 

@@ -78,7 +78,7 @@ describe("cross-document view transitions", () => {
     // Two icons make the double-red flag, so their wrapper carries the name;
     // naming each icon would be a duplicate and abort the transition.
     expect(html).toContain("<span style=\"view-transition-name: beach-flag;\"" +
-      " class=\"wa-cluster wa-gap-3xs\">" +
+      " class=\"wa-cluster wa-gap-2xs\">" +
       "<wa-icon name=\"flag\" class=\"wa-font-size-4xl flag-icon-red\"></wa-icon>" +
       "<wa-icon name=\"flag\" class=\"wa-font-size-4xl flag-icon-red\"></wa-icon>" +
       "</span>");
@@ -181,7 +181,7 @@ describe("wave-strip fill-in and now marker", () => {
 
   it("animates the segments only behind a no-preference query", () => {
     expect(PAGE_STYLES).toContain("@keyframes wave-strip-fill {");
-    expect(PAGE_STYLES).toContain("animation-delay: calc(var(--i, 0) * 70ms);");
+    expect(PAGE_STYLES).toContain("animation-delay: calc(var(--i, 0) * var(--wa-transition-fast));");
     expect(PAGE_STYLES).toContain("transform-origin: left center;");
     expect(insideNoPreference(PAGE_STYLES.indexOf("animation: wave-strip-fill"))).toBe(true);
     expect(insideNoPreference(PAGE_STYLES.indexOf("@keyframes wave-strip-fill {"))).toBe(true);

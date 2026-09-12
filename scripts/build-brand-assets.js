@@ -1,18 +1,28 @@
 // scripts/build-brand-assets.js — regenerate the committed brand assets under
 // public/ (node scripts/build-brand-assets.js [--dest public]).
 //
-// One flag-on-wave mark built on Font Awesome's solid flag glyph, placed once
-// as unit-square geometry and emitted twice: as favicon.svg, and as PNGs
-// rasterized here with a small supersampling scan and node:zlib. It also writes manifest.webmanifest from a JS object, so
-// the manifest's colors and the icon files can never drift apart.
+// Font Awesome's solid flag glyph, from src/frontend/flagGlyph.js, emitted three
+// ways: favicon.svg is the bare glyph in brand blue, the same SVG the document
+// head inlines per beach in its flag color; the app icons and share cards are
+// PNGs rasterized here with a small supersampling scan and node:zlib from the
+// same path, placed as unit-square geometry. It also writes
+// manifest.webmanifest from a JS object, so the manifest's colors and the icon
+// files can never drift apart.
 //
 // A raster carries no CSS, so every color below is a Web Awesome mild-palette
 // token value copied in literally.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  FLAG_GLYPH_PATH,
+  FLAG_GLYPH_BOX,
+  FLAG_GLYPH_POLE,
+  FLAG_STACK_UNITS,
+  FAVICON_HEX,
+  renderFlagSvg
+} from "../src/frontend/flagGlyph.js";
 
 // Mild-palette token values (styles/color/palettes/mild.css).
 const BLUE_20 = "#02345b";
@@ -23,13 +33,13 @@ const BLUE_95 = "#edf3ff";
 const WHITE = "#ffffff";
 
 // The four flag colors mean flag condition, so they appear only on the share
-// cards, which are the flag. The app icon stays brand blue and white.
+// cards, which are the flag. The app icons stay brand blue and white.
 const FLAG_HEX = {
-  "green": "#4f8051",
-  "yellow": "#c6ad4f",
-  "red": "#cf443b",
-  "double-red": "#cf443b",
-  "unknown": "#777478"
+  "green": FAVICON_HEX.green.light,
+  "yellow": FAVICON_HEX.yellow.light,
+  "red": FAVICON_HEX.red.light,
+  "double-red": FAVICON_HEX["double-red"].light,
+  "unknown": FAVICON_HEX.unknown.light
 };
 
 const OG_COLORS = ["green", "yellow", "red", "double-red", "unknown"];
@@ -195,26 +205,10 @@ function polygon(points) {
 
 // --- The mark ---------------------------------------------------------------
 
-// Font Awesome's solid flag (scripts/flag-solid-full.svg), the same glyph the
-// pages render as fa-flag, so the icon and the share cards match the UI. The
-// path is read from that file so the glyph has one source; its license comment
-// is carried into favicon.svg because the Free icons require attribution.
-const GLYPH_SOURCE = fileURLToPath(new URL("./flag-solid-full.svg", import.meta.url));
-
-function loadGlyph() {
-  const svg = readFileSync(GLYPH_SOURCE, "utf8");
-  const d = /<path d="([^"]+)"/.exec(svg);
-  const license = /<!--(.*?)-->/.exec(svg);
-  if (!d || !license) {
-    fail("cannot find the flag path in " + GLYPH_SOURCE);
-  }
-  // The glyph's own box, so the pole (x 96..160) and stacked flags share a
-  // frame the placement math can reason about.
-  return { d: d[1], license: license[1], box: { x0: 96, y0: 64, x1: 544, y1: 576 },
-    pole: { x: 96, w: 64 } };
-}
-
-const GLYPH = loadGlyph();
+// The glyph the pages render as fa-flag, with its own box and pole column so
+// the placement math and the stacked flags share a frame.
+const GLYPH = { d: FLAG_GLYPH_PATH, box: FLAG_GLYPH_BOX, pole: FLAG_GLYPH_POLE };
+const GLYPH_SOURCE = "src/frontend/flagGlyph.js";
 
 const CURVE_STEPS = 12;
 
@@ -264,9 +258,7 @@ function flattenPath(d) {
 
 const GLYPH_POINTS = flattenPath(GLYPH.d);
 
-// Vertical distance, in glyph units, between stacked flags: a second banner
-// hangs below the first with a gap, both on one pole. Two flags is double-red.
-const STACK_UNITS = 370;
+const STACK_UNITS = FLAG_STACK_UNITS;
 
 // Height of the mark as a fraction of its unit square, and where its center
 // sits; a single flag and a stacked pair both fit the same frame, so the
@@ -345,20 +337,10 @@ function renderOgCard(color) {
   return encodePng(OG_WIDTH, OG_HEIGHT, canvas.rgb);
 }
 
+// The static favicon: the bare glyph in brand blue, no plate, no wave. The same
+// builder the document head uses per beach, so the two icons cannot drift.
 function renderFaviconSvg() {
-  const mark = flagMark(1);
-  const lines = [];
-  lines.push("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" " +
-    "role=\"img\" aria-label=\"Swim Report\">");
-  lines.push("<!--" + GLYPH.license + "-->");
-  lines.push("<rect width=\"64\" height=\"64\" rx=\"14\" fill=\"" + BLUE_40 + "\"/>");
-  lines.push("<path d=\"M0 48 C 10 42, 22 55, 32 49 S 54 42, 64 48 L64 64 L0 64 Z\" " +
-    "fill=\"" + BLUE_20 + "\"/>");
-  lines.push("<path transform=\"translate(" + (mark.offsetX * 64).toFixed(3) + " " +
-    (mark.offsetY * 64).toFixed(3) + ") scale(" + (mark.fit * 64).toFixed(5) + ")\" " +
-    "d=\"" + GLYPH.d + "\" fill=\"" + WHITE + "\"/>");
-  lines.push("</svg>");
-  return lines.join("\n") + "\n";
+  return renderFlagSvg("brand", "Swim Report");
 }
 
 // Built from an object, never a hand-written string, so it is JSON by

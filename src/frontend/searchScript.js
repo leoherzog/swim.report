@@ -61,20 +61,20 @@ const SCRIPT_LINES = [
   // Green-only filter state. One localStorage key, both reads and writes in
   // try/catch because private mode throws on access rather than returning null.
   "  const GREEN_ONLY_KEY = 'swimreport:green-only';",
-  "  const GREEN_EMPTY_MESSAGE = 'No green-flag beaches match your search.';",
+  "  const GREEN_EMPTY_MESSAGE = 'No green-flag beaches match your search';",
   "  const greenSwitch = document.getElementById('green-only-filter');",
   "  let greenOnly = false;",
   // The server's own empty-state copy and visibility, re-captured after every
   // swap so the green filter can hand ownership back when it is switched off.
   "  let serverMessage = null;",
-  "  let serverDisplay = '';",
+  "  let serverHidden = false;",
   "  const captureServerEmptyState = function () {",
   "    if (!emptyState) {",
   "      return;",
   "    }",
   "    const messageEl = emptyState.querySelector('.empty-state-message');",
   "    serverMessage = messageEl ? messageEl.textContent : null;",
-  "    serverDisplay = emptyState.style.display;",
+  "    serverHidden = emptyState.hidden;",
   "  };",
   "  captureServerEmptyState();",
   // The server owns the empty state whenever a term can match rows it never
@@ -91,17 +91,17 @@ const SCRIPT_LINES = [
   "      if (messageEl) {",
   "        messageEl.textContent = GREEN_EMPTY_MESSAGE;",
   "      }",
-  "      emptyState.style.display = '';",
+  "      emptyState.hidden = false;",
   "      return;",
   "    }",
   "    if (messageEl && serverMessage !== null) {",
   "      messageEl.textContent = serverMessage;",
   "    }",
   "    if (greenOnly || !hasFetch) {",
-  "      emptyState.style.display = visibleCount === 0 ? '' : 'none';",
+  "      emptyState.hidden = visibleCount !== 0;",
   "      return;",
   "    }",
-  "    emptyState.style.display = serverDisplay;",
+  "    emptyState.hidden = serverHidden;",
   "  };",
   // Both filters resolve to one display write per row: two passes would let the
   // next keystroke clobber the green filter's result. Every row on the page is

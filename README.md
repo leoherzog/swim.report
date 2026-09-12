@@ -267,7 +267,7 @@ re-applying it as the page loads; with JavaScript off it is inert and every row 
 `GET /?ids=osm-way-1,osm-node-2` renders the same list page for exactly those beaches, in
 the order given. At most 10 ids are read, each must match the `osm-<node|way|relation>-<id>`
 format, and ids that are malformed, unknown or not flag-worthy are skipped silently, so a
-list nothing matches renders the honest "No beaches match those ids." rather than the
+list nothing matches renders the honest "No beaches match those ids" rather than the
 empty-database copy. The mode ignores `q`, `near` and the visitor's IP location, so the
 response depends only on the URL and is cacheable. It is what the **Your Beaches** section
 fetches.
@@ -444,7 +444,10 @@ dark follow the visitor's OS preference via a blocking inline script
 
 Every page's `<head>` also carries the site identity: the SVG favicon, the apple-touch icon,
 the web manifest, and two media-queried `theme-color` metas holding the light and dark
-surface colors. The list and detail pages add a `<meta name="description">`, a
+surface colors. The favicon is the bare Font Awesome flag glyph: brand blue from
+`/favicon.svg` on the list and error pages, and on a beach page the same glyph in that
+beach's display color, inlined as a `data:` URI, two stacked flags for double red and gray
+for unknown, so the tab shows the flag before the page does. The list and detail pages add a `<meta name="description">`, a
 `<link rel="canonical">` against the constant `SITE_ORIGIN`, and the Open Graph and Twitter
 card set. A detail page's description states the flag color the page displays and always says
 whether it is estimated or official, or that the status is unknown — the share cards carry no

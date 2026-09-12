@@ -82,8 +82,8 @@ describe("site identity tags", () => {
     const label = pages[i][0];
     const html = pages[i][1];
 
-    it("puts the favicon, apple-touch-icon and manifest on the " + label, () => {
-      expect(html).toContain("<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">");
+    it("puts an SVG icon, the apple-touch-icon and the manifest on the " + label, () => {
+      expect(html).toContain("<link rel=\"icon\" type=\"image/svg+xml\" href=\"");
       expect(html).toContain("<link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/apple-touch-icon.png\">");
       expect(html).toContain("<link rel=\"manifest\" href=\"/manifest.webmanifest\">");
     });
@@ -95,6 +95,33 @@ describe("site identity tags", () => {
         "<meta name=\"theme-color\" media=\"(prefers-color-scheme: dark)\" content=\"#121214\">");
     });
   }
+
+  it("links the static brand favicon on the list and error pages", () => {
+    const tag = "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">";
+    expect(renderListPage({ entries: [] })).toContain(tag);
+    expect(renderErrorPage({ status: 404, message: "Not found" })).toContain(tag);
+  });
+
+  // The detail page's icon is the flag glyph in displayFlag's color, inlined,
+  // so the tab reads the flag before the page does. The hex arrives
+  // percent-encoded inside the data: URI.
+  it("inlines the flag glyph in the display color on the detail page", () => {
+    const green = detailHtml(estimateWith(), null);
+    expect(green).not.toContain("href=\"/favicon.svg\"");
+    expect(green).toContain("<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml,%3Csvg");
+    expect(green).toContain("path%7Bfill%3A%234f8051%7D");
+    expect(green).toContain("aria-label%3D%22green%20flag%22");
+    // A fresh posted red flag is the display flag, so the tab goes red.
+    expect(detailHtml(estimateWith(), officialWith())).toContain("path%7Bfill%3A%23cf443b%7D");
+    // Double red stacks two flags.
+    const doubleRed = detailHtml(estimateWith({ color: "double-red" }), null);
+    expect(doubleRed).toContain("aria-label%3D%22double%20red%20flag%22");
+    expect(doubleRed.split("%3Cpath").length - 1).toBe(2);
+    // No estimate at all is honest gray, never a green default.
+    const unknown = detailHtml(null, null);
+    expect(unknown).toContain("path%7Bfill%3A%23777478%7D");
+    expect(unknown).toContain("aria-label%3D%22Flag%20status%20unknown%22");
+  });
 
   it("puts the identity tags after the title and before the theme stylesheet", () => {
     const html = renderListPage({ entries: [] });

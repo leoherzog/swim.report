@@ -25,14 +25,25 @@ function pngSize(relative) {
 }
 
 describe("brand asset files", () => {
-  it("ships the favicon as an SVG in brand blue", () => {
+  it("ships the favicon as the bare flag glyph in brand blue", () => {
     const svg = readFileSync(assetPath("favicon.svg"), "utf8");
     expect(svg.indexOf("<svg")).toBe(0);
-    // Mild-palette blue-40, the brand tint. The mark is never a flag color.
-    expect(svg).toContain("#2e5b89");
+    // Mild-palette blue-40 with the blue-70 dark fill, the brand tint. The mark
+    // is never a flag color, and it has no plate or wave behind it.
+    expect(svg).toContain("path{fill:#2e5b89}");
+    expect(svg).toContain("@media (prefers-color-scheme:dark){path{fill:#88b2e4}}");
+    expect(svg).not.toContain("<rect");
+    expect(svg.split("<path").length - 1).toBe(1);
     expect(svg).not.toContain("#4f8051");
     expect(svg).not.toContain("#c6ad4f");
     expect(svg).not.toContain("#cf443b");
+  });
+
+  // The committed file is exactly what the shared builder emits, so the static
+  // icon and the per-beach data: URI can never drift apart.
+  it("is byte-identical to renderFlagSvg's brand output", async () => {
+    const { renderFlagSvg } = await import("../src/frontend/flagGlyph.js");
+    expect(readFileSync(assetPath("favicon.svg"), "utf8")).toBe(renderFlagSvg("brand", "Swim Report"));
   });
 
   // The mark is Font Awesome's solid flag, which the Free license requires

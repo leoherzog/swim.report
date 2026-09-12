@@ -68,7 +68,7 @@ function render(extra) {
 
 // The verdict paragraph's text, or null when the line is absent.
 function verdict(html) {
-  const m = html.match(/<p class="wa-font-size-l">([^<]*)<\/p>/);
+  const m = html.match(/<p class="wa-body-l">([^<]*)<\/p>/);
   return m ? m[1] : null;
 }
 
@@ -79,8 +79,8 @@ describe("detail-page verdict line", function () {
 
   it("sits between the flag label and the coordinates line", function () {
     const html = render({});
-    const label = html.indexOf("<span class=\"wa-font-size-l wa-font-weight-bold\">");
-    const line = html.indexOf("<p class=\"wa-font-size-l\">");
+    const label = html.indexOf("<span class=\"wa-heading-l\">");
+    const line = html.indexOf("<p class=\"wa-body-l\">");
     const meta = html.indexOf("<a class=\"coords-link");
     expect(label).toBeGreaterThan(-1);
     expect(line).toBeGreaterThan(label);
@@ -111,7 +111,7 @@ describe("detail-page verdict line", function () {
       estimate: { color: "green", reason: "Estimated wave height 1.2 ft", updated: FRESH }
     });
     expect(verdict(html)).toBe(null);
-    expect(html.indexOf("<p class=\"wa-font-size-l\">")).toBe(-1);
+    expect(html.indexOf("<p class=\"wa-body-l\">")).toBe(-1);
   });
 
   it("escapes an alert name from upstream", function () {
@@ -124,7 +124,7 @@ describe("detail-page verdict line", function () {
         alertDetails: [{ event: "Beach \"Hazards\" <Statement>", onset: null, ends: null }]
       })
     });
-    expect(html).toContain("<p class=\"wa-font-size-l\">Beach &quot;Hazards&quot; " +
+    expect(html).toContain("<p class=\"wa-body-l\">Beach &quot;Hazards&quot; " +
       "&lt;Statement&gt; in effect.</p>");
   });
 
@@ -134,9 +134,9 @@ describe("detail-page flag legend", function () {
   it("renders one collapsed legend per page, between the tiles and the stack", function () {
     const html = render({});
     expect(html.split("What the flags mean").length - 1).toBe(1);
-    expect(html).toContain("<wa-details class=\"wa-font-size-s\" summary=\"What the flags mean\" " +
+    expect(html).toContain("<wa-details class=\"wa-body-s\" summary=\"What the flags mean\" " +
       "appearance=\"plain\" icon-placement=\"start\">");
-    const legend = html.indexOf("<wa-details class=\"wa-font-size-s\"");
+    const legend = html.indexOf("<wa-details class=\"wa-body-s\"");
     const glance = html.indexOf("aria-labelledby=\"glance-heading\"");
     const stack = html.indexOf("class=\"estimate-card\"");
     expect(glance).toBeGreaterThan(-1);

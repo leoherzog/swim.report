@@ -5,7 +5,7 @@
 // The geolocation upgrade (geoScript.js) and the live search (searchScript.js)
 // both fetch the same server-rendered "/" page, so the swap is single-sourced
 // here. #beach-list-empty and #list-active-query are updated by reference
-// (innerHTML + style) and never replaced: searchScript.js captured
+// (innerHTML + hidden) and never replaced: searchScript.js captured
 // #beach-list-empty at load, and replacing the node strands that reference.
 // #home-map is deliberately not touched. The map holds its own live MapLibre
 // instance and its callers update it or leave it alone.
@@ -34,12 +34,7 @@ const SCRIPT_LINES = [
   "    const currentEmpty = document.getElementById('beach-list-empty');",
   "    if (nextEmpty && currentEmpty) {",
   "      currentEmpty.innerHTML = nextEmpty.innerHTML;",
-  "      const emptyStyle = nextEmpty.getAttribute('style');",
-  "      if (emptyStyle) {",
-  "        currentEmpty.setAttribute('style', emptyStyle);",
-  "      } else {",
-  "        currentEmpty.removeAttribute('style');",
-  "      }",
+  "      currentEmpty.hidden = nextEmpty.hidden;",
   "    }",
   // A stable, always-present container, so it swaps in place; its inner markup
   // is empty on the default listing and populated on a q-filtered page.

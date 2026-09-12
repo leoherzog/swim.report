@@ -60,14 +60,15 @@ for (let i = 0; i < MODEL_DISPLAY.length; i++) {
   MODEL_NAME_BY_ID.set(MODEL_DISPLAY[i].id, MODEL_DISPLAY[i].name);
 }
 
-// Series colors for the comparison chart, assigned by display position. Blue,
-// purple and cyan at a mid tint, deliberately not the green/yellow/red flag
-// semantics, so a model line can never be misread as a hazard color. Cycles for
-// a 4th (unknown) model. The <wa-line-chart> component resolves the var() itself.
+// Series colors for the comparison chart, assigned by display position: the
+// three --wave-series-* variables styles.js declares on <html>, blue, purple and
+// cyan with their own dark-scheme step, deliberately not the green/yellow/red
+// flag semantics, so a model line can never be misread as a hazard color.
+// Cycles for a 4th (unknown) model. <wa-line-chart> resolves the var() itself.
 const MODEL_SERIES_COLORS = [
-  "var(--wa-color-blue-60)",
-  "var(--wa-color-purple-60)",
-  "var(--wa-color-cyan-60)"
+  "var(--wave-series-1)",
+  "var(--wave-series-2)",
+  "var(--wave-series-3)"
 ];
 
 // Display name for a model id: the mapped name for a known id, else the raw id.

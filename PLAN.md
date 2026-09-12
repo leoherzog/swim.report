@@ -4023,13 +4023,13 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       //                 input so proximity sorting survives a search submit),
       //          idsMode: boolean (optional — this page is the ?ids= slice, so it may
       //                 not assert data-complete however few rows it holds, and its
-      //                 empty state reads "No beaches match those ids." rather than
+      //                 empty state reads "No beaches match those ids" rather than
       //                 the search-miss or empty-database copy) }
       // -> full HTML document string.
       // Each row reads estimate and official only through displayFlag(entry, data.nowIso).
       // distanceMi renders as a rough row label ("<1 mi" / "~12 mi"); non-finite or
       // null renders nothing. sortedByProximity heads the main list with
-      // <h2 id="nearby-heading" class="wa-font-size-l">Nearby</h2> and names the list
+      // <h2 id="nearby-heading" class="wa-heading-l">Nearby</h2> and names the list
       // section by it (aria-labelledby="nearby-heading"), so a distance-sorted list is
       // a labelled region; an alphabetical list gets neither, because it is not nearby
       // anything and may not claim to be. Nothing names the origin the distance labels
@@ -4038,7 +4038,13 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // The search box is a GET form (id="beach-search-form",
       // action="/", input name="q") that submits server-side while the inline script
       // filters rendered rows; a q-filtered page with zero rows shows "No beaches match
-      // your search.", not the empty-database copy.
+      // your search", not the empty-database copy. The empty state is the centered
+      // block <div id="beach-list-empty" class="empty-state wa-stack wa-gap-l
+      // wa-align-items-center wa-text-center"[ hidden]>: an umbrella-beach wa-icon, the
+      // copy as <h2 class="empty-state-message wa-heading-l">, a quiet "Check back soon."
+      // paragraph on the empty database alone, then the "Search all beaches" brand
+      // button when offered. Its hidden attribute, not an inline style, is what the two
+      // client scripts toggle.
       // The green-only control sits between the active-query line and the live region,
       // as <wa-switch id="green-only-filter" size="s" class="wa-align-self-end">Green
       // flags only</wa-switch> on the end edge of the page stack; a list with no rows
@@ -4053,7 +4059,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // both the read and the write in try/catch, and a restored "1" runs the pass at
       // load, since a wa-switch fires "change" only on real interaction. While the switch
       // is on it owns #beach-list-empty, showing "No green-flag beaches match your
-      // search." when it has hidden every row the term matched, and restores the server's
+      // search" when it has hidden every row the term matched, and restores the server's
       // own copy and visibility when switched off. A term that matched no row at all
       // leaves the server's copy standing, so the filter never takes the blame for a
       // plain search miss. Both counts behind that decision are taken inside
@@ -4315,15 +4321,24 @@ exporting a CSS string); render.js is the sole module the router imports.
   back on pageshow. The script returns immediately without document.startViewTransition or
   under a reduce preference, and every navigation works unchanged without it.
 - Title: "Swim Report" (list) / beach.name + " — Swim Report" (detail).
-- Site identity, on every page including the error page: <link rel="icon"
-  type="image/svg+xml" href="/favicon.svg">, <link rel="apple-touch-icon" sizes="180x180"
-  href="/apple-touch-icon.png">, <link rel="manifest" href="/manifest.webmanifest">, and two
-  <meta name="theme-color"> tags carrying the matter surface colors, media-queried light
-  (#ffffff) and dark (#121214). A meta tag takes no CSS var, so those two hexes are the
-  token values copied in literally. All four files are static assets (section 8).
+- Site identity, on every page including the error page: the icon link, <link
+  rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">, <link rel="manifest"
+  href="/manifest.webmanifest">, and two <meta name="theme-color"> tags carrying the matter
+  surface colors, media-queried light (#ffffff) and dark (#121214). A meta tag takes no CSS
+  var, so those two hexes are the token values copied in literally. The three files are
+  static assets (section 8).
+- The icon link (renderIconTag): with no meta.iconColor, <link rel="icon"
+  type="image/svg+xml" href="/favicon.svg">, the static brand-blue flag glyph. The detail
+  page passes iconColor: flag.color, the displayFlag color, and gets the same glyph in that
+  color inlined as href="data:image/svg+xml,..." — one flag, or two stacked on a shared pole
+  for double-red, gray for unknown — so the tab reads the flag before the page does and the
+  request path serves nothing new. src/frontend/flagGlyph.js owns the glyph path, the
+  light/dark hex pairs (mild-palette values copied in literally, since an SVG favicon reads no
+  page CSS; the dark step is the one styles.js gives --flag-*) and renderFlagSvg(colorKey,
+  label); scripts/build-brand-assets.js builds favicon.svg from the same function.
 - renderDocument(title, bodyHtml, meta) takes an optional meta of
-  { title, description, path, flagColor }. With one it emits, between the <title> and the
-  identity tags: <meta name="description">, <link rel="canonical" href=SITE_ORIGIN + path>,
+  { title, description, path, flagColor, iconColor }. With one it emits, between the <title>
+  and the identity tags: <meta name="description">, <link rel="canonical" href=SITE_ORIGIN + path>,
   the Open Graph set (og:type "website", og:site_name "Swim Report", og:title,
   og:description, og:url, og:image, og:image:width 1200, og:image:height 630, og:image:alt)
   and the Twitter set (twitter:card "summary_large_image", twitter:title,
@@ -4360,14 +4375,19 @@ exporting a CSS string); render.js is the sole module the router imports.
 ### Flag rendering rules
 
 - Four variables carry the flag colors, declared once on <html> in src/frontend/styles.js
-  and mapped there to Web Awesome palette tokens (mild palette, no custom hex values):
-  --flag-green: var(--wa-color-green-50), --flag-yellow: var(--wa-color-yellow-70),
-  --flag-red: var(--wa-color-red-50), --flag-unknown: var(--wa-color-gray-50). Every rule
-  in styles.js, the wave strip's inline segment styles and mapScript's runtime
-  getComputedStyle read a --flag-* variable, so that block is the only place a tint is
-  named and a palette change is one edit. Yellow uses tint 70 deliberately: tint 50 in
-  the mild palette reads olive, not caution yellow. If the palette changes, re-verify the
-  four flag colors remain visually distinct safety signals.
+  and mapped there to Web Awesome tokens (no custom hex values): --flag-green:
+  var(--wa-color-success-border-loud), --flag-red: var(--wa-color-danger-border-loud),
+  --flag-unknown: var(--wa-color-neutral-border-loud), which re-resolve under the wa-dark
+  class on their own, and --flag-yellow: var(--wa-color-yellow-70), the one raw palette
+  tint, with an html.wa-dark override to yellow-80. Every rule in styles.js, the wave
+  strip's inline segment styles and mapScript's runtime getComputedStyle read a --flag-*
+  variable, so that block is the only place a tint is named and a palette change is one
+  edit. Yellow does not ride the warning tokens deliberately: warning maps to yellow-50,
+  which in the mild palette reads olive, not caution yellow. If the palette changes,
+  re-verify the four flag colors remain visually distinct safety signals in both schemes.
+  The comparison chart's three series colors follow the same shape: --wave-series-1..3,
+  blue, purple and cyan palette tints with their own wa-dark step, aliased on <html>
+  because waveStrip.js hands them to <wa-line-chart> as strings.
 - double-red = --flag-red rendered as two stacked flag icons plus the label "DOUBLE RED —
   water closed" on the detail cards (list-row chips use the short "DOUBLE RED", because
   the full text wraps badly beside long park names); unknown carries the label "UNKNOWN".
@@ -4617,7 +4637,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   echo is missing or empty.
 - Section headings: every detail-page section below the hero is labeled by the shared
   renderSectionHeading(id, iconName, text) — an <h2 class="wa-cluster wa-gap-xs
-  wa-font-size-l"> with a leading decorative wa-icon, pointed at by the section's
+  wa-heading-l"> with a leading decorative wa-icon, pointed at by the section's
   aria-labelledby. The four are "At a glance" (gauge), "Wave forecast" (chart-line),
   "Nearby webcam" (video) and "Nearby beaches" (location-dot).
 - Wave forecast section (detail page only, between the estimate card and the wave map

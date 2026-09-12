@@ -11,6 +11,14 @@ const RULES = [
   "  padding: 0;",
   "}",
 
+  // The layout utilities set display: flex from an author @layer, which
+  // outranks the browser's own [hidden] { display: none }, so a hidden wa-stack
+  // (the empty state, the Your Beaches shell) would still paint. Restated
+  // unlayered, where it beats every layered utility.
+  "[hidden] {",
+  "  display: none;",
+  "}",
+
   // The page's opaque base color. <wa-page>'s host normally paints this itself,
   // but the host is made transparent below so the .wave-bg layer can sit behind
   // it. The surface color has to live on <html>, the canvas background, and not
@@ -19,17 +27,37 @@ const RULES = [
   // negative z-index positioned elements in the root stacking context, hiding
   // the waves. Restated here so the page keeps its opaque fill if native.css is
   // ever dropped from the head.
-  // The four flag colors, declared once. Every rule below and both client
-  // scripts read these, so a palette change lands in one edit. Yellow takes
-  // tint 70 because tint 50 reads olive in the mild palette (PLAN.md section 9);
-  // gray is honest absence, never a guessed condition.
+  // The four flag colors, declared once. Every rule below, the wave strip's
+  // inline segment styles and mapScript's getComputedStyle read these four
+  // names, so a palette change lands in one edit. Three ride the semantic
+  // border-loud tokens, which re-resolve under .wa-dark on their own. Yellow is
+  // the one raw palette tint: warning maps to yellow-50, which reads olive in
+  // the mild palette (PLAN.md section 9), so it takes tint 70 and owes the dark
+  // step below. Gray is honest absence, never a guessed condition.
+  //
+  // The three chart series are raw tints too, blue, purple and cyan so a model
+  // line can never be misread as a hazard color, and are aliased here because
+  // waveStrip.js hands them to <wa-line-chart> as strings, the only place a
+  // dark step can attach to them.
   "html {",
   "  --content-measure: 48rem;",
-  "  --flag-green: var(--wa-color-green-50);",
+  "  --flag-green: var(--wa-color-success-border-loud);",
   "  --flag-yellow: var(--wa-color-yellow-70);",
-  "  --flag-red: var(--wa-color-red-50);",
-  "  --flag-unknown: var(--wa-color-gray-50);",
+  "  --flag-red: var(--wa-color-danger-border-loud);",
+  "  --flag-unknown: var(--wa-color-neutral-border-loud);",
+  "  --wave-series-1: var(--wa-color-blue-60);",
+  "  --wave-series-2: var(--wa-color-purple-60);",
+  "  --wave-series-3: var(--wa-color-cyan-60);",
   "  background-color: var(--wa-color-surface-default);",
+  "}",
+
+  // One step lighter on a dark surface, the same shift matter applies to its
+  // own border-loud tokens between schemes.
+  "html.wa-dark {",
+  "  --flag-yellow: var(--wa-color-yellow-80);",
+  "  --wave-series-1: var(--wa-color-blue-70);",
+  "  --wave-series-2: var(--wa-color-purple-70);",
+  "  --wave-series-3: var(--wa-color-cyan-70);",
   "}",
 
   // <wa-page>'s shadow :host rule sets background-color: var(--wa-color-surface-
@@ -120,7 +148,7 @@ const RULES = [
   "  }",
   "  ::view-transition-group(beach-title),",
   "  ::view-transition-group(beach-flag) {",
-  "    animation-duration: 260ms;",
+  "    animation-duration: var(--wa-transition-slow);",
   "  }",
   "}",
 
@@ -245,7 +273,9 @@ const RULES = [
   // surface token so the tint follows light and dark without a second palette.
   // The keyword comes from a data-flag attribute rather than an inline style, so
   // no color literal ever reaches the markup. Unknown washes gray: honest
-  // absence, never a green default.
+  // absence, never a green default. At 12% the surface barely moves, so the
+  // text keeps --wa-color-text-normal; a stronger wash would need a paired
+  // on-color.
   ".detail-hero {",
   "  padding: var(--wa-space-l);",
   "  border-radius: var(--wa-border-radius-l);",
@@ -354,7 +384,8 @@ const RULES = [
 
   // Colors come from the group-less variant tokens, so the wa-danger /
   // wa-warning class src/frontend/waveStrip.js assigns per flag color decides
-  // the hue.
+  // the hue. Absolutely positioned inside the lane, so the block-level
+  // wa-cluster cannot stand in for the flex centering.
   ".wave-alert-band {",
   "  position: absolute;",
   "  top: 0;",
@@ -421,8 +452,8 @@ const RULES = [
   "@media (prefers-reduced-motion: no-preference) {",
   "  .wave-strip-seg {",
   "    transform-origin: left center;",
-  "    animation: wave-strip-fill 320ms ease-out backwards;",
-  "    animation-delay: calc(var(--i, 0) * 70ms);",
+  "    animation: wave-strip-fill var(--wa-transition-slow) ease-out backwards;",
+  "    animation-delay: calc(var(--i, 0) * var(--wa-transition-fast));",
   "  }",
   "  @keyframes wave-strip-fill {",
   "    from { transform: scaleX(0); }",

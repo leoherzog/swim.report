@@ -437,14 +437,14 @@ describe("renderListPage search form", () => {
 
   it("shows the no-match empty state (not the empty-database copy) on a q-filtered page with zero results", () => {
     // A search miss against a populated table must not fall through to "No
-    // beaches found yet. Check back soon.", which would tell the searcher the
-    // site has no beaches at all.
+    // beaches found yet", which would tell the searcher the site has no beaches
+    // at all.
     const html = renderListPage({
       entries: [],
       nowIso: "2026-07-05T12:00:00.000Z",
       query: "xyzzy"
     });
-    expect(html).toContain("No beaches match your search.");
+    expect(html).toContain("No beaches match your search");
     expect(html).not.toContain("No beaches found yet");
   });
 
@@ -453,7 +453,12 @@ describe("renderListPage search form", () => {
       entries: [],
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    expect(html).toContain("No beaches found yet. Check back soon.");
+    // The heading carries the state and the quiet note the next step; only the
+    // empty database has one to offer.
+    expect(html).toContain("<h2 class=\"empty-state-message wa-heading-l\">No beaches found yet</h2>" +
+      "<p class=\"wa-color-text-quiet\">Check back soon.</p>");
+    expect(html).toContain("<div id=\"beach-list-empty\" class=\"empty-state wa-stack wa-gap-l " +
+      "wa-align-items-center wa-text-center\">");
   });
 
   it("shows the active query and a clear-search link on a q-filtered page", () => {
@@ -639,7 +644,7 @@ describe("renderListPage proximity output", () => {
     });
     expect(html).toContain("with-header-actions");
     expect(html).toContain("<span slot=\"header-actions\" class=\"wa-cluster wa-gap-2xs " +
-      "wa-justify-content-end wa-font-size-2xs\">");
+      "wa-justify-content-end wa-font-size-xs\">");
     // Labels render as quiet badge chips — the source url is never hyperlinked in
     // the card, and the footer credits NOAA/NWS rather than the wave-model page,
     // so a provenance url must not appear in the document at all.
@@ -679,7 +684,7 @@ describe("renderListPage proximity output", () => {
     // Scraped official sources are the one case that links out — hostname
     // ("www." stripped) linking to the source page.
     expect(officialCard).toContain(
-      "<a slot=\"header-actions\" class=\"wa-font-size-s\" " +
+      "<a slot=\"header-actions\" class=\"wa-body-s\" " +
       "href=\"https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php\" " +
       "rel=\"noopener noreferrer\">southhavenmi.gov</a>"
     );
@@ -1793,8 +1798,8 @@ describe("every surface shows the one displayFlag decision", () => {
       const html = await res.text();
       expect(html).toContain("<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
         d.keyword + "\">");
-      expect(sliceBetween(html, "<span class=\"wa-font-size-l wa-font-weight-bold\">", "</span>")).toBe(
-        "<span class=\"wa-font-size-l wa-font-weight-bold\">" +
+      expect(sliceBetween(html, "<span class=\"wa-heading-l\">", "</span>")).toBe(
+        "<span class=\"wa-heading-l\">" +
         HERO_LABELS[d.color] + "</span>");
       const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
       expect(h1).toContain("flag-icon-" + d.keyword);
@@ -2061,7 +2066,7 @@ describe("per-source staleness horizon on the official card", () => {
 describe("honest unknown: missing estimate never defaults green", () => {
   it("renders a gray UNKNOWN estimate card when the estimate is null", () => {
     const card = estimateCardOf(detailPage(null, null));
-    expect(card).toContain("<span class=\"wa-font-size-xl wa-font-weight-bold\">UNKNOWN</span>");
+    expect(card).toContain("<span class=\"wa-heading-xl\">UNKNOWN</span>");
     expect(card).toContain("No estimate available yet");
     expect(card).toContain("flag-icon-unknown");
     expect(card).toContain(">ESTIMATE</wa-badge>");
@@ -2108,7 +2113,7 @@ describe("double-red presentation", () => {
   it("shows the full label and TWO red-tinted flag icons on the official card", () => {
     const card = officialCardOf(detailPage(null, doubleRedOfficial));
     expect(card).toContain("DOUBLE RED — water closed");
-    const iconWrap = sliceBetween(card, "<span class=\"wa-cluster wa-gap-3xs\">", "</span>");
+    const iconWrap = sliceBetween(card, "<span class=\"wa-cluster wa-gap-2xs\">", "</span>");
     expect(iconWrap.split("<wa-icon name=\"flag\"").length - 1).toBe(2);
     expect(iconWrap).toContain("flag-icon-red");
   });
@@ -2142,7 +2147,7 @@ describe("detail-page title flag precedence", () => {
   // The hero's flag label is what names the display color in text; the title
   // icon only tints it.
   function heroLabelOf(html) {
-    return sliceBetween(html, "<span class=\"wa-font-size-l wa-font-weight-bold\">", "</span>");
+    return sliceBetween(html, "<span class=\"wa-heading-l\">", "</span>");
   }
 
   it("prefers the official color over the estimate", () => {
@@ -2206,7 +2211,7 @@ describe("detail-page title flag: raise-only over an aged official reading", () 
     const h1 = titleOf(html);
     expect(h1).toContain("flag-icon-red");
     // The estimate supplied that red, so the hero credits the estimate for it.
-    expect(html).toContain("<span class=\"wa-font-size-l wa-font-weight-bold\">RED</span>");
+    expect(html).toContain("<span class=\"wa-heading-l\">RED</span>");
     expect(h1).not.toContain("flag-icon-yellow");
   });
 
@@ -2350,6 +2355,10 @@ describe("search script <-> rendered markup id contract", () => {
   it("pins the ids/attributes the client script queries to what renderListPage emits", () => {
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-search')");
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-list-empty')");
+    // The empty state is shown and hidden through its hidden attribute, the
+    // same switch the server renders; rows keep their inline display toggle.
+    expect(LIST_SEARCH_SCRIPT).toContain("emptyState.hidden = serverHidden;");
+    expect(LIST_SEARCH_SCRIPT).not.toContain("emptyState.style.display");
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('beach-search-form')");
     expect(LIST_SEARCH_SCRIPT).toContain("querySelectorAll('.beach-row')");
     expect(LIST_SEARCH_SCRIPT).toContain("getAttribute('data-name')");
@@ -2380,7 +2389,7 @@ describe("search script <-> rendered markup id contract", () => {
     expect(LIST_SEARCH_SCRIPT).toContain("getElementById('green-only-filter')");
     expect(LIST_SEARCH_SCRIPT).toContain("getAttribute('data-flag') === 'green'");
     expect(LIST_SEARCH_SCRIPT).toContain("addEventListener('swimreport:listswap'");
-    expect(LIST_SEARCH_SCRIPT).toContain("No green-flag beaches match your search.");
+    expect(LIST_SEARCH_SCRIPT).toContain("No green-flag beaches match your search");
     expect(LIST_SEARCH_SCRIPT).not.toContain("estimated-green");
     // A restored state must be applied at load: wa-switch fires "change" only on a
     // real click or keypress, so without this the switch would read on above a
@@ -2410,6 +2419,9 @@ describe("shared list-swap helper contract", () => {
     expect(LIST_SWAP_SCRIPT).toContain("window.__swimReportSwapList");
     expect(LIST_SWAP_SCRIPT).toContain("getElementById('beach-list-items')");
     expect(LIST_SWAP_SCRIPT).toContain("getElementById('beach-list-empty')");
+    // Visibility travels as the hidden attribute, never an inline style.
+    expect(LIST_SWAP_SCRIPT).toContain("currentEmpty.hidden = nextEmpty.hidden;");
+    expect(LIST_SWAP_SCRIPT).not.toContain("getAttribute('style')");
     expect(LIST_SWAP_SCRIPT).toContain("getElementById('list-active-query')");
   });
 
@@ -2499,15 +2511,29 @@ describe("renderListPage color-coded rows", () => {
       ".beach-row[data-flag=\"unknown\"] .beach-row-link { border-inline-start-color: var(--flag-unknown); }");
   });
 
+  // wa-stack's layered display: flex would beat the browser's [hidden] rule and
+  // paint the hidden empty state under a populated list; the sheet restates the
+  // rule unlayered.
+  it("restates [hidden] unlayered so a hidden layout utility stays hidden", () => {
+    expect(PAGE_STYLES).toContain("[hidden] {\n  display: none;\n}");
+    const hiddenIdx = PAGE_STYLES.indexOf("[hidden] {");
+    expect(hiddenIdx).toBeGreaterThan(-1);
+    expect(PAGE_STYLES.slice(0, hiddenIdx)).not.toContain("@layer");
+  });
+
   // Every flag color in the sheet, the wave strip and mapScript reads one of
   // these four variables, so this is the only place a palette tint is named.
   it("declares the four flag variables once, on <html>", () => {
-    expect(PAGE_STYLES).toContain("--flag-green: var(--wa-color-green-50);");
+    expect(PAGE_STYLES).toContain("--flag-green: var(--wa-color-success-border-loud);");
     expect(PAGE_STYLES).toContain("--flag-yellow: var(--wa-color-yellow-70);");
-    expect(PAGE_STYLES).toContain("--flag-red: var(--wa-color-red-50);");
-    expect(PAGE_STYLES).toContain("--flag-unknown: var(--wa-color-gray-50);");
-    const palette = PAGE_STYLES.match(/--wa-color-(green-50|yellow-70|red-50|gray-50)/g);
-    expect(palette).toHaveLength(4);
+    expect(PAGE_STYLES).toContain("--flag-red: var(--wa-color-danger-border-loud);");
+    expect(PAGE_STYLES).toContain("--flag-unknown: var(--wa-color-neutral-border-loud);");
+    // Yellow is the one raw palette tint (warning's yellow-50 reads olive in the
+    // mild palette), so it alone owes a dark-scheme step; the semantic tokens
+    // re-resolve on their own.
+    expect(PAGE_STYLES).toContain("html.wa-dark {\n  --flag-yellow: var(--wa-color-yellow-80);");
+    const palette = PAGE_STYLES.match(/--wa-color-(green|red|gray)-\d+/g);
+    expect(palette).toBeNull();
   });
 });
 
@@ -2535,7 +2561,7 @@ describe("renderListPage green-only filter and distance origin", () => {
     // A search miss is equally rowless, so it gets no filter over nothing either.
     const miss = renderListPage({ entries: [], nowIso: NOW_ISO, query: "zzz" });
     expect(miss).not.toContain("<wa-switch id=\"green-only-filter\"");
-    expect(miss).toContain("No beaches match your search.");
+    expect(miss).toContain("No beaches match your search");
   });
 
   it("heads a proximity-sorted list with Nearby, above the rows and below Your Beaches", () => {
@@ -2546,7 +2572,7 @@ describe("renderListPage green-only filter and distance origin", () => {
       near: "42.658,-86.211"
     });
     expect(html).toContain(
-      "<h2 id=\"nearby-heading\" class=\"wa-font-size-l\">Nearby</h2>");
+      "<h2 id=\"nearby-heading\" class=\"wa-heading-l\">Nearby</h2>");
     // The heading names its own section, so the list is a labelled region.
     expect(html).toContain(
       "<section class=\"beach-list-section wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">");
@@ -2666,9 +2692,9 @@ describe("GET /?ids= list mode", () => {
     const { env } = makeEnv({ beaches: [ONE] });
     const res = await handleRequest(idsRequest("osm-way-999"), env);
     const html = await res.text();
-    expect(html).toContain("No beaches match those ids.");
-    expect(html).not.toContain("No beaches found yet. Check back soon.");
-    expect(html).not.toContain("No beaches match your search.");
+    expect(html).toContain("No beaches match those ids");
+    expect(html).not.toContain("No beaches found yet");
+    expect(html).not.toContain("No beaches match your search");
   });
 
   it("caps the list at 10 ids", async () => {

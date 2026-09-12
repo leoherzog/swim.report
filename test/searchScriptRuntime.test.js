@@ -13,9 +13,21 @@ function makeRow(name) {
   };
 }
 
+// The server-rendered empty state: visibility is its hidden attribute, and the
+// copy lives in .empty-state-message. No style object on purpose, so a write to
+// style.display throws instead of passing silently.
+function makeEmptyState(hidden) {
+  const message = { textContent: "No beaches match your search" };
+  return {
+    hidden: hidden,
+    message: message,
+    querySelector(selector) { return selector === ".empty-state-message" ? message : null; }
+  };
+}
+
 // The input stub deliberately has no "value" property, which is the
 // pre-upgrade custom element: the query lives on the attribute alone.
-function makeStubs(rows, attributeValue) {
+function makeStubs(rows, attributeValue, emptyState) {
   const docHandlers = {};
   const input = {
     getAttribute(attr) { return attr === "value" ? attributeValue : null; },
@@ -29,6 +41,7 @@ function makeStubs(rows, attributeValue) {
     getElementById(id) {
       if (id === "beach-search") { return input; }
       if (id === "beach-list-items") { return list; }
+      if (id === "beach-list-empty") { return emptyState || null; }
       return null;
     },
     querySelectorAll: () => rows,
@@ -44,16 +57,19 @@ function makeStubs(rows, attributeValue) {
   return { input: input, docHandlers: docHandlers };
 }
 
-function runScript(rows, attributeValue) {
-  const stubs = makeStubs(rows, attributeValue);
+function runScript(rows, attributeValue, emptyState) {
+  const stubs = makeStubs(rows, attributeValue, emptyState);
   // eslint-disable-next-line no-new-func
   new Function(LIST_SEARCH_SCRIPT)();
   return stubs;
 }
 
+const savedFetch = globalThis.fetch;
+
 afterEach(() => {
   delete globalThis.document;
   delete globalThis.window;
+  globalThis.fetch = savedFetch;
 });
 
 describe("list search script runtime", () => {
@@ -77,5 +93,33 @@ describe("list search script runtime", () => {
 
     expect(rows[0].style.display).toBe("none");
     expect(rows[1].style.display).toBe("");
+  });
+
+  it("owns the empty state through its hidden attribute when it cannot fetch", () => {
+    // No fetch means the page the server rendered is all there is, so the
+    // filter decides the empty state itself from the rows it can see.
+    delete globalThis.fetch;
+    const rows = [makeRow("ottawa beach"), makeRow("oak street")];
+    const emptyState = makeEmptyState(true);
+    const stubs = runScript(rows, "zzz", emptyState);
+
+    stubs.docHandlers["swimreport:rowsadded"]();
+    expect(emptyState.hidden).toBe(false);
+    expect(emptyState.message.textContent).toBe("No beaches match your search");
+
+    stubs.input.value = "oak";
+    stubs.docHandlers["swimreport:rowsadded"]();
+    expect(emptyState.hidden).toBe(true);
+  });
+
+  it("leaves the empty state to the server when it can fetch", () => {
+    // A term can match beaches the page never rendered, so the server's own
+    // hidden attribute, captured at load, is what the filter restores.
+    const rows = [makeRow("ottawa beach"), makeRow("oak street")];
+    const emptyState = makeEmptyState(true);
+    const stubs = runScript(rows, "zzz", emptyState);
+
+    stubs.docHandlers["swimreport:rowsadded"]();
+    expect(emptyState.hidden).toBe(true);
   });
 });

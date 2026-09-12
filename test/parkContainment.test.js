@@ -195,7 +195,7 @@ describe("park-name-first rendering", () => {
     });
     expect(html).toContain("<title>Holland State Park — Swim Report</title>");
     expect(html).toContain("<span>Holland State Park</span></h1>");
-    expect(html).toContain("<p class=\"wa-color-text-quiet wa-font-size-l\">Ottawa Beach</p>");
+    expect(html).toContain("<p class=\"wa-body-l wa-color-text-quiet\">Ottawa Beach</p>");
   });
 });
 

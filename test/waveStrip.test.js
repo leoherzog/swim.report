@@ -299,9 +299,9 @@ describe("buildWaveModelChartConfig", () => {
     const config = buildWaveModelChartConfig(threeModelTrimmed());
     const colors = config.data.datasets.map(function (d) { return d.borderColor; });
     expect(colors).toEqual([
-      "var(--wa-color-blue-60)",
-      "var(--wa-color-purple-60)",
-      "var(--wa-color-cyan-60)"
+      "var(--wave-series-1)",
+      "var(--wave-series-2)",
+      "var(--wave-series-3)"
     ]);
     config.data.datasets.forEach(function (d) {
       expect(d).not.toHaveProperty("pointRadius");

@@ -195,7 +195,7 @@ describe("wave-forecast section", () => {
       official: null,
       waves: wavesWith({})
     });
-    expect(html).toContain("<span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">1.0 ft</span>");
+    expect(html).toContain("<span class=\"wave-now-value wa-heading-xl\">1.0 ft</span>");
     expect(html).toContain("waves now");
   });
 
@@ -205,7 +205,7 @@ describe("wave-forecast section", () => {
       official: null,
       waves: null
     });
-    expect(html).toContain("<span class=\"wave-now-value wa-font-size-xl wa-font-weight-bold\">2.6 ft</span>");
+    expect(html).toContain("<span class=\"wave-now-value wa-heading-xl\">2.6 ft</span>");
     expect(html).not.toContain("<div class=\"wave-strip\"");
     expect(html).not.toContain("<wa-line-chart");
     // The section wrapper still renders (the stat alone justifies it).
