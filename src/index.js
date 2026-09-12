@@ -103,7 +103,9 @@ const MAX_BEACHES_PER_RUN = 3000;
 // The official record shares this lease by default. The two are the operands of
 // displayFlag, so the estimate must never outlive the posted flag it is
 // weighed against; a scraper on a reduced cadence may opt into a longer one
-// through officialTtlSeconds, which every reader honors on its own column.
+// through officialTtlSeconds, and one whose posting is a point-in-time
+// observation into an absolute one through officialMaxAgeMs, anchored to the
+// record's updated instant. Every reader honors either on its own column.
 //
 // The water-quality advisory keeps the shorter WQFLOOR_TTL_SECONDS lease
 // (src/beachState.js): a run that finds no advisory writes nothing, so expiry is
@@ -428,6 +430,44 @@ async function flushBeachState(env, writes) {
     }
   }
   return { persisted: persisted, rows: rows, failures: failures };
+}
+
+// Pure. The official_expires epoch for one resolved OfficialFlag, or null when
+// the record is not worth writing. Exported for tests.
+//
+// A scraper declaring officialMaxAgeMs (a finite number > 0) publishes a
+// point-in-time posting: the lease is ABSOLUTE, anchored to the record's updated
+// instant, so a morning flag dies a fixed span after it was posted no matter
+// which run picked it up and a re-scrape cannot extend it. An unparseable
+// updated yields null, since an age that cannot be established must not default
+// to a write-time lease; so does a record under 60 s from its horizon, the same
+// rule the reading applies.
+//
+// Otherwise the lease is write-time. The default matches the estimate's:
+// displayFlag weighs this record against the estimate, so an official that
+// lapses first hands a posted red to a stale green. Past displayFlag's 2 h gate
+// the surviving record is raise-only and its card carries the stale warning, so
+// ageing together costs no safety. A scraper on a reduced cadence may opt into
+// a longer lease via officialTtlSeconds, which every reader honors on its own
+// column.
+export function officialExpiryEpoch(scraper, flag, nowEpoch) {
+  const maxAgeMs = scraper.officialMaxAgeMs;
+  if (typeof maxAgeMs === "number" && Number.isFinite(maxAgeMs) && maxAgeMs > 0) {
+    const updatedMs = Date.parse(flag.updated);
+    if (!Number.isFinite(updatedMs)) {
+      console.log(
+        "index: official from " + scraper.id +
+        " carries an unparseable updated, skipping: " + String(flag.updated)
+      );
+      return null;
+    }
+    const expiration = Math.floor((updatedMs + maxAgeMs) / 1000);
+    return expiration - nowEpoch >= 60 ? expiration : null;
+  }
+  const officialTtl = typeof scraper.officialTtlSeconds === "number"
+    ? scraper.officialTtlSeconds
+    : FLAG_TTL_SECONDS;
+  return nowEpoch + officialTtl;
 }
 
 // Hourly estimate recompute. Fetches the fast-changing safety signals (alerts,
@@ -908,28 +948,22 @@ async function runFlagRecompute(env) {
         for (const beach of group.beaches) {
           const flag = scrapeOfficialFlagFromResult(beach, group.scraper, result);
           if (flag !== null) {
-            // The default matches the estimate's lease: displayFlag weighs
-            // this record against the estimate, so an official that lapses first
-            // hands a posted red to a stale green. Past displayFlag's 2 h gate
-            // the surviving record is raise-only and its card carries the stale
-            // warning, so ageing together costs no safety. A scraper on a
-            // reduced cadence may opt into a longer lease via
-            // officialTtlSeconds, which every reader honors on its own column.
-            const officialTtl =
-              typeof group.scraper.officialTtlSeconds === "number"
-                ? group.scraper.officialTtlSeconds
-                : FLAG_TTL_SECONDS;
-            officialWrites.push({
-              beachId: beach.id,
-              official: flag,
-              officialExpires: nowEpoch + officialTtl
-            });
-            officialsByBeach.set(beach.id, {
-              color: flag.color,
-              source: flag.scraperId || group.scraper.id,
-              updated: flag.updated
-            });
-            officialCount = officialCount + 1;
+            const officialExpires = officialExpiryEpoch(
+              group.scraper, flag, nowEpoch
+            );
+            if (officialExpires !== null) {
+              officialWrites.push({
+                beachId: beach.id,
+                official: flag,
+                officialExpires: officialExpires
+              });
+              officialsByBeach.set(beach.id, {
+                color: flag.color,
+                source: flag.scraperId || group.scraper.id,
+                updated: flag.updated
+              });
+              officialCount = officialCount + 1;
+            }
           }
           // Point-in-time observations expire on their own column, resolved
           // independently of the flag: a site the source reports with no posted

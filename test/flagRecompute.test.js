@@ -17,6 +17,7 @@ import { NDBC_HEAD_BYTES } from "../src/waveSources/ndbcBuoys.js";
 import { runScheduledCron } from "./helpers/cron.js";
 import { makeD1 } from "./helpers/d1.js";
 import { READING_MAX_AGE_MS } from "../src/officialReading.js";
+import { officialExpiryEpoch } from "../src/index.js";
 import { estimateFlag } from "../src/rules.js";
 import {
   FLAG_SEAL_VERSION,
@@ -1094,15 +1095,18 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
 
 // Step 8's official_expires: writeEpoch + FLAG_TTL_SECONDS (25200) by default,
 // so the record never expires ahead of the estimate displayFlag weighs it
-// against, unless the scraper declares a numeric officialTtlSeconds. No
-// registered scraper currently declares one (the override hook is retained as a
-// generic extension point for a future reduced-cadence scraper), so only the
-// default branch is exercised.
+// against, unless the scraper declares a numeric officialTtlSeconds (no
+// registered scraper does) or an officialMaxAgeMs, which anchors the lease to
+// the record's updated instant instead of the run.
 // The NWS Grand Rapids "Other Marine Reports" product, the one registered
-// scraper that also publishes point-in-time observations. Issued 14:56Z, read at
-// 18:00Z, so the reading is still inside its four-hour horizon.
+// scraper that also publishes point-in-time observations and the one that
+// declares officialMaxAgeMs. Issued 14:56Z, read at 18:00Z, so both the reading
+// and the posted flag are still inside their four-hour horizon.
 const OMR_ISSUANCE = "2026-07-21T14:56:00+00:00";
 const OMR_NOW = "2026-07-21T18:00:00Z";
+// Read again at 20:00Z, past the horizon: the product is still the newest one
+// NWS lists, and nothing off it may be written.
+const OMR_LATE = "2026-07-21T20:00:00Z";
 
 function omrProduct() {
   return [
@@ -1206,12 +1210,94 @@ describe("runFlagRecompute official_expires (default vs officialTtlSeconds)", fu
     expect(reading).not.toBeNull();
     expect(reading.waterTempF).toBe(68);
     expect(reading.waveHeightFt).toBe(4);
-    expect(expiresOf(made, "osm-node-ludington", "reading_expires"))
-      .toBe(Math.floor((Date.parse(OMR_ISSUANCE) + READING_MAX_AGE_MS) / 1000));
-    // The flag off the same product keeps the estimate's lease, measured from
-    // this run: the two records expire independently.
+    const horizon = Math.floor((Date.parse(OMR_ISSUANCE) + READING_MAX_AGE_MS) / 1000);
+    expect(expiresOf(made, "osm-node-ludington", "reading_expires")).toBe(horizon);
+    // The flag off the same product is the same morning observation, so it
+    // takes the same absolute lease rather than the run's 25200 s.
     expect(officialOf(made, "osm-node-ludington").color).toBe("red");
-    expect(expiresOf(made, "osm-node-ludington", "official_expires")).toBe(nowEpoch() + 25200);
+    expect(expiresOf(made, "osm-node-ludington", "official_expires")).toBe(horizon);
+    expect(horizon).toBeLessThan(nowEpoch() + 25200);
+  });
+
+  // A run past the horizon writes neither record and pairs no history row, so
+  // a re-scrape of the same product cannot extend the flag's life.
+  it("a run past the four-hour horizon writes no official and no reading", async function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(OMR_LATE));
+
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("/products/types/OMR/locations/GRR") !== -1) {
+        return omrJson({ "@graph": [{ id: "newest-id", issuanceTime: OMR_ISSUANCE }] });
+      }
+      if (target.indexOf("/products/newest-id") !== -1) {
+        return omrJson({ productText: omrProduct(), issuanceTime: OMR_ISSUANCE });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-ludington",
+        name: "Ludington State Park",
+        lat: 43.9585,
+        lon: -86.4790
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    expect(estimateOf(made, "osm-node-ludington")).not.toBeNull();
+    expect(officialOf(made, "osm-node-ludington")).toBeNull();
+    expect(expiresOf(made, "osm-node-ludington", "official_expires")).toBeNull();
+    expect(readingOf(made, "osm-node-ludington")).toBeNull();
+    expect(findHistoryStatements(made.batchCalls)).toHaveLength(0);
+  });
+});
+
+describe("officialExpiryEpoch", function () {
+  const NOW = Math.floor(Date.parse(OMR_NOW) / 1000);
+  const flag = { updated: OMR_ISSUANCE };
+
+  it("defaults to the estimate's write-time lease", function () {
+    expect(officialExpiryEpoch({ id: "x" }, flag, NOW)).toBe(NOW + 25200);
+  });
+
+  it("honors officialTtlSeconds as a write-time lease", function () {
+    expect(officialExpiryEpoch({ id: "x", officialTtlSeconds: 600 }, flag, NOW))
+      .toBe(NOW + 600);
+  });
+
+  it("anchors officialMaxAgeMs to the record's updated instant", function () {
+    const scraper = { id: "x", officialMaxAgeMs: READING_MAX_AGE_MS };
+    expect(officialExpiryEpoch(scraper, flag, NOW))
+      .toBe(Math.floor((Date.parse(OMR_ISSUANCE) + READING_MAX_AGE_MS) / 1000));
+  });
+
+  it("officialMaxAgeMs wins over a declared officialTtlSeconds", function () {
+    const scraper = { id: "x", officialMaxAgeMs: READING_MAX_AGE_MS, officialTtlSeconds: 600 };
+    expect(officialExpiryEpoch(scraper, flag, NOW))
+      .toBe(Math.floor((Date.parse(OMR_ISSUANCE) + READING_MAX_AGE_MS) / 1000));
+  });
+
+  it("returns null within 60 s of the horizon or past it", function () {
+    const scraper = { id: "x", officialMaxAgeMs: READING_MAX_AGE_MS };
+    const horizon = Math.floor((Date.parse(OMR_ISSUANCE) + READING_MAX_AGE_MS) / 1000);
+    expect(officialExpiryEpoch(scraper, flag, horizon - 60)).toBe(horizon);
+    expect(officialExpiryEpoch(scraper, flag, horizon - 59)).toBeNull();
+    expect(officialExpiryEpoch(scraper, flag, horizon + 3600)).toBeNull();
+  });
+
+  it("returns null for an unparseable updated under officialMaxAgeMs", function () {
+    const scraper = { id: "x", officialMaxAgeMs: READING_MAX_AGE_MS };
+    expect(officialExpiryEpoch(scraper, { updated: "yesterday" }, NOW)).toBeNull();
+    expect(officialExpiryEpoch(scraper, { updated: null }, NOW)).toBeNull();
+  });
+
+  it("ignores an invalid officialMaxAgeMs and falls back to the write-time lease", function () {
+    expect(officialExpiryEpoch({ id: "x", officialMaxAgeMs: NaN }, flag, NOW)).toBe(NOW + 25200);
+    expect(officialExpiryEpoch({ id: "x", officialMaxAgeMs: 0 }, flag, NOW)).toBe(NOW + 25200);
+    expect(officialExpiryEpoch({ id: "x", officialMaxAgeMs: "14400000" }, flag, NOW))
+      .toBe(NOW + 25200);
   });
 });
 

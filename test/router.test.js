@@ -2185,8 +2185,8 @@ describe("detail-page title flag: raise-only over an aged official reading", () 
   function titleOf(html) {
     return sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
   }
-  // 4 h before NOW_ISO — past the 2 h default, well inside the OMR's own 30 h
-  // staleMs, which is deliberately NOT the gate.
+  // 4 h before NOW_ISO — past the 2 h default, well inside the fixture's own
+  // 30 h staleMs, which is deliberately NOT the gate.
   const AGED = "2026-07-05T08:00:00.000Z";
   // 30 min before NOW_ISO — still fresh.
   const FRESH = "2026-07-05T11:30:00.000Z";

@@ -3,12 +3,15 @@
 // src/rules.js estimates, and an official color overrides the estimate everywhere
 // it is shown.
 //
-// The product is a single morning observation, which makes it the canonical case
-// for displayFlag's raise-only rule: past the 2 h STALE_MS horizon a fresher,
-// more severe estimate lifts every surface's flag above this color but never
-// below it, and this card keeps reporting the scraped color verbatim. A morning
-// table posting Yellow can be overtaken within hours by the same WFO's Beach
-// Hazards Statement and Surf Zone Forecast.
+// The product is a single morning observation, so the posted flag lives only
+// READING_MAX_AGE_MS (4 h) past its issuance, the same absolute horizon as the
+// water temperature and wave height off the same row: a morning flag is not a
+// claim about the afternoon. Inside that window it is the canonical case for
+// displayFlag's raise-only rule: past the 2 h STALE_MS horizon a fresher, more
+// severe estimate lifts every surface's flag above this color but never below
+// it, and this card keeps reporting the scraped color verbatim. A morning table
+// posting Yellow can be overtaken within hours by the same WFO's Beach Hazards
+// Statement and Surf Zone Forecast.
 //
 // Source: NWS Grand Rapids (WFO GRR) "Other Marine Reports" product (AWIPS
 // OMRGRR), which carries the fixed "Lake Michigan Beach Reports" table for the
@@ -49,6 +52,7 @@
 
 import { fetchJson } from "../clients/http.js";
 import { NWS_USER_AGENT, NWS_TIMEOUT_MS } from "../clients/nws.js";
+import { READING_MAX_AGE_MS } from "../officialReading.js";
 import { resolveSiteForBeach, perBeachResult } from "./util.js";
 
 // Product-type list for the OMR product issued by WFO Grand Rapids (GRR).
@@ -375,19 +379,21 @@ export const nwsOmr = {
   id: "nws-omr-grr",
   label: OMR_LABEL,
   url: OMR_URL,
-  // Staleness horizon for this source. The frontend's 2 h default is calibrated
-  // to the hourly estimate recompute, but this product is issued once per day,
-  // late morning local time (roughly 14:30-16:00 UTC), and the updated field is
-  // its issuanceTime — so a flat 2 h horizon would mark the card stale for most
-  // of every day even though the posted colors are current. 30 h covers the daily
-  // cadence plus issuance jitter, so the stale warning fires only when NWS
-  // genuinely skips an issuance, which is exactly when a reader should stop
-  // trusting the colors.
-  staleMs: 30 * 60 * 60 * 1000,
-  // The reading is still point-in-time, and the product text itself warns the
-  // observations "may not be representative of conditions later in the day", so
-  // between the 2 h default and the 30 h horizon that is said plainly. Rendered
-  // as a neutral callout with the age appended.
+  // The posted flag is a morning observation, issued once per day, late morning
+  // local time (roughly 14:30-16:00 UTC), and updated is its issuanceTime. The
+  // record expires 4 h after that instant, absolute rather than write-time, so
+  // a run that picks the product up in the evening writes nothing and a
+  // re-scrape cannot extend its life. The reading off the same row already dies
+  // at this horizon; the flag now dies with it.
+  officialMaxAgeMs: READING_MAX_AGE_MS,
+  // The record never outlives its lease, so the display horizon matches it.
+  // Between the 2 h default and the lease the card carries the neutral note
+  // below rather than the stale warning.
+  staleMs: READING_MAX_AGE_MS,
+  // The product text itself warns the observations "may not be representative
+  // of conditions later in the day", so between the 2 h default and the 4 h
+  // horizon that is said plainly. Rendered as a neutral callout with the age
+  // appended.
   readingNote: "Morning reading — conditions may have changed since it was posted",
   // Does this beach belong to one of the curated OMR sites? The shared resolver
   // over SITE_DEFS: any site's names[] substring-matching the beach's

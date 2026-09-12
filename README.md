@@ -487,7 +487,9 @@ classification (offline)](#discovery-and-classification-offline)).
   is logged and its beaches are left out of the calibration history, so a history row can
   never claim an estimate that was not stored. A scraper's optional
   `officialTtlSeconds` sets its own `official_expires` and may run past the estimate's,
-  because every reader checks each record's lease on its own; its `staleMs` and `readingNote`,
+  because every reader checks each record's lease on its own; `officialMaxAgeMs` instead
+  anchors that lease to the record's own `updated` instant, so the NWS Grand Rapids morning
+  flag dies 4 h after issuance whichever run scraped it. Its `staleMs` and `readingNote`,
   plus the resolver's `reportedFor`, ride along as display-side hints rather than leases. A
   scraped point-in-time observation lands in the same row's `reading` column, expiring on an
   absolute schedule 4 h past the observation instant, and the water-quality advisory in
@@ -786,7 +788,7 @@ returns the first scraper whose `matches(beach)` is true:
 | South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version") | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data. A beach naming no pole resolves to the nearest one and carries `reportedFor`, so the card names the pole it borrowed |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion, never an inferred green |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red; records >36 h old dropped; a beach reports green only when its own Surf row is fresh, so a green resting solely on a water-quality row is no data rather than a false green |
-| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance, so it declares a 30 h `staleMs` and a "Morning reading" note. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
+| NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance and the posted flag is that morning's observation, so it declares a 4 h `officialMaxAgeMs`: the record expires 4 h after issuance, absolute, alongside the readings. `staleMs` matches the lease and a "Morning reading" note covers the window past 2 h. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
 | Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
 | PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only |
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | Zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
@@ -872,6 +874,10 @@ nothing to report must never return null, or it would raise a false alert.
          // run past the estimate's 25200 s — every reader checks each record's
          // lease on its own.
          // officialTtlSeconds: 21600,
+         // OPTIONAL, wins over officialTtlSeconds: the posted flag is a point-in-
+         // time observation, so official_expires is anchored to the record's
+         // updated instant rather than the run. See "Point-in-time postings".
+         // officialMaxAgeMs: 14400000,
          matches: function (beach) {
            // BeachRow -> boolean, pure. Match by name regex and/or a lat/lon
            // bounding box covering every OSM beach row for that area.
@@ -970,9 +976,9 @@ nothing to report must never return null, or it would raise a false alert.
    honest `updated` of its issuance time would show "Stale data" for most of every day even
    though the posted colors are current. Such a scraper declares `staleMs` — the milliseconds
    after which *its* reading is genuinely stale — and the warning then fires only when the
-   source actually misses its cadence (`nws-omr-grr` 30 h; `winnetka-tower-beach` 72 h,
-   covering a Friday-afternoon status post read on Monday morning). A scraper that declares
-   nothing keeps the honest 2 h signal.
+   source actually misses its cadence (`winnetka-tower-beach` 72 h, covering a
+   Friday-afternoon status post read on Monday morning). A scraper that declares nothing
+   keeps the honest 2 h signal.
 
    A source whose reading is a **point in time** may additionally declare `readingNote`: a
    sentence fragment rendered as a neutral callout when the reading is older than the 2 h
@@ -989,6 +995,17 @@ nothing to report must never return null, or it would raise a false alert.
    `staleMs` is an addition to honest `updated` stamping, never a substitute: stamping `nowIso`
    on a days-old reading and covering it with a long horizon is exactly the failure the honesty
    rule exists to prevent.
+
+   **Point-in-time postings (`officialMaxAgeMs`).** A source whose posted flag is itself a
+   single observation declares `officialMaxAgeMs`, a finite number of milliseconds > 0. The
+   cron then anchors `official_expires` to the record's `updated` instant, exactly as it
+   anchors `reading_expires` to the observation, so the flag dies a fixed span after it was
+   posted no matter which run scraped it and a re-scrape cannot extend it. A run past that
+   horizon writes no official record at all. `nws-omr-grr` declares the reading horizon, 4 h:
+   a morning flag is not a claim about the afternoon, and past it the estimate stands alone.
+   It wins over `officialTtlSeconds`; declare one or the other. Set `staleMs` to the same
+   value, so the card carries the `readingNote` rather than a stale warning between 2 h and
+   expiry.
 
 2. Register it in the `scrapers` array in `src/officialSources/index.js`, most-specific
    `matches()` first — `findScraper(beach)` returns the first match, so tight city boxes go

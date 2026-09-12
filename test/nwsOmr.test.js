@@ -20,6 +20,7 @@ import {
 } from "../src/officialSources/index.js";
 import { installFetch } from "./helpers/fetch.js";
 import { makeBeach } from "./helpers/beach.js";
+import { READING_MAX_AGE_MS } from "../src/officialReading.js";
 
 const NOW_ISO = "2026-07-21T18:00:00.000Z";
 const ISSUANCE = "2026-07-21T14:56:00+00:00";
@@ -302,14 +303,20 @@ describe("nwsOmr.matches", function () {
 });
 
 // The OMR GRR product is issued ONCE PER DAY (observed ~14:30-16:00 UTC) and
-// scrape() stamps updated with the product's issuanceTime, so the frontend's 2 h
-// default would mark the official card stale for ~22 of every 24 hours. The
-// scraper therefore declares its own horizon plus honest copy for the window
-// between the two.
+// scrape() stamps updated with the product's issuanceTime. The posted flag is a
+// morning observation, so the record lives 4 h past that instant, the same
+// absolute horizon as the readings off the same row, and the display horizon
+// matches the lease so the card carries the neutral note rather than the stale
+// warning between 2 h and expiry.
 describe("nwsOmr staleness contract", function () {
-  it("declares a 30 h staleMs (24 h cadence + issuance jitter + margin)", function () {
-    expect(nwsOmr.staleMs).toBe(30 * 60 * 60 * 1000);
-    expect(nwsOmr.staleMs).toBe(108000000);
+  it("declares a 4 h officialMaxAgeMs, the reading horizon", function () {
+    expect(nwsOmr.officialMaxAgeMs).toBe(READING_MAX_AGE_MS);
+    expect(nwsOmr.officialMaxAgeMs).toBe(4 * 60 * 60 * 1000);
+    expect(nwsOmr.officialTtlSeconds).toBeUndefined();
+  });
+
+  it("declares a staleMs equal to the lease", function () {
+    expect(nwsOmr.staleMs).toBe(READING_MAX_AGE_MS);
     expect(Number.isFinite(nwsOmr.staleMs)).toBe(true);
     expect(nwsOmr.staleMs).toBeGreaterThan(0);
   });
@@ -344,7 +351,7 @@ describe("nwsOmr end-to-end resolution", function () {
     expect(flag.scraperId).toBe("nws-omr-grr");
     expect(flag.updated).toBe(ISSUANCE);
     // The declared per-source horizon and note ride along onto the KV record.
-    expect(flag.staleMs).toBe(30 * 60 * 60 * 1000);
+    expect(flag.staleMs).toBe(READING_MAX_AGE_MS);
     expect(flag.readingNote).toBe(
       "Morning reading — conditions may have changed since it was posted"
     );

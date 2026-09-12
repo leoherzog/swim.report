@@ -783,7 +783,7 @@ Leases, all ABSOLUTE epoch seconds:
 | column | value written |
 |---|---|
 | estimate_expires | writeEpoch + FLAG_TTL_SECONDS (25200) |
-| official_expires | writeEpoch + (the scraper's officialTtlSeconds, else FLAG_TTL_SECONDS) |
+| official_expires | floor((Date.parse(updated) + officialMaxAgeMs) / 1000) when the scraper declares officialMaxAgeMs; else writeEpoch + (the scraper's officialTtlSeconds, else FLAG_TTL_SECONDS) |
 | wqfloor_expires | writeEpoch + WQFLOOR_TTL_SECONDS (7200) |
 | reading_expires | floor((Date.parse(observedIso) + READING_MAX_AGE_MS) / 1000) |
 | wave_expires | validStartEpoch + 86400 (series) or + 25200 (wind-only) — the one lease measured from the model valid time, not from writeEpoch |
@@ -2243,6 +2243,11 @@ Date.now(), no ambient clock.
       // to run past the estimate's lease, because every reader checks each
       // record's lease on its own. Independent of staleMs: this is how long the
       // stored record lives, staleMs how the frontend judges the reading's age.
+      // officialMaxAgeMs: optional, finite number > 0 — declares the posted flag a
+      // point-in-time observation. official_expires is then ABSOLUTE, anchored to
+      // the record's updated instant like reading_expires, so a re-scrape cannot
+      // extend it and a run past the horizon writes nothing. Wins over
+      // officialTtlSeconds. nws-omr-grr declares READING_MAX_AGE_MS (4 h).
       matches: function(beach) { ... },  // BeachRow -> boolean, pure
       scrape: async function(nowIso) { ... }
       // -> result | null. null is failure-only: a fetch failure, an unparseable page,
@@ -2798,12 +2803,18 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    not the pass; call each distinct scraper's scrape(nowIso) ONCE per run; for every
    matched beach, in a sequential loop over group.beaches, resolve the shared result via
    scrapeOfficialFlagFromResult(beach, scraper, result) and add the returned OfficialFlag to
-   that beach's write descriptor as official, with
-   officialExpires = nowEpoch + (scraper.officialTtlSeconds ?? FLAG_TTL_SECONDS): a scraper
-   may opt into a longer lease when it fetches on a reduced cadence, so its last color
-   persists between infrequent fetches. Default 25200. The lease is free to run past the
-   estimate's, because every reader checks official_expires on its own (section 2). No
-   registered scraper declares officialTtlSeconds, so this resolves to the default. The
+   that beach's write descriptor as official, with officialExpires from officialExpiryEpoch
+   (src/index.js, pure): nowEpoch + (scraper.officialTtlSeconds ?? FLAG_TTL_SECONDS) by
+   default, so a scraper may opt into a longer lease when it fetches on a reduced cadence
+   and its last color persists between infrequent fetches. Default 25200. The lease is free
+   to run past the estimate's, because every reader checks official_expires on its own
+   (section 2). No registered scraper declares officialTtlSeconds. A scraper declaring
+   officialMaxAgeMs instead gets an ABSOLUTE lease, floor((Date.parse(flag.updated) +
+   officialMaxAgeMs) / 1000), the same anchoring as the reading below: nws-omr-grr declares
+   READING_MAX_AGE_MS, so its morning flag dies four hours after issuance no matter which
+   run picked it up. A record under 60 s from that horizon, or one whose updated does not
+   parse, is skipped rather than written, contributes no official field, and pairs no
+   flag_history row. The
    record also carries the scraper's validated staleMs / readingNote when declared, and
    reportedFor when the beach resolved to a report site of another name (both copied by
    scrapeOfficialFlagFromResult, section 6) — display-side fields, orthogonal to the lease.
