@@ -49,7 +49,6 @@ import {
 import {
   WQFLOOR_TTL_SECONDS,
   WAVE_STATE_SELECT,
-  BEACH_STATE_JOIN,
   liveWaveRecord,
   beachStateUpsertStatements,
   estimateCasStatement,
@@ -58,47 +57,49 @@ import {
 import { makeDeadline, runPool } from "./pool.js";
 import { withSecurityHeaders } from "./securityHeaders.js";
 
-// Rows per hourly run. The cap bounds one run's wall clock and its D1 batch
-// budget against the 900 s scheduled ceiling; it does not have to cover the table.
-// Cold rows rotate, and FLAG_TTL_SECONDS is what carries a beach between its
-// turns, so the two must satisfy:
-//
-//   FLAG_TTL_SECONDS / 3600 >= ceil((flagWorthy - hot) / (this - hot)) + 2
-//
-// The hard requirement is that this stay above the hot count (last_viewed inside
-// HOT_VIEW_WINDOW_MS, logged as hot=): hot rows are covered every run, so at
-// hot >= this the cold tier gets no slots and starves whatever the TTL is. The
-// run logs oldest=, the oldest cursor stamp it selected, so the left side of
-// that inequality is measurable rather than assumed.
-//
-// The inequality, not wall clock, is what sets this number. At 9,068 flag-worthy
-// rows and 719-837 hot, 3000 gives the cold tier ~2,160 slots, a four-run
-// rotation, and 6 <= 7 with one run of slack. Lowering it eats that slack fast,
-// because the hot tier comes off the top: 2600 lands exactly on 7 <= 7 with none
-// left, and 2000 gives a ten-run rotation and ages half the cold coast out to
-// unknown between turns. Wall clock is not the constraint here — the 3000-row run
-// measures 187-206 s against the 900 s ceiling, at 1.0-2.7 s of CPU — and the
-// run's cost is wall clock plus batched D1 round trips, so a cut has to come from
-// the rotation arithmetic or from the TTL, never from this number alone. Read
-// oldest= and the run's own timestamps before moving it either way. Real
-// pagination is still required past what one run can walk (TODO.md).
-const MAX_BEACHES_PER_RUN = 3000;
+// The hourly walks its whole queue in pages. A page is one wave read, one
+// beach_state chunk and one recompute_updated stamp, so the page size must not
+// exceed chunkStatements' 200 or a page would split across chunks. Positive
+// integer env override (FLAG_RECOMPUTE_PAGE_SIZE) for tests.
+const FLAG_RECOMPUTE_PAGE_SIZE = 200;
+// No page past the hot prefix starts after T+240 s, and no page at all after
+// T+300 s. Both sit before the alert refresh's :13 slot, 360 s after this cron's
+// :07 start: the hourly's upsert is unconditional, so a page flushed after that
+// slot replaces any raise the refresh made with a color decided on this run's
+// older alert fetch. A page in flight past the slot is repaired at the next
+// refresh cadence. Hot rows lead the queue and keep the extra 60 s, so a slow run
+// degrades to hot-first then oldest-first rotation. Numeric env overrides
+// (FLAG_WALK_DEADLINE_MS, FLAG_HOT_WALK_DEADLINE_MS), read like
+// WQ_GATHER_DEADLINE_MS.
+const FLAG_WALK_DEADLINE_MS = 240000;
+const FLAG_HOT_WALK_DEADLINE_MS = 300000;
+// No scraper starts after T+600 s. The tail must fit under the 900 s ceiling: the
+// scraper in flight, up to 90 s for nws-omr's two 45 s fetches, then the official
+// flush with its one retry and the flag_history batch, each D1 statement capped at
+// 30 s. An unreached scraper writes nothing, so its stored official ages out, and
+// its health streak is left alone. Numeric env override (FLAG_SCRAPE_DEADLINE_MS).
+const FLAG_SCRAPE_DEADLINE_MS = 600000;
+// Consecutive failed pages that end the walk: a failed wave read, or an estimate
+// flush that lost rows. A D1 outage then costs three pages instead of every
+// remaining one, and the scrape pass still runs.
+const FLAG_PAGE_FAILURE_LIMIT = 3;
+// Rows per water-temp run. That cron still rotates a capped queue on wave_updated.
+const WATER_TEMP_BEACHES_PER_RUN = 3000;
 // HOT_VIEW_WINDOW_MS is imported from ./demandWindow.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry module
 // and fails the Worker at startup. See demandWindow.js.
 // FLAG_TTL_SECONDS (25200) is imported from ./flagTtl.js and deliberately not
 // re-exported: workerd rejects any non-function named export on the entry
 // module and fails the Worker at startup.
-// The estimate is rewritten on every rotation turn and never retracted, so this
-// lease is pure expiry: it must outlive the gap between one beach's turns rather
-// than bound how long a withdrawn reading keeps rendering. That gap is
-// ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot)) hourly runs, plus one
-// hour for every run killed before its trailing recompute_updated batch commits,
-// plus the beach_state flush's position inside a run capped at 900 s. Seven
-// hours covers a four-run rotation with two lost runs. A beach at the far end
-// renders its last reading, marked stale on the detail page, instead of dropping
-// to no-data; the list chip and the map marker carry no age signal, so a
-// rotation-old color reads there exactly like a fresh one.
+// The estimate is rewritten on every run that reaches the beach and never
+// retracted, so this lease is pure expiry: it must outlive the gap between one
+// beach's turns rather than bound how long a withdrawn reading keeps rendering.
+// A full walk makes that gap one run, so seven hours absorbs six lost or
+// truncated runs in a row. Under truncation read reached= against beaches= in
+// the completion log: an unreached cold row waits for the next run. A beach at
+// the far end renders its last reading, marked stale on the detail page, instead
+// of dropping to no-data; the list chip and the map marker carry no age signal,
+// so an old color reads there exactly like a fresh one.
 //
 // The official record shares this lease by default. The two are the operands of
 // displayFlag, so the estimate must never outlive the posted flag it is
@@ -125,7 +126,7 @@ const WAVE_DATA_TTL_SECONDS = 25200;
 // and applied sequentially (src/beachState.js).
 //
 // The hourly spends this budget on its upstream gathers alone: its wave records
-// ride the SELECT it already issues, so it makes no per-beach KV read. The
+// come from one primary-key D1 read per page, so it makes no per-beach read. The
 // water-temp cron spends it on station fetches and its own "watertemp:" puts.
 const KV_WRITE_CONCURRENCY = 12;
 // Wall-clock budgets for the 6-hourly water-temp cron, measured from the top of
@@ -251,37 +252,24 @@ function runBudget(env) {
 
 // The run queue shared by both beach-walking crons: flag-worthy rows ordered
 // hot-first (a last_viewed demand stamp inside the hot window) ahead of the
-// oldest-cursor rotation, capped at MAX_BEACHES_PER_RUN. Only the column list,
-// the clock source and the rotation cursor column differ, so the WHERE, the
-// hot-first guard, the id ASC tiebreak, the LIMIT and the single bind live here
-// once. Returns the bound statement; the caller runs it.
+// oldest-cursor rotation, then id ASC. Returns the bound statement; the caller
+// runs it.
 //
-// The hot-first demand term applies to both callers: dropping it from the
-// 6-hourly cron would let a beach in active demand lose its reading to the
-// rotation the moment the table outgrows one run, which is the contract PLAN.md
+// The hot-first demand term applies to both callers: a beach in active demand
+// must never lose its reading to the rotation, which is the contract PLAN.md
 // section 7 makes. rotation selects the cursor column from the ROTATION_COLUMNS
-// whitelist — a column name cannot be a bind parameter, so it is concatenated as
-// a literal and the lookup is own-property-checked rather than trusting an
-// arbitrary string to index the map.
-//
-// stateSelect is optional: pass a beach_state fragment to join the table and
-// select it alongside columns, which the caller must then qualify as b.* rather
-// than * so the row set does not carry every beach_state column. Omit it and the
-// statement is the plain unjoined SELECT. Every other clause stays unqualified in
-// both forms — FLAG_WORTHY_WATER_SQL's water_class and water_class_attempts,
-// last_viewed, the cursor column, id — which holds only because beach_state
-// carries none of those names; any future beach_state column must satisfy that
-// too.
-function selectRunBeaches(env, columns, hotCutoffIso, rotation, stateSelect) {
+// whitelist, since a column name cannot be a bind parameter and must never be
+// caller-derived text. limit is appended only when it is a positive integer; the
+// hourly passes none and walks the whole queue.
+function selectRunBeaches(env, columns, hotCutoffIso, rotation, limit) {
   const cursorColumn = Object.prototype.hasOwnProperty.call(ROTATION_COLUMNS, rotation)
     ? ROTATION_COLUMNS[rotation]
     : ROTATION_COLUMNS.flag;
-  const select = stateSelect ? columns + ", " + stateSelect : columns;
-  const from = stateSelect ? " FROM beaches b" + BEACH_STATE_JOIN : " FROM beaches";
+  const limitSql = Number.isInteger(limit) && limit > 0 ? " LIMIT " + String(limit) : "";
   return env.DB.prepare(
-    "SELECT " + select + from + " WHERE " + FLAG_WORTHY_WATER_SQL +
+    "SELECT " + columns + " FROM beaches WHERE " + FLAG_WORTHY_WATER_SQL +
     " ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC, " + cursorColumn +
-    " ASC, id ASC LIMIT " + String(MAX_BEACHES_PER_RUN)
+    " ASC, id ASC" + limitSql
   ).bind(hotCutoffIso);
 }
 
@@ -360,6 +348,15 @@ const ALERT_REFRESH_SQL =
   "FROM beaches b JOIN beach_state s ON s.beach_id = b.id WHERE " + FLAG_WORTHY_WATER_SQL +
   " AND s.estimate IS NOT NULL AND s.estimate_expires > ?1 AND b.id > ?2 " +
   "ORDER BY b.id LIMIT " + String(ALERT_REFRESH_PAGE_SIZE);
+
+// One hourly page's wave records and its cursor stamp, each keyed on a JSON id
+// array bound as one parameter. beach_state.beach_id and beaches.id are both
+// primary keys, so neither needs an index, and a page costs two statements
+// however many ids it holds.
+const FLAG_PAGE_WAVE_SQL = "SELECT s.beach_id, " + WAVE_STATE_SELECT +
+  " FROM beach_state s WHERE s.beach_id IN (SELECT value FROM json_each(?1))";
+const RECOMPUTE_STAMP_SQL =
+  "UPDATE beaches SET recompute_updated = ?1 WHERE id IN (SELECT value FROM json_each(?2))";
 
 // D1 answers a transient "Connection closed" or "overloaded" by asking the
 // caller to retry, so every state batch gets exactly one second try; a second
@@ -472,28 +469,42 @@ export function officialExpiryEpoch(scraper, flag, nowEpoch) {
 
 // Hourly estimate recompute. Fetches the fast-changing safety signals (alerts,
 // rip-current risk) every hour but takes wave height and the wind fallback from
-// the beach_state.wave record the offline NOAA GRIB pipeline writes, selected on
-// the same join it is about to write back to; no wave fetch is reachable from
-// this Worker at all.
+// the beach_state.wave record the offline NOAA GRIB pipeline writes; no wave
+// fetch is reachable from this Worker at all.
 //
-// Every derived record it produces — estimate, wqfloor, official, reading — is
-// collected as a beach_state write descriptor and applied in batches: the
-// estimates as soon as the pool returns, the officials and readings after the
-// scrape pass. Both flushes COALESCE onto the same row, so a beach that produced
-// both ends the run as one row.
+// It snapshots the whole flag-worthy queue in one unjoined SELECT, gathers every
+// national, SRF and water-quality signal once over that snapshot, then walks it
+// in pages under FLAG_WALK_DEADLINE_MS. Each page reads its wave records, flushes
+// its estimates and stamps recompute_updated before the next page starts. The
+// officials and readings flush once, after the scrape pass. Both flushes
+// COALESCE onto the same row, so a beach that produced both ends the run as one
+// row.
 async function runFlagRecompute(env) {
+  // Measured before the snapshot SELECT, so the walk deadline bounds true
+  // elapsed time.
+  const startedMs = Date.now();
   const nowIso = new Date().toISOString();
   const nowMs = Date.parse(nowIso);
   const nowEpoch = Math.floor(nowMs / 1000);
   const wqGatherDeadlineMs = env && typeof env.WQ_GATHER_DEADLINE_MS === "number"
     ? env.WQ_GATHER_DEADLINE_MS : WQ_GATHER_DEADLINE_MS;
-  // Descriptors for the two beach_state flushes. A record this run did not
+  const pageSize = env && Number.isInteger(env.FLAG_RECOMPUTE_PAGE_SIZE) &&
+    env.FLAG_RECOMPUTE_PAGE_SIZE > 0
+    ? env.FLAG_RECOMPUTE_PAGE_SIZE : FLAG_RECOMPUTE_PAGE_SIZE;
+  const walkDeadlineMs = env && typeof env.FLAG_WALK_DEADLINE_MS === "number"
+    ? env.FLAG_WALK_DEADLINE_MS : FLAG_WALK_DEADLINE_MS;
+  const walkDeadline = makeDeadline(startedMs, walkDeadlineMs);
+  const hotWalkDeadlineMs = env && typeof env.FLAG_HOT_WALK_DEADLINE_MS === "number"
+    ? env.FLAG_HOT_WALK_DEADLINE_MS : FLAG_HOT_WALK_DEADLINE_MS;
+  const hotWalkDeadline = makeDeadline(startedMs, hotWalkDeadlineMs);
+  const scrapeDeadlineMs = env && typeof env.FLAG_SCRAPE_DEADLINE_MS === "number"
+    ? env.FLAG_SCRAPE_DEADLINE_MS : FLAG_SCRAPE_DEADLINE_MS;
+  const scrapeDeadline = makeDeadline(startedMs, scrapeDeadlineMs);
+  // Descriptors for the official/reading flush. A record this run did not
   // produce is simply absent: the upsert COALESCEs, so expiry stays the only
-  // retraction path for a cleared advisory, official or reading. They are
-  // flushed separately — estimates the moment the pool returns, officials and
-  // readings after the scrape pass — because a run killed at the 900 s ceiling
-  // inside the scrapes must still keep the estimates it already computed.
-  const estimateWrites = [];
+  // retraction path for a cleared advisory, official or reading. Estimates are
+  // flushed per page instead, because a run killed at the 900 s ceiling inside
+  // the scrapes must still keep the estimates it already computed.
   const officialWrites = [];
   let estimateCount = 0;
   let officialCount = 0;
@@ -509,14 +520,21 @@ async function runFlagRecompute(env) {
 
   const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString();
 
+  function isHot(b) {
+    return b.last_viewed && b.last_viewed >= hotCutoffIso;
+  }
+
   try {
-    // b.* rather than *: a bare splat over the join returns every beach_state
-    // column, putting the estimate and official blobs on all MAX_BEACHES_PER_RUN
-    // rows.
-    const beachesResult = await selectRunBeaches(
-      env, "b.*", hotCutoffIso, "flag", WAVE_STATE_SELECT
-    ).all();
+    // The whole queue, unjoined and with no LIMIT: beaches columns only, so the
+    // snapshot carries no JSON blob. A throw here rejects the run.
+    const beachesResult = await selectRunBeaches(env, "*", hotCutoffIso, "flag").all();
     const beaches = beachesResult.results || [];
+    // The ORDER BY puts every hot row first, so the hot rows are exactly this
+    // leading run. Only the hot walk deadline stops a page inside it.
+    let hotPrefix = 0;
+    while (hotPrefix < beaches.length && isHot(beaches[hotPrefix])) {
+      hotPrefix = hotPrefix + 1;
+    }
 
     // Step 3: alerts — one national fetch, matched to the run's distinct zone ids
     // locally. Costs a single subrequest regardless of zone count, so nationwide
@@ -640,33 +658,6 @@ async function runFlagRecompute(env) {
       );
     }
 
-    // Step 5: wave inputs — read only, never fetched here. Each beach's row
-    // already carries the offline wave cycle's record and its lease, selected
-    // above over the beach_state join, so there is no per-beach read at all.
-    // liveWaveRecord applies the same expiry rule every other beach_state column
-    // obeys, and resolveWaveInput then indexes the stored series at the hour this
-    // run is estimating rather than reading hour 0 — which is what lets one landed
-    // cycle color a day of runs, and why a series-bearing record's lease is the
-    // length of its series.
-    //
-    // An absent record, a lease that has passed and a spent series all yield no
-    // wave input, and the estimate degrades to the wind fallback or "unknown",
-    // never a wrong flag. Both gates hold on their own: a wind-only record's live
-    // wave_expires is not evidence that its hour-0 wind is offerable, which only
-    // resolveWaveInput decides. Resolving here rather than in the loop below means
-    // every beach in a run indexes the same instant.
-    const waveInputs = new Map();
-    for (const beach of beaches) {
-      const record = liveWaveRecord(beach, nowMs);
-      if (record === null) {
-        continue;
-      }
-      const resolved = resolveWaveInput(record, nowMs);
-      if (resolved !== null) {
-        waveInputs.set(beach.id, resolved);
-      }
-    }
-
     // Step 5b: water-quality floor gather, grouped like the step-8 official
     // scrapers: group beaches by their matching wqFloor source and fetch each
     // source once per run, so a table-wide advisory source costs one fetch. The
@@ -715,14 +706,15 @@ async function runFlagRecompute(env) {
       );
     }
 
-    // Step 6: per-beach estimate, isolated failures, through the bounded pool
-    // — see src/pool.js. The body is pure local work over signals steps 3
-    // through 6b already gathered, and every write it produces is a descriptor
-    // step 7b flushes, so the width buys no concurrency today; the pool stays as
-    // the fan-out bound for any per-beach upstream or storage call added here,
-    // and as pool.js's backstop around the body's own catch. Nothing in the body
-    // depends on the previous iteration, and estimateCount / failureCount are
-    // incremented with a single synchronous statement.
+    // Step 6: per-beach estimate, isolated failures, run through the bounded
+    // pool once per page — see src/pool.js. The body is pure local work over
+    // signals steps 3 through 5b already gathered and the page's wave inputs, and
+    // every write it produces is a descriptor the page's step-7b flush applies,
+    // so the width buys no concurrency today; the pool stays as the fan-out bound
+    // for any per-beach upstream or storage call added here, and as pool.js's
+    // backstop around the body's own catch. Nothing in the body depends on the
+    // previous iteration, and estimateCount / failureCount are incremented with a
+    // single synchronous statement.
     //
     // The alert half of every beach's bundle is assembled by buildAlertInputs
     // (src/flagInputs.js), the same function the alerts refresh cron calls, so
@@ -732,7 +724,11 @@ async function runFlagRecompute(env) {
       ecccAlerts: ecccAlerts,
       ecccMarineAlerts: ecccMarineAlerts
     };
-    await runPool(beaches, KV_WRITE_CONCURRENCY, async function (beach) {
+    // Page-local: the walk replaces both before it runs the pool over a page, and
+    // the pool has fully settled before either is replaced again.
+    let waveInputs = new Map();
+    let estimateWrites = [];
+    async function estimateBeach(beach) {
       try {
         // The non-alert source entries, kept separate from the alert ones so
         // buildEstimateInputs can concat them in the same order the payload has
@@ -754,8 +750,8 @@ async function runFlagRecompute(env) {
         }
 
         // Wave height and the wind fallback both come from the stored wave
-        // input, already resolved to this run's hour in step 5 (or absent when
-        // there is no live data for this beach).
+        // input, already resolved to this run's hour by the page's step-5 read
+        // (or absent when there is no live data for this beach).
         const waveInput = waveInputs.get(beach.id);
 
         // Number.isFinite, not typeof "number": rules.js step 3's else branch has
@@ -860,13 +856,139 @@ async function runFlagRecompute(env) {
         failureCount = failureCount + 1;
         console.log("index: flag estimate failed for beach " + beach.id + ": " + err.message);
       }
-    });
+    }
 
-    // Step 7b: persist the estimates before the scrape pass starts. Everything
-    // below this line is upstream work bounded only by each scraper's own fetch
-    // timeout, and a run killed at the 900 s ceiling in there must not cost the
-    // beaches it has already estimated.
-    const estimateFlush = await flushBeachState(env, estimateWrites);
+    // Step 7: the paged walk. Each page reads its wave records, estimates,
+    // flushes and stamps before the next page starts, so every committed
+    // estimate is in D1 before the scrape pass and a kill anywhere costs only the
+    // page in flight. Both deadlines are checked between pages; the cold one
+    // never stops a page inside the hot prefix, the hot one stops any page.
+    let reached = 0;
+    let pagesRun = 0;
+    let pageFailures = 0;
+    let consecutivePageFailures = 0;
+    let stampFailures = 0;
+    let waveInputCount = 0;
+    let estimateRows = 0;
+    let estimateFailures = 0;
+    let deadlineHit = "no";
+    const persistedEstimates = new Set();
+    const totalPages = Math.ceil(beaches.length / pageSize);
+    for (let start = 0; start < beaches.length; start = start + pageSize) {
+      if (hotWalkDeadline.expired() || (start >= hotPrefix && walkDeadline.expired())) {
+        deadlineHit = start < hotPrefix ? "hot" : "cold";
+        break;
+      }
+      const page = beaches.slice(start, start + pageSize);
+      const pageIds = page.map(function (b) { return b.id; });
+
+      // Step 5, per page: wave inputs are read here and never fetched. A failed
+      // read skips the page whole, with no estimate and no stamp, because a page
+      // estimated without its wave records would publish a wave-blind color. The
+      // skipped rows keep their cursor and sort first next run.
+      let waveRows = null;
+      try {
+        const waveResult = await env.DB.prepare(FLAG_PAGE_WAVE_SQL)
+          .bind(JSON.stringify(pageIds)).all();
+        waveRows = waveResult.results || [];
+      } catch (err) {
+        console.log(
+          "index: flag recompute wave page read failed at " + String(start) + ": " + err.message
+        );
+        pageFailures = pageFailures + 1;
+        consecutivePageFailures = consecutivePageFailures + 1;
+        if (consecutivePageFailures >= FLAG_PAGE_FAILURE_LIMIT) {
+          console.log(
+            "index: flag recompute walk aborted after " + String(consecutivePageFailures) +
+            " consecutive failed pages"
+          );
+          break;
+        }
+        continue;
+      }
+      pagesRun = pagesRun + 1;
+
+      // A beach absent from a successful read has no wave record. liveWaveRecord
+      // applies the same expiry rule every other beach_state column obeys, and
+      // resolveWaveInput then indexes the stored series at the hour this run is
+      // estimating rather than reading hour 0, which is what lets one landed
+      // cycle color a day of runs. An absent record, a passed lease and a spent
+      // series all yield no wave input, so the estimate degrades to the wind
+      // fallback or "unknown", never a wrong flag. Both gates hold on their own:
+      // a wind-only record's live wave_expires is not evidence that its hour-0
+      // wind is offerable, which only resolveWaveInput decides. Every page
+      // resolves against the same nowMs, so the whole run indexes one instant.
+      const waveById = new Map();
+      for (const row of waveRows) {
+        waveById.set(row.beach_id, row);
+      }
+      waveInputs = new Map();
+      for (const beach of page) {
+        const record = liveWaveRecord(waveById.get(beach.id) || null, nowMs);
+        if (record === null) {
+          continue;
+        }
+        const resolved = resolveWaveInput(record, nowMs);
+        if (resolved !== null) {
+          waveInputs.set(beach.id, resolved);
+        }
+      }
+      waveInputCount = waveInputCount + waveInputs.size;
+
+      estimateWrites = [];
+      await runPool(page, KV_WRITE_CONCURRENCY, estimateBeach);
+
+      // Step 7b, per page: persist this page's estimates before the next page and
+      // long before the scrape pass, whose upstream work is bounded only by each
+      // scraper's own fetch timeout.
+      const estimateFlush = await flushBeachState(env, estimateWrites);
+      for (const id of estimateFlush.persisted) {
+        persistedEstimates.add(id);
+      }
+      estimateRows = estimateRows + estimateFlush.rows;
+      estimateFailures = estimateFailures + estimateFlush.failures;
+
+      // Step 10, per page: advance the cursor for every row the page reached
+      // except one whose estimate chunk rolled back, which keeps its old stamp
+      // and sorts first next run. A beach whose estimateFlag threw is stamped, so
+      // a deterministic throw cannot pin itself to the head of the queue. A lost
+      // stamp only reorders the next run, so it is logged with no retry.
+      const unpersisted = new Set();
+      for (const write of estimateWrites) {
+        if (!estimateFlush.persisted.has(write.beachId)) {
+          unpersisted.add(write.beachId);
+        }
+      }
+      const stampIds = pageIds.filter(function (id) { return !unpersisted.has(id); });
+      if (stampIds.length > 0) {
+        try {
+          await env.DB.prepare(RECOMPUTE_STAMP_SQL)
+            .bind(nowIso, JSON.stringify(stampIds)).run();
+        } catch (err) {
+          stampFailures = stampFailures + stampIds.length;
+          console.log(
+            "index: failed to stamp recompute_updated for " + String(stampIds.length) +
+            " beaches at " + String(start) + ": " + err.message
+          );
+        }
+      }
+      reached = reached + page.length;
+
+      // A flush that lost rows is a failed page too, so a D1 that answers reads
+      // but rejects writes still ends the walk instead of retrying every page.
+      if (estimateFlush.failures > 0) {
+        consecutivePageFailures = consecutivePageFailures + 1;
+        if (consecutivePageFailures >= FLAG_PAGE_FAILURE_LIMIT) {
+          console.log(
+            "index: flag recompute walk aborted after " + String(consecutivePageFailures) +
+            " consecutive failed pages"
+          );
+          break;
+        }
+      } else {
+        consecutivePageFailures = 0;
+      }
+    }
 
     // Step 8: officials, one scrape call per distinct matched scraper, then
     // per-beach resolution of the shared result (contract v2). A beach that
@@ -891,7 +1013,18 @@ async function runFlagRecompute(env) {
         scraperGroups.get(scraper.id).beaches.push(beach);
       }
     }
+    // The scrape deadline is checked between scrapers only; each scraper's own
+    // fetch timeout bounds the one in flight.
+    let scrapersReached = 0;
     for (const group of scraperGroups.values()) {
+      if (scrapeDeadline.expired()) {
+        console.log(
+          "index: official scrape deadline reached=" + String(scrapersReached) +
+          " of " + String(scraperGroups.size) + " scrapers"
+        );
+        break;
+      }
+      scrapersReached = scrapersReached + 1;
       try {
         let result = null;
         try {
@@ -996,13 +1129,13 @@ async function runFlagRecompute(env) {
     }
 
     // Step 8b: persist the officials and readings this run scraped. A rejected
-    // chunk in either flush logs and counts toward stateFailures; the history
-    // step below pairs only against the estimate flush's persisted set, so it can
-    // never claim an estimate that never landed. The upsert COALESCEs every
-    // column, so this flush's NULL estimate leaves step 7b's row intact.
+    // chunk in any flush logs and counts toward stateFailures; the history step
+    // below pairs only against the pages' persisted set, so it can never claim an
+    // estimate that never landed. The upsert COALESCEs every column, so this
+    // flush's NULL estimate leaves step 7b's row intact.
     const officialFlush = await flushBeachState(env, officialWrites);
-    const stateRows = estimateFlush.rows + officialFlush.rows;
-    const stateFailures = estimateFlush.failures + officialFlush.failures;
+    const stateRows = estimateRows + officialFlush.rows;
+    const stateFailures = estimateFailures + officialFlush.failures;
 
     // Step 9: calibration history (migration 0006). One row per beach with both
     // a fresh estimate and a scraped official color this run — the paired signal
@@ -1016,7 +1149,7 @@ async function runFlagRecompute(env) {
       for (const beach of beaches) {
         const estimateEntry = estimatesByBeach.get(beach.id);
         const officialEntry = officialsByBeach.get(beach.id);
-        if (estimateEntry && officialEntry && estimateFlush.persisted.has(beach.id)) {
+        if (estimateEntry && officialEntry && persistedEstimates.has(beach.id)) {
           historyStatements.push(
             env.DB.prepare(
               "INSERT INTO flag_history (beach_id, observed_at, estimated_color, official_color, rules_version, official_source) " +
@@ -1040,25 +1173,10 @@ async function runFlagRecompute(env) {
       console.log("index: failed to write flag_history rows: " + err.message);
     }
 
-    if (beaches.length > 0) {
-      try {
-        const updateStatements = beaches.map(function (b) {
-          return env.DB.prepare(
-            "UPDATE beaches SET recompute_updated = ?1 WHERE id = ?2"
-          ).bind(nowIso, b.id);
-        });
-        await env.DB.batch(updateStatements);
-      } catch (err) {
-        console.log("index: failed to update recompute_updated timestamps: " + err.message);
-      }
-    }
-
-    const hotCount = beaches.filter(function (b) {
-      return b.last_viewed && b.last_viewed >= hotCutoffIso;
-    }).length;
-    // Oldest cursor stamp in the selected set: the cold-tier wait
-    // FLAG_TTL_SECONDS must span. Rows never recomputed carry no wait, so they
-    // are skipped rather than reported as the oldest.
+    const hotCount = beaches.filter(isHot).length;
+    // Oldest cursor stamp in the queue, as read at the start of the run: the
+    // wait FLAG_TTL_SECONDS must span. Rows never recomputed carry no wait, so
+    // they are skipped rather than reported as the oldest.
     const oldestCursor = beaches.reduce(function (acc, b) {
       if (!b.recompute_updated) {
         return acc;
@@ -1073,10 +1191,17 @@ async function runFlagRecompute(env) {
       " history=" + String(historyCount) +
       " failures=" + String(failureCount) +
       " hot=" + String(hotCount) +
-      " waveinputs=" + String(waveInputs.size) +
+      " waveinputs=" + String(waveInputCount) +
       " oldest=" + (oldestCursor || "none") +
       " stateRows=" + String(stateRows) +
-      " stateFailures=" + String(stateFailures)
+      " stateFailures=" + String(stateFailures) +
+      " reached=" + String(reached) +
+      " pages=" + String(pagesRun) + "/" + String(totalPages) +
+      " pageFailures=" + String(pageFailures) +
+      " stampFailures=" + String(stampFailures) +
+      " deadline=" + deadlineHit +
+      " scrapers=" + String(scrapersReached) + "/" + String(scraperGroups.size) +
+      " elapsedMs=" + String(Date.now() - startedMs)
     );
   } catch (err) {
     console.log("index: flag recompute failed: " + err.message);
@@ -1131,9 +1256,9 @@ async function runAlertRefresh(env) {
   let nwsOk = false;
   let ecccOk = false;
 
-  // skipStaleLower is cold-tier steady state, not an alarm: the hourly rotation
-  // is sized at four runs, so a beach whose turn is further back than STALE_MS
-  // keeps its color until that turn comes. features high with parsed 0 is the
+  // skipStaleLower is near zero in steady state, since a full hourly walk keeps
+  // every seal younger than STALE_MS. A sustained count means missed or
+  // truncated hourlies (read their reached=). features high with parsed 0 is the
   // visible signature of an NWS schema drift, which is why both are logged raw.
   function logComplete() {
     console.log(
@@ -1309,8 +1434,8 @@ async function runAlertRefresh(env) {
         ? SEVERITY_RANK[next.color] : 0;
       const sealAgeMs = nowMs - standingMs;
       const stale = sealAgeMs >= STALE_MS;
-      // The one lowering rail: a clear-down decided on wave and wind inputs the
-      // page itself would render with a stale-data warning waits for the hourly.
+      // The one lowering rail: a clear-down decided on wave and wind inputs older
+      // than STALE_MS, two hourly cadences, waits for the hourly.
       // Raises are never gated on age, because age can only understate a hazard.
       if (nextRank < standingRank && stale) {
         skipStaleLower = skipStaleLower + 1;
@@ -1441,7 +1566,8 @@ async function runWaterTempRefresh(env) {
       env,
       "id, lat, lon, last_viewed",
       hotCutoffIso,
-      "wave"
+      "wave",
+      WATER_TEMP_BEACHES_PER_RUN
     ).all();
     const beaches = beachesResult.results || [];
 

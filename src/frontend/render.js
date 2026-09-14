@@ -37,6 +37,11 @@ const WAVE_STALE_MS = 28800000;
 // matches the parser window (NDBC_WATER_TEMP_MAX_OBS_AGE_MS) — water temp is
 // slow-moving, so a several-hour-old reading is still faithful.
 const WATER_TEMP_STALE_MS = 43200000; // 12 h — matches the parser window; water temp is slow-moving
+// The estimate card's own stale horizon, 5 h: the warning fires once about four
+// hourly runs in a row have missed the beach. It must stay below
+// FLAG_TTL_SECONDS * 1000, or the record expires to UNKNOWN before the warning
+// can render.
+const ESTIMATE_STALE_MS = 18000000;
 
 // The canonical origin, so the canonical link, the share meta and the detail
 // page's share controls can hand out an absolute URL without the renderer
@@ -538,10 +543,10 @@ function renderAlertDetails(estimate, nowIso) {
 // are slotted with no wrapper element. The with-* attributes track slotted
 // content per the wa-card SSR contract.
 //
-// Four optional options tune the body. Only renderOfficialCard passes the first
-// three, so the estimate card always gets the plain 2 h behaviour; only
-// renderEstimateCard passes the fourth, since no scraper publishes alert text:
-//   staleMs          — this source's own staleness horizon; absent means STALE_MS.
+// Four optional options tune the body. renderEstimateCard passes its own
+// ESTIMATE_STALE_MS as staleMs and never readingNote or reportedForHtml; only it
+// passes alertDetailsHtml, since no scraper publishes alert text:
+//   staleMs          — this record's own staleness horizon; absent means STALE_MS.
 //   readingNote      — copy for the neutral note shown between the 2 h default
 //                      and that horizon.
 //   reportedForHtml  — the provenance line for a reading posted at another site,
@@ -596,6 +601,7 @@ function renderEstimateCard(estimate, nowIso) {
     reason: isMissing ? "No estimate available yet" : (estimate.reason || "No data available"),
     sourcesHtml: isMissing ? "" : renderSourceLabels(estimate.sources),
     updated: isMissing ? null : (estimate.updated || null),
+    staleMs: ESTIMATE_STALE_MS,
     alertDetailsHtml: isMissing ? "" : renderAlertDetails(estimate, nowIso),
     nowIso: nowIso
   });

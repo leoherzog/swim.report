@@ -218,18 +218,18 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   lockfile is out of date", and a plain `deno run` silently rewrites the checked-in lock. The
   npm scripts already set it. Do not "fix" this by regenerating the lock without the env var —
   that trades a loud failure for silent drift in the only delete-bearing job in the repo.
-- **Demand-priority recompute rotation — mechanism landed, cold-tier tuning deferred.** The
+- **Demand-priority cron ordering — mechanism landed.** The
   request path stamps `beaches.last_viewed` (migration 0007; detail page and `/api/flag`,
   throttled to 1/h per beach, `ctx.waitUntil`). `runFlagRecompute` and `runWaterTempRefresh`
-  split their rotation into a hot tier (`last_viewed` within `HOT_VIEW_WINDOW_MS`, always
-  fully covered) and a cold tier rotating through the remaining `MAX_BEACHES_PER_RUN` budget;
-  the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue tiebreak.
-  Beach count exceeds `MAX_BEACHES_PER_RUN`, so the split governs coverage: a cold-tier beach
-  waits several runs for its turn (see the `MAX_BEACHES_PER_RUN` / `FLAG_TTL_SECONDS`
-  accounting below). Deferred residue: (1) stamping `last_viewed` from the
-  home list view too, since only the two single-beach routes stamp it today; (2) a real
-  split-query implementation — today's is a single ORDER BY guard, not two queries — plus the
-  migration 0012-class indexes real pagination will need; (3) real pagination itself. Workers
+  order their queue hot tier first (`last_viewed` within `HOT_VIEW_WINDOW_MS`), then oldest
+  cursor first; the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue
+  tiebreak. The hourly walks its whole queue, so there the order decides coverage only when
+  the walk deadline truncates a run (below); the water-temp cron still caps its queue, so
+  there it decides coverage every run. Deferred residue: (1) stamping `last_viewed` from the
+  home list view too, since only the two single-beach routes stamp it today; (2) optionally,
+  a split-query implementation — today's is a single ORDER BY guard, not two queries — plus
+  migration 0012-class indexes on the cursor columns, if the hourly snapshot's sort ever
+  shows up in its `elapsedMs=`. Workers
   Cache means cache hits do not run the Worker, so `last_viewed` undercounts popular beaches
   slightly, which is fine for a coarse priority signal.
 - **Alerts-only fast cron — shipped as `runAlertRefresh` (`"3-53/10 * * * *"`).** It closes
@@ -273,8 +273,8 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   sharding well before it, and no cache policy hides an OOM on a cache miss.
 - **Both beach-walking crons are O(N) in D1 rows read.** The alerts refresh reads every live
   estimate blob 144 times a day, since a recompute needs the whole sealed payload, and writes
-  only the few dozen beaches whose alerts moved; the hourly reads up to `MAX_BEACHES_PER_RUN`
-  rows and writes one row per beach. That is the Worker's one recurring per-beach cost, and it
+  only the few dozen beaches whose alerts moved; the hourly reads every flag-worthy
+  row and writes one row per beach. That is the Worker's one recurring per-beach cost, and it
   is the price of holding no alert state outside the estimate. The lever is a stored alert key
   — a column or digest on `beach_state`, written by whichever cron last estimated the beach,
   that the refresh can filter on in SQL to read only rows whose alert set could have moved —
@@ -337,30 +337,35 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   - **Homepage list and map.** `GET /` is capped at 100 rows with no pagination, and the map
     endpoint serves the whole flag-worthy set in one response (below).
   The Worker-side constraint that predates all of this:
-  - **`MAX_BEACHES_PER_RUN = 3000` and `FLAG_TTL_SECONDS = 25200`** (`src/index.js`) are one
-    constraint, not two. Hot rows are covered every run; a cold row waits
-    `ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot))` runs for its turn, and the flag
-    TTL must span that wait plus the runs killed before their trailing `recompute_updated`
-    batch commits: `FLAG_TTL_SECONDS / 3600 >= that wait + 2`. At 7,219 flag-worthy rows and
-    ~520 hot the wait is three runs and the TTL absorbs two lost runs; at 1200 the wait was
-    ten and half the cold coast read gray between turns. The 1,102-row run took about a
-    minute of wall clock, so 3000 budgets roughly three; the next raise wants the run's
-    own timestamps read first. A run
-    truncated at the 900 s ceiling is a different failure and the lease only delays it:
-    the run takes no write deadline and the `recompute_updated` batch is
-    all-or-nothing, so an hourly truncation dies at the same point in the same selection
-    order and the same tail is never written. The residual is
-    growth: at ~520 hot the inequality fails near 12,900 flag-worthy rows, and once the hot
-    tier alone fills the run the cold tier gets no slots at all, which no TTL rescues. The hourly summary logs `oldest=`, the oldest cursor
-    stamp the run selected, so the wait is readable from the observability API. Past those
-    sizes the knob is a larger `MAX_BEACHES_PER_RUN`, bounded by the 900 s wall clock on a
-    cron that passes no deadline to its gather pools, or real pagination.
-    The alerts refresh cron inherits that reach rather than extending it: a seal and a
-    standing estimate exist only for the rows a run covered, so
-    `MAX_BEACHES_PER_RUN × (FLAG_TTL_SECONDS / 3600)` beaches — 21,000 — can hold a live
-    seal at any time. At 7,219 rows that is the whole table; past 21k
-    real pagination is the prerequisite, and `skipNoSeal=` in the refresh cron's completion log
-    is the number that reports it.
+  - **The hourly walk deadlines** (`FLAG_WALK_DEADLINE_MS = 240000` and
+    `FLAG_HOT_WALK_DEADLINE_MS = 300000`, `src/index.js`) are the growth ceiling.
+    `runFlagRecompute` walks every flag-worthy row in pages of 200, starts no cold page past
+    240 s and no page at all past 300 s. A truncated run leaves its
+    unreached cold rows on their old cursor, so they go first next run, and
+    `FLAG_TTL_SECONDS = 25200` absorbs six truncated or lost runs in a row. A run that
+    truncates every hour is a coverage gap, not noise: the cold tail then rotates across runs
+    and ages out to unknown once its wait passes seven hours. Watch `deadline=cold|hot`,
+    `reached=` against `beaches=`, `elapsedMs=` and `oldest=` in the hourly completion log;
+    `deadline=hot` means the hot set alone outgrew the budget. A longer walk deadline is not a
+    free lever: pages flushed after the alert refresh's :13 slot can replace its raises with
+    colors from the hourly's older alert fetch until the next cadence. The levers past that
+    size are a smaller per-page cost, or an estimate upsert guarded on the stored `alertsAt`
+    so a later page cannot overwrite a newer refresh. The alerts refresh cron inherits the hourly's reach:
+    its `rows=` counts beaches holding a live estimate, so it falling well below the
+    flag-worthy count is the refresh-side sign of the same shortfall.
+  - **The hourly scrape deadline** (`FLAG_SCRAPE_DEADLINE_MS = 600000`) stops the sequential
+    scraper loop between groups, so an unreached scraper's stored official ages out and its
+    health streak is left alone. Registry order decides which scrapers go unreached; watch
+    `scrapers=` against its matched count as the registry grows.
+  - **D1's 1,000 queries per invocation is documented but not enforced.** Cloudflare counts
+    each statement inside a batch toward it, and a full hourly walk issues about 9,100 upserts
+    plus a wave read and a stamp per page. Treat it as watched, like the KV operation count;
+    if it is ever enforced, the hourly's estimate chunks are what breaks.
+  - **The water-temp cron still rotates a capped queue.** `runWaterTempRefresh` selects
+    `WATER_TEMP_BEACHES_PER_RUN = 3000` rows a run against a 7 h `watertemp:` TTL. At 9,072
+    flag-worthy and 791 hot rows a cold beach waits ceil((9072 - 791) / (3000 - 791)) = 4 runs,
+    24 h, so most cold beaches show no water temperature most of the time. Paging it like the
+    hourly, or a TTL that spans its rotation, closes the gap.
 
 ## Official-scraper fragility
 
@@ -560,8 +565,8 @@ remains partnership-gated.
   station plus its `watertemp:` writes (PLAN.md section 7). The **Free** plan's
   50-subrequest ceiling and 1000 KV-writes/day
   quota are not sufficient at this cadence and beach count. The wave cycle's own write cost is
-  D1 rows, not KV. For a free-plan demo, drop
-  `MAX_BEACHES_PER_RUN` well down and reduce cron frequency before deploying. Two further Free
+  D1 rows, not KV. There is no free-plan
+  configuration: a full hourly walk makes about 140 D1 calls, past Free's 50 on its own. Two further Free
   blockers arrived with the alerts refresh cron: a sub-hour Cron Trigger gets 10 ms of CPU on
   Free, and Free caps Cron Triggers at 5 per account, which this Worker now exceeds.
 

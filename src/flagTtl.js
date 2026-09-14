@@ -14,5 +14,5 @@
 // The hourly cron stamps beach_state.estimate_expires and official_expires this
 // many seconds past its write instant, and readers compare those columns against
 // the request instant. See PLAN.md section 2 for the columns and section 7 for
-// the rotation math that sizes the lease.
+// the lost-run margin that sizes the lease.
 export const FLAG_TTL_SECONDS = 25200;

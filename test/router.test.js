@@ -16,6 +16,7 @@ import {
 } from "../src/router.js";
 import { renderListPage, renderDetailPage } from "../src/frontend/render.js";
 import { displayFlag } from "../src/displayFlag.js";
+import { FLAG_TTL_SECONDS } from "../src/flagTtl.js";
 import { makeD1 } from "./helpers/d1.js";
 import { PAGE_STYLES } from "../src/frontend/styles.js";
 import { COLOR_SCHEME_SCRIPT } from "../src/frontend/colorSchemeScript.js";
@@ -844,6 +845,27 @@ describe("handleDetail: state from the row, water temperature from KV", () => {
     expect(card).toContain(">UNKNOWN</span>");
     expect(card).toContain("No estimate available yet");
     expect(card).not.toContain("flag-icon-green");
+  });
+
+  it("warns on an estimate still inside its lease (the horizon sits below the lease)", async () => {
+    // Half an hour before its lease runs out, the estimate must still render its
+    // color and must already carry the warning; otherwise it would expire to
+    // UNKNOWN before the warning could ever show.
+    const updatedMs = Date.now() - (FLAG_TTL_SECONDS * 1000 - 1800000);
+    const estimate = {
+      color: "yellow",
+      reason: "choppy",
+      official: false,
+      sources: [],
+      updated: new Date(updatedMs).toISOString()
+    };
+    const made = detailEnv({
+      state: { estimate: estimate, estimateExpires: Math.floor(updatedMs / 1000) + FLAG_TTL_SECONDS }
+    });
+    const card = estimateCardOf(await (await handleRequest(detailRequest("osm-way-1"), made.env)).text());
+    expect(card).toContain("flag-icon-yellow");
+    expect(card).not.toContain(">UNKNOWN</span>");
+    expect(card).toContain("Stale data — last updated");
   });
 
   it("keeps an expired official out of the title flag and off the card", async () => {
@@ -1905,17 +1927,30 @@ describe("handleHome proximity branch: in-memory distance sort", () => {
   });
 });
 
-describe("2-hour stale-data warning on flag cards", () => {
+// The estimate card warns past its own 5 h horizon; an official card that
+// declares no staleMs keeps the 2 h STALE_MS default.
+describe("stale-data warning on flag cards", () => {
   const STALE_UPDATED = "2026-07-05T09:00:00.000Z"; // 3 h before NOW_ISO
+  const ESTIMATE_STALE_UPDATED = "2026-07-05T06:00:00.000Z"; // 6 h before NOW_ISO
 
   function estimateUpdatedAt(iso) {
     return { color: "green", reason: "calm", official: false, sources: [], updated: iso };
   }
 
-  it("warns on an estimate card 3 h out of date", () => {
-    const card = estimateCardOf(detailPage(estimateUpdatedAt(STALE_UPDATED)));
+  function officialUpdatedAt(iso) {
+    return {
+      color: "green",
+      reason: "Official flag",
+      official: true,
+      source: "https://example.gov/flags",
+      updated: iso
+    };
+  }
+
+  it("warns on an estimate card 6 h out of date", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt(ESTIMATE_STALE_UPDATED)));
     expect(card).toContain(
-      "Stale data — last updated <wa-relative-time date=\"" + STALE_UPDATED +
+      "Stale data — last updated <wa-relative-time date=\"" + ESTIMATE_STALE_UPDATED +
       "\" sync></wa-relative-time>"
     );
   });
@@ -1925,21 +1960,30 @@ describe("2-hour stale-data warning on flag cards", () => {
     expect(card).not.toContain("Stale data");
   });
 
-  it("treats exactly 2 h as fresh (strictly-greater-than threshold)", () => {
-    const card = estimateCardOf(detailPage(estimateUpdatedAt("2026-07-05T10:00:00.000Z")));
+  it("stays quiet on a 4 h-old estimate", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt("2026-07-05T08:00:00.000Z")));
     expect(card).not.toContain("Stale data");
   });
 
-  it("warns on an official card 3 h out of date", () => {
-    const official = {
-      color: "green",
-      reason: "Official flag",
-      official: true,
-      source: "https://example.gov/flags",
-      updated: STALE_UPDATED
-    };
-    const card = officialCardOf(detailPage(null, official));
+  it("treats exactly 5 h as fresh (strictly-greater-than threshold)", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt("2026-07-05T07:00:00.000Z")));
+    expect(card).not.toContain("Stale data");
+  });
+
+  it("warns on an estimate one millisecond past 5 h", () => {
+    const card = estimateCardOf(detailPage(estimateUpdatedAt("2026-07-05T06:59:59.999Z")));
     expect(card).toContain("Stale data — last updated");
+  });
+
+  it("warns on an official card 3 h out of date", () => {
+    const card = officialCardOf(detailPage(null, officialUpdatedAt(STALE_UPDATED)));
+    expect(card).toContain("Stale data — last updated");
+  });
+
+  it("splits the horizons on one page: a 3 h official warns, a 3 h estimate does not", () => {
+    const html = detailPage(estimateUpdatedAt(STALE_UPDATED), officialUpdatedAt(STALE_UPDATED));
+    expect(officialCardOf(html)).toContain("Stale data — last updated");
+    expect(estimateCardOf(html)).not.toContain("Stale data");
   });
 
   it("skips the warning (without throwing) on an unparseable timestamp", () => {
@@ -1951,8 +1995,8 @@ describe("2-hour stale-data warning on flag cards", () => {
 // A source that publishes on its OWN slower schedule (a once-daily NWS product,
 // a human-posted beach status) may declare staleMs — its real staleness horizon
 // — and, for a point-in-time reading, readingNote. The 2 h default stays in
-// force for every record that declares nothing, and the estimate card never
-// gets either field.
+// force for every official record that declares nothing, and the estimate card
+// never takes either field from the official record.
 describe("per-source staleness horizon on the official card", () => {
   // 11 h before NOW_ISO: past the 2 h default, inside a 30 h source horizon.
   const MORNING = "2026-07-05T01:00:00.000Z";
@@ -2043,10 +2087,10 @@ describe("per-source staleness horizon on the official card", () => {
     expect(card).not.toContain("Stale data");
   });
 
-  it("leaves the estimate card on the plain 2 h behaviour", () => {
+  it("keeps the estimate card on its own horizon, ignoring the official's staleMs and readingNote", () => {
     // The same 11 h-old timestamp that a declaring official source would treat
-    // as fresh must still warn on the estimate card, which is on our own hourly
-    // recompute; and no estimate card ever carries a reading note.
+    // as fresh is past the estimate card's own 5 h horizon, so it still warns;
+    // and no estimate card ever carries a reading note.
     const html = detailPage(
       estimateAt(MORNING),
       officialAt(MORNING, { staleMs: THIRTY_HOURS, readingNote: NOTE })

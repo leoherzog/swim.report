@@ -286,9 +286,9 @@ fetch leaves it hidden too.
 
 **The staleness warning.** When a flag card's `updated` time is older than its staleness
 horizon, the card carries a visible warning callout reading "Stale data — last updated
-<em>N hours ago</em>". The horizon is 2 hours by default, matching the hourly recompute, and
-the estimate card always uses that default. An official card may declare a longer horizon when
-its source publishes on a slower schedule, and for a point-in-time reading the gap between 2
+<em>N hours ago</em>". The estimate card's horizon is 5 hours, inside the estimate's 7 hour
+lease so the warning renders before the record expires. An official card's horizon is 2 hours
+by default, and it may declare a longer one when its source publishes on a slower schedule, and for a point-in-time reading the gap between 2
 hours and that horizon is filled by a neutral note instead. See [How to add a new
 official-source scraper](#how-to-add-a-new-official-source-scraper) for the `staleMs` and
 `readingNote` fields. The wave forecast strip has its own 8 hour threshold, since the marine
@@ -463,30 +463,36 @@ failure in one job never starves another. Beach discovery, water-body classifica
 the `marine_zone` derivation are not in this list — they run offline (see [Discovery and
 classification (offline)](#discovery-and-classification-offline)).
 
-- `7 * * * *` (hourly) — `runFlagRecompute`: reads up to `MAX_BEACHES_PER_RUN = 3000` beaches
-  from D1, ordered hot-first then oldest-`recompute_updated`-first. A beach viewed within
-  `HOT_VIEW_WINDOW_MS` (7 days, tracked by the `last_viewed` demand stamp) is covered every
-  run; cold rows rotate through the remaining budget, and the stored estimate's 25200 second
-  lease spans several rotation turns plus a lost run, so a cold beach keeps showing its last
-  reading rather than dropping to "no data". The detail page marks that reading stale past
-  2 h; the list chip and the map marker carry no age signal, so a rotation-old color reads
-  there like a fresh one. It fetches the
-  fast-changing safety signals (alerts and SRF rip-current risk) and reads each beach's wave
-  inputs off the same `beach_state` row it is about to write, indexing that record's
-  24-hour series at the hour it is estimating — it performs **no** wave or wind fetch itself
-  and no per-beach read at all. Both alert authorities are fetched nationally once per run and matched
+- `7 * * * *` (hourly) — `runFlagRecompute`: snapshots every flag-worthy beach from D1 in one
+  query, ordered hot-first then oldest-`recompute_updated`-first, and walks that queue in
+  pages of 200. Beaches viewed within `HOT_VIEW_WINDOW_MS` (7 days, tracked by the
+  `last_viewed` demand stamp) lead the queue. No cold page starts after 240 s and no page at
+  all after 300 s, so a slow run covers the beaches in active demand first, then the
+  longest-waiting cold ones, and a healthy run's estimates land before the alert refresh six
+  minutes later. No official-source scraper starts after 600 s, which leaves room under the
+  900 s ceiling to persist what the run gathered. A full
+  walk reaches every beach each run, and the stored estimate's 25200 second lease absorbs six
+  lost or truncated runs, so a beach a run missed keeps showing its last reading rather than
+  dropping to "no data". The detail page marks that reading stale past 5 h; the list chip and
+  the map marker carry no age signal, so an older color reads there like a fresh one. It
+  fetches the fast-changing safety signals (alerts and SRF rip-current risk) once per run and
+  reads each page's wave inputs with one `beach_state` query, indexing each record's 24-hour
+  series at the hour it is estimating — it performs **no** wave or wind fetch itself and no
+  per-beach read at all. A page whose wave read fails is skipped whole rather than estimated
+  wave-blind. Both alert authorities are fetched nationally once per run and matched
   locally, so alert cost stays flat no matter how many beaches a run covers: one
   `api.weather.gov/alerts/active` fetch matched by `nws_zone` and `marine_zone`, and one GeoMet
   `weather-alerts` fetch matched by alert-region polygon. It runs the inputs through
   `estimateFlag`, runs the official-source scrapers once per distinct matched scraper with
   KV-backed health monitoring, and writes each beach's estimate and official record into its
   `beach_state` row at a 25200 second lease. The rows go out as `env.DB.batch` calls of 200
-  statements rather than a write per beach, so a full 3000-beach run costs 15 round trips.
-  The estimates are flushed the moment the per-beach pass finishes, before the scrapers run,
-  so a run killed inside an upstream fetch still keeps every estimate it computed; the
-  officials and readings follow after the scrape pass, onto the same rows. A rejected batch
-  is logged and its beaches are left out of the calibration history, so a history row can
-  never claim an estimate that was not stored. A scraper's optional
+  statements rather than a write per beach, so a page costs three round trips: its wave read,
+  its estimate batch and its `recompute_updated` stamp. Each page's estimates are flushed
+  before the next page starts and before the scrapers run, so a run killed inside an upstream
+  fetch still keeps every estimate it computed; the officials and readings follow after the
+  scrape pass, onto the same rows. A rejected batch is logged, its beaches are left out of the
+  calibration history and keep their old cursor stamp, so a history row can never claim an
+  estimate that was not stored and those beaches go first next run. A scraper's optional
   `officialTtlSeconds` sets its own `official_expires` and may run past the estimate's,
   because every reader checks each record's lease on its own; `officialMaxAgeMs` instead
   anchors that lease to the record's own `updated` instant, so the NWS Grand Rapids morning
@@ -510,8 +516,8 @@ classification (offline)](#discovery-and-classification-offline)).
   alerts using the same functions the hourly uses, and writes only the beaches whose payload
   actually moved. The recompute reads the sealed non-alert inputs out of the stored estimate,
   so it can never lower a flag by losing a wave reading, a rip-current risk or a
-  water-quality advisory. A lowering decided from sealed inputs the detail page would already
-  mark stale is left to the hourly instead. It writes nothing but the estimate column, and
+  water-quality advisory. A lowering decided from sealed inputs older than the 2 h display
+  horizon is left to the hourly instead. It writes nothing but the estimate column, and
   only through a compare-and-set on the standing timestamp: the row keeps its original
   `estimate_updated` and `estimate_expires`, so it can neither restamp the age the detail page
   reports for the data behind a color nor keep a flag alive past the hourly rotation meant to
@@ -729,14 +735,14 @@ NOAA data is a US Government work in the public domain; the credit on every page
 courtesy, not an obligation.
 
 **Paid-plan assumption.** The cron subrequest budgets exceed the free plan's 50-subrequest
-ceiling; the paid plan allows 10,000 per invocation. `TODO.md` records a free-plan-friendly
-fallback (a lower `MAX_BEACHES_PER_RUN`). Wall clock, not subrequest count, is the binding
+ceiling; the paid plan allows 10,000 per invocation. The hourly's D1 calls alone exceed the
+free plan's limits, so there is no free-plan configuration (`TODO.md`). Wall clock, not subrequest count, is the binding
 limit: a scheduled invocation gets 900 s, and Cloudflare caps an invocation at **six
 simultaneous open connections** with KV `get`/`put` counting toward that cap, so a write pool
 wider than ~6 buys no throughput and all wall-clock sizing here is done at 6. The per-beach
 flag writes escape that cap entirely by not being a fan-out: they are batched into
-`env.DB.batch` calls of 200 statements, a handful of round trips for a whole run. The hourly's
-wave read escapes it too, riding the SELECT the run already issues.
+`env.DB.batch` calls of 200 statements, one round trip per page. The hourly's wave reads and
+cursor stamps escape it too, as one sequential statement per page.
 
 ## Deployment
 
@@ -971,8 +977,8 @@ nothing to report must never return null, or it would raise a false alert.
    floor color** must keep its own local stripper — widening the entity set there changes
    whether a floor is raised (e.g. `prediction&mdash;poor`), a behavior change, not a cleanup.
 
-   **Staleness horizons (`staleMs` / `readingNote`).** The stale-data warning defaults to 2
-   hours, calibrated to the hourly *estimate* recompute. That is wrong for a source publishing
+   **Staleness horizons (`staleMs` / `readingNote`).** An official card's stale-data warning
+   defaults to 2 hours; the estimate card has its own 5 hour horizon. That default is wrong for a source publishing
    on its own slower schedule: the NWS Grand Rapids beach report is issued once a day, so an
    honest `updated` of its issuance time would show "Stale data" for most of every day even
    though the posted colors are current. Such a scraper declares `staleMs` — the milliseconds

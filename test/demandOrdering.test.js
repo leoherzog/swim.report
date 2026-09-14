@@ -24,11 +24,12 @@
 //       ORDER BY (webcam_checked IS NULL) DESC, last_viewed DESC NULLS LAST,
 //                webcam_checked ASC, id ASC
 //
-// The hourly's FROM carries a LEFT JOIN onto beach_state for the wave record,
-// which the clauses above do not name: beach_state shares no column name with
-// beaches, so every term here stays unqualified in the real SQL and the copies
-// below remain byte-identical against this file's own single table.
-import { describe, it, expect, beforeAll } from "vitest";
+// The hourly's queue SELECT reads beaches alone, with no join, so every term
+// stays unqualified in the real SQL and the copies below remain byte-identical
+// against this file's own single table.
+import { describe, it, expect, beforeAll, vi } from "vitest";
+import { makeD1 } from "./helpers/d1.js";
+import { runScheduledCron } from "./helpers/cron.js";
 
 let DatabaseSync = null;
 let sqliteUnavailableReason = "";
@@ -189,6 +190,30 @@ describeIfSqlite("demand-aware ORDER BY clauses against real SQLite", function (
       ]);
       const rows = db.prepare("SELECT * FROM beaches " + CLAUSE).all(hotCutoffIso);
       expect(idsOf(rows)).toEqual(["z-starved", "a-recently-waved"]);
+    });
+
+    it("keeps its 3000-row cap while the hourly walks its whole queue", async function () {
+      vi.stubGlobal("fetch", function () {
+        return Promise.reject(new Error("network disabled in test"));
+      });
+      const db = makeD1({ beaches: [{ id: "osm-node-1" }] });
+      const env = {
+        DB: db,
+        FLAGS: {
+          get: function () { return Promise.resolve(null); },
+          put: function () { return Promise.resolve(); }
+        }
+      };
+      try {
+        await runScheduledCron(env, "15 */6 * * *");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      const selects = db.statements.filter(function (s) {
+        return s.sql.indexOf("SELECT id, lat, lon, last_viewed FROM beaches WHERE") === 0;
+      });
+      expect(selects.length).toBe(1);
+      expect(selects[0].sql.endsWith("wave_updated ASC, id ASC LIMIT 3000")).toBe(true);
     });
   });
 

@@ -62,7 +62,7 @@ function makeBeachRow(overrides) {
 //
 // kvSeed pre-populates the KV reads that remain on the cron path: the raw
 // "scraperhealth:" string. Wave records are seeded into beach_state through
-// db.seedWave, not here — the cron reads them off the join its SELECT issues.
+// db.seedWave, not here — the cron reads them with one D1 read per page.
 function makeEnv(beachRows, kvSeed) {
   const db = makeD1({ beaches: beachRows || [] });
   const kvPuts = new Map();
@@ -600,6 +600,75 @@ function findHistoryStatements(batchCalls) {
     }
   }
   return rows;
+}
+
+// n beach rows inside the South Haven bbox, all named "North Beach" so the
+// scraper's site resolution gives every one of them an official color and the
+// flag_history pairing is exercised at pool scale.
+function southHavenBeaches(n) {
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    rows.push(makeBeachRow({
+      id: "osm-node-" + String(i),
+      name: "North Beach",
+      lat: 42.40 + i * 0.0004,
+      lon: -86.28
+    }));
+  }
+  return rows;
+}
+
+function southHavenFetch() {
+  return function (url) {
+    const target = typeof url === "string" ? url : (url && url.url) || "";
+    if (target.indexOf("southhavenmi.gov") !== -1) {
+      return Promise.resolve({ ok: false, status: 500 });
+    }
+    if (target.indexOf("docs.google.com") !== -1) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: function () { return Promise.resolve("Flag #6 North Beach is Red"); }
+      });
+    }
+    return Promise.reject(new Error("network disabled in test"));
+  };
+}
+
+// The hourly's per-page recompute_updated stamps, in order. They run through
+// prepare().run(), never a batch, so they are read off the prepared statements.
+function stampStatements(made) {
+  return made.preparedBinds.filter(function (s) {
+    return s.sql.indexOf("UPDATE beaches SET recompute_updated") === 0;
+  });
+}
+
+// The hourly's per-page wave reads, in order, including any that failed.
+function waveReadStatements(made) {
+  return made.preparedBinds.filter(function (s) {
+    return s.sql.indexOf("SELECT s.beach_id") === 0;
+  });
+}
+
+// Every estimate upsert D1 received: the estimate blob is bound as ?2, and the
+// official/reading flush binds it NULL.
+function estimateInserts(made) {
+  const found = [];
+  for (const statements of made.batchCalls) {
+    for (const statement of statements) {
+      if (statement.sql.indexOf("INSERT INTO beach_state") === 0 && statement.args[1] !== null) {
+        found.push(statement);
+      }
+    }
+  }
+  return found;
+}
+
+function recomputeUpdatedOf(made, id) {
+  const row = made.db.sqlite.prepare(
+    "SELECT recompute_updated FROM beaches WHERE id = ?1"
+  ).get(id);
+  return row ? row.recompute_updated : null;
 }
 
 describe("runFlagRecompute flag_history calibration logging", function () {
@@ -1339,29 +1408,16 @@ describe("runFlagRecompute corrupt scraperhealth: KV", function () {
   });
 });
 
-// After the per-beach loop, runFlagRecompute batches one
-// "UPDATE beaches SET recompute_updated = ?1 WHERE id = ?2" per processed
-// beach — the rotation that guarantees full-table coverage. A failed batch is
-// swallowed (the beach_state rows must survive).
+// Each page ends with one set-based "UPDATE beaches SET recompute_updated = ?1
+// WHERE id IN (SELECT value FROM json_each(?2))" over the ids it reached. A
+// failed stamp is swallowed: the beach_state rows must survive it.
 describe("runFlagRecompute recompute_updated rotation stamping", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  function findRecomputeUpdates(batchCalls) {
-    const updates = [];
-    for (const statements of batchCalls) {
-      for (const statement of statements) {
-        if (statement.sql &&
-            statement.sql.indexOf("UPDATE beaches SET recompute_updated") === 0) {
-          updates.push(statement);
-        }
-      }
-    }
-    return updates;
-  }
-
-  it("stamps recompute_updated once per processed beach with [nowIso, beachId] args", async function () {
+  it("stamps recompute_updated with one statement per page binding [nowIso, id array]", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
@@ -1372,22 +1428,20 @@ describe("runFlagRecompute recompute_updated rotation stamping", function () {
     ]);
     await runHourlyCron(made.env);
 
-    const updates = findRecomputeUpdates(made.batchCalls);
-    expect(updates.length).toBe(2);
-    const stampedIds = updates.map(function (u) { return u.args[1]; }).sort();
-    expect(stampedIds).toEqual(["osm-node-1", "osm-node-2"]);
-    for (const update of updates) {
-      expect(update.args.length).toBe(2);
-      // nowIso-shaped first arg, identical across the run.
-      expect(update.args[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-      expect(update.args[0]).toBe(updates[0].args[0]);
-    }
+    const stamps = stampStatements(made);
+    expect(stamps.length).toBe(1);
+    expect(stamps[0].args.length).toBe(2);
+    expect(stamps[0].args[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(JSON.parse(stamps[0].args[1]).sort()).toEqual(["osm-node-1", "osm-node-2"]);
+    expect(recomputeUpdatedOf(made, "osm-node-1")).toBe(stamps[0].args[0]);
+    expect(recomputeUpdatedOf(made, "osm-node-2")).toBe(stamps[0].args[0]);
   });
 
-  it("a rejected UPDATE batch is swallowed — the run completes and the state rows survive", async function () {
+  it("a rejected stamp is swallowed — the run completes and the state rows survive", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.reject(new Error("network disabled in test"));
     });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
 
     const made = makeEnv([
       makeBeachRow({ id: "osm-node-1" }),
@@ -1398,11 +1452,12 @@ describe("runFlagRecompute recompute_updated rotation stamping", function () {
     });
     await runHourlyCron(made.env);
 
-    // The batch WAS attempted...
-    expect(findRecomputeUpdates(made.batchCalls).length).toBe(2);
-    // ...and its failure never poisoned the state rows already committed.
+    expect(stampStatements(made).length).toBe(1);
     expect(estimateOf(made, "osm-node-1")).not.toBeNull();
     expect(estimateOf(made, "osm-node-2")).not.toBeNull();
+    expect(loggedLines(logSpy)).toContain(" stampFailures=2");
+    expect(recomputeUpdatedOf(made, "osm-node-1")).toBeNull();
+    expect(recomputeUpdatedOf(made, "osm-node-2")).toBeNull();
   });
 });
 
@@ -1435,16 +1490,15 @@ describe("runFlagRecompute demand-aware ordering (last_viewed)", function () {
     const after = Date.now();
 
     const selectBinds = made.preparedBinds.filter(function (b) {
-      // The hourly splats b.* and carries the wave columns over the beach_state
-      // join; the water-temp cron's own SELECT names its columns and stays
-      // unjoined, so this literal picks exactly one of the two.
-      return b.sql.indexOf(
-        "SELECT b.*, s.wave, s.wave_expires FROM beaches b" +
-        " LEFT JOIN beach_state s ON s.beach_id = b.id WHERE"
-      ) !== -1 && b.sql.indexOf("ORDER BY") !== -1;
+      // The hourly splats * over beaches alone; the water-temp cron's SELECT
+      // names its columns, so this prefix picks exactly the hourly's queue.
+      return b.sql.indexOf("SELECT * FROM beaches WHERE") === 0;
     });
     expect(selectBinds.length).toBe(1);
     const sql = selectBinds[0].sql;
+    // The whole queue, with no cap and no blob-bearing join.
+    expect(sql.indexOf(" LIMIT ")).toBe(-1);
+    expect(sql.indexOf("beach_state")).toBe(-1);
     const hotIdx = sql.indexOf("(last_viewed IS NOT NULL AND last_viewed >= ?1) DESC");
     const recomputeIdx = sql.indexOf("recompute_updated ASC, id ASC");
     expect(hotIdx).toBeGreaterThan(-1);
@@ -2126,39 +2180,6 @@ describe("runFlagRecompute pooled estimates and the beach_state flush", function
     vi.restoreAllMocks();
   });
 
-  // n beach rows inside the South Haven bbox, all named "North Beach" so the
-  // scraper's site resolution gives every one of them an official color and the
-  // flag_history pairing is exercised at pool scale.
-  function southHavenBeaches(n) {
-    const rows = [];
-    for (let i = 0; i < n; i++) {
-      rows.push(makeBeachRow({
-        id: "osm-node-" + String(i),
-        name: "North Beach",
-        lat: 42.40 + i * 0.0004,
-        lon: -86.28
-      }));
-    }
-    return rows;
-  }
-
-  function southHavenFetch() {
-    return function (url) {
-      const target = typeof url === "string" ? url : (url && url.url) || "";
-      if (target.indexOf("southhavenmi.gov") !== -1) {
-        return Promise.resolve({ ok: false, status: 500 });
-      }
-      if (target.indexOf("docs.google.com") !== -1) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          text: function () { return Promise.resolve("Flag #6 North Beach is Red"); }
-        });
-      }
-      return Promise.reject(new Error("network disabled in test"));
-    };
-  }
-
   it("writes one beach_state row per beach and keeps flag_history in query order", async function () {
     // Inside South Haven's monitored season/hours so the scraper does not gate
     // itself off.
@@ -2232,13 +2253,23 @@ describe("runFlagRecompute pooled estimates and the beach_state flush", function
       }
       expect(historyIds.indexOf(row.id) !== -1).toBe(hasEstimate && hasOfficial);
     }
-    // 205 estimate statements chunk 200 + 5; the chunk holding osm-node-7 is
-    // the only rejected one, and every official statement landed.
+    // 205 estimate statements page 200 + 5; the page holding osm-node-7 is the
+    // only rejected chunk, and every official statement landed.
     expect(persistedEstimates).toBe(5);
     expect(loggedLines(logSpy)).toContain(
       " stateRows=" + String(persistedEstimates + persistedOfficials) +
       " stateFailures=" + String(205 - persistedEstimates)
     );
+    // A rolled-back page keeps its cursor so it sorts first next run; the page
+    // whose chunk committed is stamped.
+    const sortedIds = rows.map(function (b) { return b.id; }).sort();
+    for (const id of sortedIds.slice(0, 200)) {
+      expect(recomputeUpdatedOf(made, id)).toBeNull();
+    }
+    for (const id of sortedIds.slice(200)) {
+      expect(recomputeUpdatedOf(made, id)).toBe("2026-07-15T16:00:00.000Z");
+    }
+    expect(loggedLines(logSpy)).toContain(" stampFailures=0");
   });
 
   it("keeps every estimate when the official flush rejects", async function () {
@@ -2293,6 +2324,327 @@ describe("runFlagRecompute pooled estimates and the beach_state flush", function
     const lines = loggedLines(logSpy);
     expect(lines).toContain("beach_state chunk of 120 failed, retrying once");
     expect(lines).toContain(" stateRows=240 stateFailures=0");
+  });
+});
+
+// The hourly walks its whole snapshot in pages. Gathers run once over the
+// snapshot, every page commits its estimates before the scrape pass, the cold
+// walk deadline stops only past the hot prefix, the hot one stops any page, the
+// scrape deadline stops the scrapers alone, and a failed page read, flush or
+// stamp costs that page alone.
+describe("runFlagRecompute paged walk", function () {
+  const NOW = "2026-07-15T16:00:00.000Z";
+
+  beforeEach(function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function networkDisabled() {
+    return Promise.reject(new Error("network disabled in test"));
+  }
+
+  it("walks every row across pages with exactly one estimate upsert each", async function () {
+    vi.stubGlobal("fetch", networkDisabled);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const hotIso = "2026-07-15T15:00:00.000Z";
+    const rows = [
+      makeBeachRow({ id: "osm-node-1" }),
+      makeBeachRow({ id: "osm-node-2", lat: 44.81 }),
+      makeBeachRow({ id: "osm-node-3", lat: 44.82 }),
+      makeBeachRow({ id: "osm-node-4", lat: 44.83, last_viewed: hotIso }),
+      makeBeachRow({ id: "osm-node-5", lat: 44.84, last_viewed: hotIso })
+    ];
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 2;
+    await runHourlyCron(made.env);
+
+    const inserts = estimateInserts(made);
+    for (const row of rows) {
+      expect(estimateOf(made, row.id)).not.toBeNull();
+      expect(inserts.filter(function (s) { return s.args[0] === row.id; }).length).toBe(1);
+      expect(recomputeUpdatedOf(made, row.id)).toBe(NOW);
+    }
+    const reads = waveReadStatements(made);
+    expect(reads.length).toBe(3);
+    expect(JSON.parse(reads[0].args[0]).sort()).toEqual(["osm-node-4", "osm-node-5"]);
+    expect(stampStatements(made).map(function (s) {
+      return JSON.parse(s.args[1]).length;
+    })).toEqual([2, 2, 1]);
+    expect(loggedLines(logSpy)).toContain(
+      " reached=5 pages=3/3 pageFailures=0 stampFailures=0 deadline=no"
+    );
+  });
+
+  it("issues each national fetch and each WFO's SRF once across pages", async function () {
+    const urls = [];
+    vi.stubGlobal("fetch", function (url) {
+      urls.push(typeof url === "string" ? url : (url && url.url) || "");
+      return networkDisabled();
+    });
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-1",
+        nws_zone: "MIZ071",
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/33,33"
+      }),
+      makeBeachRow({
+        id: "osm-node-2",
+        name: "Colchester Beach",
+        lat: 41.9836774,
+        lon: -82.9343626,
+        eccc_zone: "Windsor - Essex - Chatham-Kent",
+        enrichment_attempts: 5
+      }),
+      makeBeachRow({
+        id: "osm-node-3",
+        lat: 44.81,
+        lon: -83.31,
+        nws_zone: "MIZ056",
+        nws_grid_url: "https://api.weather.gov/gridpoints/GRR/40,50"
+      })
+    ]);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 1;
+    await runHourlyCron(made.env);
+
+    function count(fragment) {
+      return urls.filter(function (u) { return u.indexOf(fragment) !== -1; }).length;
+    }
+    expect(waveReadStatements(made).length).toBe(3);
+    expect(count("api.weather.gov/alerts/active")).toBe(1);
+    expect(count("collections/weather-alerts/items")).toBe(1);
+    expect(count("collections/marineweather-realtime/items")).toBe(1);
+    expect(count(SRF_LATEST_URL)).toBe(1);
+  });
+
+  it("flushes every page's estimates before the first scraper fetch", async function () {
+    const inner = southHavenFetch();
+    let flushedAtScrape = null;
+    const made = makeEnv(southHavenBeaches(5));
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 2;
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (flushedAtScrape === null && target.indexOf("docs.google.com") !== -1) {
+        flushedAtScrape = made.batchCalls.filter(function (statements) {
+          return statements.some(function (s) {
+            return s.sql.indexOf("INSERT INTO beach_state") === 0 && s.args[1] !== null;
+          });
+        }).length;
+      }
+      return inner(url);
+    });
+    await runHourlyCron(made.env);
+
+    expect(flushedAtScrape).toBe(3);
+  });
+
+  it("a tripped cold walk deadline stops only after the hot prefix", async function () {
+    vi.stubGlobal("fetch", southHavenFetch());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = southHavenBeaches(6);
+    for (let i = 0; i < 3; i++) {
+      rows[i].last_viewed = "2026-07-15T15:00:00.000Z";
+    }
+    for (let i = 3; i < 6; i++) {
+      rows[i].recompute_updated = "2026-01-01T00:00:00.000Z";
+    }
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 2;
+    made.env.FLAG_WALK_DEADLINE_MS = 0;
+    await runHourlyCron(made.env);
+
+    // Pages [0,1] and [2,3] start inside the hot prefix; page [4,5] does not.
+    for (let i = 0; i < 4; i++) {
+      expect(estimateOf(made, rows[i].id)).not.toBeNull();
+      expect(recomputeUpdatedOf(made, rows[i].id)).toBe(NOW);
+    }
+    for (let i = 4; i < 6; i++) {
+      expect(estimateOf(made, rows[i].id)).toBeNull();
+      expect(recomputeUpdatedOf(made, rows[i].id)).toBe("2026-01-01T00:00:00.000Z");
+      // The scrape pass covers the whole snapshot, not only the walked rows.
+      expect(officialOf(made, rows[i].id)).not.toBeNull();
+    }
+    const historyIds = findHistoryStatements(made.batchCalls).map(function (h) { return h.args[0]; });
+    expect(historyIds).toEqual(rows.slice(0, 4).map(function (r) { return r.id; }));
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain(" reached=4 pages=2/3");
+    expect(lines).toContain("deadline=cold");
+    expect(lines).toContain("oldest=2026-01-01T00:00:00.000Z");
+  });
+
+  it("a tripped hot walk deadline stops inside the hot prefix; scrape pass and log still run", async function () {
+    vi.stubGlobal("fetch", southHavenFetch());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = southHavenBeaches(6);
+    for (const row of rows) {
+      row.last_viewed = "2026-07-15T15:00:00.000Z";
+      row.recompute_updated = "2026-01-01T00:00:00.000Z";
+    }
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 2;
+    // The first page's wave read is slow enough to spend the whole hot budget.
+    made.db.failWhen(function (sql) {
+      if (sql.indexOf("SELECT s.beach_id") === 0 && waveReadStatements(made).length === 1) {
+        vi.setSystemTime(new Date(Date.parse(NOW) + 300000));
+      }
+      return false;
+    });
+    await runHourlyCron(made.env);
+
+    expect(waveReadStatements(made).length).toBe(1);
+    for (let i = 0; i < 2; i++) {
+      expect(estimateOf(made, rows[i].id)).not.toBeNull();
+      expect(recomputeUpdatedOf(made, rows[i].id)).toBe(NOW);
+    }
+    for (let i = 2; i < 6; i++) {
+      expect(estimateOf(made, rows[i].id)).toBeNull();
+      expect(recomputeUpdatedOf(made, rows[i].id)).toBe("2026-01-01T00:00:00.000Z");
+    }
+    for (const row of rows) {
+      expect(officialOf(made, row.id)).not.toBeNull();
+    }
+    const historyIds = findHistoryStatements(made.batchCalls).map(function (h) { return h.args[0]; });
+    expect(historyIds).toEqual([rows[0].id, rows[1].id]);
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain("flag recompute complete");
+    expect(lines).toContain(" reached=2 pages=1/3");
+    expect(lines).toContain("deadline=hot scrapers=1/1");
+  });
+
+  it("a tripped scrape deadline skips every scraper but keeps the estimates and the log", async function () {
+    const urls = [];
+    const inner = southHavenFetch();
+    vi.stubGlobal("fetch", function (url) {
+      urls.push(typeof url === "string" ? url : (url && url.url) || "");
+      return inner(url);
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = southHavenBeaches(3);
+    const made = makeEnv(rows);
+    made.env.FLAG_SCRAPE_DEADLINE_MS = 0;
+    await runHourlyCron(made.env);
+
+    for (const row of rows) {
+      expect(estimateOf(made, row.id)).not.toBeNull();
+      expect(officialOf(made, row.id)).toBeNull();
+    }
+    expect(urls.filter(function (u) { return u.indexOf("docs.google.com") !== -1; }).length).toBe(0);
+    // An unreached scraper is neither failing nor healthy this run.
+    expect(Array.from(made.kvPuts.keys()).filter(function (k) {
+      return k.indexOf("scraperhealth:") === 0;
+    })).toEqual([]);
+    expect(findHistoryStatements(made.batchCalls).length).toBe(0);
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain("official scrape deadline reached=0 of 1 scrapers");
+    expect(lines).toContain("deadline=no scrapers=0/1");
+  });
+
+  it("three consecutive failed estimate flushes end the walk", async function () {
+    vi.stubGlobal("fetch", networkDisabled);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = [];
+    for (let i = 1; i <= 5; i++) {
+      rows.push(makeBeachRow({ id: "osm-node-" + String(i), lat: 44.8 + i * 0.01 }));
+    }
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 1;
+    made.db.failWhen(function (sql, args) {
+      return sql.indexOf("INSERT INTO beach_state") === 0 && args[1] !== null;
+    });
+    await runHourlyCron(made.env);
+
+    expect(waveReadStatements(made).length).toBe(3);
+    for (const row of rows) {
+      expect(estimateOf(made, row.id)).toBeNull();
+      expect(recomputeUpdatedOf(made, row.id)).toBeNull();
+    }
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain("walk aborted after 3 consecutive failed pages");
+    expect(lines).toContain(" stateRows=0 stateFailures=3 reached=3 pages=3/5 pageFailures=0");
+  }, 15000);
+
+  it("a failed wave page read skips that page", async function () {
+    vi.stubGlobal("fetch", networkDisabled);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = [];
+    for (let i = 1; i <= 5; i++) {
+      rows.push(makeBeachRow({ id: "osm-node-" + String(i), lat: 44.8 + i * 0.01 }));
+    }
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 2;
+    const seededUpdated = "2026-07-15T10:00:00.000Z";
+    for (const id of ["osm-node-3", "osm-node-4"]) {
+      made.db.seedState(id, {
+        estimate: { beachId: id, color: "green", updated: seededUpdated },
+        estimate_color: "green",
+        estimate_updated: seededUpdated,
+        estimate_expires: nowEpoch() + 3600
+      });
+    }
+    made.db.failWhen(function (sql, args) {
+      return sql.indexOf("SELECT s.beach_id") === 0 && String(args[0]).indexOf("osm-node-3") !== -1;
+    });
+    await runHourlyCron(made.env);
+
+    for (const id of ["osm-node-3", "osm-node-4"]) {
+      expect(made.db.stateOf(id).estimate_updated).toBe(seededUpdated);
+      expect(recomputeUpdatedOf(made, id)).toBeNull();
+    }
+    for (const id of ["osm-node-1", "osm-node-2", "osm-node-5"]) {
+      expect(made.db.stateOf(id).estimate_updated).toBe(NOW);
+      expect(recomputeUpdatedOf(made, id)).toBe(NOW);
+    }
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain(" reached=3 pages=2/3 pageFailures=1");
+    expect(lines).toContain("wave page read failed at 2");
+  });
+
+  it("three consecutive failed page reads end the walk; scrape pass and log still run", async function () {
+    vi.stubGlobal("fetch", southHavenFetch());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = southHavenBeaches(4);
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 1;
+    made.db.failWhen(function (sql) {
+      return sql.indexOf("SELECT s.beach_id") === 0;
+    });
+    await runHourlyCron(made.env);
+
+    expect(waveReadStatements(made).length).toBe(3);
+    for (const row of rows) {
+      expect(estimateOf(made, row.id)).toBeNull();
+      expect(officialOf(made, row.id)).not.toBeNull();
+    }
+    const lines = loggedLines(logSpy);
+    expect(lines).toContain("flag recompute complete");
+    expect(lines).toContain("pageFailures=3");
+  });
+
+  it("a failed stamp never re-estimates a beach", async function () {
+    vi.stubGlobal("fetch", southHavenFetch());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const rows = southHavenBeaches(5);
+    const made = makeEnv(rows);
+    made.env.FLAG_RECOMPUTE_PAGE_SIZE = 2;
+    made.db.failWhen(function (sql) {
+      return sql.indexOf("UPDATE beaches SET recompute_updated") === 0;
+    });
+    await runHourlyCron(made.env);
+
+    const inserts = estimateInserts(made);
+    for (const row of rows) {
+      expect(inserts.filter(function (s) { return s.args[0] === row.id; }).length).toBe(1);
+    }
+    expect(loggedLines(logSpy)).toContain("stampFailures=5");
+    const historyIds = findHistoryStatements(made.batchCalls).map(function (h) { return h.args[0]; });
+    expect(historyIds.length).toBe(5);
+    expect(new Set(historyIds).size).toBe(historyIds.length);
   });
 });
 
@@ -2448,7 +2800,7 @@ describe("whole-run failure rejects the scheduled promise", function () {
     const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
     const made = makeEnv([makeBeachRow({ id: "osm-node-1", nws_zone: "MIZ071" })]);
     made.db.failWhen(function (sql) {
-      return sql.indexOf("SELECT b.*") === 0;
+      return sql.indexOf("SELECT * FROM beaches WHERE") === 0;
     });
 
     await expect(runHourlyCron(made.env)).rejects.toThrow(/D1 fake: forced failure/);

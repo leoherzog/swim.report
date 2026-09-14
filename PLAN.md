@@ -293,8 +293,8 @@ below for why.
     }
 
 Written by the offline NOAA GRIB2 wave cycle as an idempotent SQL delta into
-beach_state.wave, and read by the hourly runFlagRecompute off the beach_state join its
-per-run SELECT already issues, so the wave height and the wind fallback cost no live fetch
+beach_state.wave, and read by the hourly runFlagRecompute with one primary-key read per
+page of its walk, so the wave height and the wind fallback cost no live fetch
 and no per-beach read. Written only when the cycle produced something usable for the beach:
 at least one finite forecast hour, or a wind fallback for a beach that resolved none. A beach
 that resolved neither is skipped entirely, so its last-good row rides its own wave_expires
@@ -544,8 +544,9 @@ migrations/0004_recompute_updated.sql:
 
     ALTER TABLE beaches ADD COLUMN recompute_updated TEXT;
 
-  ISO timestamp of the last time runFlagRecompute processed this row (stamped
-  in one D1 batch at the end of each hourly run). Drives the hourly recompute
+  ISO timestamp of the last time runFlagRecompute processed this row (stamped per page
+  of the hourly walk, after that page's estimates commit, by one json_each UPDATE; a
+  beach whose estimate chunk rolled back keeps its old stamp). Drives the hourly recompute
   rotation only: the hourly SELECT orders by recompute_updated ASC (NULLs sort
   first) so never-recomputed and longest-waiting beaches always go first.
   runWaterTempRefresh has its own cursor (wave_updated, migration 0012); each
@@ -596,7 +597,7 @@ migrations/0007_last_viewed.sql:
   and runWaterTempRefresh for their hot/cold rotation split, and by runNwsEnrichment /
   runEcccEnrichment / runWebcamSync as a last_viewed DESC (NULLS LAST) candidate-queue
   tiebreak (section 7). Nationwide scale-out still needs list-view stamping
-  and real pagination (TODO.md "Scale-out").
+  (TODO.md "Scale-out").
 
 migrations/0008_eccc.sql:
 
@@ -2598,16 +2599,16 @@ wrangler.toml triggers:
 scheduled(controller, env, ctx) looks controller.cron up in the CRON_JOBS dispatch
 table (a plain object keyed by cron expression, each value { run, label }) and runs the
 matched job; an unrecognized cron is logged and ignored. The table:
-- "7 * * * *"          → runFlagRecompute(env). Hourly; reads wave inputs off the
-                         beach_state join its per-run SELECT already issues, and never
+- "7 * * * *"          → runFlagRecompute(env). Hourly; reads wave inputs with one
+                         beach_state read per page of its walk, and never
                          fetches waves. Offset off the congested top-of-hour slot the
                          repo's own workflows avoid. No ordering against the offline wave
                          cycle is required, because a stored wave record carries an absolute
                          wave_expires derived from the model valid time.
 - "3-53/10 * * * *"    → runAlertRefresh(env). Recompute-and-diff alerts refresh, every
                          10 minutes. Three national fetches, no per-beach upstream call;
-                         writes only beach_state.estimate. Offset off the hourly's measured
-                         22-147 s window starting at :07, and off every other minute in this
+                         writes only beach_state.estimate. Offset off the hourly's :07
+                         start, and off every other minute in this
                          table — a plain "*/10" would fire at :10, inside a slow hourly run.
 - "15 */6 * * *"       → runWaterTempRefresh(env). Sole writer of "watertemp:", and sole
                          writer and reader of the wave_updated rotation cursor.
@@ -2628,7 +2629,9 @@ catch logs its "<label> failed:" line in place of that summary before the rethro
 
 ### runFlagRecompute (hourly)
 
-Constants: MAX_BEACHES_PER_RUN = 3000, FLAG_TTL_SECONDS = 25200,
+Constants: FLAG_RECOMPUTE_PAGE_SIZE = 200, FLAG_WALK_DEADLINE_MS = 240000,
+FLAG_HOT_WALK_DEADLINE_MS = 300000, FLAG_SCRAPE_DEADLINE_MS = 600000,
+FLAG_PAGE_FAILURE_LIMIT = 3, FLAG_TTL_SECONDS = 25200,
 WQFLOOR_TTL_SECONDS = 7200 (src/beachState.js), KV_WRITE_CONCURRENCY = 12,
 SRF_GATHER_DEADLINE_MS = 120000, WQ_GATHER_DEADLINE_MS = 120000,
 HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; lives in
@@ -2639,37 +2642,49 @@ The step-7 wave and wind reads use Number.isFinite, not typeof x === "number", s
 malformed stored wave record cannot reach rules.js step 3's unguarded else branch and decide
 green. That is caller-side input validation, not a rule change, and bumps no RULES_VERSION.
 
-MAX_BEACHES_PER_RUN bounds one run's wall clock and its D1 batch budget; the run issues no
-per-beach KV read at all, because the wave record rides the same SELECT. It does not have to
-cover the table. A beach is hot when its last_viewed falls within HOT_VIEW_WINDOW_MS of the
-run, and every hot row is covered every run. Cold rows rotate through the remaining budget,
-so a cold beach waits ceil((flagWorthy - hot) / (MAX_BEACHES_PER_RUN - hot)) runs for its
-turn, and estimate_expires is what carries its flag across that wait: the two must satisfy
-FLAG_TTL_SECONDS / 3600 >= that wait + 2, the margin covering runs killed before the
-trailing recompute_updated batch at step 10 commits. That margin covers isolated kills
-only: neither the step-7 estimate pool nor either beach_state flush takes a deadline, so a
-run that truncates every hour dies at the same point in the same selection order and
-starves the same tail, which no TTL rescues.
-The hard requirement is
-MAX_BEACHES_PER_RUN above the hot count: at hot >= the limit the cold tier gets no slots and
-starves whatever the TTL is. Nationwide scale-out still needs real pagination (TODO.md).
+The run walks the whole flag-worthy queue in pages. A page is one wave read, one
+beach_state chunk and one recompute_updated stamp, so FLAG_RECOMPUTE_PAGE_SIZE must not
+exceed chunkStatements' 200 or a page would split across chunks (positive-integer env
+override, for tests). Two walk deadlines are measured from the top of the run and checked
+between pages only, each a numeric env override read like WQ_GATHER_DEADLINE_MS. No page
+past the hot prefix starts once FLAG_WALK_DEADLINE_MS has elapsed; the hot prefix is the
+leading run of snapshot rows whose last_viewed falls within HOT_VIEW_WINDOW_MS, which the
+ORDER BY puts first. No page at all starts once FLAG_HOT_WALK_DEADLINE_MS has elapsed, since
+the hot prefix is sized by outside traffic and has no bound of its own. A slow run therefore
+degrades to hot-first then oldest-first rotation.
+Both deadlines sit before the alert refresh's :13 slot, 360 s after this cron's :07 start.
+The hourly's upsert is unconditional and the refresh's CAS protects only the refresh, so a
+page flushed after that slot replaces any raise the refresh made with a color decided on
+this run's older alert fetch. A page in flight past the slot is repaired at the next refresh
+cadence, the same bound runAlertRefresh documents.
+No scraper group starts once FLAG_SCRAPE_DEADLINE_MS has elapsed (numeric env override). The
+tail after it must fit under the 900 s ceiling: the scraper in flight, up to 90 s for
+nws-omr's two 45 s fetches, then the step-8b flush with its one retry per chunk and the
+step-9 batch, each D1 statement capped at 30 s.
+FLAG_PAGE_FAILURE_LIMIT consecutive failed pages end the walk, a page failing when its wave
+read throws or its estimate flush loses rows, so a D1 outage costs three pages rather than
+every remaining one; the scrape pass and the completion log still run.
 
-1. const nowIso = new Date().toISOString(); (single timestamp for the whole run);
-   const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
-2. SELECT b.*, <WAVE_STATE_SELECT> FROM beaches b <BEACH_STATE_JOIN>
+A full walk reaches every beach each run, so FLAG_TTL_SECONDS is a lost-run margin: seven
+hours absorbs six lost or truncated runs in a row. A truncated run leaves its unreached
+cold rows on their old cursor, so they sort first next run; reached= against beaches= in
+the completion log measures the shortfall.
+
+1. const startedMs = Date.now(), taken before the snapshot SELECT so the walk deadline
+   bounds true elapsed time; const nowIso = new Date().toISOString(); (single timestamp for
+   the whole run); const hotCutoffIso = new Date(Date.now() - HOT_VIEW_WINDOW_MS).toISOString().
+2. SELECT * FROM beaches
    WHERE <FLAG_WORTHY_WATER_SQL>
    ORDER BY (last_viewed IS NOT NULL AND last_viewed >= ?1) DESC,
-   recompute_updated ASC, id ASC LIMIT 3000, bound with hotCutoffIso as ?1.
+   recompute_updated ASC, id ASC, bound with hotCutoffIso as ?1. This is the run's snapshot:
+   the whole queue, unjoined and with no LIMIT, so it carries beaches columns only and no
+   JSON blob. A throw here rejects the run.
    Both beach-walking crons emit this statement from one shared helper,
-   selectRunBeaches(env, columns, hotCutoffIso, rotation, stateSelect), so the WHERE,
-   hot-first guard, id ASC tiebreak, LIMIT and single bind live there once. The join and the
-   b alias appear only when a caller passes stateSelect, so the water-temp caller's SQL is
-   byte-identical to the unjoined shape. This caller splats b.* rather than *, because a bare
-   * over the join would drag every beach_state blob onto all 3000 rows. Every other clause
-   stays unqualified — FLAG_WORTHY_WATER_SQL's columns, last_viewed, the cursor column, id —
-   which is safe only because beach_state carries none of those names, the constraint any
-   future beach_state column must satisfy. The callers differ only in the
-   column list ("b.*" plus the wave columns here) and the rotation cursor column, taken from the ROTATION_COLUMNS
+   selectRunBeaches(env, columns, hotCutoffIso, rotation, limit), so the WHERE,
+   hot-first guard, id ASC tiebreak and single bind live there once. limit is appended as
+   LIMIT only when it is a positive integer: this caller passes none, and
+   runWaterTempRefresh passes WATER_TEMP_BEACHES_PER_RUN. The callers differ only in the
+   column list ("*" here), the limit and the rotation cursor column, taken from the ROTATION_COLUMNS
    whitelist { flag: "recompute_updated", wave: "wave_updated" } and concatenated into the
    SQL as a literal, because a column name cannot be a bind parameter; that lookup is
    own-property-checked and must never be caller-derived text. The hot-first demand term
@@ -2678,7 +2693,7 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    Migration 0012 explains why one shared cursor is not viable. NULLs sort first within
    each tier, and the leading guard evaluates to 0 for NULL or older last_viewed, so
    never-viewed and stale-viewed rows sort into the cold tier after every hot row. The
-   per-run summary log adds hot=<count> and oldest=<oldest cursor stamp selected, or
+   per-run summary log adds hot=<count> and oldest=<oldest cursor stamp in the snapshot, or
    none>.
 3. Alerts: build the set of distinct non-null nws_zone values; when non-empty, one
    fetchAllActiveAlerts() call for the whole run, then each zone's Map entry =
@@ -2707,12 +2722,16 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    sequential loop bounded only by the 45 s transport timeout would let a few hung WFOs
    spend the 900 s ceiling before any beach is written.
 5. Wave inputs: read only — the hourly cron performs no wave fetch and no per-beach read.
-   Every beach's wave record (section 1) already rode the step-2 SELECT, so this step is a
-   synchronous walk of rows in hand: liveWaveRecord(beach, nowMs) applies the wave_expires
-   lease, and each live record goes through resolveWaveInput(record, nowMs)
-   (src/waveInput.js) into a Map. That resolver indexes the record's series at the hour this
-   run is estimating, which is what lets one landed cycle color 24 h of runs; nowMs is
-   Date.parse(nowIso), so every beach in a run reads the same instant. Both gates stand on
+   Each page of the step-7b walk issues one
+   SELECT s.beach_id, <WAVE_STATE_SELECT> FROM beach_state s
+   WHERE s.beach_id IN (SELECT value FROM json_each(?1)), bound with the page's ids as a
+   JSON array. beach_state.beach_id is the primary key, so the read needs no index and costs
+   one statement however many ids the page holds. A beach absent from a successful read has
+   no wave record (section 1). liveWaveRecord(row, nowMs) applies the wave_expires lease, and
+   each live record goes through resolveWaveInput(record, nowMs) (src/waveInput.js) into the
+   page's Map. That resolver indexes the record's series at the hour this run is estimating,
+   which is what lets one landed cycle color 24 h of runs; nowMs is Date.parse(nowIso), so
+   every page in a run reads the same instant. Both gates stand on
    their own: a live wave_expires is not evidence that an hour-0 wind is offerable, and a
    spent series is absent however fresh its lease. A missing record — the cycle has not
    landed, or its rows reached their absolute expiration — and a record whose
@@ -2736,15 +2755,16 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    because the resolved advisory feeds estimateFlag's waterQualityAdvisory input (a
    raise-only floor, section 4 step 7); the step-8 official gather is too late. A scrape
    failure is isolated — result null means no floor for that source's beaches.
-7. Per beach, in a KV_WRITE_CONCURRENCY-wide runPool (src/pool.js). The body is pure local
-   work over the signals steps 3 through 6b already gathered, and every write it produces
-   is a descriptor step 7b flushes, so the width buys no concurrency here; what the pool
+7. Per beach, in a KV_WRITE_CONCURRENCY-wide runPool (src/pool.js) run once per page of the
+   step-7b walk. The body is pure local work over the signals steps 3 through 6b already
+   gathered and the page's step-5 wave inputs, and every write it produces is a descriptor
+   the page's step-7b flush applies, so the width buys no concurrency here; what the pool
    contributes is the fan-out bound for any per-beach upstream or storage call added to
    this body later, and pool.js's backstop around the per-beach try/catch, which keeps a
    throw while assembling one beach's inputs from aborting the rest of the run.
    estimateCount / failureCount are incremented with a single synchronous statement. No
-   deadline is passed here; the hourly's deadline-bounded pools are the step-4 SRF gather
-   and the step-6b wq gather.
+   deadline is passed to this pool; the walk deadline is checked between pages, and the
+   hourly's deadline-bounded pools are the step-4 SRF gather and the step-6b wq gather.
    Assemble inputs (nulls for anything missing), including
    alertsCheckable: (beach.nws_zone || beach.eccc_zone || beach.marine_zone) ? true : false
    — a beach enriched for no authority gets the honesty caveat instead of a silent
@@ -2793,11 +2813,24 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    The wave columns are not written here; the offline wave cycle owns wave and wave_expires.
    beachStateUpsertStatements names neither in its INSERT column list nor its SET list, so an
    hourly run can never blank or restamp a wave record.
-7b. Flush the estimate descriptors, before the scrape pass below starts: everything in
-   step 8 is upstream work bounded only by each scraper's own fetch timeout, and a run
-   killed at the 900 s ceiling in there must not cost the beaches it has already
-   estimated. Mechanics and the persisted-id set are in step 8b, which applies the same
-   flush to the officials and readings.
+7b. The paged walk. Pages are consecutive FLAG_RECOMPUTE_PAGE_SIZE slices of the step-2
+   snapshot, and each runs to completion before the next starts. No page starts once the
+   hot walk deadline has expired, and no page whose start index is at or past the hot
+   prefix starts once the cold walk deadline has; the walk stops and logs deadline=hot or
+   deadline=cold after the page's position. A started page:
+   (a) issues its step-5 wave read. A failed read skips the page whole, with no estimate and
+       no stamp, because a page estimated without its wave records would publish a
+       wave-blind color; the skipped rows keep their cursor and sort first next run. It
+       counts toward FLAG_PAGE_FAILURE_LIMIT, as does a page whose flush in (c) loses rows;
+       a page that flushes cleanly resets the streak.
+   (b) runs the step-7 pool over its rows.
+   (c) flushes its estimate descriptors, before the next page and long before the scrape
+       pass: everything in step 8 is upstream work bounded only by each scraper's own fetch
+       timeout, and a run killed at the 900 s ceiling costs only the page in flight.
+       Mechanics are in step 8b, which applies the same flush to the officials and
+       readings. The ids each page's flush committed accumulate into one run-wide
+       persisted-id set.
+   (d) stamps the rotation cursor (step 10).
 8. Officials: group beaches by findScraper(beach) id, each findScraper call in its own
    try/catch so one row a scraper-supplied matches() cannot parse costs its own beach and
    not the pass; call each distinct scraper's scrape(nowIso) ONCE per run; for every
@@ -2833,6 +2866,10 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    scraperGroups loop stays strictly sequential for a different reason: it mutates shared
    per-scraper "scraperhealth:" state across a KV read-modify-write and carries the
    `if (result === null) continue`, neither of which survives a callback conversion intact.
+   The loop checks FLAG_SCRAPE_DEADLINE_MS before each scraper group; once it has expired
+   the loop logs "index: official scrape deadline reached=X of Y scrapers" and stops. An
+   unreached scraper contributes no official or reading field, so its stored records age
+   out, and its scraperhealth streak is neither bumped nor reset.
    Scraper health monitoring (hourly path only): around each distinct matched scraper's
    single scrape(nowIso) call, read-modify-write a KV counter at
    "scraperhealth:" + scraperId holding JSON { consecutiveNulls, lastSuccess,
@@ -2861,44 +2898,55 @@ starves whatever the TTL is. Nationwide scale-out still needs real pagination (T
    stateFailures. A rejected chunk never stops the run. A beach that produced both an
    estimate and an official is written by both flushes and ends the run as one row: every
    column COALESCEs, so this flush's NULL estimate leaves step 7b's value standing.
-   Each flush returns the ids whose chunk actually committed. Step 9 pairs against step
-   7b's set, which is the flag_history ordering invariant: a history row may only claim an
-   estimate that landed, and a rejected chunk excludes its beaches from the history batch.
-   The completion log carries stateRows=<rows committed across both flushes> and
+   Each flush returns the ids whose chunk actually committed. Step 9 pairs against the
+   run-wide set step 7b accumulates across pages, which is the flag_history ordering
+   invariant: a history row may only claim an estimate that landed, and a rejected chunk
+   excludes its beaches from the history batch.
+   The completion log carries stateRows=<rows committed across every flush> and
    stateFailures=<rows in rejected chunks>; the two sum to the descriptor total.
 9. Calibration history (migration 0006): during steps 7-8, record each beach's estimate in
    estimatesByBeach (beachId -> { color, rulesVersion }) and each resolved official in
    officialsByBeach (beachId -> { color, source = flag.scraperId }). After step 8b, write one
-   flag_history row per beach present in both maps AND in step 7b's persisted-id set (a fresh
+   flag_history row per beach present in both maps AND in step 7b's run-wide persisted-id set (a fresh
    estimate and a scraped official color this run, both committed) via
    a single env.DB.batch INSERT; official_source = the scraper id. Estimate-only
    beaches are deliberately not logged, so the table records estimated-vs-official
    pairs rather than every beach hourly. Wrapped in its own try/catch so a failure here
    never poisons the run; the summary log line gains a history=<n> field. Cost: at most
    one extra D1 batch call per run.
-10. Stamp the rotation cursor: one env.DB.batch of
-   UPDATE beaches SET recompute_updated = nowIso WHERE id = ? per processed beach.
-   A single post-loop batch is safe here because this cron finishes well inside its 900 s
-   ceiling; runWaterTempRefresh stamps wave_updated incrementally instead (migration 0012).
+10. Stamp the rotation cursor, inside each page after its estimate flush: one
+   UPDATE beaches SET recompute_updated = ?1 WHERE id IN (SELECT value FROM json_each(?2)),
+   bound with nowIso and the page's ids as a JSON array. beaches.id is the primary key, so the
+   stamp needs no index. It excludes every beach whose estimate chunk rolled back, which keeps
+   its old stamp and sorts first next run, and it still stamps a beach whose estimateFlag
+   threw, so a deterministic throw cannot pin itself to the head of the queue. A lost stamp
+   only reorders the next run, so a failure is logged and counted with no retry. Stamping per
+   page is what lets a run killed mid-walk keep the cursor for every page it finished;
+   runWaterTempRefresh stamps wave_updated incrementally for the same reason (migration 0012).
    The two crons deliberately do not share a cursor: recompute_updated is written and read
    by this cron alone.
-Subrequest budget (paid plan, 10,000 per invocation): 1 NWS national alerts call + 2 ECCC
-national fetches (only when Canadian rows exist) + one SRF call per distinct WFO (~15 at Great
-Lakes scope, 60+ continental, pooled)
+   The completion log appends, after stateFailures=: reached=<rows in pages whose wave read
+   succeeded> pages=<pages run>/<total pages> pageFailures=<failed page reads>
+   stampFailures=<rows in failed stamps> deadline=no|cold|hot
+   scrapers=<scraper groups run>/<matched scraper groups> elapsedMs=<since startedMs>.
+Subrequest budget (paid plan, 10,000 per invocation): 1 snapshot SELECT + 1 NWS national
+alerts call + 2 ECCC national fetches (only when Canadian rows exist) + one SRF call per
+distinct WFO (~15 at Great Lakes scope, 60+ continental, pooled)
 + one scrape() per matched wqFloor source + one scrape() per matched official scraper
-+ ~2 scraper-health KV ops per matched scraper + ceil(3000 / 200) = 15 beach_state D1
-batches + ≤1 flag_history D1 batch + 1 recompute_updated D1 batch ≈ 100 in the worst case
-at the 3000-row LIMIT — the wave records ride the step-2 SELECT and cost no subrequest each.
-Nothing in this cron is O(the whole table): the per-beach writes
-collapse into batches of 200 rather than a subrequest each, and both authorities' alerts are
-one national fetch each, so alert cost stays flat as the table grows. Wall clock rather than
-subrequest count is the binding limit on all three crons. The free plan (50 subrequests) is
-not sufficient at this cadence; a free-plan demo would need a low MAX_BEACHES_PER_RUN
-(TODO.md).
++ ~2 scraper-health KV ops per matched scraper + three D1 calls per page (wave read,
+estimate chunk, stamp) + one official chunk per 200 official descriptors + ≤1 flag_history
+D1 batch — about 230 for a full walk of some 46 pages. Upstream cost is flat in the table:
+both authorities' alerts are one national fetch each and SRF is one fetch per WFO, while D1
+calls grow by three per 200 flag-worthy rows. D1 separately documents 1,000 queries per
+invocation on Paid and counts each statement inside a batch, which a full walk's per-beach
+upserts exceed; that limit is not enforced today (TODO.md). Wall clock rather than
+subrequest count is the binding limit on all three crons. The free plan (50 subrequests, 50
+D1 queries) is not sufficient: a full walk's D1 calls alone exceed it (TODO.md).
 
 ### runWaterTempRefresh (6-hourly: "15 */6 * * *")
 
-Constants: WAVE_DATA_TTL_SECONDS = 25200 (7 h), KV_WRITE_CONCURRENCY = 12,
+Constants: WATER_TEMP_BEACHES_PER_RUN = 3000, WAVE_DATA_TTL_SECONDS = 25200 (7 h),
+KV_WRITE_CONCURRENCY = 12,
 WAVE_GATHER_DEADLINE_MS = 480000, WAVE_WRITE_DEADLINE_MS = 840000,
 WAVE_CURSOR_FLUSH_SIZE = 100, HOT_VIEW_WINDOW_MS (src/demandWindow.js).
 
@@ -2906,7 +2954,8 @@ The sole writer of "watertemp:" (section 1) and the sole writer and reader of th
 wave_updated rotation cursor (migration 0012). Display-only end to end: nothing it writes
 reaches src/rules.js, so it can never change a flag color and never bumps RULES_VERSION.
 
-1. Select beaches with selectRunBeaches(env, { rotation: "wave_updated" }) — the same
+1. Select up to WATER_TEMP_BEACHES_PER_RUN beaches with selectRunBeaches(env,
+   "id, lat, lon, last_viewed", hotCutoffIso, "wave", WATER_TEMP_BEACHES_PER_RUN) — the same
    hot/cold demand-priority ordering as the hourly cron (hot rows by last_viewed within
    HOT_VIEW_WINDOW_MS first, then oldest-cursor-first), rotating on its own cursor. The two
    crons deliberately do not share one: the hourly cron rewrites recompute_updated to a
@@ -3016,9 +3065,9 @@ alert means.
      unchanged row is written nothing, and a second run against an identical feed writes
      nothing at all.
    - The one lowering rail: when SEVERITY_RANK[next.color] < SEVERITY_RANK[standing.color]
-     and nowMs - Date.parse(signals.updated) >= STALE_MS (src/displayFlag.js, the same 2 h
-     horizon the page marks stale), count skipStaleLower and write nothing. A clear-down
-     decided on wave and wind inputs the page itself would flag as stale waits for the hourly.
+     and nowMs - Date.parse(signals.updated) >= STALE_MS (src/displayFlag.js, the display gate's 2 h
+     horizon), count skipStaleLower and write nothing. A clear-down decided on wave and wind
+     inputs past that horizon waits for the hourly.
      The rail is on the lowering direction only, since age can only understate a hazard.
    - Otherwise push estimateCasStatement(env.DB, row.id, stored, row.estimate_updated) with
      its rank pair.
@@ -3057,10 +3106,10 @@ writes whose sealed inputs were already at or past STALE_MS. The rail keeps lowe
 it, so it is raises plus the same-rank rewrites an alertDetails or reason change selects, and
 it routinely exceeds raised plus lowered. features and parsed are pure observation of the NWS
 parse and gate nothing: features high with parsed 0 is the visible signature of a schema
-drift that renamed properties.event or restructured geocode.UGC. skipStaleLower is cold-tier
-steady state, not an alarm — the hourly rotation is sized at about four runs, so a cold
-beach's seal is routinely older than the page's 2 h stale horizon and a clear-down it would
-decide simply waits its turn. The operator trip-wires are the line's absence, nws=down or
+drift that renamed properties.event or restructured geocode.UGC. skipStaleLower is near zero
+in steady state, since a full hourly walk keeps every seal younger than the display gate's
+2 h STALE_MS; a sustained count means missed or truncated hourlies, whose reached= and
+deadline= say which. The operator trip-wires are the line's absence, nws=down or
 eccc=down persisting across runs, and features high with parsed 0.
 
 ### Run budgets and write pools (src/pool.js)
@@ -3097,14 +3146,16 @@ sequential per-beach `await env.FLAGS.put(...)`: that pattern consumes a whole 9
 invocation and costs the run everything it had gathered. Per-beach D1 state is not a fan-out
 at all — beachStateUpsertStatements and estimateCasStatement collapse it into batches of 200
 (chunkStatements), so it costs a handful of round trips rather than one per beach and needs
-no pool; the wave record sits on that side of the split too, read off a join and written
-offline as one batched delta.
+no pool; the wave record sits on that side of the split too, read one statement per hourly
+page and written offline as one batched delta.
 
 The water-temp cron's wall-clock budgets are WAVE_GATHER_DEADLINE_MS (480000) and
 WAVE_WRITE_DEADLINE_MS (840000), plus the WAVE_CURSOR_FLUSH_SIZE (100) flush granularity
 for the write pool's cursor. The two deadlines are numeric-env-overridable via
-runBudget(env); the hourly's WQ_GATHER_DEADLINE_MS is read the same way inside
-runFlagRecompute.
+runBudget(env). The hourly's wall-clock budgets are FLAG_WALK_DEADLINE_MS (240000, checked
+between pages past the hot prefix), FLAG_HOT_WALK_DEADLINE_MS (300000, checked between every
+page) and FLAG_SCRAPE_DEADLINE_MS (600000, checked between scraper groups); they and
+WQ_GATHER_DEADLINE_MS are numeric-env-overridable, read inside runFlagRecompute.
 
 The alerts refresh cron takes no write deadline and no write pool. Its worst case — three
 fetches bounded at 45 s each, the keyset pages, and one D1 batch per 200 CAS statements —
@@ -3271,8 +3322,8 @@ REGIONS, so the ocean grid floors are seeded by hand after the first cycle that 
 beaches. No single box may cross the antimeridian (every consumer reads raw minLon..maxLon;
 src/layerGrid.js wraps longitude, so a coast straddling 180 is two boxes split there). Mexico,
 Labrador, Hudson Bay, the Arctic and Greenland are excluded by choice (src/regions.js header).
-The Worker-side ceiling is the flag-worthy row count against the MAX_BEACHES_PER_RUN /
-FLAG_TTL_SECONDS inequality in section 7, recorded in TODO.md.
+The Worker-side ceiling is the flag-worthy row count one hourly walk reaches inside
+FLAG_WALK_DEADLINE_MS (section 7), recorded in TODO.md.
 
 runDiscovery(layers, report) is a local scan. There is no retry, no backoff, no per-tile
 budget and no circuit breaker, because there is no upstream to be flaky:
@@ -4429,14 +4480,16 @@ exporting a CSS string); render.js is the sole module the router imports.
   callout — stale warning or reading note, never both — in the body, and an "Updated
   <wa-relative-time date=updated sync>" in slot="footer". Distinction comes from card
   class, appearance and badge, never from layout. renderFlagCard takes the optional staleMs,
-  readingNote and reportedForHtml, all three passed through by renderOfficialCard alone, so
-  the estimate card keeps the default its own hourly cadence was calibrated to and can never
-  show a report-site line; and the optional alertDetailsHtml, passed by renderEstimateCard
+  readingNote and reportedForHtml, all three passed through by renderOfficialCard;
+  renderEstimateCard passes only staleMs, as ESTIMATE_STALE_MS, so the estimate card can
+  never show a reading note or a report-site line; and the optional alertDetailsHtml, passed by renderEstimateCard
   alone, since no scraper publishes alert text. alertDetailsHtml renders BELOW the age
   callout, so a stale warning is never pushed under an expander.
 - Stale-data warning: the age threshold is STALE_MS = 7200000 (2 h) by default,
-  overridable per official record by its optional staleMs (section 1); the estimate card
-  always uses the default. Let limit = typeof x.staleMs === "number" ? x.staleMs : STALE_MS.
+  overridable per official record by its optional staleMs (section 1). The estimate card
+  passes ESTIMATE_STALE_MS = 18000000 (5 h), module-private in src/frontend/render.js; it
+  must stay below FLAG_TTL_SECONDS * 1000, or the estimate expires to UNKNOWN before its
+  warning can render. Let limit = typeof x.staleMs === "number" ? x.staleMs : STALE_MS.
   If (Date.parse(nowIso) - Date.parse(x.updated)) > limit, append the warning wa-callout
   (variant="warning", triangle-exclamation icon) inside that card reading "Stale data —
   last updated " followed by <wa-relative-time date=x.updated sync>, and no reading note.
@@ -4787,7 +4840,7 @@ exporting a CSS string); render.js is the sole module the router imports.
     HTML the strip renders with JS off or the kit unreachable; only the tooltips need the
     component kit.
   - Stale warning (WAVE_STALE_MS = 28800000 ms / 8 h, keyed on waves.updated) inside the
-    section — longer than the flag cards' 2 h default because the strip refreshes on the
+    section — longer than the official card's 2 h default and the estimate card's 5 h because the strip refreshes on the
     offline NOAA wave cycle, whose records ride an absolute lease measured from the model
     valid hour and whose models publish every 6-12 h, so a
     few-hours-old strip is model-current rather than stale. The ESTIMATE badge plus footer
@@ -5139,8 +5192,8 @@ test uses symbolically.
   index, the fill-in keyframe's placement inside the guard, and the strip's neutral "now"
   marker.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps
-  wave_updated; runFlagRecompute takes wave height and the wind fallback off the
-  beach_state join, degrading to unknown when the record is absent or past its
+  wave_updated; runFlagRecompute takes wave height and the wind fallback off a
+  per-page beach_state read, degrading to unknown when the record is absent or past its
   wave_expires, rather than fetching or reading KV, and leaves a stored wave record
   untouched across its own upsert; the alertDetails/ripCurrentRisk
   echoes land in beach_state.estimate; and the Canadian path (an eccc_zone beach inside a
@@ -5161,7 +5214,15 @@ test uses symbolically.
   (asserted by forcing one chunk to reject with failWhen, which must also raise
   stateFailures without stopping the run), the durability split — a rejected official chunk
   leaving every estimate standing — and the Number.isFinite guards refusing a non-finite
-  wave height or wind speed.
+  wave height or wind speed. The paged walk: every row reached across pages with exactly
+  one estimate upsert each, each national fetch and each WFO's SRF issued once across
+  pages, every page's estimates flushed before the first scraper fetch, a tripped cold walk
+  deadline stopping only after the hot prefix, a tripped hot walk deadline stopping inside
+  it while the scrape pass and completion log still run, a tripped scrape deadline skipping
+  every scraper and its health write while the estimates land, a failed wave page read
+  skipping its page, three consecutive failed reads or failed estimate flushes ending the
+  walk while the scrape pass and completion log still run, one stamp statement per page binding [nowIso, id array], and a failed stamp
+  never re-estimating a beach.
 - test/router.test.js — behavior against seeded rows rather than pinned SQL text: the list,
   ids, detail and /api/flag routes resolving their estimate and official off the
   beach_state join, an expired record rendering as absent, the list select taking the

@@ -6,9 +6,9 @@
 // official's updated, so liveChipState pairs and liveBeachState blobs decide alike.
 import { SEVERITY_RANK, normalizeColor } from "./rules.js";
 
-// The display gate and the default card stale horizon, calibrated to the hourly
-// recompute. The alert refresh refuses to lower a flag from inputs this gate
-// calls aged, so every reader imports this one value.
+// The display gate and the official card's default stale horizon, calibrated to
+// the hourly recompute. The alert refresh refuses to lower a flag from inputs
+// this gate calls aged, so every reader imports this one value.
 export const STALE_MS = 7200000;
 
 // A missing or unparseable instant on either side reads as not stale.

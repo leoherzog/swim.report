@@ -140,8 +140,10 @@ describe("estimate card: per-alert disclosures", function () {
   });
 
   it("keeps a stale warning above the disclosures", function () {
-    const stale = "2026-07-05T06:00:00.000Z";
+    const stale = "2026-07-05T03:00:00.000Z";
     const card = estimateCard(estimateWith([BHS], { updated: stale }));
+    expect(card).toContain("Stale data");
+    expect(card).toContain("alert-details");
     expect(card.indexOf("Stale data")).toBeLessThan(card.indexOf("alert-details"));
   });
 });
