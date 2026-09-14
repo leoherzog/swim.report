@@ -4240,7 +4240,9 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // on every home-page load and the response is a whole list document. A browser
       // without fetch or DOMParser takes the same branch and shows the rows it has.
       // Every row is then copied (document.importNode) into the saved or the recent list
-      // in the id order above. The server owns row markup and the row order — the script
+      // in the id order above. Before a copy connects, every id in it and every
+      // wa-tooltip for reference gains the prefix "your-", since a tooltip binds to the
+      // first element carrying its for id and the source row still holds the original. The server owns row markup and the row order — the script
       // never re-sorts or rebuilds a row. The two sub-labels are revealed only when both
       // groups have rows; one group alone is already named by the heading. No stored ids,
       // an empty response or a failed fetch leaves the section hidden, which is the page
@@ -4408,10 +4410,10 @@ exporting a CSS string); render.js is the sole module the router imports.
   it live, so the renderer stays pure and only interpolates the ISO.
 - Estimate === null renders exactly like an unknown estimate with reason
   "No estimate available yet".
-- Official flags (the detail page's official card, and an OFFICIAL badge on any row, nearby
-  card or hero whose displayed color the official record supplied) must be visually distinct: a
-  separate card with a heavy border, an "OFFICIAL" badge with a circle-check Font Awesome
-  icon, the source hostname ("www." stripped) linking to the scraped page, and its own
+- Official flags (the detail page's official card, the OFFICIAL badge on a hero whose
+  displayed color the official record supplied, and the filled chip on any such row or nearby
+  card) must be visually distinct: a separate card with a heavy border, an "OFFICIAL" badge
+  with a circle-check Font Awesome icon, the source hostname ("www." stripped) linking to the scraped page, and its own
   updated time. The official card appears above the estimate card; when official is null no
   official card renders. When the record carries reportedFor (section 1) with a non-empty
   name, the card body also carries a quiet caption line under the flag row reading
@@ -4456,9 +4458,13 @@ exporting a CSS string); render.js is the sole module the router imports.
   matches either.
 - List page: one row per entry linking to "/beach/" + encodeURIComponent(beach.id), showing
   the display name, optional subtitle and the flag chip from displayFlag(entry, data.nowIso):
-  the icon and short label of flag.color, followed by an OFFICIAL badge only when
-  flag.source is "official" and by no ESTIMATE badge, so an unbadged chip is never a posted
-  flag. The <li> carries data-flag = flag.keyword (green|yellow|red|unknown), which drives
+  one wa-badge variant="neutral" with the icon and short label of flag.color. It is
+  appearance="filled", with a wa-visually-hidden "Official " before the label, only when
+  flag.source is "official", and appearance="outlined" otherwise; no separate OFFICIAL or
+  ESTIMATE badge follows it, so an outlined chip is never a posted flag. An official chip
+  carries id "flag-chip-" + beach.id ("nearby-flag-chip-" + beach.id on a nearby card) and a
+  <wa-tooltip for=that id> reading "Official", emitted after the closing </a> so the tooltip
+  body never joins the link's accessible name. The <li> carries data-flag = flag.keyword (green|yellow|red|unknown), which drives
   both the flag-colored inline-start border in styles.js and the client-side green-only
   filter; chip, border, map marker and detail title are one decision. unknown renders gray
   rather than being omitted. class="beach-row" stays the first attribute and never gains a
@@ -5128,8 +5134,8 @@ test uses symbolically.
   both ::view-transition-group durations inside the no-preference guard, the hero's two
   static names (including the double-red pair, named on the wrapper rather than on either
   icon), that no row or card carries a server-rendered name, the click-time naming script
-  on both pages and its claim/release/feature-gate lines, the flag chip staying the first
-  badge when an OFFICIAL badge follows it, the per-segment --i stagger
+  on both pages and its claim/release/feature-gate lines, an official chip staying the link's
+  one badge, the per-segment --i stagger
   index, the fill-in keyframe's placement inside the guard, and the strip's neutral "now"
   marker.
 - test/flagRecompute.test.js — runWaterTempRefresh writes "watertemp:" and stamps

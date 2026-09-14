@@ -164,6 +164,17 @@ const LIST_LINES = [
   "        continue;",
   "      }",
   "      const copy = document.importNode(row, true);",
+  // A copy repeats its source row's ids, and a wa-tooltip binds to the first
+  // element carrying its for id, so ids and for references are prefixed before
+  // the copy connects.
+  "      const named = copy.querySelectorAll('[id]');",
+  "      for (let j = 0; j < named.length; j = j + 1) {",
+  "        named[j].id = 'your-' + named[j].id;",
+  "      }",
+  "      const tips = copy.querySelectorAll('wa-tooltip[for]');",
+  "      for (let j = 0; j < tips.length; j = j + 1) {",
+  "        tips[j].setAttribute('for', 'your-' + tips[j].getAttribute('for'));",
+  "      }",
   "      if (favorites.indexOf(ids[i]) !== -1) {",
   "        savedList.appendChild(copy);",
   "        savedCount = savedCount + 1;",

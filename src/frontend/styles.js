@@ -515,9 +515,9 @@ const RULES = [
   "  --point-radius: 0;",
   "}",
 
-  // Keep the list row's flag/badge cluster on one line and never squeezed by
-  // a long beach name (white-space inherits into the badge's shadow text).
-  ".beach-row-link > .wa-cluster {",
+  // Keep the list row's flag chip on one line and never squeezed by a long
+  // beach name (white-space inherits into the badge's shadow text).
+  ".beach-row-link > wa-badge {",
   "  flex-shrink: 0;",
   "  white-space: nowrap;",
   "}",

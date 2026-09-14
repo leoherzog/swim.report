@@ -350,13 +350,14 @@ describe("handleHome reads the list's flags from beach_state", () => {
     expect(out.row).toContain(">RED</wa-badge>");
     expect(out.row).not.toContain("flag-icon-yellow");
     expect(out.row).not.toContain(">YELLOW</wa-badge>");
-    expect(out.row).toContain(">OFFICIAL</wa-badge>");
+    expect(out.row).toContain("appearance=\"filled\"");
+    expect(out.row).toContain(">Official </span>RED</wa-badge>");
     expect(out.row).toContain("data-flag=\"red\"");
     // The list page reads no KV at all: both records rode in on the row.
     expect(out.keys).toEqual([]);
   });
 
-  it("credits the estimate, with no OFFICIAL badge, when an aged official is outranked", async () => {
+  it("credits the estimate, with an outlined chip, when an aged official is outranked", async () => {
     const out = await rowFor({
       estimate: Object.assign({}, ESTIMATE, { color: "red" }),
       official: Object.assign({}, OFFICIAL, { color: "yellow" })
@@ -364,7 +365,9 @@ describe("handleHome reads the list's flags from beach_state", () => {
     expect(out.row).toContain(">RED</wa-badge>");
     expect(out.row).toContain("flag-icon-red");
     expect(out.row).not.toContain(">YELLOW</wa-badge>");
-    expect(out.row).not.toContain(">OFFICIAL</wa-badge>");
+    expect(out.row).toContain("appearance=\"outlined\"");
+    expect(out.row).not.toContain("appearance=\"filled\"");
+    expect(out.row).not.toContain("Official </span>");
     expect(out.row).toContain("data-flag=\"red\"");
   });
 
@@ -375,14 +378,14 @@ describe("handleHome reads the list's flags from beach_state", () => {
     expect(out.row).not.toContain("flag-icon-yellow");
   });
 
-  it("drops the OFFICIAL badge once the official column expires, keeping the estimate", async () => {
+  it("outlines the chip once the official column expires, keeping the estimate", async () => {
     const out = await rowFor({
       estimate: ESTIMATE,
       official: OFFICIAL,
       officialExpires: NOW_EPOCH
     });
     expect(out.row).toContain(">YELLOW</wa-badge>");
-    expect(out.row).not.toContain(">OFFICIAL</wa-badge>");
+    expect(out.row).not.toContain("appearance=\"filled\"");
   });
 
   it("renders unknown for a beach with no beach_state row at all", async () => {
@@ -901,12 +904,13 @@ describe("handleDetail nearby beaches", () => {
     expect(section).not.toContain("/beach/b-far");
     expect(section).not.toContain("/beach/osm-way-9");
     expect(section).not.toContain("/beach/b-inland");
-    // Each card's displayFlag chip and OFFICIAL badge come off its own joined
-    // row, and read exactly as a list row's do.
+    // Each card's displayFlag chip comes off its own joined row, and reads
+    // exactly as a list row's does.
     const first = sliceBetween(section, "<wa-card class=\"nearby-card\"", "</wa-card>");
     expect(first).toContain("Dune Park");
-    expect(first).toContain("OFFICIAL");
-    expect(first).toContain(">GREEN</wa-badge>");
+    expect(first).toContain("<wa-badge variant=\"neutral\" appearance=\"filled\" id=\"nearby-flag-chip-");
+    expect(first).toContain("<wa-tooltip for=\"nearby-flag-chip-");
+    expect(first).toContain(">Official </span>GREEN</wa-badge>");
     expect(first).not.toContain("UNKNOWN");
     expect(first).toContain("&lt;1 mi");
     expect(section).toContain("RED");
@@ -1743,10 +1747,20 @@ describe("every surface shows the one displayFlag decision", () => {
     expect(chip).toContain("flag-icon-" + d.keyword);
     expect(chip).toContain(">" + shortLabel(d.color) + "</wa-badge>");
     if (d.source === "official") {
-      expect(markup).toContain(">OFFICIAL</wa-badge>");
+      expect(chip).toContain("appearance=\"filled\"");
+      expect(chip).toContain(">Official </span>");
+      const id = /id="([^"]+)"/.exec(chip)[1];
+      // The tooltip sits outside the link, bound to the chip by id.
+      const tip = "<wa-tooltip for=\"" + id + "\">Official</wa-tooltip>";
+      expect(markup).toContain(tip);
+      expect(markup.indexOf("</a>")).toBeLessThan(markup.indexOf(tip));
     } else {
-      expect(markup).not.toContain(">OFFICIAL</wa-badge>");
+      expect(chip).toContain("appearance=\"outlined\"");
+      expect(chip).not.toContain("Official </span>");
+      expect(chip).not.toContain(" id=\"");
+      expect(markup).not.toContain("<wa-tooltip");
     }
+    expect(markup).not.toContain(">OFFICIAL</wa-badge>");
     expect(markup).not.toContain(">ESTIMATE</wa-badge>");
   }
 
@@ -2656,9 +2670,9 @@ describe("GET /?ids= list mode", () => {
     const html = await (await handleRequest(idsRequest("osm-way-1,osm-node-2"), made.env)).text();
     const first = beachRowOf(html);
     expect(first).toContain(">RED</wa-badge>");
-    expect(first).not.toContain(">OFFICIAL</wa-badge>");
+    expect(first).not.toContain("appearance=\"filled\"");
     const second = html.slice(html.indexOf("<li class=\"beach-row\"", html.indexOf("</li>")));
-    expect(second).toContain(">OFFICIAL</wa-badge>");
+    expect(second).toContain("appearance=\"filled\"");
     // The official-only row shows the posted green, not an unknown estimate chip.
     expect(second).toContain(">GREEN</wa-badge>");
     expect(second).not.toContain(">UNKNOWN</wa-badge>");

@@ -458,8 +458,8 @@ describe("no second copy of the display decision", function () {
     expect(count(text, "collapseFlagColor(")).toBe(1);
     // The row, the nearby card and the detail page.
     expect(count(text, "= displayFlag(")).toBe(3);
-    // The definition, the official card, the compact flag and the hero badge.
-    expect(count(text, "renderOfficialBadge(")).toBe(4);
+    // The definition, the official card and the hero badge.
+    expect(count(text, "renderOfficialBadge(")).toBe(3);
     const dataFlags = [];
     const pattern = /data-flag=\\"" \+\s*(\S+)/g;
     let match = pattern.exec(text);

@@ -260,17 +260,33 @@ function renderOfficialBadge(sizeClass, slotName) {
     "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>";
 }
 
-// The compact flag a list row or nearby card carries. The chip comes first,
-// because ROW_TRANSITION_SCRIPT claims the link's first wa-badge; OFFICIAL
-// follows only when the posted record supplied the chip's color.
-function renderCompactFlag(flag) {
+/**
+ * The compact flag a list row or nearby card carries: one wa-badge, filled when
+ * the posted record supplied its color and outlined otherwise. An official chip
+ * also gets a hover tooltip and a hidden "Official " prefix for screen readers.
+ * The tooltip comes back separately so the caller places it outside the link,
+ * where its body cannot join the link's accessible name.
+ * @param {object} flag displayFlag result
+ * @param {string} chipId id for an official chip, unique within the page
+ * @returns {{badgeHtml: string, tooltipHtml: string}} tooltipHtml is "" unless official
+ */
+function renderCompactFlag(flag, chipId) {
   // Short label only: "— water closed" wraps badly beside long park names.
   const label = flag.color === "double-red" ? "DOUBLE RED" : FLAG_LABELS[flag.color];
-  const officialHtml = flag.source === "official" ? (" " + renderOfficialBadge(null)) : "";
-  return "<span class=\"wa-cluster wa-gap-xs\">" +
-    "<wa-badge variant=\"neutral\" appearance=\"outlined\">" +
-    renderFlagIcon(flag.color, "wa-font-size-l", "start") + escapeHtml(label) +
-    "</wa-badge>" + officialHtml + "</span>";
+  const iconHtml = renderFlagIcon(flag.color, "wa-font-size-l", "start");
+  if (flag.source !== "official") {
+    return {
+      badgeHtml: "<wa-badge variant=\"neutral\" appearance=\"outlined\">" + iconHtml +
+        escapeHtml(label) + "</wa-badge>",
+      tooltipHtml: ""
+    };
+  }
+  const id = escapeHtml(chipId);
+  return {
+    badgeHtml: "<wa-badge variant=\"neutral\" appearance=\"filled\" id=\"" + id + "\">" + iconHtml +
+      "<span class=\"wa-visually-hidden\">Official </span>" + escapeHtml(label) + "</wa-badge>",
+    tooltipHtml: renderTooltipFor(id, "Official")
+  };
 }
 
 // The hero badge names the record displayFlag says supplied the color; an
@@ -966,9 +982,13 @@ function renderBeachRow(entry, nowIso) {
     "href=\"" + escapeHtml(href) + "\">");
   lines.push("<span class=\"beach-row-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + distanceHtml +
     subtitleHtml + "</span>");
-  lines.push(renderCompactFlag(flag));
+  const chip = renderCompactFlag(flag, "flag-chip-" + beach.id);
+  lines.push(chip.badgeHtml);
   lines.push("<wa-icon name=\"chevron-right\" class=\"wa-color-text-quiet\"></wa-icon>");
   lines.push("</a>");
+  if (chip.tooltipHtml) {
+    lines.push(chip.tooltipHtml);
+  }
   lines.push("</li>");
   return lines.join("\n");
 }
@@ -1193,9 +1213,8 @@ function renderWaveMap(beach) {
 }
 
 // Nearby beaches, last in the detail stack: one card per entry in a responsive
-// wa-grid. Each card is one link carrying the same displayFlag chip, and
-// OFFICIAL badge when earned, that a list row does, so the estimated/official
-// distinction reads the same on every surface. Entries arrive distance-sorted
+// wa-grid. Each card is one link carrying the same displayFlag chip a list row
+// does, so the estimated/official distinction reads the same on every surface. Entries arrive distance-sorted
 // from the router; an empty list renders nothing rather than an empty heading.
 function renderNearbyCard(entry, nowIso) {
   const beach = entry.beach;
@@ -1203,13 +1222,15 @@ function renderNearbyCard(entry, nowIso) {
   const flag = displayFlag(entry, nowIso);
   const subtitleHtml = span("wa-caption-s", subtitleName(beach));
   const distanceHtml = span("wa-caption-s", formatMiles(entry.distanceMi));
+  const chip = renderCompactFlag(flag, "nearby-flag-chip-" + beach.id);
   return "<wa-card class=\"nearby-card\" appearance=\"outlined\">" +
     "<a class=\"nearby-card-link wa-link-plain wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
     "<span class=\"nearby-card-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + "</span>" +
     subtitleHtml +
-    renderCompactFlag(flag) +
+    chip.badgeHtml +
     distanceHtml +
     "</a>" +
+    chip.tooltipHtml +
     "</wa-card>";
 }
 

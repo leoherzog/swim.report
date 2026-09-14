@@ -171,6 +171,16 @@ describe("favorites script constants", () => {
     // Server-owned markup: rows are copied as they came, never rebuilt, and the
     // caller's id order decides where each one lands.
     expect(LIST_FAVORITES_SCRIPT).toContain("const copy = document.importNode(row, true);");
+    // A copy's ids and tooltip for references are prefixed before it connects,
+    // so its official tooltip never binds to the source row's chip.
+    const append = LIST_FAVORITES_SCRIPT.indexOf("savedList.appendChild(copy);");
+    const renameId = LIST_FAVORITES_SCRIPT.indexOf("named[j].id = 'your-' + named[j].id;");
+    const renameFor = LIST_FAVORITES_SCRIPT.indexOf(
+      "tips[j].setAttribute('for', 'your-' + tips[j].getAttribute('for'));");
+    expect(renameId).toBeGreaterThan(-1);
+    expect(renameFor).toBeGreaterThan(-1);
+    expect(renameId).toBeLessThan(append);
+    expect(renameFor).toBeLessThan(append);
     expect(LIST_FAVORITES_SCRIPT).not.toContain(".sort(");
     expect(LIST_FAVORITES_SCRIPT).not.toContain("innerHTML");
   });

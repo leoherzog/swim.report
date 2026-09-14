@@ -72,7 +72,7 @@ const SCRIPT_LINES = [
   "      heroFlag.style.viewTransitionName = 'none';",
   "    }",
   "    claim(link.querySelector(NAMES), 'beach-title');",
-  // The flag chip is the first badge in the row or card; an OFFICIAL badge may follow it.
+  // The flag chip is the first badge in the row or card.
   "    claim(link.querySelector('wa-badge'), 'beach-flag');",
   "  });",
   "  window.addEventListener('pageshow', release);",

@@ -97,9 +97,9 @@ describe("cross-document view transitions", () => {
     expect(detail).not.toContain("class=\"nearby-card-name wa-font-weight-semibold\" style=\"view-transition-name");
   });
 
-  it("keeps the flag chip the first badge when an OFFICIAL badge follows it", () => {
+  it("renders an official chip as the link's one badge", () => {
     // The script claims the link's first wa-badge as beach-flag, so an official
-    // that supplies the color must never put its badge ahead of the chip.
+    // that supplies the color must never add a second badge beside the chip.
     const official = { color: "yellow", updated: NOW_ISO };
     const html = renderListPage({
       entries: [{
@@ -113,15 +113,16 @@ describe("cross-document view transitions", () => {
     const row = html.slice(html.indexOf("<li class=\"beach-row\""));
     const first = row.slice(row.indexOf("<wa-badge"), row.indexOf("</wa-badge>"));
     expect(first).toContain("flag-icon-yellow");
-    expect(first).not.toContain("OFFICIAL");
-    expect(row.slice(0, row.indexOf("</li>"))).toContain("OFFICIAL</wa-badge>");
+    expect(first).toContain("appearance=\"filled\"");
+    expect(row.slice(0, row.indexOf("</li>")).split("<wa-badge").length).toBe(2);
     const detail = detailPage({
       nearby: [{ beach: beachWith({ id: "osm-way-2", name: "Tunnel Park" }), estimate: null, official: official, distanceMi: 2 }]
     });
     const card = detail.slice(detail.indexOf("<wa-card class=\"nearby-card\""));
     const cardFirst = card.slice(card.indexOf("<wa-badge"), card.indexOf("</wa-badge>"));
     expect(cardFirst).toContain("flag-icon-yellow");
-    expect(cardFirst).not.toContain("OFFICIAL");
+    expect(cardFirst).toContain("appearance=\"filled\"");
+    expect(card.slice(0, card.indexOf("</wa-card>")).split("<wa-badge").length).toBe(2);
   });
 
   it("ships the click-time naming script on both pages", () => {

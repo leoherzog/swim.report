@@ -76,8 +76,8 @@ over `unknown`; `double-red` collapses to `red`; a missing or expired reading ma
 `unknown`, never a green default. One exception keeps a point-in-time official reading from
 going stale on the map: once the official record is more than 2 h old, the more severe of the
 official and estimated colors wins, so a fresher estimate can **raise** the marker but never
-lower it. List rows, nearby cards and the detail page show the identical color, each with an
-OFFICIAL badge only when the scraped record supplied it. Beaches with non-finite coordinates
+lower it. List rows, nearby cards and the detail page show the identical color, each marked
+official only when the scraped record supplied it. Beaches with non-finite coordinates
 are omitted.
 
 ### `GET /api/flag/:beachId`
@@ -200,8 +200,8 @@ directly under the estimate card, between it and the wave forecast — see the r
 below.
 
 Last on the detail page, after the wave map and the webcam, come up to three **nearby
-beaches** as cards: the nearest flag-worthy rows within 50 mi, each with the same flag chip,
-and OFFICIAL badge when earned, that a list row carries, its distance, and a link. The section is omitted
+beaches** as cards: the nearest flag-worthy rows within 50 mi, each with the same flag chip a
+list row carries, its distance, and a link. The section is omitted
 when nothing lies within range.
 
 The detail page includes a **Wave forecast** section: a "now" wave-height stat (from the
@@ -257,7 +257,8 @@ or whitespace-only `q` is ignored. The on-page search box submits this as a `GET
 also filtering the rendered rows client-side as you type.
 
 Each list row shows the beach's flag — the same color as its map marker and detail page — as
-a chip, followed by an OFFICIAL badge when a posted flag supplied it, and a border in that
+a chip, filled with an "Official" hover tooltip when a posted flag supplied it and outlined
+otherwise, and a border in that
 color on its leading edge, so the list scans as a color-coded feed; unknown rows show gray. A
 **Green flags only** switch above the list hides every row whose flag is not green. It is browser-side and works over the
 rendered rows alone, so it means green among the beaches on this page, not across the whole
