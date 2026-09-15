@@ -548,24 +548,46 @@ describe("renderListPage geolocation script", () => {
     expect(html).toContain("window.location.replace(nextUrl)");
   });
 
-  it("asks for the position only when the Use my location button is pressed", () => {
-    // The page must never prompt for location on load. The only
-    // getCurrentPosition call sits inside the button's click listener, and the
-    // script's top level touches nothing but the button, the live region and
-    // the capability check.
+  it("prompts for the position only when the Use my location button is pressed", () => {
+    // The page must never raise a permission prompt on load. There is exactly
+    // one getCurrentPosition call, inside requestPosition, which the click
+    // listener reaches unconditionally and the load-time path reaches only
+    // behind a Permissions API "granted" answer.
     expect(LIST_GEO_SCRIPT).toContain("getElementById('locate-me')");
-    const clickAt = LIST_GEO_SCRIPT.indexOf("button.addEventListener('click'");
-    const positionAt = LIST_GEO_SCRIPT.indexOf("navigator.geolocation.getCurrentPosition(");
-    expect(clickAt).toBeGreaterThan(-1);
-    expect(positionAt).toBeGreaterThan(clickAt);
     const positionCall = "navigator.geolocation.getCurrentPosition(";
+    const requestAt = LIST_GEO_SCRIPT.indexOf("const requestPosition = function (asked) {");
+    const positionAt = LIST_GEO_SCRIPT.indexOf(positionCall);
+    expect(requestAt).toBeGreaterThan(-1);
+    expect(positionAt).toBeGreaterThan(requestAt);
     expect(LIST_GEO_SCRIPT.indexOf("getCurrentPosition", positionAt + positionCall.length)).toBe(-1);
-    // A near param in the URL no longer short-circuits: a press on a shared
-    // "?near=" link still asks for the visitor's own position.
-    expect(LIST_GEO_SCRIPT).not.toContain("new URLSearchParams(window.location.search).get('near')");
+    const clickAt = LIST_GEO_SCRIPT.indexOf("button.addEventListener('click'");
+    expect(clickAt).toBeGreaterThan(positionAt);
+    expect(LIST_GEO_SCRIPT.indexOf("requestPosition(true);", clickAt)).toBeGreaterThan(clickAt);
     // Presses are dropped while a request is in flight, and the button shows it.
     expect(LIST_GEO_SCRIPT).toContain("button.setAttribute('loading', '')");
     expect(LIST_GEO_SCRIPT).toContain("if (pending) {");
+  });
+
+  it("reuses an already-granted permission on load without prompting", () => {
+    // A recorded grant is the one state where getCurrentPosition cannot prompt,
+    // so it is the only state that runs the request on load. "prompt", "denied",
+    // a missing Permissions API or a rejected query all wait for a press.
+    const queryAt = LIST_GEO_SCRIPT.indexOf("navigator.permissions.query({ name: 'geolocation' })");
+    expect(queryAt).toBeGreaterThan(-1);
+    const grantedAt = LIST_GEO_SCRIPT.indexOf("status.state === 'granted'", queryAt);
+    expect(grantedAt).toBeGreaterThan(queryAt);
+    expect(LIST_GEO_SCRIPT.indexOf("requestPosition(false);", grantedAt)).toBeGreaterThan(grantedAt);
+    expect(LIST_GEO_SCRIPT).toContain("typeof navigator.permissions.query !== 'function'");
+    // The load-time path alone honours an existing near param, so a shared
+    // "?near=" link keeps the place it names; the guard sits after the click
+    // listener is attached, so a press on such a link still asks.
+    const nearGuard = "new URLSearchParams(window.location.search).get('near')";
+    const nearAt = LIST_GEO_SCRIPT.indexOf(nearGuard);
+    const clickAt = LIST_GEO_SCRIPT.indexOf("button.addEventListener('click'");
+    expect(nearAt).toBeGreaterThan(clickAt);
+    expect(nearAt).toBeLessThan(queryAt);
+    // A failed load-time reuse is silent: the announcement is gated on a press.
+    expect(LIST_GEO_SCRIPT).toContain("if (asked) {");
   });
 
   it("renders the locate button hidden in the search input's end slot", () => {

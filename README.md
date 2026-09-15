@@ -250,12 +250,14 @@ by approximate distance to the visitor, each row shows a rough mileage label, an
 headed **Nearby**. Without geolocation the list falls back to alphabetical order and the
 heading is absent.
 `GET /?near=lat,lon` overrides the detected location, useful in local dev where `request.cf`
-has no coordinates; an invalid value falls back to alphabetical. The page never asks the
-browser for a position on load. A "Use my location" button in the end slot of the search box
-(shown only when the browser exposes `navigator.geolocation`) requests it on press, then
-re-fetches the list with `?near=` rounded to three decimals (~110 m) and swaps the rows in
-place; a denied or failed request keeps the IP-based order and says so in the page's live
-region. Nothing about the visitor's location is stored. The located list really is the nearest beaches no matter where the visitor
+has no coordinates; an invalid value falls back to alphabetical. The page never prompts for
+location permission on load. A "Use my location" button in the end slot of the search box
+(shown only when the browser exposes `navigator.geolocation`) requests the position on press,
+then re-fetches the list with `?near=` rounded to three decimals (~110 m) and swaps the rows
+in place; a denied or failed request keeps the IP-based order and says so in the page's live
+region. If the browser already holds a grant for the site (the Permissions API reports
+`granted`), the page reuses it on load and locates without a press; any other state waits for
+the button. Nothing about the visitor's location is stored. The located list really is the nearest beaches no matter where the visitor
 sits relative to the table: the server narrows to the 500 nearest candidates **in SQL**, then
 re-sorts those with the exact haversine before slicing to 100.
 

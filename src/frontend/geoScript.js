@@ -1,14 +1,26 @@
 // Exports the literal text of the inline geolocation script on the beach list
 // page. It runs in the browser, not in the Worker.
 //
-// The page never asks for the visitor's position on its own. The request is
-// made only when the visitor presses the "Use my location" button rendered in
-// the end slot of the #beach-search input (#locate-me). The button is served
-// with the hidden attribute and this script reveals it when the browser exposes
-// navigator.geolocation, so a page without JS or without the API never shows a
-// control that can do nothing.
+// The page never prompts the visitor for location permission on its own. A
+// permission prompt is raised only when the visitor presses the "Use my
+// location" button rendered in the end slot of the #beach-search input
+// (#locate-me). The button is served with the hidden attribute and this script
+// reveals it when the browser exposes navigator.geolocation, so a page without
+// JS or without the API never shows a control that can do nothing.
 //
-// On a press the script asks for the position and upgrades the page in place:
+// A grant the visitor already made is reused on load. When the URL carries no
+// "near" param, the script asks the Permissions API for the geolocation state
+// and, only when it answers "granted", runs the same position request the
+// button would, which cannot prompt because the decision is already recorded.
+// Any other state ("prompt", "denied"), a browser without navigator.permissions,
+// or a query that rejects leaves the page on IP-based ordering until a press,
+// because the only other way to learn the state is to prompt. The near check is
+// deliberate on this path alone: a visitor who opened someone else's shared
+// "?near=" link asked for that place, so the page keeps it and leaves their own
+// position to the button.
+//
+// On a press (or that load-time reuse) the script asks for the position and
+// upgrades the page in place:
 // it fetches the same list URL with "?near=lat,lon", parses the response with
 // DOMParser, and swaps in the server-rendered pieces the location changes. The
 // server must re-select, because the nearest-100 set can differ and not merely
@@ -32,14 +44,17 @@
 //
 // The button is a <wa-button> and its loading attribute is set for the whole
 // request, position prompt included, so a second press cannot start a second
-// fetch. A denied or failed position request is logged and announced into the
-// live region, and the IP-based ordering stays. A failed fetch or unexpected
-// markup falls back to a full navigation (location.replace). Coordinates are
-// rounded to 3 decimal places (~110 m), matching the rough distance labels
-// while keeping precise coordinates out of URLs and server logs. An existing
-// "near" param does not stop a press: a visitor who opened someone else's
-// shared "?near=" link can still ask for their own position, and nothing runs
-// without a press, so the script can never loop.
+// fetch, and a press during the load-time reuse is dropped the same way. A
+// denied or failed position request is logged and the IP-based ordering stays;
+// it is announced into the live region only when a press asked for it, since a
+// silent load-time reuse that fails leaves the page exactly as it was served. A
+// failed fetch or unexpected markup falls back to a full navigation
+// (location.replace). Coordinates are rounded to 3 decimal places (~110 m),
+// matching the rough distance labels while keeping precise coordinates out of
+// URLs and server logs. An existing "near" param does not stop a press: a
+// visitor on a shared "?near=" link can still ask for their own position. The
+// load-time path runs at most once and only on a near-less URL, and the
+// fallback navigation always carries "near", so the script can never loop.
 
 const SCRIPT_LINES = [
   "(function () {",
@@ -152,21 +167,48 @@ const SCRIPT_LINES = [
   "  };",
   // The failure is logged rather than swallowed, because an already-granted
   // permission that still fails is otherwise indistinguishable from a fix that
-  // simply lands near the IP estimate. It is also announced, since the visitor
-  // asked for something and the list visibly did nothing.
-  "  const onPositionError = function (err) {",
+  // simply lands near the IP estimate. It is announced only after a press,
+  // since then the visitor asked for something and the list visibly did
+  // nothing; a failed load-time reuse changed nothing they can see.
+  "  const onPositionError = function (err, asked) {",
   "    console.log('geolocation unavailable (code ' + (err && err.code) + '): ' +",
   "      ((err && err.message) || 'no detail') + ' — keeping IP-based ordering');",
-  "    announce('Your location is unavailable.');",
+  "    if (asked) {",
+  "      announce('Your location is unavailable.');",
+  "    }",
   "    setPending(false);",
   "  };",
-  "  button.addEventListener('click', function () {",
+  // The one position request, shared by the press and the load-time reuse.
+  // "asked" is true only for a press.
+  "  const requestPosition = function (asked) {",
   "    if (pending) {",
   "      return;",
   "    }",
   "    setPending(true);",
-  "    navigator.geolocation.getCurrentPosition(onPosition, onPositionError,",
-  "      { maximumAge: 300000, timeout: 10000 });",
+  "    navigator.geolocation.getCurrentPosition(onPosition, function (err) {",
+  "      onPositionError(err, asked);",
+  "    }, { maximumAge: 300000, timeout: 10000 });",
+  "  };",
+  "  button.addEventListener('click', function () {",
+  "    requestPosition(true);",
+  "  });",
+  // Reuse an existing grant on load. Only a recorded "granted" state runs the
+  // request, because with any other answer the request would prompt, and a
+  // prompt belongs to the button alone. No Permissions API means no way to know
+  // without prompting, so the page waits for a press. A shared "?near=" link
+  // keeps the place it names.
+  "  if (new URLSearchParams(window.location.search).get('near')) {",
+  "    return;",
+  "  }",
+  "  if (!navigator.permissions || typeof navigator.permissions.query !== 'function') {",
+  "    return;",
+  "  }",
+  "  navigator.permissions.query({ name: 'geolocation' }).then(function (status) {",
+  "    if (status && status.state === 'granted') {",
+  "      requestPosition(false);",
+  "    }",
+  "  }).catch(function (err) {",
+  "    console.log('geolocation permission query failed: ' + ((err && err.message) || 'no detail'));",
   "  });",
   "})();"
 ];

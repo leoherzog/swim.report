@@ -4190,12 +4190,17 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // #beach-list-items, so rows in the "Your Beaches" section can neither suppress the
       // main list's empty state nor be counted twice.
       // The page embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a browser-side
-      // geolocation upgrade the visitor starts, never the page: the search form's
+      // geolocation upgrade that never prompts on its own: the search form's
       // <wa-input id="beach-search"> carries in its end slot an icon-only
       // <wa-button id="locate-me" slot="end" appearance="plain" size="s" hidden> wrapping
       // <wa-icon name="location-crosshairs" label="Use my location">. It is served hidden
       // and the script reveals it only when navigator.geolocation exists, so no JS or no API
-      // means no control. On a press the script sets the button's loading attribute
+      // means no control. A permission prompt is raised only by a press. A grant the
+      // visitor already made is reused on load: when the URL has no "near" param the
+      // script queries navigator.permissions for "geolocation" and runs the same position
+      // request only on a "granted" answer, which cannot prompt; "prompt", "denied", a
+      // missing Permissions API or a rejected query wait for a press. On a press (or that
+      // load-time reuse) the script sets the button's loading attribute
       // (dropping further presses until it clears), calls
       // navigator.geolocation.getCurrentPosition and on success fetch()es the same list
       // URL with "?near=lat,lon" appended (3-decimal rounding, ~110 m, matching the rough
@@ -4222,11 +4227,14 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // wave-strip summary). The server owns the sort — the nearest-100 set can differ
       // from the rendered rows — so the client swaps whole fragments and never re-sorts
       // locally. A denied, failed or timed-out position request keeps the IP-based
-      // ordering, is logged, and is announced into the same live region ("Your location
-      // is unavailable."); a failed fetch or unexpected markup falls back to a full
-      // navigation. An existing "near" param does not block a press (a visitor on a shared
-      // "?near=" link can still ask for their own position), and nothing runs without a
-      // press, so the script can never loop.
+      // ordering and is logged; after a press it is also announced into the same live
+      // region ("Your location is unavailable."), while a failed load-time reuse stays
+      // silent because the page is exactly as served. A failed fetch or unexpected markup
+      // falls back to a full navigation. An existing "near" param does not block a press
+      // (a visitor on a shared "?near=" link can still ask for their own position) but
+      // does skip the load-time reuse, so the shared place wins; that path runs at most
+      // once and the fallback navigation always carries "near", so the script can never
+      // loop.
       // Between the intro and the search form the page embeds a home-page map mount
       // (no per-beach data — that ships from /api/beaches.geojson):
       // <div id="home-map"
