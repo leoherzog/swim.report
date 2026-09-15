@@ -19,7 +19,7 @@ import {
   ecccZoneNameForPoint
 } from "./clients/eccc.js";
 import { fetchActiveEcccMarineAlerts } from "./clients/ecccMarine.js";
-import { parseRipCurrentRisk } from "./clients/srfParser.js";
+import { parseRipCurrentRisk, parseSrfTides } from "./clients/srfParser.js";
 import { FLAG_WORTHY_WATER_SQL } from "./waterClass.js";
 import {
   fetchNearestWebcam,
@@ -247,6 +247,28 @@ function runBudget(env) {
   return {
     gatherDeadlineMs: gather,
     writeDeadlineMs: write
+  };
+}
+
+// The beach's own zone's tide table from its office's SRF entry, as the
+// beach_state.tides record, or null when the product carries no tides block for
+// that zone. Pure: the entry's tidesByZone is parseSrfTides' output.
+function tidesForBeach(beach, srfEntry, nowIso) {
+  const byZone = srfEntry.tidesByZone;
+  const zone = beach.nws_zone;
+  if (!byZone || typeof zone !== "string" ||
+      !Object.prototype.hasOwnProperty.call(byZone, zone)) {
+    return null;
+  }
+  const table = byZone[zone];
+  return {
+    zone: zone,
+    period: table.period,
+    locations: table.locations,
+    productId: srfEntry.productId,
+    source: srfEntry.sourceUrl,
+    issued: srfEntry.issuanceTime,
+    updated: nowIso
   };
 }
 
@@ -644,7 +666,15 @@ async function runFlagRecompute(env) {
         const srf = await fetchLatestSrfText(wfo);
         if (srf !== null) {
           const risk = parseRipCurrentRisk(srf.text);
-          srfMap.set(wfo, { risk: risk, sourceUrl: srf.sourceUrl, productId: srf.productId });
+          // The zone-keyed tide tables ride the same entry, so a beach's tides
+          // come from its own office's product and its own zone segment.
+          srfMap.set(wfo, {
+            risk: risk,
+            sourceUrl: srf.sourceUrl,
+            productId: srf.productId,
+            issuanceTime: srf.issuanceTime,
+            tidesByZone: parseSrfTides(srf.text)
+          });
         }
       } catch (err) {
         console.log("index: srf fetch threw for wfo " + wfo + ": " + err.message);
@@ -737,6 +767,7 @@ async function runFlagRecompute(env) {
         const alertPart = buildAlertInputs(beach, alertCtx, nowIso);
 
         let ripCurrentRisk = null;
+        let tides = null;
         const wfo = wfoFromGridUrl(beach.nws_grid_url);
         if (wfo) {
           const srfEntry = srfMap.get(wfo);
@@ -746,6 +777,7 @@ async function runFlagRecompute(env) {
               label: "NWS Surf Zone Forecast",
               url: srfEntry.sourceUrl
             });
+            tides = tidesForBeach(beach, srfEntry, nowIso);
           }
         }
 
@@ -830,6 +862,9 @@ async function runFlagRecompute(env) {
         // only when this run resolved one: a clean reading writes nothing and
         // the standing advisory ages out. It is display-only — never an official
         // override, and it never feeds displayFlag.
+        // The tide table is display-only and rides the estimate's lease: every
+        // run that reaches the beach rewrites it, and a run whose SRF fetch
+        // failed contributes no field, so the standing table ages out.
         estimateWrites.push({
           beachId: beach.id,
           estimate: stored,
@@ -837,7 +872,9 @@ async function runFlagRecompute(env) {
           wqfloor: waterQualityAdvisory,
           wqfloorExpires: waterQualityAdvisory === null
             ? null
-            : nowEpoch + WQFLOOR_TTL_SECONDS
+            : nowEpoch + WQFLOOR_TTL_SECONDS,
+          tides: tides,
+          tidesExpires: tides === null ? null : nowEpoch + FLAG_TTL_SECONDS
         });
 
         // The offline wave cycle owns beach_state.wave and wave_expires, and the

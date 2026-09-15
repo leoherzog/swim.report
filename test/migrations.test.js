@@ -28,7 +28,8 @@ describe("migrations", function () {
       "official", "official_color", "official_updated", "official_expires",
       "wqfloor", "wqfloor_expires",
       "reading", "reading_expires",
-      "wave", "wave_expires"
+      "wave", "wave_expires",
+      "tides", "tides_expires"
     ]);
     const byName = {};
     for (const c of cols) {
@@ -41,6 +42,24 @@ describe("migrations", function () {
     expect(byName.reading_expires.type).toBe("INTEGER");
     expect(byName.wave.type).toBe("TEXT");
     expect(byName.wave_expires.type).toBe("INTEGER");
+    expect(byName.tides.type).toBe("TEXT");
+    expect(byName.tides_expires.type).toBe("INTEGER");
+  });
+
+  it("0016 adds the tides columns to an already-populated beach_state", function () {
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db, "0015_beach_state_wave.sql");
+    db.prepare(
+      "INSERT INTO beach_state (beach_id, estimate, estimate_color, estimate_expires) " +
+      "VALUES (?1, ?2, ?3, ?4)"
+    ).run("b1", JSON.stringify({ color: "green" }), "green", 1750025200);
+
+    db.exec(readFileSync(join(MIGRATIONS_DIR, "0016_beach_state_tides.sql"), "utf8"));
+
+    const row = db.prepare("SELECT * FROM beach_state WHERE beach_id = 'b1'").get();
+    expect(row.estimate_color).toBe("green");
+    expect(row.tides).toBeNull();
+    expect(row.tides_expires).toBeNull();
   });
 
   it("0015 adds the wave columns to an already-populated beach_state", function () {

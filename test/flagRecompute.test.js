@@ -1040,6 +1040,80 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
     });
   });
 
+  // The tide table is the beach's own zone segment of the same product, stored
+  // beside the estimate on the estimate's lease. A zone the product carries no
+  // tides block for writes no tides column.
+  it("stores the zone's tide table beside the estimate, and none for a zone without one", async function () {
+    const product = [
+      "SRFILM", "",
+      "NCZ106-152115-", "Coastal Pender-", "348 AM EDT Tue Sep 15 2026", "",
+      "...MODERATE RISK OF RIP CURRENTS IN EFFECT THROUGH THIS EVENING...", "",
+      ".TODAY...",
+      "Rip Current Risk*...........Moderate.",
+      "Tides...",
+      "   Topsail Inlet............High at 10:58 AM EDT.",
+      "                            Low at 05:19 PM EDT.",
+      "Remarks.....................Strong longshore current.", "",
+      "$$", "",
+      "NCZ108-152115-", "Coastal New Hanover-", "348 AM EDT Tue Sep 15 2026", "",
+      ".TODAY...",
+      "Rip Current Risk*...........Moderate.", "",
+      "$$", ""
+    ].join("\n");
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("/products/types/SRF/") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () {
+            return Promise.resolve({
+              productText: product,
+              issuanceTime: "2026-09-15T07:48:00+00:00"
+            });
+          }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const made = makeEnv([
+      makeBeachRow({
+        id: "osm-node-1",
+        nws_zone: "NCZ106",
+        nws_grid_url: "https://api.weather.gov/gridpoints/ILM/33,33"
+      }),
+      makeBeachRow({
+        id: "osm-node-2",
+        name: "Test Beach Beta",
+        lat: 34.2,
+        lon: -77.8,
+        nws_zone: "NCZ108",
+        nws_grid_url: "https://api.weather.gov/gridpoints/ILM/40,50"
+      })
+    ]);
+    await runHourlyCron(made.env);
+
+    const tides = recordOf(made, "osm-node-1", "tides");
+    expect(tides).toEqual({
+      zone: "NCZ106",
+      period: "TODAY",
+      locations: [{ name: "Topsail Inlet", events: ["High at 10:58 AM EDT.", "Low at 05:19 PM EDT."] }],
+      productId: "SRF ILM",
+      source: "https://api.weather.gov/products/types/SRF/locations/ILM/latest",
+      issued: "2026-09-15T07:48:00+00:00",
+      updated: estimateOf(made, "osm-node-1").updated
+    });
+    expect(expiresOf(made, "osm-node-1", "tides_expires"))
+      .toBe(expiresOf(made, "osm-node-1", "estimate_expires"));
+    // The rip risk still decides the color; the table decides nothing.
+    expect(estimateOf(made, "osm-node-1").ripCurrentRisk).toBe("MODERATE");
+    expect(estimateOf(made, "osm-node-1").tides).toBeUndefined();
+
+    expect(recordOf(made, "osm-node-2", "tides")).toBeNull();
+    expect(made.db.stateOf("osm-node-2").tides_expires).toBeNull();
+  });
+
   it("two beaches sharing a WFO cause exactly ONE SRF fetch (deduped via the wfos set)", async function () {
     const urls = [];
     vi.stubGlobal("fetch", makeSrfFetchStub(urls));

@@ -173,11 +173,18 @@ The detail page opens with a **flag hero**: the beach name behind its flag icon,
 label, and a badge naming the record that supplied that color — OFFICIAL for a posted flag,
 ESTIMATE for the estimate, none when the status is unknown — over a background washed 12% in that flag's own color. The
 hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
-button. Directly under it, up to five **at a glance** tiles summarize the waves now, the
-water temperature, the rip-current risk, the count of active alerts and the next sunrise or
-sunset. A reading nobody published gets no tile, so the row carries only answers, and a beach
-with no readings at all shows no section. The full official and estimate cards follow
-unchanged.
+button. Directly under it, up to six **at a glance** tiles summarize the waves now, the
+water temperature, the rip-current risk, the count of active alerts, the day's tides and the
+next sunrise or sunset. A reading nobody published gets no tile, so the row carries only
+answers, and a beach with no readings at all shows no section. The full official and
+estimate cards follow unchanged.
+
+The tide tile is the "Tides" block of the beach's own zone segment in its office's NWS Surf
+Zone Forecast, the product the hourly cron already fetches for the rip-current risk. It
+renders the product's lines as written, so one office reads "High at 10:58 AM EDT." and
+another "Low 0.4 feet (MLLW) 07:56 AM EDT.", each under the location the office names.
+Great Lakes offices print no tides, so those beaches have no tile. It is display-only and
+never feeds the flag.
 
 The sun tile is computed in the Worker from the beach's coordinates (`src/frontend/sun.js`,
 delegating to the `suncalc` library, no upstream call), and shown on the viewer's own clock by

@@ -1581,19 +1581,25 @@ function renderWqFloorCallout(wqfloor) {
 // same quiet weight, so only a real reading carries the loud value type.
 // options.valueHtml is inserted raw and wins over options.value, for the one
 // reading that is a formatted time rather than text; the caller escapes it.
+// options.bodyHtml replaces the single value with a raw block of lines, for the
+// one reading that is a table rather than a number; the caller escapes it.
 function renderGlanceTile(options) {
+  const hasBodyHtml = typeof options.bodyHtml === "string" && options.bodyHtml.length > 0;
   const hasValueHtml = typeof options.valueHtml === "string" && options.valueHtml.length > 0;
   const valueClass = options.quiet
     ? "wa-body-l wa-color-text-quiet"
     : "wa-heading-xl";
   const valueHtml = hasValueHtml ? options.valueHtml : escapeHtml(options.value);
+  const readingHtml = hasBodyHtml
+    ? "<div class=\"wa-stack wa-gap-3xs\">" + options.bodyHtml + "</div>"
+    : "<span class=\"" + valueClass + "\">" + valueHtml + "</span>";
   const sourceHtml = typeof options.sourceHtml === "string" && options.sourceHtml.length > 0
     ? "<span class=\"wa-caption-s\">" + options.sourceHtml + "</span>"
     : "";
   return "<wa-card class=\"glance-tile\" appearance=\"outlined\">" +
     "<div class=\"wa-stack wa-gap-2xs\">" +
     "<wa-icon class=\"wa-color-text-quiet wa-font-size-l\" name=\"" + options.icon + "\"></wa-icon>" +
-    "<span class=\"" + valueClass + "\">" + valueHtml + "</span>" +
+    readingHtml +
     "<span class=\"wa-caption-s wa-font-weight-semibold\">" + escapeHtml(options.caption) + "</span>" +
     sourceHtml +
     "</div>" +
@@ -1623,6 +1629,59 @@ function renderSunTile(beach, nowIso) {
   });
 }
 
+// A forecast period label as the product spells it ("TODAY", "REST OF TODAY",
+// "WEDNESDAY") in sentence case, or "" for anything that is not a string.
+function periodLabel(period) {
+  if (typeof period !== "string" || period.trim() === "") {
+    return "";
+  }
+  const lower = period.trim().toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+// The beach's zone's tide table, as its NWS Surf Zone Forecast prints it: each
+// named location over its event lines verbatim, so "High at 10:58 AM EDT." and
+// "High 3.8 feet (MLLW) 12:21 AM PDT." both render as written and the tile
+// claims no clock the product did not. Returns "" when the record carries no
+// event line. Display-only: it never reaches src/rules.js.
+function renderTidesTile(tides) {
+  if (!tides || typeof tides !== "object" || !Array.isArray(tides.locations)) {
+    return "";
+  }
+  const rows = [];
+  for (const location of tides.locations) {
+    if (!location || !Array.isArray(location.events)) {
+      continue;
+    }
+    const events = location.events.filter(function (event) {
+      return typeof event === "string" && event.trim() !== "";
+    });
+    if (events.length === 0) {
+      continue;
+    }
+    const name = typeof location.name === "string" ? location.name.trim() : "";
+    if (name !== "") {
+      rows.push("<span class=\"wa-caption-s wa-color-text-quiet\">" + escapeHtml(name) + "</span>");
+    }
+    for (const event of events) {
+      rows.push("<span class=\"wa-body-m wa-font-weight-semibold\">" + escapeHtml(event.trim()) + "</span>");
+    }
+  }
+  if (rows.length === 0) {
+    return "";
+  }
+  const period = periodLabel(tides.period);
+  const issued = typeof tides.issued === "string" && !Number.isNaN(Date.parse(tides.issued))
+    ? tides.issued : null;
+  return renderGlanceTile({
+    icon: "water-arrow-up",
+    bodyHtml: rows.join(""),
+    caption: period === "" ? "Tides" : "Tides · " + period,
+    sourceHtml: "NWS Surf Zone Forecast" +
+      (issued === null ? "" : " · " + renderRelativeTime(issued))
+  });
+}
+
 // The readings a visitor scans before reading the cards, as small tiles under
 // the hero. A reading nobody published gets no tile at all, so the row carries
 // only answers; with no readings at all the whole section is omitted. Every tile
@@ -1634,7 +1693,7 @@ function renderSunTile(beach, nowIso) {
 // (src/flagInputs.js), so the tile reads it from the beach row through the same
 // shared predicate the cron uses. A beach whose alerts were never checkable has
 // no alerts tile: "none active" would be a claim nobody made.
-function renderAtAGlance(beach, estimate, waterTemp, reading, nowIso) {
+function renderAtAGlance(beach, estimate, waterTemp, reading, tides, nowIso) {
   const tiles = [];
   const morning = usableReading(reading, nowIso);
 
@@ -1730,6 +1789,9 @@ function renderAtAGlance(beach, estimate, waterTemp, reading, nowIso) {
     }));
   }
 
+  const tidesHtml = renderTidesTile(tides);
+  if (tidesHtml !== "") tiles.push(tidesHtml);
+
   const sunHtml = renderSunTile(beach, nowIso);
   if (sunHtml !== "") tiles.push(sunHtml);
 
@@ -1788,6 +1850,9 @@ export function renderDetailPage(data) {
   // Active water-quality advisory written by the hourly cron. Absent means no
   // advisory stands, never a clean reading.
   const wqfloor = (data.wqfloor === undefined || data.wqfloor === null) ? null : data.wqfloor;
+  // The zone's tide table off the latest Surf Zone Forecast, written by the
+  // hourly cron. Display-only; absent renders no tile.
+  const tides = (data.tides === undefined || data.tides === null) ? null : data.tides;
   // Distance-sorted nearby entries from the router; absent renders no section.
   const nearby = Array.isArray(data.nearby) ? data.nearby : [];
   const title = displayName(beach) + " — Swim Report";
@@ -1877,7 +1942,7 @@ export function renderDetailPage(data) {
     "</div>" +
     "</section>";
 
-  const glanceHtml = renderAtAGlance(beach, estimate, waterTemp, reading, nowIso);
+  const glanceHtml = renderAtAGlance(beach, estimate, waterTemp, reading, tides, nowIso);
 
   const officialHtml = renderOfficialCard(official, nowIso);
   const estimateHtml = renderEstimateCard(estimate, nowIso);

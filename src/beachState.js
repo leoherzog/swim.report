@@ -1,6 +1,6 @@
-// src/beachState.js — the shape of the beach_state table (migrations 0014 and
-// 0015), as pure SQL fragments and statement builders. The four cron-written
-// derived records — estimate, official, wqfloor, reading — plus the wave record
+// src/beachState.js — the shape of the beach_state table (migrations 0014, 0015
+// and 0016), as pure SQL fragments and statement builders. The five cron-written
+// derived records — estimate, official, wqfloor, reading, tides — plus the wave record
 // the offline wave cycle writes out of band are read here on the request path
 // under one expiry rule, so the column list, that rule and the upsert live in
 // exactly one module.
@@ -17,7 +17,8 @@ export const WQFLOOR_TTL_SECONDS = 7200;
 // only the beaches side is splatted with b.*.
 export const BEACH_STATE_SELECT =
   "s.estimate, s.estimate_expires, s.official, s.official_expires, " +
-  "s.wqfloor, s.wqfloor_expires, s.reading, s.reading_expires";
+  "s.wqfloor, s.wqfloor_expires, s.reading, s.reading_expires, " +
+  "s.tides, s.tides_expires";
 
 // Leading space so it concatenates straight onto "FROM beaches b".
 export const BEACH_STATE_JOIN = " LEFT JOIN beach_state s ON s.beach_id = b.id";
@@ -54,7 +55,9 @@ const UPSERT_COLUMNS = [
   "wqfloor",
   "wqfloor_expires",
   "reading",
-  "reading_expires"
+  "reading_expires",
+  "tides",
+  "tides_expires"
 ];
 
 // A record is only ever replaced by a newer one of its own kind or left to
@@ -108,19 +111,20 @@ function parseBlob(blob, expires, nowEpoch) {
 }
 
 // Row from any query that selected BEACH_STATE_SELECT (extra columns ignored),
-// or null. Returns { estimate, official, wqfloor, reading }, each a parsed
+// or null. Returns { estimate, official, wqfloor, reading, tides }, each a parsed
 // object or null. Expired (expires <= nowEpoch), NULL or unparseable JSON reads
 // as null. Never throws.
 export function liveBeachState(row, nowMs) {
   const nowEpoch = Math.floor(nowMs / 1000);
   if (!row) {
-    return { estimate: null, official: null, wqfloor: null, reading: null };
+    return { estimate: null, official: null, wqfloor: null, reading: null, tides: null };
   }
   return {
     estimate: parseBlob(row.estimate, row.estimate_expires, nowEpoch),
     official: parseBlob(row.official, row.official_expires, nowEpoch),
     wqfloor: parseBlob(row.wqfloor, row.wqfloor_expires, nowEpoch),
-    reading: parseBlob(row.reading, row.reading_expires, nowEpoch)
+    reading: parseBlob(row.reading, row.reading_expires, nowEpoch),
+    tides: parseBlob(row.tides, row.tides_expires, nowEpoch)
   };
 }
 
@@ -130,8 +134,8 @@ export function liveBeachState(row, nowMs) {
 // resolveWaveInput or trimWaveSeries, each of which applies its own spent-series
 // rule on top of this lease. Never throws.
 //
-// A separate resolver rather than a fifth key on liveBeachState: that one is also
-// called on rows which never selected these columns, where a fifth key would be
+// A separate resolver rather than a sixth key on liveBeachState: that one is also
+// called on rows which never selected these columns, where a sixth key would be
 // null because the column was absent from the SELECT, indistinguishable from
 // expired.
 export function liveWaveRecord(row, nowMs) {
@@ -201,7 +205,9 @@ const DESCRIPTOR_FIELDS = [
   "wqfloor",
   "wqfloorExpires",
   "reading",
-  "readingExpires"
+  "readingExpires",
+  "tides",
+  "tidesExpires"
 ];
 
 // The hourly gathers its estimate and its official/reading in two separate
@@ -229,7 +235,7 @@ function mergeWrites(writes) {
 
 // One write descriptor per beach:
 //   { beachId, estimate, estimateExpires, official, officialExpires,
-//     wqfloor, wqfloorExpires, reading, readingExpires }
+//     wqfloor, wqfloorExpires, reading, readingExpires, tides, tidesExpires }
 // Every field after beachId is optional; an absent one binds NULL and so leaves
 // the stored column untouched. Returns one bound statement per beach, for
 // env.DB.batch.
@@ -249,7 +255,9 @@ export function beachStateUpsertStatements(db, writes) {
       jsonOrNull(write.wqfloor),
       numberOrNull(write.wqfloorExpires),
       jsonOrNull(write.reading),
-      numberOrNull(write.readingExpires)
+      numberOrNull(write.readingExpires),
+      jsonOrNull(write.tides),
+      numberOrNull(write.tidesExpires)
     ));
   }
   return statements;

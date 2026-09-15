@@ -425,6 +425,49 @@ describe("at a glance tiles", () => {
     expect(glance.split("<wa-card class=\"glance-tile\"").length - 1).toBe(5);
   });
 
+  // The tide table renders the product's own lines: a location name over its
+  // event strings verbatim, whichever grammar the office uses.
+  it("renders the zone's tide table as written, with the period and the product's age", () => {
+    const html = render({
+      tides: {
+        zone: "NCZ106",
+        period: "REST OF TODAY",
+        locations: [
+          { name: "Topsail Inlet", events: ["High at 10:58 AM EDT.", "Low at 05:19 PM EDT."] },
+          { name: "Nauset <Beach>", events: ["Low 0.4 feet (MLLW) 07:56 AM EDT."] }
+        ],
+        issued: "2026-07-05T07:48:00+00:00"
+      }
+    });
+    const block = tile(html, "water-arrow-up");
+    expect(block).not.toBe(null);
+    expect(block).toContain("<span class=\"wa-caption-s wa-color-text-quiet\">Topsail Inlet</span>");
+    expect(block).toContain("<span class=\"wa-body-m wa-font-weight-semibold\">High at 10:58 AM EDT.</span>");
+    expect(block).toContain("Low at 05:19 PM EDT.");
+    expect(block).toContain("Nauset &lt;Beach&gt;");
+    expect(block).toContain("Low 0.4 feet (MLLW) 07:56 AM EDT.");
+    expect(block).toContain("Tides · Rest of today");
+    expect(block).toContain("NWS Surf Zone Forecast · <wa-relative-time date=\"2026-07-05T07:48:00+00:00\" sync>");
+    expect(block).not.toContain("wa-heading-xl");
+  });
+
+  it("renders no tide tile for an absent, empty or malformed table", () => {
+    expect(tile(render({}), "water-arrow-up")).toBe(null);
+    expect(tile(render({ tides: { period: "TODAY", locations: [] } }), "water-arrow-up")).toBe(null);
+    expect(tile(render({ tides: { period: "TODAY", locations: [{ name: "X", events: ["", 3] }] } }), "water-arrow-up")).toBe(null);
+    expect(tile(render({ tides: "Tides..." }), "water-arrow-up")).toBe(null);
+  });
+
+  it("captions a table with no period label as plain Tides and skips an unparseable issued stamp", () => {
+    const block = tile(render({
+      tides: { locations: [{ name: "", events: ["High at 10:58 AM EDT."] }], issued: "yesterday" }
+    }), "water-arrow-up");
+    expect(block).toContain(">Tides</span>");
+    expect(block).toContain("NWS Surf Zone Forecast</span>");
+    expect(block).not.toContain("wa-relative-time");
+    expect(block).not.toContain("wa-caption-s wa-color-text-quiet\"></span>");
+  });
+
   it("omits the whole section when no reading has any data", () => {
     const html = render({ beach: beachWith({ lat: null, lon: null }) });
     expect(html.indexOf("aria-labelledby=\"glance-heading\"")).toBe(-1);

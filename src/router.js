@@ -472,6 +472,7 @@ async function handleDetail(env, ctx, beachId) {
     waterTemp: results[0],
     reading: state.reading,
     wqfloor: state.wqfloor,
+    tides: state.tides,
     nearby: results[1],
     nowIso: new Date(nowMs).toISOString()
   });

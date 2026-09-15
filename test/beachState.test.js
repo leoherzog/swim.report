@@ -40,7 +40,8 @@ describe("beachState constants", function () {
   it("selects every blob with its own expiry, aliased to the join", function () {
     expect(BEACH_STATE_SELECT).toBe(
       "s.estimate, s.estimate_expires, s.official, s.official_expires, " +
-      "s.wqfloor, s.wqfloor_expires, s.reading, s.reading_expires"
+      "s.wqfloor, s.wqfloor_expires, s.reading, s.reading_expires, " +
+      "s.tides, s.tides_expires"
     );
     expect(BEACH_STATE_JOIN).toBe(" LEFT JOIN beach_state s ON s.beach_id = b.id");
     expect(BEACH_STATE_SELECT.indexOf("wave")).toBe(-1);
@@ -59,6 +60,7 @@ describe("beachState constants", function () {
     expect(CHIP_STATE_SELECT.indexOf("s.official,")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("wqfloor")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("reading")).toBe(-1);
+    expect(CHIP_STATE_SELECT.indexOf("tides")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("wave")).toBe(-1);
   });
 });
@@ -127,7 +129,7 @@ describe("liveWaveRecord", function () {
     };
     expect(liveWaveRecord(row, NOW_MS).model).toBe("global.0p16");
     expect(liveBeachState(row, NOW_MS)).toEqual({
-      estimate: { color: "green" }, official: null, wqfloor: null, reading: null
+      estimate: { color: "green" }, official: null, wqfloor: null, reading: null, tides: null
     });
   });
 });
@@ -228,14 +230,16 @@ describe("liveBeachState", function () {
       wqfloor: JSON.stringify({ color: "red" }),
       wqfloor_expires: null,
       reading: "",
-      reading_expires: NOW_EPOCH + 1
+      reading_expires: NOW_EPOCH + 1,
+      tides: JSON.stringify({ period: "TODAY" }),
+      tides_expires: NOW_EPOCH
     }, NOW_MS);
-    expect(state).toEqual({ estimate: null, official: null, wqfloor: null, reading: null });
+    expect(state).toEqual({ estimate: null, official: null, wqfloor: null, reading: null, tides: null });
   });
 
   it("returns all-null for a missing row and never throws", function () {
     expect(liveBeachState(null, NOW_MS)).toEqual({
-      estimate: null, official: null, wqfloor: null, reading: null
+      estimate: null, official: null, wqfloor: null, reading: null, tides: null
     });
     expect(liveBeachState(undefined, NOW_MS).estimate).toBeNull();
     expect(liveBeachState({ estimate: "null", estimate_expires: NOW_EPOCH + 1 }, NOW_MS).estimate)
@@ -259,8 +263,8 @@ describe("beachStateUpsertStatements", function () {
     expect(stmt.sql).toBe(
       "INSERT INTO beach_state (beach_id, estimate, estimate_color, estimate_updated, " +
       "estimate_expires, official, official_color, official_updated, official_expires, " +
-      "wqfloor, wqfloor_expires, reading, reading_expires) " +
-      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) " +
+      "wqfloor, wqfloor_expires, reading, reading_expires, tides, tides_expires) " +
+      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) " +
       "ON CONFLICT(beach_id) DO UPDATE SET " +
       "estimate = COALESCE(excluded.estimate, beach_state.estimate), " +
       "estimate_color = COALESCE(excluded.estimate_color, beach_state.estimate_color), " +
@@ -273,7 +277,9 @@ describe("beachStateUpsertStatements", function () {
       "wqfloor = COALESCE(excluded.wqfloor, beach_state.wqfloor), " +
       "wqfloor_expires = COALESCE(excluded.wqfloor_expires, beach_state.wqfloor_expires), " +
       "reading = COALESCE(excluded.reading, beach_state.reading), " +
-      "reading_expires = COALESCE(excluded.reading_expires, beach_state.reading_expires)"
+      "reading_expires = COALESCE(excluded.reading_expires, beach_state.reading_expires), " +
+      "tides = COALESCE(excluded.tides, beach_state.tides), " +
+      "tides_expires = COALESCE(excluded.tides_expires, beach_state.tides_expires)"
     );
   });
 
@@ -294,6 +300,7 @@ describe("beachStateUpsertStatements", function () {
       JSON.stringify(estimate), "yellow", "2026-09-09T12:00:00Z", NOW_EPOCH + 25200,
       null, null, null, null,
       null, null,
+      null, null,
       null, null
     ]);
   });
@@ -313,10 +320,20 @@ describe("beachStateUpsertStatements", function () {
       JSON.stringify(estimate), "green", "2026-09-09T12:00:00Z", 100,
       JSON.stringify(official), "red", "2026-09-09T11:40:00Z", 200,
       null, null,
-      JSON.stringify(reading), 300
+      JSON.stringify(reading), 300,
+      null, null
     ]);
     expect(stmts[1].args[0]).toBe("b2");
     expect(stmts[1].args[5]).toBeNull();
+  });
+
+  it("binds the tide table beside the estimate it rode in with", function () {
+    const estimate = { color: "green", updated: "2026-09-09T12:00:00Z" };
+    const tides = { period: "TODAY", locations: [{ name: "Topsail Inlet", events: ["High at 10:58 AM EDT."] }] };
+    const stmt = beachStateUpsertStatements(recordingDb(), [{
+      beachId: "b1", estimate: estimate, estimateExpires: 100, tides: tides, tidesExpires: 100
+    }])[0];
+    expect(stmt.args.slice(13)).toEqual([JSON.stringify(tides), 100]);
   });
 
   it("skips descriptors with no beachId", function () {

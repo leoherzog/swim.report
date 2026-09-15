@@ -159,7 +159,8 @@ export function wfoFromGridUrl(nwsGridUrl) {
 // api.weather.gov exposes /products/types/{type}/locations/{loc}/latest, which
 // returns the newest matching product object with productText inline — no need
 // for the old two-leg (list -> @graph[0].id -> /products/{id}) dance. Success ->
-//   { text, productId: "SRF <wfo>", sourceUrl }  (sourceUrl is the /latest URL)
+//   { text, productId: "SRF <wfo>", sourceUrl, issuanceTime }  (sourceUrl is the
+//   /latest URL; issuanceTime is the product's own ISO stamp, or null)
 // any fetch failure or a response missing productText -> null (data-or-null
 // contract, consumed by parseRipCurrentRisk and the hourly cron).
 export async function fetchLatestSrfText(wfo) {
@@ -175,7 +176,8 @@ export async function fetchLatestSrfText(wfo) {
   return {
     text: latestJson.productText,
     productId: "SRF " + wfo,
-    sourceUrl: latestUrl
+    sourceUrl: latestUrl,
+    issuanceTime: typeof latestJson.issuanceTime === "string" ? latestJson.issuanceTime : null
   };
 }
 

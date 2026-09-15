@@ -1,6 +1,6 @@
 // test/srfParser.test.js
 import { describe, it, expect } from "vitest";
-import { parseRipCurrentRisk } from "../src/clients/srfParser.js";
+import { parseRipCurrentRisk, parseSrfTides } from "../src/clients/srfParser.js";
 import { wfoFromGridUrl } from "../src/clients/nws.js";
 
 function buildSrf(bodyLines) {
@@ -149,5 +149,139 @@ describe("wfoFromGridUrl", function() {
 
   it("returns null for a non-matching (garbage) URL", function() {
     expect(wfoFromGridUrl("https://example.com/not-a-gridpoints-url")).toBe(null);
+  });
+});
+
+// Ocean-office products carry a "Tides" block in every zone segment, in two
+// grammars: times only ("High at 10:58 AM EDT.") and heights plus times
+// ("High 3.8 feet (MLLW) 12:21 AM PDT."). The parser keeps each event string
+// verbatim and keys the table by UGC zone id.
+describe("parseSrfTides", function() {
+  function segment(header, nameLines, periods) {
+    const lines = [header].concat(nameLines).concat(["348 AM EDT Tue Sep 15 2026", ""]);
+    for (const period of periods) {
+      lines.push("." + period.label + "...");
+      for (const line of period.lines) {
+        lines.push(line);
+      }
+      lines.push("");
+    }
+    return lines.concat(["&&", "", "$$", ""]);
+  }
+
+  const ILM_TODAY = [
+    "Rip Current Risk*...........Moderate. ",
+    "Surf Height.................2 to 4 feet. ",
+    "Winds.......................Northeast winds around 15 mph.",
+    "Tides...",
+    "   Topsail Inlet............High at 10:58 AM EDT.",
+    "                            Low at 05:19 PM EDT. ",
+    "Remarks.....................Strong north to south longshore current."
+  ];
+  const ILM_WEDNESDAY = [
+    "Rip Current Risk*...........Moderate. ",
+    "Tides...",
+    "   Topsail Inlet............High at 11:44 AM EDT. ",
+    "Remarks.....................Moderate north to south longshore current."
+  ];
+
+  it("keys the first period's block by zone, events verbatim and leaders stripped", function() {
+    const text = buildSrf(segment("NCZ106-152115-", ["Coastal Pender-", "Including the beaches of Surf City and Topsail Beach"], [
+      { label: "TODAY", lines: ILM_TODAY },
+      { label: "WEDNESDAY", lines: ILM_WEDNESDAY }
+    ]));
+    expect(parseSrfTides(text)).toEqual({
+      NCZ106: {
+        period: "TODAY",
+        locations: [
+          { name: "Topsail Inlet", events: ["High at 10:58 AM EDT.", "Low at 05:19 PM EDT."] }
+        ]
+      }
+    });
+  });
+
+  it("keeps heights and datum in the event string, several locations per zone", function() {
+    const text = buildSrf(segment("MAZ022-152200-", ["Barnstable MA-"], [
+      { label: "TODAY", lines: [
+        "Rip Current Risk*...",
+        "   East Coast...............Moderate. ",
+        "Tides...",
+        "   Nauset Beach.............Low 0.4 feet (MLLW) 07:56 AM EDT.",
+        "                            High 4.5 feet (MLLW) 02:04 PM EDT.",
+        "   Hyannisport..............Low 0.7 feet (MLLW) 09:11 AM EDT.",
+        "                            High 3.8 feet (MLLW) 03:58 PM EDT."
+      ] }
+    ]));
+    expect(parseSrfTides(text).MAZ022.locations).toEqual([
+      { name: "Nauset Beach", events: ["Low 0.4 feet (MLLW) 07:56 AM EDT.", "High 4.5 feet (MLLW) 02:04 PM EDT."] },
+      { name: "Hyannisport", events: ["Low 0.7 feet (MLLW) 09:11 AM EDT.", "High 3.8 feet (MLLW) 03:58 PM EDT."] }
+    ]);
+  });
+
+  it("reads a label padded with leaders and a deeper indent, and stops at the next field", function() {
+    const text = buildSrf(segment("CAZ552-152130-", ["Orange County Coastal Areas-"], [
+      { label: "TODAY", lines: [
+        "Tides.........................",
+        "        Newport Beach.........High 3.8 feet (MLLW) 12:21 AM PDT.",
+        "                              Low 2.0 feet (MLLW) 05:27 AM PDT.",
+        "Remarks.......................Mixed swell from 150 and 280 degrees."
+      ] }
+    ]));
+    expect(parseSrfTides(text).CAZ552).toEqual({
+      period: "TODAY",
+      locations: [{ name: "Newport Beach", events: ["High 3.8 feet (MLLW) 12:21 AM PDT.", "Low 2.0 feet (MLLW) 05:27 AM PDT."] }]
+    });
+  });
+
+  it("expands a multi-zone header, a range and a wrapped header onto every zone", function() {
+    const text = buildSrf(
+      segment("MAZ015-016-152200-", ["Suffolk MA-Eastern Norfolk MA-"], [
+        { label: "TODAY", lines: ["Tides...", "   Boston Harbor............High at 01:00 PM EDT."] }
+      ]).concat(segment("RIZ006>008-", ["MAZ019-152200-", "Newport RI-"], [
+        { label: "TODAY", lines: ["Tides...", "   Newport..................Low at 09:00 AM EDT."] }
+      ]))
+    );
+    const tides = parseSrfTides(text);
+    expect(Object.keys(tides).sort()).toEqual(["MAZ015", "MAZ016", "MAZ019", "RIZ006", "RIZ007", "RIZ008"]);
+    expect(tides.MAZ016.locations[0].name).toBe("Boston Harbor");
+    expect(tides.RIZ007.locations[0].events).toEqual(["Low at 09:00 AM EDT."]);
+    expect(tides.MAZ019.locations[0].name).toBe("Newport");
+  });
+
+  it("keeps the period label as printed, whichever period comes first", function() {
+    const text = buildSrf(segment("NCZ106-151430-", ["Coastal Pender-"], [
+      { label: "TUESDAY", lines: ILM_TODAY }
+    ]).concat(segment("MIZ037-152100-", ["Mason-"], [
+      { label: "REST OF TODAY", lines: ["Tides...", "   Nowhere.................High at 01:00 PM EDT."] }
+    ])));
+    const tides = parseSrfTides(text);
+    expect(tides.NCZ106.period).toBe("TUESDAY");
+    expect(tides.MIZ037.period).toBe("REST OF TODAY");
+  });
+
+  it("yields nothing for a zone with no tides block, and an empty table for a Great Lakes product", function() {
+    const text = buildSrf(segment("MIZ037-152100-", ["Mason-"], [
+      { label: "REST OF TODAY", lines: [
+        "Swim Risk*..................High. ",
+        "Wave Height.................7 to 10 feet. ",
+        "Sunrise.....................7:24 AM. ",
+        "Sunset......................7:59 PM."
+      ] }
+    ]));
+    expect(parseSrfTides(text)).toEqual({});
+  });
+
+  it("ignores a tides line outside any zone segment, and non-string input", function() {
+    expect(parseSrfTides(buildSrf(["Tides...", "   Somewhere...............High at 01:00 PM EDT."]))).toEqual({});
+    expect(parseSrfTides(null)).toEqual({});
+    expect(parseSrfTides("")).toEqual({});
+    expect(parseSrfTides(42)).toEqual({});
+  });
+
+  it("caps a runaway range so a malformed header cannot expand into thousands of zones", function() {
+    const text = buildSrf(segment("MAZ001>999-152200-", ["Everywhere-"], [
+      { label: "TODAY", lines: ["Tides...", "   Somewhere...............High at 01:00 PM EDT."] }
+    ]));
+    expect(parseSrfTides(text)).toEqual({});
   });
 });

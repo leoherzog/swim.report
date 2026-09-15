@@ -440,6 +440,42 @@ Both tiles' source lines name siteName and the observation age through <wa-relat
 with a wa-tooltip (ids "reading-temp" / "reading-wave") naming sourceLabel, so a beach
 reading a neighboring site's observation always says whose it is.
 
+### TideTable (beach_state.tides)
+
+    {
+      "zone": "NCZ106",              // the beach's nws_zone, the UGC id of the segment read
+      "period": "TODAY",             // the forecast period label as the product prints it
+                                     // ("TODAY", "REST OF TODAY", "TUESDAY"), or null
+      "locations": [                 // every location the segment's Tides block names
+        { "name": "Topsail Inlet",
+          "events": ["High at 10:58 AM EDT.", "Low at 05:19 PM EDT."] }
+      ],
+      "productId": "SRF ILM",
+      "source": "https://api.weather.gov/products/types/SRF/locations/ILM/latest",
+      "issued": "2026-09-15T07:48:00+00:00", // the product's issuanceTime, or null
+      "updated": "2026-09-15T13:07:02.000Z"  // the run that stored it
+    }
+
+The "Tides" block of the beach's own zone segment in the latest NWS Surf Zone Forecast,
+the product the hourly already fetches once per WFO for the rip risk. parseSrfTides
+(section 5) keys every segment's first tide-bearing period by UGC zone id, and the cron
+looks the beach's nws_zone up in its own office's table, so a beach reads its own zone's
+lines and never a neighbor's. Every event string is verbatim: ocean offices print either
+times alone ("High at 10:58 AM EDT.") or heights with times ("Low 0.4 feet (MLLW) 07:56
+AM EDT."), and the record claims no clock or datum the product did not. Great Lakes
+products carry no Tides block, so those beaches never get one.
+
+Display-only: no color, never reaches src/rules.js, not in the estimate or the seal, never
+bumps RULES_VERSION. Written by the hourly on the estimate's own lease (tides_expires =
+writeEpoch + FLAG_TTL_SECONDS) only when the product carried a block for that zone; a run
+whose SRF fetch failed contributes no field, so the standing table ages out.
+
+Read by handleDetail on the beach_state JOIN and passed to renderDetailPage as data.tides,
+which renders one "at a glance" tile: each location's name over its event lines as
+written, captioned "Tides · <period in sentence case>", sourced "NWS Surf Zone Forecast"
+with the product's age through <wa-relative-time>. A record with no event line renders no
+tile.
+
 ### WqFloorAdvisory (beach_state.wqfloor)
 
     {
@@ -729,6 +765,14 @@ migrations/0015_beach_state_wave.sql:
   record carrying startIso and hoursFt, validStartEpoch + 25200 for a wind-only one — so a
   pipeline run firing late cannot grant a fresh lease to old data.
 
+migrations/0016_beach_state_tides.sql:
+
+    ALTER TABLE beach_state ADD COLUMN tides TEXT;
+    ALTER TABLE beach_state ADD COLUMN tides_expires INTEGER;
+
+  The per-beach tide table (section 1, TideTable), written by the hourly cron beside the
+  estimate on the estimate's lease and COALESCEd like every other cron-owned column.
+
   Single writer: the offline NOAA wave cycle, as a SQL delta. No cron writes these columns;
   the hourly upsert in src/beachState.js names neither in its INSERT column list nor its SET
   list, so an hourly run can never blank or restamp a wave record. Expiry is the only
@@ -758,7 +802,7 @@ migrations/0015_beach_state_wave.sql:
 ### beach_state
 
 The estimate, official, wqfloor and reading records (section 1) live in migration 0014's
-table and the wave record in 0015's two columns, one row per beach, so a single JOIN
+table, the wave record in 0015's two columns and the tide table in 0016's, one row per beach, so a single JOIN
 resolves a beach and everything rendered about
 it and the map endpoint resolves a marker from scalar columns. src/beachState.js is the
 only module that knows the column list: BEACH_STATE_SELECT, CHIP_STATE_SELECT,
@@ -787,6 +831,7 @@ Leases, all ABSOLUTE epoch seconds:
 | official_expires | floor((Date.parse(updated) + officialMaxAgeMs) / 1000) when the scraper declares officialMaxAgeMs; else writeEpoch + (the scraper's officialTtlSeconds, else FLAG_TTL_SECONDS) |
 | wqfloor_expires | writeEpoch + WQFLOOR_TTL_SECONDS (7200) |
 | reading_expires | floor((Date.parse(observedIso) + READING_MAX_AGE_MS) / 1000) |
+| tides_expires | writeEpoch + FLAG_TTL_SECONDS (25200), the estimate's own lease |
 | wave_expires | validStartEpoch + 86400 (series) or + 25200 (wind-only) — the one lease measured from the model valid time, not from writeEpoch |
 
 Reader rule, in liveBeachState(row, nowMs), liveChipState(row, nowMs), liveWaveRecord(row,
@@ -804,8 +849,8 @@ resolver.
 Single writers, by column:
 
 - The hourly runFlagRecompute owns official, official_color, official_updated,
-  official_expires, wqfloor, wqfloor_expires, reading and reading_expires, and writes the
-  estimate columns whole. It writes a column only when that run produced the record: the
+  official_expires, wqfloor, wqfloor_expires, reading, reading_expires, tides and
+  tides_expires, and writes the estimate columns whole. It writes a column only when that run produced the record: the
   upsert is ON CONFLICT DO UPDATE SET <column> = COALESCE(excluded.<column>,
   beach_state.<column>), so a run with no advisory, no scrape or no observation leaves the
   standing value alone and expiry stays the only retraction path. Descriptors are merged
@@ -1578,6 +1623,19 @@ detail page's water-temperature tile and never src/rules.js.
       //   3. /RISK\s+OF\s+RIP\s+CURRENTS?\s+(?:IS|WILL\s+BE|REMAINS)\s+(HIGH|MODERATE|LOW)/i
       // Null/empty/non-matching input -> null. Accepted limitation: "LOW TO MODERATE"
       // captures "LOW", a conservative parse, pinned by a test.
+
+    export function parseSrfTides(srfText)
+      // srfText: string | null -> { <UGC zone id>: { period, locations } }
+      // Walks the product segment by segment: a UGC header line ("NCZ106-152115-",
+      // "MAZ015-016-152200-", "RIZ006>008-", wrapped lines allowed until the DDHHMM
+      // expiry closes it) opens a segment and "$$" closes it; ".TODAY..." style lines
+      // set the period label; the first "Tides" field label (with or without dot
+      // leaders) in a segment opens a block of indented lines, a leader line
+      // ("   Topsail Inlet............High at 10:58 AM EDT.") starting a location and
+      // a bare indented line adding one more event to it, ended by the first
+      // unindented line. Event strings are verbatim. Every zone the header expands to
+      // gets the same table; a ">" range wider than 100 is dropped. A zone with no
+      // block is absent, so a Great Lakes product yields {}. Non-string input -> {}.
 
 ### src/waveGrids.js (the NOAA GRIB2 wave grids + pure sampling geometry — offline only)
 
@@ -2716,8 +2774,8 @@ the completion log measures the shortfall.
    authority's alerts as null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO through runPool at KV_WRITE_CONCURRENCY under SRF_GATHER_DEADLINE_MS = 120000
-   (anchored at the step's own start); parseRipCurrentRisk on each; Map wfo -> { risk,
-   sourceUrl } | null. Every WFO is pre-seeded null, so a throw, a null fetch or a WFO the
+   (anchored at the step's own start); parseRipCurrentRisk and parseSrfTides on each; Map
+   wfo -> { risk, sourceUrl, productId, issuanceTime, tidesByZone } | null. Every WFO is pre-seeded null, so a throw, a null fetch or a WFO the
    deadline leaves unreached all read as "no rip input" for that WFO's beaches alone. A
    sequential loop bounded only by the 45 s transport timeout would let a few hung WFOs
    spend the 900 s ceiling before any beach is written.
@@ -2807,6 +2865,10 @@ the completion log measures the shortfall.
    water-quality callout. A clean reading contributes no field, so the COALESCE upsert
    leaves the stored advisory alone and it ages out — expiry stays the only retraction
    path. It is not an official override and never feeds displayFlag.
+   Likewise only when the WFO's tidesByZone carries the beach's nws_zone, add tides (the
+   TideTable of section 1, built by tidesForBeach from that zone's entry plus the SRF
+   entry's productId, sourceUrl and issuanceTime) and tidesExpires (nowEpoch +
+   FLAG_TTL_SECONDS). Display-only and outside the seal: rules.js never sees it.
    The pool collects descriptors; step 7b writes them. estimatesByBeach.set(...) may run
    inside the pool, because the flag_history guarantee is enforced at step 9 against the
    set of beaches whose chunk actually committed, not against the pool's own bookkeeping.
@@ -4619,14 +4681,18 @@ exporting a CSS string); render.js is the sole module the router imports.
     "Saved" and the icon variant to solid. It is a purely local preference and says
     nothing about the flag, so it carries no flag color.
   - "At a glance" tiles (the section labelled by glance-heading, directly under the hero): a wa-grid of up to
-    five outlined <wa-card class="glance-tile"> tiles, each an icon, a value, a caption and a
+    six outlined <wa-card class="glance-tile"> tiles, each an icon, a value, a caption and a
     quiet source line — waves now (estimate.waveHeightFt.toFixed(1) + " ft", the same field
     the wave strip's now stat reads, sourced by the ESTIMATE badge); water temperature (the
     WaterTemp reading with the station provenance and tooltip of section 1); rip current
     risk (estimate.ripCurrentRisk as HIGH/MODERATE/LOW, sourced "NWS surf zone forecast");
     active alerts (decidedAlertDetails(estimate).length with the first in-effect entry's
     event name; a checkable beach with only upcoming alerts shows the quiet "None active"
-    with the first upcoming event "not yet in effect" as its source line); and the next
+    with the first upcoming event "not yet in effect" as its source line); the zone's tide
+    table (data.tides, the TideTable of section 1: icon water-arrow-up, each location's
+    name in quiet caption text over its event strings verbatim in wa-body-m, captioned
+    "Tides · <period in sentence case>" or "Tides", sourced "NWS Surf Zone Forecast" plus
+    the product's age through <wa-relative-time> when issued parses); and the next
     sun event. A reading with no data renders no tile at all, and a beach with no
     readings renders no section: the row carries only answers, never a placeholder.
     The sun tile is computed, not stored: src/frontend/sun.js (SunCalc's Meeus solar math
@@ -4983,7 +5049,10 @@ test uses symbolically.
   (no attempt bumped); per-beach isolation preserved.
 - test/srfParser.test.js — parseRipCurrentRisk cases 1-9 (HIGH/MODERATE/LOW, lowercase prose,
   "high risk of rip currents", first-occurrence-wins, no-mention→null, "LOW TO MODERATE"→LOW,
-  null/""→null) and wfoFromGridUrl (case 10). Fixtures built with + and "\n" (no backticks).
+  null/""→null), wfoFromGridUrl (case 10) and parseSrfTides (both event grammars, several
+  locations, leader-padded label, multi-zone/range/wrapped headers, period label as printed,
+  Great Lakes product → {}, non-string → {}, runaway range dropped). Fixtures built with +
+  and "\n" (no backticks).
 - test/parkContainment.test.js — mergeBeachRows (parkName attach, largest-unnamed-per-park,
   parkKey distinctness, id/osm_id derivation, a named park beach missed by the named pass,
   the compass-separation threshold boundary); rendering (park-name-first title/subtitle,

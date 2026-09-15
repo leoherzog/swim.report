@@ -238,8 +238,16 @@ describe("fetchLatestSrfText", function () {
     expect(result).toEqual({
       text: "SURF ZONE FORECAST\nRIP CURRENT RISK...HIGH",
       productId: "SRF MFL",
-      sourceUrl: latestUrl
+      sourceUrl: latestUrl,
+      issuanceTime: "2026-07-20T12:00:00.000Z"
     });
+  });
+
+  it("reports a missing or malformed issuanceTime as null", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ id: "abc-123", issuanceTime: 12, productText: "SRF" });
+    });
+    expect((await fetchLatestSrfText("MFL")).issuanceTime).toBeNull();
   });
 
   it("returns null when productText is missing or malformed", async function () {

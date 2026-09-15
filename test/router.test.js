@@ -74,6 +74,11 @@ function stateFields(records) {
     fields.reading_expires = records.readingExpires === undefined
       ? LIVE_EXPIRES : records.readingExpires;
   }
+  if (records.tides) {
+    fields.tides = records.tides;
+    fields.tides_expires = records.tidesExpires === undefined
+      ? LIVE_EXPIRES : records.tidesExpires;
+  }
   if (records.wave) {
     fields.wave = records.wave;
     fields.wave_expires = records.waveExpires === undefined
@@ -800,6 +805,27 @@ describe("handleDetail: state from the row, water temperature from KV", () => {
     const expired = detailEnv({ state: { reading: READING, readingExpires: NOW_EPOCH } });
     const goneHtml = await (await handleRequest(detailRequest("osm-way-1"), expired.env)).text();
     expect(goneHtml).not.toContain("Grand Haven Pier");
+  });
+
+  const TIDES = {
+    zone: "MIZ071",
+    period: "TODAY",
+    locations: [{ name: "Topsail Inlet", events: ["High at 10:58 AM EDT.", "Low at 05:19 PM EDT."] }],
+    productId: "SRF ILM",
+    source: "https://api.weather.gov/products/types/SRF/locations/ILM/latest",
+    issued: "2026-07-15T07:48:00+00:00",
+    updated: "2026-07-15T13:00:00.000Z"
+  };
+
+  it("renders the tide table from the tides column, and drops it when expired", async () => {
+    const made = detailEnv({ state: { tides: TIDES } });
+    const html = await (await handleRequest(detailRequest("osm-way-1"), made.env)).text();
+    expect(html).toContain("Topsail Inlet");
+    expect(html).toContain("High at 10:58 AM EDT.");
+
+    const expired = detailEnv({ state: { tides: TIDES, tidesExpires: NOW_EPOCH } });
+    const goneHtml = await (await handleRequest(detailRequest("osm-way-1"), expired.env)).text();
+    expect(goneHtml).not.toContain("Topsail Inlet");
   });
 
   // isNullableNumberArray requires exactly WAVE_SERIES_HOURS entries, so a
