@@ -315,7 +315,8 @@ describe("renderListPage home map", () => {
 
   it("embeds the map script's live-update hook for the geolocation swap", () => {
     const html = renderListPage({ entries: [] });
-    // geoScript.js swaps data-center in place and dispatches this event; the map
+    // geoScript.js swaps data-center in place on a "Use my location" press and
+    // dispatches this event; the map
     // script re-reads data-center and refits around the new center, easing to it
     // at the zoom cap only while the directory is still in flight. The source
     // already holds every beach, so it is a pure re-center (no refetch, no

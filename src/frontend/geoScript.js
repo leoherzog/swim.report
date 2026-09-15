@@ -1,16 +1,21 @@
 // Exports the literal text of the inline geolocation script on the beach list
 // page. It runs in the browser, not in the Worker.
 //
-// With no "near" param in the URL, the script asks for the visitor's position
-// and upgrades the page in place: it fetches the same list URL with
-// "?near=lat,lon", parses the response with DOMParser, and swaps in the
-// server-rendered pieces the location changes. The server must re-select,
-// because the nearest-100 set can differ and not merely its order.
-// history.replaceState then rewrites the URL, a hidden "near" input is appended
-// to the search form for the same reason, and a polite aria-live region
-// announces the reorder.
-// All rendering stays server-side in render.js; this script only moves finished
-// HTML.
+// The page never asks for the visitor's position on its own. The request is
+// made only when the visitor presses the "Use my location" button rendered in
+// the end slot of the #beach-search input (#locate-me). The button is served
+// with the hidden attribute and this script reveals it when the browser exposes
+// navigator.geolocation, so a page without JS or without the API never shows a
+// control that can do nothing.
+//
+// On a press the script asks for the position and upgrades the page in place:
+// it fetches the same list URL with "?near=lat,lon", parses the response with
+// DOMParser, and swaps in the server-rendered pieces the location changes. The
+// server must re-select, because the nearest-100 set can differ and not merely
+// its order. history.replaceState then rewrites the URL, a hidden "near" input
+// is appended to (or updated in) the search form for the same reason, and a
+// polite aria-live region announces the reorder. All rendering stays
+// server-side in render.js; this script only moves finished HTML.
 //
 // The map re-center is decoupled from that list fetch. The browser fix is
 // authoritative the moment it arrives and is all the map needs, since
@@ -25,21 +30,30 @@
 // data-center at construction, so it picks up the fix even when it missed the
 // event.
 //
-// Everything degrades silently to IP-based ordering, and a failed fetch or
-// unexpected markup falls back to a full navigation (location.replace).
-// Coordinates are rounded to 3 decimal places (~110 m), matching the rough
-// distance labels while keeping precise coordinates out of URLs and server logs.
-// An existing "near" param short-circuits the whole script, so the upgrade
-// happens at most once per visit and can never loop.
+// The button is a <wa-button> and its loading attribute is set for the whole
+// request, position prompt included, so a second press cannot start a second
+// fetch. A denied or failed position request is logged and announced into the
+// live region, and the IP-based ordering stays. A failed fetch or unexpected
+// markup falls back to a full navigation (location.replace). Coordinates are
+// rounded to 3 decimal places (~110 m), matching the rough distance labels
+// while keeping precise coordinates out of URLs and server logs. An existing
+// "near" param does not stop a press: a visitor who opened someone else's
+// shared "?near=" link can still ask for their own position, and nothing runs
+// without a press, so the script can never loop.
 
 const SCRIPT_LINES = [
   "(function () {",
-  "  if (!('geolocation' in navigator)) {",
+  "  const button = document.getElementById('locate-me');",
+  "  if (!button || !('geolocation' in navigator)) {",
   "    return;",
   "  }",
-  "  if (new URLSearchParams(window.location.search).get('near')) {",
-  "    return;",
-  "  }",
+  "  button.hidden = false;",
+  "  const live = document.getElementById('geo-live-region');",
+  "  const announce = function (text) {",
+  "    if (live) {",
+  "      live.textContent = text;",
+  "    }",
+  "  };",
   // Point the live map at a "lat,lon" center and tell mapScript.js to ease over.
   // The attribute is written before the event so a map script that has not run
   // yet still reads the fix at construction.
@@ -52,17 +66,27 @@ const SCRIPT_LINES = [
   "    mapEl.setAttribute('data-center-precise', '1');",
   "    document.dispatchEvent(new CustomEvent('swimreport:nearupdate'));",
   "  };",
-  "  navigator.geolocation.getCurrentPosition(function (pos) {",
+  "  let pending = false;",
+  "  const setPending = function (value) {",
+  "    pending = value;",
+  "    if (value) {",
+  "      button.setAttribute('loading', '');",
+  "    } else {",
+  "      button.removeAttribute('loading');",
+  "    }",
+  "  };",
+  "  const onPosition = function (pos) {",
   "    const lat = pos.coords.latitude;",
   "    const lon = pos.coords.longitude;",
   "    if (typeof lat !== 'number' || typeof lon !== 'number' ||",
   "        !isFinite(lat) || !isFinite(lon)) {",
+  "      setPending(false);",
   "      return;",
   "    }",
   // Read the params fresh here, not at load: the visitor may have typed a search
-  // during the permission prompt, which live search reflected into the URL.
-  // Overlaying the current search box value as q preserves that query instead of
-  // wiping it back to the full list.
+  // before pressing, which live search reflected into the URL. Overlaying the
+  // current search box value as q preserves that query instead of wiping it
+  // back to the full list.
   "    const params = new URLSearchParams(window.location.search);",
   "    params.set('near', lat.toFixed(3) + ',' + lon.toFixed(3));",
   "    const searchInput = document.getElementById('beach-search');",
@@ -97,13 +121,17 @@ const SCRIPT_LINES = [
   "        fallbackReload();",
   "        return;",
   "      }",
+  // A second press updates the hidden input the first one appended.
   "      const form = document.getElementById('beach-search-form');",
-  "      if (form && !form.querySelector('input[name=near]')) {",
-  "        const hidden = document.createElement('input');",
-  "        hidden.type = 'hidden';",
-  "        hidden.name = 'near';",
+  "      if (form) {",
+  "        let hidden = form.querySelector('input[name=near]');",
+  "        if (!hidden) {",
+  "          hidden = document.createElement('input');",
+  "          hidden.type = 'hidden';",
+  "          hidden.name = 'near';",
+  "          form.appendChild(hidden);",
+  "        }",
   "        hidden.value = params.get('near');",
-  "        form.appendChild(hidden);",
   "      }",
   // Re-apply the server's own data-center for the same fix. Normally a no-op
   // (both are the same 3 dp rounding), it stands as the authoritative reconcile
@@ -115,21 +143,31 @@ const SCRIPT_LINES = [
   "        applyMapCenter(nextMap.getAttribute('data-center'));",
   "      }",
   "      window.history.replaceState(null, '', nextUrl);",
-  "      const live = document.getElementById('geo-live-region');",
-  "      if (live) {",
-  "        live.textContent = 'Beaches sorted by distance from your location.';",
-  "      }",
+  "      announce('Beaches sorted by distance from your location.');",
+  "      setPending(false);",
   "    }).catch(function (err) {",
   "      console.log('geo upgrade failed, falling back to reload: ' + err.message);",
   "      fallbackReload();",
   "    });",
+  "  };",
   // The failure is logged rather than swallowed, because an already-granted
   // permission that still fails is otherwise indistinguishable from a fix that
-  // simply lands near the IP estimate.
-  "  }, function (err) {",
+  // simply lands near the IP estimate. It is also announced, since the visitor
+  // asked for something and the list visibly did nothing.
+  "  const onPositionError = function (err) {",
   "    console.log('geolocation unavailable (code ' + (err && err.code) + '): ' +",
   "      ((err && err.message) || 'no detail') + ' — keeping IP-based ordering');",
-  "  }, { maximumAge: 300000, timeout: 10000 });",
+  "    announce('Your location is unavailable.');",
+  "    setPending(false);",
+  "  };",
+  "  button.addEventListener('click', function () {",
+  "    if (pending) {",
+  "      return;",
+  "    }",
+  "    setPending(true);",
+  "    navigator.geolocation.getCurrentPosition(onPosition, onPositionError,",
+  "      { maximumAge: 300000, timeout: 10000 });",
+  "  });",
   "})();"
 ];
 

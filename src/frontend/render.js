@@ -1115,6 +1115,15 @@ export function renderListPage(data) {
     "<wa-input id=\"beach-search\" name=\"q\" type=\"search\" value=\"" + escapeHtml(query) + "\" " +
     "label=\"Search beaches\" placeholder=\"Search by beach or park name\" with-clear>" +
     "<wa-icon slot=\"start\" name=\"magnifying-glass\"></wa-icon>" +
+    // The "Use my location" control. Served hidden: geoScript.js reveals it only
+    // when navigator.geolocation exists, so a page without JS or without the API
+    // shows no button that can do nothing. An icon-only <wa-button> rather than
+    // a bare <wa-icon>, so the control is focusable and pressable from the
+    // keyboard; the icon's label is the button's accessible name. type="button"
+    // is wa-button's default, so a press never submits the search form.
+    "<wa-button id=\"locate-me\" slot=\"end\" appearance=\"plain\" size=\"s\" hidden>" +
+    "<wa-icon name=\"location-crosshairs\" label=\"Use my location\"></wa-icon>" +
+    "</wa-button>" +
     "</wa-input>" +
     nearHiddenHtml +
     "</form>";
@@ -1137,9 +1146,11 @@ export function renderListPage(data) {
     ("<wa-switch id=\"green-only-filter\" size=\"s\" class=\"wa-align-self-end\">" +
       "Green flags only</wa-switch>") : "";
 
-  // Polite live region for the geolocation upgrade: geoScript.js swaps the list
-  // in place with no navigation, so the reorder would otherwise be invisible to
-  // screen-reader users. The script fills it after a successful swap.
+  // Polite live region for the "Use my location" upgrade: geoScript.js swaps
+  // the list in place with no navigation, so the reorder would otherwise be
+  // invisible to screen-reader users. The script fills it after a successful
+  // swap, and with a failure notice when the position request is denied or
+  // fails.
   const geoLiveHtml =
     "<p id=\"geo-live-region\" class=\"wa-visually-hidden\" role=\"status\" aria-live=\"polite\"></p>";
 

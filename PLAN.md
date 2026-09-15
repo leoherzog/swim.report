@@ -4190,7 +4190,13 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // #beach-list-items, so rows in the "Your Beaches" section can neither suppress the
       // main list's empty state nor be counted twice.
       // The page embeds LIST_GEO_SCRIPT (src/frontend/geoScript.js), a browser-side
-      // geolocation upgrade: on load, when the URL has no "near" param, it calls
+      // geolocation upgrade the visitor starts, never the page: the search form's
+      // <wa-input id="beach-search"> carries in its end slot an icon-only
+      // <wa-button id="locate-me" slot="end" appearance="plain" size="s" hidden> wrapping
+      // <wa-icon name="location-crosshairs" label="Use my location">. It is served hidden
+      // and the script reveals it only when navigator.geolocation exists, so no JS or no API
+      // means no control. On a press the script sets the button's loading attribute
+      // (dropping further presses until it clears), calls
       // navigator.geolocation.getCurrentPosition and on success fetch()es the same list
       // URL with "?near=lat,lon" appended (3-decimal rounding, ~110 m, matching the rough
       // distance labels and keeping precise coordinates out of URLs and logs; other
@@ -4198,10 +4204,10 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // the server-rendered pieces in place: #beach-list-items innerHTML, the
       // #beach-list-empty block (updated in place, never replaced, because the search
       // script holds it by reference), the #list-active-query block, a hidden "near" input
-      // appended to #beach-search-form, and the #home-map data-center /
-      // data-center-precise attributes (the #home-map node itself is never replaced, so
-      // the MapLibre instance stays alive). The green-only control is not swapped; it is
-      // browser state. __swimReportSwapList dispatches a "swimreport:listswap"
+      // appended to #beach-search-form (or updated on a later press), and the #home-map
+      // data-center / data-center-precise attributes (the #home-map node itself is never
+      // replaced, so the MapLibre instance stays alive). The green-only control is not
+      // swapped; it is browser state. __swimReportSwapList dispatches a "swimreport:listswap"
       // CustomEvent on document after every successful swap, because the replaced rows
       // lose the inline display the client filters wrote and searchScript.js has to
       // re-apply both of them. That event means fresh server markup arrived, so its
@@ -4215,10 +4221,12 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // unreachable that string becomes visible, the same accepted exposure as the
       // wave-strip summary). The server owns the sort — the nearest-100 set can differ
       // from the rendered rows — so the client swaps whole fragments and never re-sorts
-      // locally. No geolocation API, denied permission, or timeout silently keeps the
-      // IP-based ordering; a failed fetch or unexpected markup falls back to a full
-      // navigation; and an existing "near" param short-circuits the script, so the
-      // upgrade happens at most once and can never loop.
+      // locally. A denied, failed or timed-out position request keeps the IP-based
+      // ordering, is logged, and is announced into the same live region ("Your location
+      // is unavailable."); a failed fetch or unexpected markup falls back to a full
+      // navigation. An existing "near" param does not block a press (a visitor on a shared
+      // "?near=" link can still ask for their own position), and nothing runs without a
+      // press, so the script can never loop.
       // Between the intro and the search form the page embeds a home-page map mount
       // (no per-beach data — that ships from /api/beaches.geojson):
       // <div id="home-map"

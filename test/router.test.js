@@ -531,12 +531,12 @@ describe("renderListPage geolocation script", () => {
       entries: [],
       nowIso: "2026-07-05T12:00:00.000Z"
     });
-    // The script is always embedded; skipping is a RUNTIME decision so the
-    // near-less page can upgrade itself. Assert the load-bearing pieces: the
-    // capability check, the near short-circuit (loop prevention), the rounded
-    // near param, the in-place fetch-and-swap (no navigation on success), the
-    // URL rewrite that keeps refreshes/links/submits proximity-sorted, the map
-    // notification event, and the full-navigation fallback for a failed fetch.
+    // The script is always embedded; revealing the button is a RUNTIME decision
+    // on the geolocation capability. Assert the load-bearing pieces: the
+    // capability check, the rounded near param, the in-place fetch-and-swap (no
+    // navigation on success), the URL rewrite that keeps refreshes/links/submits
+    // proximity-sorted, the map notification event, and the full-navigation
+    // fallback for a failed fetch.
     expect(html).toContain("'geolocation' in navigator");
     expect(html).toContain("params.get('near')");
     expect(html).toContain("getCurrentPosition");
@@ -546,6 +546,53 @@ describe("renderListPage geolocation script", () => {
     expect(html).toContain("window.history.replaceState(null, '', nextUrl)");
     expect(html).toContain("document.dispatchEvent(new CustomEvent('swimreport:nearupdate'))");
     expect(html).toContain("window.location.replace(nextUrl)");
+  });
+
+  it("asks for the position only when the Use my location button is pressed", () => {
+    // The page must never prompt for location on load. The only
+    // getCurrentPosition call sits inside the button's click listener, and the
+    // script's top level touches nothing but the button, the live region and
+    // the capability check.
+    expect(LIST_GEO_SCRIPT).toContain("getElementById('locate-me')");
+    const clickAt = LIST_GEO_SCRIPT.indexOf("button.addEventListener('click'");
+    const positionAt = LIST_GEO_SCRIPT.indexOf("navigator.geolocation.getCurrentPosition(");
+    expect(clickAt).toBeGreaterThan(-1);
+    expect(positionAt).toBeGreaterThan(clickAt);
+    const positionCall = "navigator.geolocation.getCurrentPosition(";
+    expect(LIST_GEO_SCRIPT.indexOf("getCurrentPosition", positionAt + positionCall.length)).toBe(-1);
+    // A near param in the URL no longer short-circuits: a press on a shared
+    // "?near=" link still asks for the visitor's own position.
+    expect(LIST_GEO_SCRIPT).not.toContain("new URLSearchParams(window.location.search).get('near')");
+    // Presses are dropped while a request is in flight, and the button shows it.
+    expect(LIST_GEO_SCRIPT).toContain("button.setAttribute('loading', '')");
+    expect(LIST_GEO_SCRIPT).toContain("if (pending) {");
+  });
+
+  it("renders the locate button hidden in the search input's end slot", () => {
+    const html = renderListPage({
+      entries: [],
+      nowIso: "2026-07-05T12:00:00.000Z"
+    });
+    // Served hidden and revealed by the script, so no JS or no geolocation API
+    // means no dead control. An icon-only wa-button so it is keyboard
+    // operable, with the icon's label as the accessible name; wa-button's
+    // default type is "button", so a press never submits the search form.
+    const button = "<wa-button id=\"locate-me\" slot=\"end\" appearance=\"plain\" size=\"s\" hidden>" +
+      "<wa-icon name=\"location-crosshairs\" label=\"Use my location\"></wa-icon>" +
+      "</wa-button>";
+    expect(html).toContain(button);
+    const inputAt = html.indexOf("<wa-input id=\"beach-search\"");
+    const closeAt = html.indexOf("</wa-input>", inputAt);
+    const buttonAt = html.indexOf(button);
+    expect(buttonAt).toBeGreaterThan(inputAt);
+    expect(buttonAt).toBeLessThan(closeAt);
+    expect(html).not.toContain("type=\"submit\" slot=\"end\"");
+    expect(LIST_GEO_SCRIPT).toContain("button.hidden = false;");
+  });
+
+  it("announces a failed position request into the live region", () => {
+    // The visitor asked for something, so silence would read as a broken button.
+    expect(LIST_GEO_SCRIPT).toContain("announce('Your location is unavailable.');");
   });
 
   it("renders the polite live region the swap announces into", () => {
