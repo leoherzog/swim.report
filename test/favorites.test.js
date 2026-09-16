@@ -42,7 +42,7 @@ describe("detail-page favorite toggle", () => {
     expect(html).toContain(
       "<wa-button id=\"favorite-toggle\" " +
       "appearance=\"outlined\" size=\"s\" aria-pressed=\"false\" " +
-      "data-beach-id=\"osm-way-505668572\" hidden>" +
+      "data-beach-id=\"w505668572\" hidden>" +
       "<wa-icon id=\"favorite-icon\" slot=\"start\" name=\"star\" variant=\"regular\"></wa-icon>" +
       "<span id=\"favorite-label\">Save</span>" +
       "</wa-button>");
@@ -142,6 +142,25 @@ describe("favorites script constants", () => {
     expect(LIST_FAVORITES_SCRIPT).toContain("} catch (err) {");
     // Nothing is written back from the list page.
     expect(LIST_FAVORITES_SCRIPT).not.toContain("setItem");
+  });
+
+  it("normalizes a stored id to the public form and drops anything else", () => {
+    // Both scripts share the reader, so the detail page's write-back and the
+    // list page's ?ids= fetch carry the same form the pages link to.
+    for (const script of [DETAIL_FAVORITE_SCRIPT, LIST_FAVORITES_SCRIPT]) {
+      const from = script.indexOf("  const PUBLIC_ID =");
+      const to = script.indexOf("  const readIds =");
+      expect(from).toBeGreaterThan(-1);
+      expect(to).toBeGreaterThan(from);
+      const normalize = new Function(script.slice(from, to) + "return publicId;")();
+      expect(normalize("osm-node-354000095")).toBe("n354000095");
+      expect(normalize("osm-way-5")).toBe("w5");
+      expect(normalize("osm-relation-7")).toBe("r7");
+      expect(normalize("n1")).toBe("n1");
+      for (const junk of ["n01", "N1", "osm-node-0", "beach-1", "", 7, null]) {
+        expect(normalize(junk)).toBe("");
+      }
+    }
   });
 
   it("fetches only the ids the page does not already hold", () => {

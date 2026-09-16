@@ -20,6 +20,14 @@ import { FLAG_TTL_SECONDS } from "../src/flagTtl.js";
 import { makeD1 } from "./helpers/d1.js";
 import { PAGE_STYLES } from "../src/frontend/styles.js";
 import { COLOR_SCHEME_SCRIPT } from "../src/frontend/colorSchemeScript.js";
+import { toPublicId } from "../src/publicId.js";
+
+// A fixture's URL segment. Fixtures and seeded rows carry storage ids; the URL
+// and every href carry the public form, and an id outside the storage shape is
+// emitted as it stands, exactly as the renderers do.
+function pub(id) {
+  return toPublicId(id) || id;
+}
 
 const NOW_EPOCH = Math.floor(Date.now() / 1000);
 // Every seeded record leases an hour out unless the fixture names its own epoch.
@@ -281,38 +289,38 @@ describe("flag-worthy water gate", () => {
   it("404s the detail page for a confirmed-inland beach", async () => {
     const inland = { id: "osm-way-1", name: "Fremont Lake", lat: 43.4, lon: -85.9, osm_id: "way/1", water_class: "inland", water_class_attempts: 0 };
     const { env } = viewEnv(inland);
-    const res = await handleRequest(getRequest("/beach/osm-way-1"), env);
+    const res = await handleRequest(getRequest("/beach/w1"), env);
     expect(res.status).toBe(404);
   });
 
   it("renders the detail page for a NULL-pending beach (still visible during backfill)", async () => {
     const pending = { id: "osm-way-2", name: "Oval Beach", lat: 42.6, lon: -86.2, osm_id: "way/2", water_class: null, water_class_attempts: 0 };
     const { env } = viewEnv(pending);
-    const res = await handleRequest(getRequest("/beach/osm-way-2"), env);
+    const res = await handleRequest(getRequest("/beach/w2"), env);
     expect(res.status).toBe(200);
   });
 
   it("renders the detail page for a confirmed great_lake beach", async () => {
     const keeper = { id: "osm-way-3", name: "South Beach", lat: 42.4, lon: -86.3, osm_id: "way/3", water_class: "great_lake", water_class_attempts: 0 };
     const { env } = viewEnv(keeper);
-    const res = await handleRequest(getRequest("/beach/osm-way-3"), env);
+    const res = await handleRequest(getRequest("/beach/w3"), env);
     expect(res.status).toBe(200);
   });
 
   it("hides a parked-unresolved beach (NULL at the attempts cap) from the detail page", async () => {
     const parked = { id: "osm-way-4", name: "Puddle", lat: 43.4, lon: -85.9, osm_id: "way/4", water_class: null, water_class_attempts: 5 };
     const { env } = viewEnv(parked);
-    const res = await handleRequest(getRequest("/beach/osm-way-4"), env);
+    const res = await handleRequest(getRequest("/beach/w4"), env);
     expect(res.status).toBe(404);
   });
 
   it("404s /api/flag for a confirmed-inland beach and 200s a keeper", async () => {
     const inland = { id: "osm-way-1", name: "Fremont Lake", lat: 43.4, lon: -85.9, osm_id: "way/1", last_viewed: null, water_class: "inland", water_class_attempts: 0 };
-    const inRes = await handleRequest(getRequest("/api/flag/osm-way-1"), viewEnv(inland).env);
+    const inRes = await handleRequest(getRequest("/api/flag/w1"), viewEnv(inland).env);
     expect(inRes.status).toBe(404);
 
     const keeper = { id: "osm-way-3", name: "South Beach", lat: 42.4, lon: -86.3, osm_id: "way/3", last_viewed: null, water_class: "great_lake", water_class_attempts: 0 };
-    const okRes = await handleRequest(getRequest("/api/flag/osm-way-3"), viewEnv(keeper).env);
+    const okRes = await handleRequest(getRequest("/api/flag/w3"), viewEnv(keeper).env);
     expect(okRes.status).toBe(200);
   });
 });
@@ -818,7 +826,7 @@ describe("handleDetail: state from the row, water temperature from KV", () => {
   }
 
   function detailRequest(id) {
-    return { method: "GET", url: "https://swim.report/beach/" + id, cf: {} };
+    return { method: "GET", url: "https://swim.report/beach/" + pub(id), cf: {} };
   }
 
   const ADVISORY = {
@@ -1004,7 +1012,7 @@ describe("handleDetail nearby beaches", () => {
   }
 
   function detailRequest(id) {
-    return { method: "GET", url: "https://swim.report/beach/" + id, cf: {} };
+    return { method: "GET", url: "https://swim.report/beach/" + pub(id), cf: {} };
   }
 
   it("renders the three nearest as cards in distance order, dropping self, inland and the far row", async () => {
@@ -1019,7 +1027,7 @@ describe("handleDetail nearby beaches", () => {
     expect(section.indexOf("/beach/b-2")).toBeLessThan(section.indexOf("/beach/b-3"));
     expect(section).not.toContain("/beach/b-4");
     expect(section).not.toContain("/beach/b-far");
-    expect(section).not.toContain("/beach/osm-way-9");
+    expect(section).not.toContain("/beach/w9");
     expect(section).not.toContain("/beach/b-inland");
     // Each card's displayFlag chip comes off its own joined row, and reads
     // exactly as a list row's does.
@@ -1270,25 +1278,25 @@ describe("cache-control policy (Workers Cache)", () => {
 
   it("marks a found detail page cacheable with bounded stale windows", async () => {
     const { env } = viewEnv(beach);
-    const res = await handleRequest(getRequest("/beach/osm-way-1"), env);
+    const res = await handleRequest(getRequest("/beach/w1"), env);
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe(CACHEABLE);
   });
 
   it("never caches a detail 404 for a well-formed but unknown id", async () => {
     const { env } = viewEnv(null);
-    const res = await handleRequest(getRequest("/beach/osm-node-999"), env);
+    const res = await handleRequest(getRequest("/beach/n999"), env);
     expect(res.status).toBe(404);
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
   it("marks /api/flag and /api/beaches.geojson cacheable, /api/flag 404 max-age only", async () => {
     const found = viewEnv(beach);
-    const flagRes = await handleRequest(getRequest("/api/flag/osm-way-1"), found.env);
+    const flagRes = await handleRequest(getRequest("/api/flag/w1"), found.env);
     expect(flagRes.headers.get("cache-control")).toBe(CACHEABLE);
 
     const missing = viewEnv(null);
-    const flag404 = await handleRequest(getRequest("/api/flag/osm-node-999"), missing.env);
+    const flag404 = await handleRequest(getRequest("/api/flag/n999"), missing.env);
     expect(flag404.status).toBe(404);
     expect(flag404.headers.get("cache-control")).toBe("public, max-age=60");
 
@@ -1306,9 +1314,9 @@ describe("cache-control policy (Workers Cache)", () => {
     // or a Worker error serves stale forever.
     const paths = [
       "/?near=42.658,-86.211",
-      "/?ids=osm-way-1",
-      "/beach/osm-way-1",
-      "/api/flag/osm-way-1",
+      "/?ids=w1",
+      "/beach/w1",
+      "/api/flag/w1",
       "/api/beaches.geojson"
     ];
     for (const path of paths) {
@@ -1340,7 +1348,8 @@ describe("malformed beach ids", () => {
   }
 
   it("404s the detail page with the route's own no-store HTML", async () => {
-    for (const path of ["/beach/%FF", "/beach/nope"]) {
+    for (const path of ["/beach/%FF", "/beach/nope", "/beach/n01", "/beach/n0", "/beach/x1",
+      "/beach/N1", "/beach/osm-node-"]) {
       const res = await handleRequest(getRequest(path), noDbEnv());
       expect(res.status).toBe(404);
       expect(res.headers.get("cache-control")).toBe("no-store");
@@ -1350,7 +1359,7 @@ describe("malformed beach ids", () => {
   });
 
   it("404s /api/flag with the route's own cached JSON", async () => {
-    for (const path of ["/api/flag/%FF", "/api/flag/%C0%AF"]) {
+    for (const path of ["/api/flag/%FF", "/api/flag/%C0%AF", "/api/flag/n01", "/api/flag/x1"]) {
       const res = await handleRequest(getRequest(path), noDbEnv());
       expect(res.status).toBe(404);
       expect(res.headers.get("cache-control")).toBe("public, max-age=60");
@@ -1362,6 +1371,22 @@ describe("malformed beach ids", () => {
     for (const path of ["/api/flag/OSM-node-1", "/api/flag/osm-node-1%2F2", "/beach/osm%2Dnode%2D5"]) {
       const res = await handleRequest(getRequest(path), noDbEnv());
       expect(res.status).toBe(404);
+    }
+  });
+
+  it("redirects a storage-form URL to the canonical public one, without reaching D1", async () => {
+    const cases = [
+      ["/beach/osm-node-354000095", "/beach/n354000095"],
+      ["/beach/osm-way-505668572", "/beach/w505668572"],
+      ["/beach/osm-relation-7", "/beach/r7"],
+      ["/api/flag/osm-node-354000095", "/api/flag/n354000095"],
+      ["/api/flag/osm-relation-7", "/api/flag/r7"]
+    ];
+    for (const pair of cases) {
+      const res = await handleRequest(getRequest(pair[0]), noDbEnv());
+      expect(res.status).toBe(301);
+      expect(res.headers.get("location")).toBe(pair[1]);
+      expect(res.headers.get("cache-control")).toBe(CACHEABLE);
     }
   });
 
@@ -1386,7 +1411,7 @@ describe("last_viewed demand stamping", () => {
   it("stamps a never-viewed beach via ctx.waitUntil on the detail page", async () => {
     const { env, db } = viewEnv(beachViewed(null));
     const ctx = makeCtx();
-    const res = await handleRequest(getRequest("/beach/osm-way-1"), env, ctx);
+    const res = await handleRequest(getRequest("/beach/w1"), env, ctx);
     expect(res.status).toBe(200);
     expect(ctx.promises.length).toBe(1);
     await Promise.all(ctx.promises);
@@ -1396,7 +1421,7 @@ describe("last_viewed demand stamping", () => {
   it("stamps on /api/flag too, reading last_viewed for the throttle check", async () => {
     const { env, db } = viewEnv(beachViewed(null));
     const ctx = makeCtx();
-    await handleRequest(getRequest("/api/flag/osm-way-1"), env, ctx);
+    await handleRequest(getRequest("/api/flag/w1"), env, ctx);
     await Promise.all(ctx.promises);
     expect(Number.isFinite(Date.parse(stampOf(db)))).toBe(true);
   });
@@ -1405,7 +1430,7 @@ describe("last_viewed demand stamping", () => {
     const fresh = new Date(Date.now() - 60000).toISOString();
     const { env, db } = viewEnv(beachViewed(fresh));
     const ctx = makeCtx();
-    await handleRequest(getRequest("/beach/osm-way-1"), env, ctx);
+    await handleRequest(getRequest("/beach/w1"), env, ctx);
     expect(ctx.promises.length).toBe(0);
     expect(stampOf(db)).toBe(fresh);
   });
@@ -1414,14 +1439,14 @@ describe("last_viewed demand stamping", () => {
     const stale = new Date(Date.now() - 7200000).toISOString();
     const { env, db } = viewEnv(beachViewed(stale));
     const ctx = makeCtx();
-    await handleRequest(getRequest("/beach/osm-way-1"), env, ctx);
+    await handleRequest(getRequest("/beach/w1"), env, ctx);
     await Promise.all(ctx.promises);
     expect(stampOf(db)).not.toBe(stale);
   });
 
   it("no-ops without ctx (render is unaffected)", async () => {
     const { env, db } = viewEnv(beachViewed(null));
-    const res = await handleRequest(getRequest("/beach/osm-way-1"), env);
+    const res = await handleRequest(getRequest("/beach/w1"), env);
     expect(res.status).toBe(200);
     expect(stampOf(db)).toBe(null);
   });
@@ -1891,6 +1916,7 @@ describe("every surface shows the one displayFlag decision", () => {
 
   FIXTURES.forEach(function (fixture, index) {
     const id = "osm-way-" + (100 + index);
+    const shortId = pub(id);
     const d = fixture.want;
 
     it(fixture.name + ": the decision itself", () => {
@@ -1901,7 +1927,7 @@ describe("every surface shows the one displayFlag decision", () => {
 
     it(fixture.name + ": home list row", async () => {
       const html = await (await handleRequest(homeRequest(""), envFor(fixture, id))).text();
-      const row = enclosing(html, id, "<li class=\"beach-row\"", "</li>");
+      const row = enclosing(html, shortId, "<li class=\"beach-row\"", "</li>");
       expect(row).toContain("data-flag=\"" + d.keyword + "\"");
       expectCompactFlag(row, d);
     });
@@ -1909,22 +1935,22 @@ describe("every surface shows the one displayFlag decision", () => {
     it(fixture.name + ": ?ids= row", async () => {
       const req = { method: "GET", url: "https://swim.report/?ids=" + id, cf: {} };
       const html = await (await handleRequest(req, envFor(fixture, id))).text();
-      const row = enclosing(html, id, "<li class=\"beach-row\"", "</li>");
+      const row = enclosing(html, shortId, "<li class=\"beach-row\"", "</li>");
       expect(row).toContain("data-flag=\"" + d.keyword + "\"");
       expectCompactFlag(row, d);
     });
 
     it(fixture.name + ": nearby card on a neighbor's page", async () => {
-      const res = await handleRequest(getRequest("/beach/" + HOST.id), envFor(fixture, id), makeCtx());
+      const res = await handleRequest(getRequest("/beach/" + pub(HOST.id)), envFor(fixture, id), makeCtx());
       expect(res.status).toBe(200);
       const html = await res.text();
       const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
-      const card = enclosing(section, id, "<wa-card class=\"nearby-card\"", "</wa-card>");
+      const card = enclosing(section, shortId, "<wa-card class=\"nearby-card\"", "</wa-card>");
       expectCompactFlag(card, d);
     });
 
     it(fixture.name + ": detail hero and share meta", async () => {
-      const res = await handleRequest(getRequest("/beach/" + id), envFor(fixture, id), makeCtx());
+      const res = await handleRequest(getRequest("/beach/" + shortId), envFor(fixture, id), makeCtx());
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain("<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
@@ -1958,16 +1984,17 @@ describe("every surface shows the one displayFlag decision", () => {
 
     it(fixture.name + ": geojson marker", async () => {
       const body = await (await handleRequest(getRequest("/api/beaches.geojson"), envFor(fixture, id))).json();
-      const feature = body.features.filter(function (f) { return f.properties.id === id; })[0];
+      const feature = body.features.filter(function (f) { return f.properties.id === shortId; })[0];
       expect(feature.properties.flag).toBe(d.keyword);
       expect(Object.keys(feature.properties)).toEqual(["id", "name", "flag"]);
     });
 
     it(fixture.name + ": /api/flag display field", async () => {
-      const res = await handleRequest(getRequest("/api/flag/" + id), envFor(fixture, id), makeCtx());
+      const res = await handleRequest(getRequest("/api/flag/" + shortId), envFor(fixture, id), makeCtx());
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(Object.keys(body)).toEqual(["beachId", "estimate", "official", "display"]);
+      expect(body.beachId).toBe(shortId);
       expect(body.display).toEqual({ color: d.color, source: d.source });
       expect(body.estimate).toEqual(fixture.estimate);
       expect(body.official).toEqual(fixture.official);
@@ -2791,7 +2818,7 @@ describe("GET /?ids= list mode", () => {
       idsRequest("osm-way-1,osm-node-2,osm-way-3"),
       makeEnv({ beaches: [ONE, TWO, inland] }).env
     );
-    expect(ids).toEqual(["osm-way-1", "osm-node-2"]);
+    expect(ids).toEqual(["w1", "n2"]);
   });
 
   it("carries each beach's own estimate and official from its joined row", async () => {
@@ -2818,21 +2845,31 @@ describe("GET /?ids= list mode", () => {
   });
 
   it("renders the rows in the requested order, not the order SQLite returned", async () => {
-    expect(await renderedIdsFor(idsRequest("osm-way-1,osm-node-2"), makeEnv({ beaches: [TWO, ONE] }).env))
-      .toEqual(["osm-way-1", "osm-node-2"]);
-    expect(await renderedIdsFor(idsRequest("osm-node-2,osm-way-1"), makeEnv({ beaches: [TWO, ONE] }).env))
-      .toEqual(["osm-node-2", "osm-way-1"]);
+    expect(await renderedIdsFor(idsRequest("w1,n2"), makeEnv({ beaches: [TWO, ONE] }).env))
+      .toEqual(["w1", "n2"]);
+    expect(await renderedIdsFor(idsRequest("n2,w1"), makeEnv({ beaches: [TWO, ONE] }).env))
+      .toEqual(["n2", "w1"]);
+  });
+
+  it("accepts a stored id in either form and dedupes on the beach", async () => {
+    // A returning visitor's localStorage holds storage-form ids, so the list
+    // mode takes both forms and resolves them to one row apiece.
+    expect(await renderedIdsFor(idsRequest("osm-way-1,osm-node-2"), makeEnv({ beaches: [ONE, TWO] }).env))
+      .toEqual(["w1", "n2"]);
+    expect(await renderedIdsFor(idsRequest("osm-way-1,w1"), makeEnv({ beaches: [ONE] }).env))
+      .toEqual(["w1"]);
+    expect(parseBeachIds("osm-way-1,w1")).toEqual(["osm-way-1"]);
   });
 
   it("skips ids with no matching row and renders the rest", async () => {
-    expect(await renderedIdsFor(idsRequest("osm-way-1,osm-way-999"), makeEnv({ beaches: [ONE] }).env))
-      .toEqual(["osm-way-1"]);
+    expect(await renderedIdsFor(idsRequest("w1,w999"), makeEnv({ beaches: [ONE] }).env))
+      .toEqual(["w1"]);
   });
 
   it("drops malformed ids before they reach SQL and skips the read entirely when none survive", async () => {
     expect(await renderedIdsFor(
-      idsRequest("osm-way-1,osm-boat-3,12345,osm-way-x"), makeEnv({ beaches: [ONE] }).env
-    )).toEqual(["osm-way-1"]);
+      idsRequest("w1,osm-boat-3,12345,osm-way-x,w01,W1"), makeEnv({ beaches: [ONE] }).env
+    )).toEqual(["w1"]);
 
     const none = makeEnv({ beaches: [ONE] });
     const empty = await handleRequest(idsRequest("nope,%2E%2E%2F"), none.env);
@@ -2859,8 +2896,8 @@ describe("GET /?ids= list mode", () => {
     }
     const ids = await renderedIdsFor(idsRequest(many.join(",")), makeEnv({ beaches: beaches }).env);
     expect(ids.length).toBe(10);
-    expect(ids[9]).toBe("osm-way-10");
-    expect(ids).not.toContain("osm-way-11");
+    expect(ids[9]).toBe("w10");
+    expect(ids).not.toContain("w11");
   });
 
   it("is cacheable and never asserts data-complete", async () => {

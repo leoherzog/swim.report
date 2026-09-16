@@ -12,6 +12,7 @@
 // record off at the same instant. The geometry is rounded to 5 decimals.
 import { displayFlag } from "./displayFlag.js";
 import { liveChipState } from "./beachState.js";
+import { toPublicId } from "./publicId.js";
 
 // 5 decimals is about 1.1 m; dividing by a power of ten yields the shortest
 // repr, so float noise never bloats the body or churns its ETag.
@@ -43,7 +44,8 @@ export function mapFeatureFromRow(row, nowIso, nowMs) {
     type: "Feature",
     geometry: { type: "Point", coordinates: [roundCoord(lon), roundCoord(lat)] },
     properties: {
-      id: row.id,
+      // The public id: src/frontend/mapScript.js navigates to /beach/ + this.
+      id: toPublicId(row.id) || row.id,
       name: row.park_name || row.name || "",
       flag: displayFlag(state, nowIso).keyword
     }

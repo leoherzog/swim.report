@@ -15,6 +15,7 @@ import { renderFlagSvg } from "./flagGlyph.js";
 import { decidedAlertDetails, alertInEffectAt, normalizeColor } from "../rules.js";
 import { STALE_MS, isStale, collapseFlagColor, displayFlag } from "../displayFlag.js";
 import { alertsCheckable } from "../alertsCheckable.js";
+import { toPublicId } from "../publicId.js";
 import { READING_MAX_AGE_MS } from "../officialReading.js";
 import { verdictSentence } from "./verdict.js";
 import { nextSunEvent, utcClockLabel } from "./sun.js";
@@ -99,6 +100,15 @@ const FLAG_LABELS = {
   "double-red": "DOUBLE RED — water closed",
   "unknown": "UNKNOWN"
 };
+
+// The id every link, DOM id and share URL on a page carries. A beach read from
+// D1 always converts; anything else is emitted as it stands, which the two
+// single-beach routes still redirect to the canonical URL.
+function publicBeachId(beach) {
+  const id = beach ? beach.id : null;
+  const short = toPublicId(id);
+  return short === null ? String(id) : short;
+}
 
 export function escapeHtml(str) {
   if (str === null || str === undefined) {
@@ -974,7 +984,8 @@ function renderBeachRow(entry, nowIso) {
   // each find the same row.
   const searchable = (beach.park_name ? beach.park_name + " " : "") + String(beach.name || "");
   const dataName = escapeHtml(searchable.toLowerCase());
-  const href = "/beach/" + encodeURIComponent(beach.id);
+  const publicId = publicBeachId(beach);
+  const href = "/beach/" + encodeURIComponent(publicId);
   const milesLabel = formatMiles(entry.distanceMi);
   const distanceHtml = span("beach-row-distance wa-caption-s", milesLabel);
   const subtitle = subtitleName(beach);
@@ -988,7 +999,7 @@ function renderBeachRow(entry, nowIso) {
     "href=\"" + escapeHtml(href) + "\">");
   lines.push("<span class=\"beach-row-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + distanceHtml +
     subtitleHtml + "</span>");
-  const chip = renderCompactFlag(flag, "flag-chip-" + beach.id);
+  const chip = renderCompactFlag(flag, "flag-chip-" + publicId);
   lines.push(chip.badgeHtml);
   lines.push("<wa-icon name=\"chevron-right\" class=\"wa-color-text-quiet\"></wa-icon>");
   lines.push("</a>");
@@ -1235,11 +1246,12 @@ function renderWaveMap(beach) {
 // from the router; an empty list renders nothing rather than an empty heading.
 function renderNearbyCard(entry, nowIso) {
   const beach = entry.beach;
-  const href = "/beach/" + encodeURIComponent(beach.id);
+  const publicId = publicBeachId(beach);
+  const href = "/beach/" + encodeURIComponent(publicId);
   const flag = displayFlag(entry, nowIso);
   const subtitleHtml = span("wa-caption-s", subtitleName(beach));
   const distanceHtml = span("wa-caption-s", formatMiles(entry.distanceMi));
-  const chip = renderCompactFlag(flag, "nearby-flag-chip-" + beach.id);
+  const chip = renderCompactFlag(flag, "nearby-flag-chip-" + publicId);
   return "<wa-card class=\"nearby-card\" appearance=\"outlined\">" +
     "<a class=\"nearby-card-link wa-link-plain wa-stack wa-gap-xs\" href=\"" + escapeHtml(href) + "\">" +
     "<span class=\"nearby-card-name wa-font-weight-semibold\">" + escapeHtml(displayName(beach)) + "</span>" +
@@ -1903,7 +1915,8 @@ export function renderDetailPage(data) {
     typeof beach.water_class === "string" ? beach.water_class : null);
   const verdictHtml = verdictText ?
     ("<p class=\"wa-body-l\">" + escapeHtml(verdictText) + "</p>") : "";
-  const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(beach.id);
+  const publicId = publicBeachId(beach);
+  const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(publicId);
 
   // Save toggle for the visitor's own list, in the hero's share row beside the
   // copy and share controls. It ships hidden and DETAIL_FAVORITE_SCRIPT reveals
@@ -1912,7 +1925,7 @@ export function renderDetailPage(data) {
   // and it says nothing about the flag, so it carries no flag color.
   const favoriteHtml = "<wa-button id=\"favorite-toggle\" " +
     "appearance=\"outlined\" size=\"s\" aria-pressed=\"false\" data-beach-id=\"" +
-    escapeHtml(String(beach.id)) + "\" hidden>" +
+    escapeHtml(publicId) + "\" hidden>" +
     "<wa-icon id=\"favorite-icon\" slot=\"start\" name=\"star\" variant=\"regular\"></wa-icon>" +
     "<span id=\"favorite-label\">Save</span>" +
     "</wa-button>";
@@ -2030,7 +2043,7 @@ export function renderDetailPage(data) {
   return renderDocument(title, bodyHtml, {
     title: title,
     description: detailMetaDescription(beach, estimate, flag),
-    path: "/beach/" + encodeURIComponent(beach.id),
+    path: "/beach/" + encodeURIComponent(publicId),
     flagColor: flag.color,
     iconColor: flag.color
   });

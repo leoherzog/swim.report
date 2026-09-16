@@ -5,6 +5,7 @@ import { IDS_LIST_LIMIT } from "./idsListLimit.js";
 import { mapFeatureFromRow } from "./mapFeatures.js";
 import { displayFlag } from "./displayFlag.js";
 import { strongEtag, etagMatches } from "./etag.js";
+import { toPublicId, fromPublicId, fromLegacyId, parseAnyBeachId } from "./publicId.js";
 import {
   BEACH_STATE_SELECT,
   CHIP_STATE_SELECT,
@@ -24,12 +25,6 @@ const HOME_LIST_LIMIT = 100;
 // 500 of those, then the JS haversine re-sorts them and slices to
 // HOME_LIST_LIMIT. Purely a safety cap on an already-ordered read.
 const HOME_GEO_FETCH_LIMIT = 500;
-
-// The id format discovery mints (src/discovery.js): "osm-" + node|way|relation
-// + "-" + the OSM id. It gates ?ids= and the raw /beach/:id and /api/flag/:id
-// path segment, which is never decoded, so anything else never reaches a bound
-// parameter.
-const BEACH_ID_PATTERN = /^osm-(node|way|relation)-\d+$/;
 
 // Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
 // Every cacheable route is location-independent and its origin is one or two D1
@@ -69,10 +64,12 @@ export function escapeLike(term) {
     .split("_").join("\\_");
 }
 
-// The valid, deduped beach ids in a comma-separated ?ids= value, in the order
-// given and capped at IDS_LIST_LIMIT. Pure; exported for tests. Anything that
-// is not a well-formed beach id is dropped, so the caller's list can never
-// reach SQL as anything but a bound parameter.
+// The storage ids a comma-separated ?ids= value names, deduped, in the order
+// given and capped at IDS_LIST_LIMIT — the cap counts accepted ids. Pure;
+// exported for tests. Each part is read in either the public or the storage
+// form, and anything else is dropped, so the caller's list can never reach SQL
+// as anything but a bound parameter. The storage form is accepted without a
+// redirect because a returning visitor's localStorage holds ids in it.
 export function parseBeachIds(raw) {
   if (typeof raw !== "string" || raw.length === 0) {
     return [];
@@ -80,8 +77,8 @@ export function parseBeachIds(raw) {
   const parts = raw.split(",");
   const ids = [];
   for (let i = 0; i < parts.length; i = i + 1) {
-    const id = parts[i].trim();
-    if (!BEACH_ID_PATTERN.test(id) || ids.indexOf(id) !== -1) {
+    const id = parseAnyBeachId(parts[i].trim());
+    if (id === null || ids.indexOf(id) !== -1) {
       continue;
     }
     ids.push(id);
@@ -579,7 +576,9 @@ async function handleApiFlag(env, ctx, beachId) {
   const flag = displayFlag(state, new Date(nowMs).toISOString());
   return Response.json(
     {
-      beachId: beachId,
+      // The public id. The estimate and official blobs are stored records, so
+      // their own nested beachId stays the storage id.
+      beachId: toPublicId(beachId),
       estimate: state.estimate,
       official: state.official,
       // Built field by field so no internal decision field reaches the public shape.
@@ -596,6 +595,20 @@ function apiFlagNotFound() {
     { error: "beach not found" },
     { status: 404, headers: { "cache-control": "public, max-age=60" } }
   );
+}
+
+// A permanent redirect from a beach's storage-form URL to its canonical public
+// one. Neither single-beach route reads a query string, so the target is the
+// whole of what the request asked for. It is cacheable like the page it names:
+// the mapping is fixed, so no visitor needs to ask twice.
+function canonicalRedirect(location) {
+  return new Response(null, {
+    status: 301,
+    headers: {
+      "location": location,
+      "cache-control": CACHE_CONTROL_CACHEABLE
+    }
+  });
 }
 
 export async function handleRequest(request, env, ctx) {
@@ -636,24 +649,36 @@ export async function handleRequest(request, env, ctx) {
     return handleBeachesGeojson(env, request.headers.get("if-none-match"));
   }
 
-  // The segment is matched raw. An id's alphabet has nothing
+  // The segment is matched raw. Neither id form has anything
   // encodeURIComponent changes, so a segment that needs decoding is not an id,
   // and decodeURIComponent would throw URIError on a bad escape (/beach/%FF)
-  // and turn into the boundary's 500.
+  // and turn into the boundary's 500. A segment in the public form resolves to
+  // its storage id and is served; one in the storage form is redirected to the
+  // canonical URL, so one beach is never served under two.
   const flagMatch = path.match(/^\/api\/flag\/([^/]+)$/);
   if (flagMatch) {
-    if (!BEACH_ID_PATTERN.test(flagMatch[1])) {
-      return apiFlagNotFound();
+    const flagId = fromPublicId(flagMatch[1]);
+    if (flagId !== null) {
+      return handleApiFlag(env, ctx, flagId);
     }
-    return handleApiFlag(env, ctx, flagMatch[1]);
+    const legacyFlagId = fromLegacyId(flagMatch[1]);
+    if (legacyFlagId !== null) {
+      return canonicalRedirect("/api/flag/" + toPublicId(legacyFlagId));
+    }
+    return apiFlagNotFound();
   }
 
   const detailMatch = path.match(/^\/beach\/([^/]+)$/);
   if (detailMatch) {
-    if (!BEACH_ID_PATTERN.test(detailMatch[1])) {
-      return detailNotFound();
+    const detailId = fromPublicId(detailMatch[1]);
+    if (detailId !== null) {
+      return handleDetail(env, ctx, detailId);
     }
-    return handleDetail(env, ctx, detailMatch[1]);
+    const legacyDetailId = fromLegacyId(detailMatch[1]);
+    if (legacyDetailId !== null) {
+      return canonicalRedirect("/beach/" + toPublicId(legacyDetailId));
+    }
+    return detailNotFound();
   }
 
   if (path.indexOf("/api/") === 0) {

@@ -51,7 +51,7 @@ Example response:    {
           "type": "Feature",
           "geometry": { "type": "Point", "coordinates": [-86.288, 42.401] },
           "properties": {
-            "id": "osm-node-123456",
+            "id": "n123456",
             "name": "Holland State Park",
             "flag": "green"
           }
@@ -67,8 +67,11 @@ in the response, or `null` when no beach carries one, carried as a top-level Geo
 member so a stalled recompute is visible from the endpoint itself.
 
 Each feature's geometry is a `Point` in GeoJSON `[longitude, latitude]` order — lon first.
-`properties.name` is the beach's display name: the containing park name from OpenStreetMap
-when the beach sits inside a named park, otherwise the beach's own name.
+`properties.id` is the beach's public id, the id every URL on the site carries: a one-letter
+OSM element type marker (`n` node, `w` way, `r` relation) followed by the OSM id, so the map
+links straight to `/beach/n123456`. `properties.name` is the beach's display name: the
+containing park name from OpenStreetMap when the beach sits inside a named park, otherwise
+the beach's own name.
 
 `properties.flag` is the beach's display flag as a keyword — `green`, `yellow`, `red` or
 `unknown`. A scraped official reading wins over the estimate, which wins
@@ -93,14 +96,17 @@ unknown. It follows the `properties.flag` rule without collapsing double-red, an
 alters either record. Once the official record is more than 2 h old it is credited only while
 strictly more severe than the estimate; on a tie `display.source` is `estimate`.
 
+`:beachId` is the public id — `n`, `w` or `r` followed by the OSM id. The storage form
+`osm-<node|way|relation>-<id>` redirects to it with a `301`.
+
 Example request:
 
-    GET /api/flag/osm-node-123456
+    GET /api/flag/n123456
 
 Example response:
 
     {
-      "beachId": "osm-node-123456",
+      "beachId": "n123456",
       "estimate": {
         "beachId": "osm-node-123456",
         "color": "yellow",
@@ -135,8 +141,11 @@ Example response:
 The statement's onset is still ahead of `alertsAt`, so it is echoed for the detail
 page to show but did not decide the wave-height yellow.
 
+The top-level `beachId` is the public id. The `estimate` and `official` blobs are stored
+records, so their own nested `beachId` is the storage id.
+
 An unknown `beachId` (no matching D1 row) returns `404`, and so does a segment that is not a
-well-formed id, without a D1 read. A confirmed-inland beach
+well-formed id in either form, without a D1 read. A confirmed-inland beach
 returns `404` too — it is not flag-worthy, so it is treated as not found:
 
     { "error": "beach not found" }
@@ -161,6 +170,11 @@ Font Awesome's solid flag glyph, on a wave background and no text, so the estima
 title and description and can never disagree with the picture.
 
 ### `GET /` and `GET /beach/:beachId`
+
+`:beachId` is the public id: `n`, `w` or `r` for the OSM element type, then the OSM id, as in
+`/beach/n354000095`. It is the only canonical URL for a beach — a leading zero, an uppercase
+marker or the storage form is not it, and the storage form `osm-<node|way|relation>-<id>`
+answers `301` with the canonical URL.
 
 Server-rendered HTML pages: a beach list and a beach detail page, built entirely from D1,
 plus the buoy water temperature in KV (see the frontend contract in `src/frontend/render.js`). Both exclude
@@ -278,11 +292,12 @@ rendered rows alone, so it means green among the beaches on this page, not acros
 table. It combines with the search term in one pass, and remembers its position between visits,
 re-applying it as the page loads; with JavaScript off it is inert and every row shows.
 
-`GET /?ids=osm-way-1,osm-node-2` renders the same list page for exactly those beaches, in
-the order given. At most 10 ids are read, each must match the `osm-<node|way|relation>-<id>`
-format, and ids that are malformed, unknown or not flag-worthy are skipped silently, so a
-list nothing matches renders the honest "No beaches match those ids" rather than the
-empty-database copy. The mode ignores `q`, `near` and the visitor's IP location, so the
+`GET /?ids=w1,n2` renders the same list page for exactly those beaches, in the order given.
+At most 10 ids are read. An id in either the public or the storage form is accepted, with no
+redirect, because a returning visitor's `localStorage` holds ids saved in the storage form;
+ids that are malformed, unknown or not flag-worthy are skipped silently, so a list nothing
+matches renders the honest "No beaches match those ids" rather than the empty-database
+copy. The mode ignores `q`, `near` and the visitor's IP location, so the
 response depends only on the URL and is cacheable. It is what the **Your Beaches** section
 fetches.
 

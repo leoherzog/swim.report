@@ -535,6 +535,10 @@ what lets a scraper declare an officialTtlSeconds longer than FLAG_TTL_SECONDS w
 marker and the detail page diverging. Rows with non-finite coordinates are dropped, so no
 NaN geometry reaches a client; the feature name is park_name || name || "".
 
+properties.id is the beach's public id (toPublicId, src/publicId.js), not the stored id:
+src/frontend/mapScript.js navigates to '/beach/' + encodeURIComponent(id) straight from the
+feature, so the marker links to the canonical URL with no second conversion.
+
 builtAt is the newest live estimate_updated across the rows, or null when no row carries a
 live estimate — the age of the freshest color on the map, emitted as a top-level GeoJSON
 foreign member (section 8).
@@ -3951,6 +3955,30 @@ src/etag.js:
       // matches on any entry; a W/ prefix on an entry is ignored, because Cloudflare
       // re-compresses the body and hands the browser W/"<hash>".
 
+src/publicId.js:
+
+    // The beach id a URL carries: a one-letter OSM element type marker (n node, w way,
+    // r relation) followed by the OSM id, "n354000095". Storage keeps the
+    // "osm-<type>-<n>" form of section 1, so this module is the only conversion between
+    // the two: the request path converts at the edge and the renderers convert at each
+    // emission site. Pure, no imports. Both patterns require a leading non-zero digit,
+    // so one beach has exactly one canonical URL.
+
+    export function toPublicId(dbId)
+      // -> "n123" from "osm-node-123", or null when the argument is not a storage id.
+      // A row read from D1 always converts; an emission site handed anything else falls
+      // back to the id it has, which the two single-beach routes redirect.
+
+    export function fromPublicId(segment)
+      // -> the storage id a public segment names, or null. /^[nwr][1-9][0-9]*$/.
+
+    export function fromLegacyId(segment)
+      // -> a storage id given as a URL segment, unchanged, or null.
+      // /^osm-(node|way|relation)-[1-9][0-9]*$/.
+
+    export function parseAnyBeachId(segment)
+      // -> the storage id a segment in either form names, or null. Public form first.
+
 src/router.js:
 
     export async function handleRequest(request, env, ctx)  // -> Promise<Response>
@@ -3967,16 +3995,18 @@ src/router.js:
       // result is wrapped in "%" ... "%" and bound to a "LIKE ?n ESCAPE '\'" clause.
 
     export function parseBeachIds(raw)
-      // -> string[]. Pure; exported for tests. The valid, deduped beach ids in a
-      // comma-separated ?ids= value, in the order given, capped at IDS_LIST_LIMIT
-      // (10, from src/idsListLimit.js — its own module because the browser-side
-      // "Your Beaches" script bakes the same bound into the id list it asks for).
-      // An id must match /^osm-(node|way|relation)-\d+$/ (the format
-      // src/discovery.js mints) or it is dropped, so no request text can reach SQL
-      // as anything but a bound parameter. handleRequest tests the same pattern against
-      // the raw /beach/:id and /api/flag/:id segment, which is never decoded: an id's
-      // alphabet has nothing encodeURIComponent changes, and decodeURIComponent throws
-      // URIError on a bad escape.
+      // -> string[]. Pure; exported for tests. The storage ids a comma-separated ?ids=
+      // value names, deduped on the storage id, in the order given, capped at
+      // IDS_LIST_LIMIT (10, from src/idsListLimit.js — its own module because the
+      // browser-side "Your Beaches" script bakes the same bound into the id list it asks
+      // for); the cap counts accepted ids. Each part goes through parseAnyBeachId, so
+      // both the public and the storage form are read and anything else is dropped and no
+      // request text can reach SQL as anything but a bound parameter. The storage form is
+      // accepted here without a redirect, because a returning visitor's localStorage holds
+      // ids saved in it. handleRequest resolves the raw /beach/:id and /api/flag/:id
+      // segment the same way and never decodes it: neither form has anything
+      // encodeURIComponent changes, and decodeURIComponent throws URIError on a bad
+      // escape.
 
     export function nearbyBounds(lat, lon)
       // -> { latLo, latHi, lonLo, lonHi } | null. Pure; exported for tests. The window
@@ -3997,17 +4027,17 @@ Routing table (method GET only; anything else → 405):
 |---------------------------|----------------|----------------------------------------------|---------|
 | GET /?near=lat,lon&q=term | handleHome     | handleHome(env, location, rawQuery, nearParam). With a resolved user location (near param or request.cf): D1: SELECT b.*, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id [+ ?q= filter] ORDER BY (lat - (<lat>)) * (lat - (<lat>)) + (lon - (<lon>)) * (lon - (<lon>)) * <cos(lat)^2> LIMIT 500 — an approximate planar squared-distance ordering, cheap and monotone in true distance at this scale, so the LIMIT is a safety cap on an already-ordered read and keeps the 500 nearest candidates rather than the first 500 in table-scan order. Then sort by distanceMi (the exact JS haversine) ascending and slice 100. The ORDER BY is correctness, not an optimization: without it the cap truncates in scan order, so a visitor at the far end of the table gets a "nearest beaches" list containing no nearby beach. Injection contract: the three interpolated values are always finite Numbers formatted with String(), produced by the private helper proximityOrderByClause() in src/router.js, which returns null and falls back to the unordered shape if any value is non-finite; no request text is ever interpolated. Without a location: D1: the same joined SELECT [+ ?q= filter] ORDER BY COALESCE(park_name, name), name LIMIT 101 (alphabetical by display name — section 9; the +1 detects hasMore). The optional ?q= is a case-insensitive substring search over the whole table — WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\') with the term wildcard-escaped (escapeLike) and wrapped in %...%; empty or whitespace q is ignored; with a location it filters then distance-sorts. No KV read at all: the two records displayFlag reads ride the join as scalar columns, resolved per row by liveChipState(row, nowMs) (section 2). A list row renders one displayFlag decision and nothing else, so it never selects a JSON blob: the proximity branch ranks 500 rows to render 100, and a blob here would cross the binding five times for every row a visitor sees. Only the sliced rows are resolved. HOME_LIST_LIMIT is 100 | HTML renderListPage (entries carry distanceMi and sortedByProximity when located; data also carries query, hasMore, near — section 9) |
 | GET /?ids=id1,id2,...     | handleIdsList  | The same list page rendered for exactly the listed beaches, in the order given. parseBeachIds validates and dedupes the comma-separated value and caps it at 10 BEFORE any SQL; the ids are bound as parameters (D1: the same joined chip SELECT WHERE b.id IN (?1, ?2, ...) AND [flag-worthy gate] — no ORDER BY, since SQLite returns an IN-set in its own order and the caller's order is restored in JS by id), resolved through liveChipState like handleHome. Ids that do not match the id format, that name no row, or that name a non-flag-worthy row are skipped silently; an empty result reads no D1 at all. q, near and request.cf are ignored on this route, which is what makes the response fully URL-determined and therefore CACHEABLE. It writes no last_viewed stamp — only the two single-beach routes carry the demand signal. This is what the browser-side "Your Beaches" section (section 9) fetches for a visitor's saved and recently viewed ids; nothing about those lists reaches the server beyond the bounded id list in the URL. | HTML renderListPage with idsMode: true, query "", hasMore false and no location, so the page renders unsorted, un-filtered rows and never asserts data-complete. idsMode also owns the empty-state copy: a page with no rows reads "No beaches match those ids.", since an unrecognized id list is neither a search miss nor an empty database |
-| GET /beach/:beachId       | handleDetail   | A segment that fails the beach-id pattern (matched raw, never decoded) 404s before any read. Otherwise D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, wave, each honoring its own expiry — the wave record through liveWaveRecord over WAVE_STATE_SELECT); KV watertemp: only, with cacheTtl 3600; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 AND lat BETWEEN ?2 AND ?3 [AND lon BETWEEN ?4 AND ?5] from nearbyBounds(lat, lon), ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT). The window is a superset of the 50 mi cap and lets D1 seek idx_beaches_lon_lat, which leads with lon, so the lon predicate seeks and a lat-only query scans; the lon window is omitted when it would cross +-180 or the cap nears the pole. The rows are haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if the segment is malformed or no row |
+| GET /beach/:beachId       | handleDetail   | :beachId is the public id (src/publicId.js). A segment in the public form resolves to its storage id; one in the storage form answers 301 to /beach/<public id>, cache-control CACHE_CONTROL_CACHEABLE, reading nothing; anything else 404s before any read. Otherwise D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, wave, each honoring its own expiry — the wave record through liveWaveRecord over WAVE_STATE_SELECT); KV watertemp: only, with cacheTtl 3600; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 AND lat BETWEEN ?2 AND ?3 [AND lon BETWEEN ?4 AND ?5] from nearbyBounds(lat, lon), ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT). The window is a superset of the 50 mi cap and lets D1 seek idx_beaches_lon_lat, which leads with lon, so the lon predicate seeks and a lat-only query scans; the lon window is omitted when it would cross +-180 or the cap nears the pole. The rows are haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if the segment is malformed or no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which stamps displayFlag({ estimate, official }, nowIso).keyword (section 9) on the same liveChipState resolution the list surfaces use, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] rounded to 5 decimals }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. The 200 carries a strong SHA-256 ETag over the serialized bytes; a GET whose If-None-Match matches (etagMatches: weak comparison, comma list and * honored) answers 304 with the same ETag and cache-control and no body. There is no D1 shortcut before the hash, because no stored timestamp moves with every write that changes a marker: the body is the validator. No Vary, since Workers Cache compares Vary values verbatim and would fragment the entry per Accept-Encoding spelling. |
-| GET /api/flag/:beachId    | handleApiFlag  | A segment that fails the beach-id pattern (matched raw, never decoded) 404s before any read. Otherwise D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": ..., "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } }, with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
+| GET /api/flag/:beachId    | handleApiFlag  | :beachId is the public id (src/publicId.js). A segment in the public form resolves to its storage id; one in the storage form answers 301 to /api/flag/<public id>, cache-control CACHE_CONTROL_CACHEABLE, reading nothing; anything else 404s before any read. Otherwise D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": the public id, "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } } — the two record blobs are stored shapes, so their own nested beachId stays the storage id — with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag plus the four security headers public/_headers declares. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
 
 - /api/beaches.geojson: no query params are read — the response is the entire flag-worthy
   set. It is not personalized and takes no bbox.
-- /api/flag/:beachId: a segment that is not a well-formed id, or an unknown beachId → 404
-  JSON { "error": "beach not found" }; the malformed case reads nothing.
+- /api/flag/:beachId: a segment that is not a well-formed id in either form, or an unknown
+  beachId → 404 JSON { "error": "beach not found" }; the malformed case reads nothing.
 - D1 state reads: every route that renders a color selects over BEACH_STATE_JOIN, in one of
   two widths. A route that renders a record — the detail page and /api/flag — selects
   BEACH_STATE_SELECT and resolves the row with liveBeachState(row, nowMs), which returns
@@ -4437,8 +4467,11 @@ exporting a CSS string); render.js is the sole module the router imports.
   the current beach moved to the head on every detail view). Every read and write is
   wrapped in try/catch, because a private-mode browser throws on localStorage access
   rather than returning null, and a stored value that is not an array of strings reads as
-  empty. Both scripts are progressive enhancements and neither is required for a correct
-  page. The key names, the cap and IDS_LIST_LIMIT (src/idsListLimit.js, shared with the
+  empty. The shared reader also normalizes every id to the public form (section 8): a
+  stored id in the "osm-<type>-<n>" form maps to its short form, a short one passes
+  through, and anything else is dropped, so the ids the reader returns match both the
+  /beach/<id> links the rows carry and what the two writers store. Both scripts are
+  progressive enhancements and neither is required for a correct page. The key names, the cap and IDS_LIST_LIMIT (src/idsListLimit.js, shared with the
   route in src/router.js) are interpolated into the script text from those constants, since
   a script body is text and cannot import.
 - In head, load Web Awesome Pro via the version-pinned CDN kit (WA_KIT_BASE in
@@ -4495,7 +4528,9 @@ exporting a CSS string); render.js is the sole module the router imports.
   since those are a filtered or geolocated view of the same page. Its description is the
   one-sentence site description and its card is the gray unknown flag: the index reports no
   one beach's color and must not imply one.
-- The detail page canonicalizes to "/beach/" + encodeURIComponent(beach.id) and takes its
+- The detail page canonicalizes to "/beach/" + encodeURIComponent(toPublicId(beach.id))
+  (src/publicId.js; every href, DOM id and share URL a renderer emits takes the same
+  conversion, and a beach id outside the storage shape is emitted as it stands) and takes its
   card and its description wording from the page's displayFlag decision.
   detailMetaDescription(beach, estimate, flag) reads
   "<display name>: estimated YELLOW flag right now, 2.4 ft waves.": "official <COLOR>"
@@ -4593,7 +4628,7 @@ exporting a CSS string); render.js is the sole module the router imports.
   appearance="filled", with a wa-visually-hidden "Official " before the label, only when
   flag.source is "official", and appearance="outlined" otherwise; no separate OFFICIAL or
   ESTIMATE badge follows it, so an outlined chip is never a posted flag. An official chip
-  carries id "flag-chip-" + beach.id ("nearby-flag-chip-" + beach.id on a nearby card) and a
+  carries id "flag-chip-" + the beach's public id ("nearby-flag-chip-" + it on a nearby card) and a
   <wa-tooltip for=that id> reading "Official", emitted after the closing </a> so the tooltip
   body never joins the link's accessible name. The <li> carries data-flag = flag.keyword (green|yellow|red|unknown), which drives
   both the flag-colored inline-start border in styles.js and the client-side green-only
@@ -4689,8 +4724,8 @@ exporting a CSS string); render.js is the sole module the router imports.
     page keeps a working back link and the copy button alone.
     The row's third control is the save toggle, <wa-button id="favorite-toggle"
     appearance="outlined" size="s" aria-pressed="false"
-    data-beach-id=beach.id hidden> holding a star wa-icon and a span#favorite-label
-    reading "Save". It too ships hidden and DETAIL_FAVORITE_SCRIPT
+    data-beach-id=<the beach's public id> hidden> holding a star wa-icon and a
+    span#favorite-label reading "Save". It too ships hidden and DETAIL_FAVORITE_SCRIPT
     (src/frontend/favoritesScript.js) removes the attribute, so a page without JS never
     shows a control that cannot work; that script also records the beach in the
     recently-viewed list on every view. Saved state flips aria-pressed, the label to

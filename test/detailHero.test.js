@@ -204,7 +204,7 @@ describe("detail-page hero", () => {
     expect(block).toContain("<a class=\"back-link icon-link wa-gap-xs wa-color-text-link\" href=\"/\">");
     expect(block).toContain("Back to all beaches");
     expect(block).toContain(
-      "<wa-copy-button value=\"https://swim.report/beach/osm-way-505668572\" " +
+      "<wa-copy-button value=\"https://swim.report/beach/w505668572\" " +
       "copy-label=\"Copy link\" success-label=\"Link copied\"></wa-copy-button>");
     // The Share button ships hidden: navigator.share exists on some browsers
     // only, and a dead button is worse than no button.

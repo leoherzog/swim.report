@@ -26,8 +26,24 @@ export const FAVORITES_RECENT_KEY = "swimreport:recent";
 export const FAVORITES_RECENT_MAX = 8;
 
 // A stored value written by another version, another script, or a hostile
-// extension is not trusted: anything but an array of strings reads as empty.
+// extension is not trusted: anything but an array of strings reads as empty,
+// and every id is normalized to the public form the pages link to and the
+// server accepts. An id in the storage form maps to its public form, an id
+// already public passes through, and anything else is dropped. The two writers
+// below store what this returns, so a visitor's list converts on first use.
 const READ_IDS_LINES = [
+  "  const PUBLIC_ID = /^[nwr][1-9][0-9]*$/;",
+  "  const STORAGE_ID = /^osm-(node|way|relation)-([1-9][0-9]*)$/;",
+  "  const publicId = function (id) {",
+  "    if (typeof id !== 'string') {",
+  "      return '';",
+  "    }",
+  "    if (PUBLIC_ID.test(id)) {",
+  "      return id;",
+  "    }",
+  "    const parts = id.match(STORAGE_ID);",
+  "    return parts ? parts[1].charAt(0) + parts[2] : '';",
+  "  };",
   "  const readIds = function (key) {",
   "    try {",
   "      const raw = window.localStorage.getItem(key);",
@@ -38,7 +54,7 @@ const READ_IDS_LINES = [
   "      if (!Array.isArray(parsed)) {",
   "        return [];",
   "      }",
-  "      return parsed.filter(function (id) { return typeof id === 'string' && id.length > 0; });",
+  "      return parsed.map(publicId).filter(function (id) { return id.length > 0; });",
   "    } catch (err) {",
   "      return [];",
   "    }",
