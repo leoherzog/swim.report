@@ -31,7 +31,10 @@
 // "swimreport:nearupdate" CustomEvent on document, dispatched by geoScript.js
 // after its in-place proximity swap, makes the live map re-read the updated
 // data-center and refit around it; the source already holds every beach, so it
-// is a pure re-center.
+// is a pure re-center. A "swimreport:refresh" CustomEvent, dispatched by
+// refreshScript.js on its cadence, refetches the directory and hands it to
+// that same source through setData, so the discs and flags take their current
+// colors with no layer rebuild and no view change.
 //
 // The map is a purely visual supplement: the search box plus results list is the
 // complete accessible path, covering the full flag-worthy table server-side. So
@@ -67,6 +70,7 @@ const SCRIPT_LINES = [
   // helpers below close over both, and none of them runs before startMap.
   "  let maplibre;",
   "  let map;",
+  "  let sourceAdded = false;",
   // Require exactly two non-empty parts before Number(): Number('') is 0, so a
   // truncated value like '42.7,' would otherwise center the map at 0 lon
   // instead of falling through to fitBounds. maxZoom is the tightest the view
@@ -350,6 +354,7 @@ const SCRIPT_LINES = [
   "      console.log('map source failed: ' + ((e && e.message) || 'unknown'));",
   "      return;",
   "    }",
+  "    sourceAdded = true;",
   "    const beforeId = firstSymbolLayerId();",
   "    for (let i = 0; i < HIGHLIGHT_LAYERS.length; i++) {",
   "      try {",
@@ -510,6 +515,35 @@ const SCRIPT_LINES = [
   "    try {",
   "      map.easeTo({ center: updated.center, zoom: updated.maxZoom });",
   "    } catch (e) {}",
+  "  });",
+  // Live refresh (refreshScript.js): refetch the directory into the existing
+  // source, so every disc and flag takes its current color with no layer
+  // rebuild. cache: 'no-cache' revalidates against the endpoint's ETag, which
+  // answers an unchanged directory with a bodiless 304. Nothing to do until the
+  // source exists, and one refetch at a time.
+  "  let refreshing = false;",
+  "  document.addEventListener('swimreport:refresh', function () {",
+  "    if (!map || !sourceAdded || refreshing || typeof fetch === 'undefined') { return; }",
+  "    refreshing = true;",
+  "    fetch(GEOJSON_URL, { cache: 'no-cache', headers: { 'Accept': 'application/geo+json' } }).then(function (resp) {",
+  "      if (!resp || !resp.ok) {",
+  "        throw new Error('unexpected status ' + (resp ? resp.status : 'none'));",
+  "      }",
+  "      return resp.json();",
+  "    }).then(function (fc) {",
+  "      if (!fc || !Array.isArray(fc.features)) {",
+  "        console.log('map refresh unusable');",
+  "        return;",
+  "      }",
+  "      const source = map.getSource('beaches');",
+  "      if (!source || typeof source.setData !== 'function') { return; }",
+  "      source.setData(fc);",
+  "      directory = fc;",
+  "    }).catch(function (e) {",
+  "      console.log('map refresh failed: ' + ((e && e.message) || 'unknown'));",
+  "    }).then(function () {",
+  "      refreshing = false;",
+  "    });",
   "  });",
   // import() works in a classic script, keeps the failure path silent, and never
   // blocks the parser.

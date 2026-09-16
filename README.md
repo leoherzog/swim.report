@@ -322,6 +322,14 @@ official-source scraper](#how-to-add-a-new-official-source-scraper) for the `sta
 `readingNote` fields. The wave forecast strip has its own 8 hour threshold, since the marine
 models publish every 6–12 hours.
 
+**Live refresh.** An open page keeps itself current. Every five minutes while the tab is
+visible, and again when you return to a tab that missed a pass, the page refetches itself and
+updates in place: the list rows, the map colors, Your Beaches, and every block of a detail
+page, down to the flag icon in the tab. Nothing reloads, the wave map and webcam frames are
+never rebuilt, and the copy, Share and Save controls are untouched. A block you are reading,
+with focus or a text selection inside it, waits for the next pass, and an expander you
+opened stays open. With JavaScript off the page is exactly as served.
+
 All `/api/*` responses set `content-type: application/json`, except
 `GET /api/beaches.geojson`, which sends the RFC 7946 GeoJSON media type
 `application/geo+json; charset=utf-8`; HTML responses set `text/html; charset=utf-8`.

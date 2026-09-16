@@ -751,18 +751,20 @@ describe("wave-forecast local-time tick script", () => {
     expect(WAVE_TICKS_SCRIPT).not.toContain("</");
   });
 
-  it("omits the script on the buoy case, where the page has no ticks row", () => {
+  it("ships the script on the buoy case too, where the page has no ticks row yet", () => {
+    // A live refresh can bring in a wave section the served page lacked, and
+    // the relabeller is idempotent, so it rides every detail page.
     const html = render({
       estimate: estimateWith({ waveHeightFt: 2.6 }),
       official: null,
       waves: null
     });
     expect(html).not.toContain("<div class=\"wave-chart-hours");
-    expect(html).not.toContain(WAVE_TICKS_SCRIPT);
+    expect(html).toContain("<script>" + WAVE_TICKS_SCRIPT + "</script>");
   });
 
-  it("omits the script on a page with no wave section at all", () => {
+  it("ships the script on a page with no wave section at all", () => {
     const html = render({ estimate: null, official: null, waves: null });
-    expect(html).not.toContain(WAVE_TICKS_SCRIPT);
+    expect(html).toContain("<script>" + WAVE_TICKS_SCRIPT + "</script>");
   });
 });

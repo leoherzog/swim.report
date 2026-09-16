@@ -11,6 +11,9 @@ import { COLOR_SCHEME_SCRIPT } from "./colorSchemeScript.js";
 import { DETAIL_HERO_SCRIPT } from "./backLinkScript.js";
 import { WAVE_TICKS_SCRIPT } from "./waveTicksScript.js";
 import { ROW_TRANSITION_SCRIPT } from "./rowTransitionScript.js";
+import { LIVE_REFRESH_SCRIPT } from "./refreshScript.js";
+import { LIST_REFRESH_SCRIPT } from "./listRefreshScript.js";
+import { DETAIL_REFRESH_SCRIPT } from "./detailRefreshScript.js";
 import { renderFlagSvg } from "./flagGlyph.js";
 import { decidedAlertDetails, alertInEffectAt, normalizeColor } from "../rules.js";
 import { STALE_MS, isStale, collapseFlagColor, displayFlag } from "../displayFlag.js";
@@ -571,7 +574,7 @@ function renderFlagCard(options) {
     (options.updated ? " with-footer" : "");
   const lines = [];
   lines.push("<wa-card class=\"" + options.cardClass + "\" appearance=\"" +
-    options.appearance + "\"" + attrs + ">");
+    options.appearance + "\"" + attrs + " data-refresh=\"" + options.refreshKey + "\">");
   lines.push(options.badgeHtml);
   if (options.sourcesHtml) {
     lines.push(options.sourcesHtml);
@@ -605,6 +608,7 @@ function renderEstimateCard(estimate, nowIso) {
   const isMissing = estimate === null || estimate === undefined;
   return renderFlagCard({
     cardClass: "estimate-card",
+    refreshKey: "estimate",
     appearance: "outlined",
     badgeHtml: renderEstimateBadge("header"),
     color: isMissing ? "unknown" : normalizeColor(estimate.color),
@@ -625,6 +629,7 @@ function renderOfficialCard(official, nowIso) {
   const sourcesHtml = renderOfficialSourceLink(sourceUrl);
   return renderFlagCard({
     cardClass: "official-card",
+    refreshKey: "official",
     appearance: "filled-outlined",
     badgeHtml: renderOfficialBadge(null, "header"),
     color: normalizeColor(official.color),
@@ -1202,9 +1207,13 @@ export function renderListPage(data) {
     "<script>" + LIST_SEARCH_SCRIPT + "</script>" +
     "<script>" + LIST_GEO_SCRIPT + "</script>" +
     "<script>" + LIST_FAVORITES_SCRIPT + "</script>" +
+    "<script>" + LIST_REFRESH_SCRIPT + "</script>" +
     "<script>" + ROW_TRANSITION_SCRIPT + "</script>" +
     "<link rel=\"stylesheet\" href=\"" + MAPLIBRE_CSS + "\">" +
-    "<script>" + buildListMapScript(MAPLIBRE_JS) + "</script>";
+    "<script>" + buildListMapScript(MAPLIBRE_JS) + "</script>" +
+    // The scheduler goes last, so every consumer above has registered before
+    // its first tick.
+    "<script>" + LIVE_REFRESH_SCRIPT + "</script>";
 
   // The canonical is the bare "/" whatever the q or near params are: those are a
   // filtered or geolocated view of the same page, not pages of their own. The
@@ -1232,7 +1241,7 @@ function renderWaveMap(beach) {
     "&metricRain=default&metricTemp=default&metricWind=default" +
     "&zoom=11&overlay=waves&product=ecmwfWaves&level=surface&marker=true" +
     "&lat=" + lat.toFixed(3) + "&lon=" + lon.toFixed(3);
-  return "<section class=\"wave-map\">" +
+  return "<section class=\"wave-map\" data-refresh=\"wave-map\">" +
     "<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
     "<iframe class=\"wave-map-frame\" src=\"" + escapeHtml(embedSrc) + "\"" +
     " title=\"Wave height map\" loading=\"lazy\" allowfullscreen></iframe>" +
@@ -1269,7 +1278,8 @@ function renderNearby(nearby, nowIso) {
     return "";
   }
   const cards = entries.map(function (entry) { return renderNearbyCard(entry, nowIso); }).join("\n");
-  return "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">" +
+  return "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\" " +
+    "data-refresh=\"nearby\">" +
     renderSectionHeading("nearby-heading", "location-dot", "Nearby beaches") +
     "<div class=\"wa-grid wa-gap-m nearby-grid\">" + cards + "</div>" +
     "</section>";
@@ -1297,7 +1307,7 @@ function renderWebcam(beach) {
   const frameTitle = title ? title : "Nearby webcam";
   const lines = [];
   lines.push("<section class=\"wa-stack wa-gap-s\" " +
-    "aria-labelledby=\"webcam-heading\">");
+    "aria-labelledby=\"webcam-heading\" data-refresh=\"webcam\">");
   lines.push(renderSectionHeading("webcam-heading", "video", "Nearby webcam"));
   lines.push("<div class=\"wa-frame:landscape wa-border-radius-m framed-embed\">" +
     "<iframe class=\"webcam-frame\" src=\"" + escapeHtml(playerUrl) + "\"" +
@@ -1320,11 +1330,6 @@ function renderWebcam(beach) {
   lines.push("</section>");
   return lines.join("\n");
 }
-
-// Rendered marker for the tick row, matched by the detail page to decide
-// whether to ship the relabelling script. Kept beside the renderer that emits
-// it so the two cannot drift apart.
-const WAVE_TICKS_ROW_MARKER = "<div class=\"wave-chart-hours";
 
 // The data-iso attribute a tick carries so waveTicksScript.js can relabel it in
 // the viewer's own clock: the trimmed series start advanced by the tick's hour
@@ -1530,7 +1535,7 @@ function renderWaveForecast(estimate, waves, nowIso, waterClass) {
 
   const lines = [];
   lines.push("<section class=\"wave-forecast wa-stack wa-gap-s\" " +
-    "aria-labelledby=\"wave-forecast-heading\">");
+    "aria-labelledby=\"wave-forecast-heading\" data-refresh=\"waves\">");
   lines.push(renderSectionHeading("wave-forecast-heading", "chart-line", "Wave forecast"));
   if (strip.nowStat) {
     lines.push(strip.nowStat);
@@ -1581,7 +1586,7 @@ function renderWqFloorCallout(wqfloor) {
   const source = typeof wqfloor.source === "string" ? wqfloor.source.trim() : "";
   const updated = typeof wqfloor.updated === "string" ? wqfloor.updated.trim() : "";
   const variant = color === "red" ? "danger" : "warning";
-  let html = "<wa-callout variant=\"" + variant + "\" size=\"s\">" +
+  let html = "<wa-callout variant=\"" + variant + "\" size=\"s\" data-refresh=\"wqfloor\">" +
     "<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>" +
     "<strong>Water quality advisory</strong><br>" +
     escapeHtml(reason);
@@ -1820,7 +1825,8 @@ function renderAtAGlance(beach, estimate, waterTemp, reading, tides, nowIso) {
 
   if (tiles.length === 0) return "";
 
-  return "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\">" +
+  return "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"glance-heading\" " +
+    "data-refresh=\"glance\">" +
     renderSectionHeading("glance-heading", "gauge", "At a glance") +
     "<div class=\"wa-grid wa-gap-m glance-grid\">" + tiles.join("\n") + "</div>" +
     "</section>";
@@ -1914,7 +1920,7 @@ export function renderDetailPage(data) {
   const verdictText = verdictSentence(estimate, flag,
     typeof beach.water_class === "string" ? beach.water_class : null);
   const verdictHtml = verdictText ?
-    ("<p class=\"wa-body-l\">" + escapeHtml(verdictText) + "</p>") : "";
+    ("<p class=\"wa-body-l\" data-refresh=\"verdict\">" + escapeHtml(verdictText) + "</p>") : "";
   const publicId = publicBeachId(beach);
   const canonicalUrl = SITE_ORIGIN + "/beach/" + encodeURIComponent(publicId);
 
@@ -1945,12 +1951,12 @@ export function renderDetailPage(data) {
   // icon holds beach-flag): it is the one element per document a list row or a
   // nearby card morphs into.
   const heroHtml = "<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
-    flag.keyword + "\">" +
+    flag.keyword + "\" data-refresh=\"hero\">" +
     "<a class=\"back-link icon-link wa-gap-xs wa-color-text-link\" href=\"/\">" +
     "<wa-icon name=\"arrow-left\"></wa-icon> Back to all beaches</a>" +
-    "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\" style=\"view-transition-name: beach-title;\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
+    "<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\" style=\"view-transition-name: beach-title;\" data-refresh=\"title\">" + titleFlagHtml + "<span>" + escapeHtml(displayName(beach)) + "</span></h1>" +
     subtitleHtml +
-    "<p class=\"wa-cluster wa-gap-s\">" +
+    "<p class=\"wa-cluster wa-gap-s\" data-refresh=\"label\">" +
     "<span class=\"wa-heading-l\">" +
     escapeHtml(FLAG_LABELS[flag.color]) + "</span>" +
     heroBadgeHtml +
@@ -2028,17 +2034,19 @@ export function renderDetailPage(data) {
   // wa-stack.
   const mainHtml = heroHtml + glanceHtml + renderFlagLegend() + columnsHtml;
 
-  // The tick relabeller ships only when there are ticks to relabel: the wave
-  // section also renders as a bare now-stat (the buoy case), which has no strip.
-  const ticksScriptHtml = waveForecastHtml.indexOf(WAVE_TICKS_ROW_MARKER) === -1
-    ? ""
-    : ("<script>" + WAVE_TICKS_SCRIPT + "</script>");
-
+  // The tick relabeller ships on every detail page, ticks or not: a live
+  // refresh can bring in a wave section the served page had no strip for. The
+  // refresh consumer seeds its per-block serializations from the markup as
+  // served, so it runs before the relabeller rewrites the wave section; the
+  // scheduler goes last.
+  const ticksScriptHtml = "<script>" + WAVE_TICKS_SCRIPT + "</script>";
   const bodyHtml = renderPageShell(renderBrandHeader(), mainHtml, renderFooter(),
     "detail-main") +
     "<script>" + DETAIL_HERO_SCRIPT + "</script>" +
     "<script>" + DETAIL_FAVORITE_SCRIPT + "</script>" +
-    "<script>" + ROW_TRANSITION_SCRIPT + "</script>" + ticksScriptHtml;
+    "<script>" + ROW_TRANSITION_SCRIPT + "</script>" +
+    "<script>" + DETAIL_REFRESH_SCRIPT + "</script>" + ticksScriptHtml +
+    "<script>" + LIVE_REFRESH_SCRIPT + "</script>";
   // The share card, title, hero, rows and map marker are one displayFlag decision.
   return renderDocument(title, bodyHtml, {
     title: title,

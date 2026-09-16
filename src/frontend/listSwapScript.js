@@ -14,6 +14,15 @@
 // list nodes are missing so the caller can fall back to a full navigation. It
 // dispatches "swimreport:listswap" on document after a successful swap, which is
 // how searchScript.js re-applies its filters to the replaced rows.
+//
+// Two shared values ride along. window.__swimReportListHtml is the
+// serialization of the list fragment the page currently shows, seeded here
+// before any component upgrades and rewritten on every swap, so
+// listRefreshScript.js can tell an unchanged response from a changed one.
+// window.__swimReportListFetchUrl builds the cacheable fetch URL for a set of
+// list params: a "near" is added from the map's data-center when the params
+// carry none, because a "/?near=..." response is fully URL-determined and
+// edge-cacheable where the bare "/" is personalized by IP and never cached.
 
 const SCRIPT_LINES = [
   "(function () {",
@@ -21,6 +30,19 @@ const SCRIPT_LINES = [
   // captures it before its fetch and drops a stale response, so a slow fetch
   // from one can never overwrite a newer swap from the other.
   "  window.__swimReportListGen = window.__swimReportListGen || 0;",
+  "  const seedList = document.getElementById('beach-list-items');",
+  "  window.__swimReportListHtml = seedList ? seedList.innerHTML : '';",
+  "  window.__swimReportListFetchUrl = function (params) {",
+  "    const fetchParams = new URLSearchParams(params);",
+  "    if (!fetchParams.get('near')) {",
+  "      const mapEl = document.getElementById('home-map');",
+  "      const baked = mapEl ? (mapEl.getAttribute('data-center') || '') : '';",
+  "      if (baked) {",
+  "        fetchParams.set('near', baked);",
+  "      }",
+  "    }",
+  "    return '/?' + fetchParams.toString();",
+  "  };",
   "  window.__swimReportSwapList = function (doc) {",
   "    const nextList = doc.getElementById('beach-list-items');",
   "    const currentList = document.getElementById('beach-list-items');",
@@ -28,6 +50,7 @@ const SCRIPT_LINES = [
   "      return false;",
   "    }",
   "    currentList.innerHTML = nextList.innerHTML;",
+  "    window.__swimReportListHtml = nextList.innerHTML;",
   // Update the empty state in place, never replace the node: searchScript.js
   // captured #beach-list-empty by reference at load.
   "    const nextEmpty = doc.getElementById('beach-list-empty');",

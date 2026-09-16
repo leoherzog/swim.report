@@ -599,8 +599,8 @@ describe("detail-page section headings and order", () => {
       html.indexOf("class=\"estimate-card\""),
       html.indexOf("<section class=\"wave-forecast"),
       html.indexOf("<section class=\"wave-map"),
-      html.indexOf("<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"webcam-heading\">"),
-      html.indexOf("<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">")
+      html.indexOf("aria-labelledby=\"webcam-heading\" data-refresh=\"webcam\">"),
+      html.indexOf("aria-labelledby=\"nearby-heading\" data-refresh=\"nearby\">")
     ];
     for (let i = 0; i < order.length; i++) {
       expect(order[i]).toBeGreaterThan(i === 0 ? -1 : order[i - 1]);

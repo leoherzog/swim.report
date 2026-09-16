@@ -68,7 +68,7 @@ function render(extra) {
 
 // The verdict paragraph's text, or null when the line is absent.
 function verdict(html) {
-  const m = html.match(/<p class="wa-body-l">([^<]*)<\/p>/);
+  const m = html.match(/<p class="wa-body-l" data-refresh="verdict">([^<]*)<\/p>/);
   return m ? m[1] : null;
 }
 
@@ -80,7 +80,7 @@ describe("detail-page verdict line", function () {
   it("sits between the flag label and the coordinates line", function () {
     const html = render({});
     const label = html.indexOf("<span class=\"wa-heading-l\">");
-    const line = html.indexOf("<p class=\"wa-body-l\">");
+    const line = html.indexOf("<p class=\"wa-body-l\" data-refresh=\"verdict\">");
     const meta = html.indexOf("<a class=\"coords-link");
     expect(label).toBeGreaterThan(-1);
     expect(line).toBeGreaterThan(label);
@@ -111,7 +111,7 @@ describe("detail-page verdict line", function () {
       estimate: { color: "green", reason: "Estimated wave height 1.2 ft", updated: FRESH }
     });
     expect(verdict(html)).toBe(null);
-    expect(html.indexOf("<p class=\"wa-body-l\">")).toBe(-1);
+    expect(html.indexOf("<p class=\"wa-body-l\" data-refresh=\"verdict\">")).toBe(-1);
   });
 
   it("escapes an alert name from upstream", function () {
@@ -124,7 +124,7 @@ describe("detail-page verdict line", function () {
         alertDetails: [{ event: "Beach \"Hazards\" <Statement>", onset: null, ends: null }]
       })
     });
-    expect(html).toContain("<p class=\"wa-body-l\">Beach &quot;Hazards&quot; " +
+    expect(html).toContain("<p class=\"wa-body-l\" data-refresh=\"verdict\">Beach &quot;Hazards&quot; " +
       "&lt;Statement&gt; in effect.</p>");
   });
 

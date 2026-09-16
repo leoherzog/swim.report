@@ -58,7 +58,7 @@ describe("cross-document view transitions", () => {
   it("names both morph targets in the detail hero", () => {
     const html = detailPage();
     expect(html).toContain("<h1 class=\"beach-title wa-cluster wa-gap-s wa-flex-nowrap\"" +
-      " style=\"view-transition-name: beach-title;\">");
+      " style=\"view-transition-name: beach-title;\" data-refresh=\"title\">");
     // The hero icon stays decorative — the flag label right below it names the
     // color — so the transition name is the only attribute it gains.
     expect(html).toContain("<wa-icon style=\"view-transition-name: beach-flag;\"" +
@@ -139,8 +139,12 @@ describe("cross-document view transitions", () => {
     expect(ROW_TRANSITION_SCRIPT).toContain("claim(link.querySelector('wa-badge'), 'beach-flag');");
     // The hero owns both names in the same document, so it gives them up for
     // the click and takes them back on a bfcache restore.
-    expect(ROW_TRANSITION_SCRIPT).toContain("heroTitle.style.viewTransitionName = 'none';");
-    expect(ROW_TRANSITION_SCRIPT).toContain("heroFlag.style.viewTransitionName = 'none';");
+    expect(ROW_TRANSITION_SCRIPT).toContain("title.style.viewTransitionName = 'none';");
+    expect(ROW_TRANSITION_SCRIPT).toContain("flag.style.viewTransitionName = 'none';");
+    // Looked up at each use: the live refresh replaces the hero's h1, and a
+    // reference held at load would name a detached element.
+    expect(ROW_TRANSITION_SCRIPT).toContain("const heroTitle = function () {");
+    expect(ROW_TRANSITION_SCRIPT).not.toContain("const heroTitle = document.querySelector");
     expect(ROW_TRANSITION_SCRIPT).toContain("window.addEventListener('pageshow', release);");
   });
 

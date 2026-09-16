@@ -1020,7 +1020,7 @@ describe("handleDetail nearby beaches", () => {
     const res = await handleRequest(detailRequest("osm-way-9"), env, makeCtx());
     expect(res.status).toBe(200);
     const html = await res.text();
-    const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
+    const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\" data-refresh=\"nearby\">", "</section>");
     expect(section).toContain("Nearby beaches");
     expect(section.split("<wa-card class=\"nearby-card\"").length - 1).toBe(3);
     expect(section.indexOf("/beach/b-1")).toBeLessThan(section.indexOf("/beach/b-2"));
@@ -1050,7 +1050,7 @@ describe("handleDetail nearby beaches", () => {
     });
     const html = await (await handleRequest(detailRequest("osm-way-9"), env, makeCtx())).text();
     const first = sliceBetween(
-      sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>"),
+      sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\" data-refresh=\"nearby\">", "</section>"),
       "<wa-card class=\"nearby-card\"", "</wa-card>"
     );
     expect(first).toContain("UNKNOWN");
@@ -1093,7 +1093,7 @@ describe("handleDetail nearby beaches", () => {
     expect(distanceMi(self.lat, self.lon, past.lat, past.lon)).toBeGreaterThan(50);
     const { env } = nearbyEnv([self, east, north, past]);
     const html = await (await handleRequest(detailRequest("osm-way-9"), env, makeCtx())).text();
-    const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
+    const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\" data-refresh=\"nearby\">", "</section>");
     expect(section).toContain("/beach/b-east");
     expect(section).toContain("/beach/b-north");
     expect(section).not.toContain("/beach/b-past");
@@ -1117,7 +1117,7 @@ describe("handleDetail nearby beaches", () => {
     const east = { id: "b-east-seam", name: "East of the seam", lat: 52.0, lon: 179.95 };
     const { env, statements } = nearbyEnv([west, east]);
     const html = await (await handleRequest(detailRequest("osm-way-8"), env, makeCtx())).text();
-    expect(sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>")).toContain("/beach/b-east-seam");
+    expect(sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\" data-refresh=\"nearby\">", "</section>")).toContain("/beach/b-east-seam");
     const st = nearbySql(statements);
     expect(st.sql).not.toContain("lon BETWEEN");
     expect(st.args.length).toBe(3);
@@ -1944,7 +1944,7 @@ describe("every surface shows the one displayFlag decision", () => {
       const res = await handleRequest(getRequest("/beach/" + pub(HOST.id)), envFor(fixture, id), makeCtx());
       expect(res.status).toBe(200);
       const html = await res.text();
-      const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\">", "</section>");
+      const section = sliceBetween(html, "<section class=\"wa-stack wa-gap-s\" aria-labelledby=\"nearby-heading\" data-refresh=\"nearby\">", "</section>");
       const card = enclosing(section, shortId, "<wa-card class=\"nearby-card\"", "</wa-card>");
       expectCompactFlag(card, d);
     });
@@ -1954,13 +1954,13 @@ describe("every surface shows the one displayFlag decision", () => {
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain("<section class=\"detail-hero wa-stack wa-gap-s\" data-flag=\"" +
-        d.keyword + "\">");
+        d.keyword + "\" data-refresh=\"hero\">");
       expect(sliceBetween(html, "<span class=\"wa-heading-l\">", "</span>")).toBe(
         "<span class=\"wa-heading-l\">" +
         HERO_LABELS[d.color] + "</span>");
       const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
       expect(h1).toContain("flag-icon-" + d.keyword);
-      const heroFlag = sliceBetween(html, "<p class=\"wa-cluster wa-gap-s\">", "</p>");
+      const heroFlag = sliceBetween(html, "<p class=\"wa-cluster wa-gap-s\" data-refresh=\"label\">", "</p>");
       expect(heroFlag.indexOf("OFFICIAL</wa-badge>") !== -1).toBe(d.source === "official");
       expect(heroFlag.indexOf(">ESTIMATE</wa-badge>") !== -1).toBe(d.source === "estimate");
       expect(html).toContain("<meta property=\"og:image\" content=\"https://swim.report/og/" +
@@ -2559,7 +2559,7 @@ describe("search script <-> rendered markup id contract", () => {
     // cacheable, while the shareable replaceState url stays clean.
     expect(LIST_SEARCH_SCRIPT).toContain("data-complete");
     expect(LIST_SEARCH_SCRIPT).toContain("fetchUrl");
-    expect(LIST_SEARCH_SCRIPT).toContain("bakedCenter");
+    expect(LIST_SEARCH_SCRIPT).toContain("__swimReportListFetchUrl");
     // The green-only filter: one persistence key, both accesses guarded, the
     // switch's id, the row attribute it reads, and the swap hook that re-applies
     // it after every row replacement.

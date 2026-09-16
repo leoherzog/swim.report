@@ -78,7 +78,9 @@ function makeStubs(propertyValue, attrs) {
   const style = { layers: [{ id: "water", type: "fill" }, { id: "labels", type: "symbol" }] };
 
   const map = {
-    addSource(id, spec) { added.sources[id] = spec; },
+    addSource(id, spec) {
+      added.sources[id] = Object.assign({ setData(fc) { added.setData = fc; } }, spec);
+    },
     addLayer(spec, beforeId) { added.layers.push(spec); added.before.push(beforeId); },
     getStyle: () => style,
     on(type, a, b) { handlers.push({ type: type, layer: b ? a : null, fn: b || a }); },
@@ -212,6 +214,42 @@ describe("map script runtime", () => {
     const click = s.handlers.find((h) => h.type === "click" && h.layer === "flags");
     click.fn({ features: [{ properties: { id: "beach-2" } }] });
     expect(s.nav.href).toBe("/beach/beach-2");
+  });
+
+  it("refetches the directory into the live source on a refresh tick", async () => {
+    const s = await runScript("#4f8051");
+    const calls = [];
+    const fresh = { type: "FeatureCollection", features: FEATURES.features.slice(0, 2) };
+    globalThis.fetch = async (url, init) => { calls.push({ url: url, init: init }); return { ok: true, json: async () => fresh }; };
+    const refresh = s.docHandlers.find((h) => h.type === "swimreport:refresh");
+    refresh.fn();
+    // A second tick while the first is out is dropped, not queued.
+    refresh.fn();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe("/api/beaches.geojson");
+    // no-cache revalidates against the endpoint's ETag rather than re-serving
+    // the browser's copy.
+    expect(calls[0].init.cache).toBe("no-cache");
+    expect(s.added.setData).toBe(fresh);
+    // The source took the data in place: no new source, no new layer.
+    expect(Object.keys(s.added.sources)).toEqual(["beaches"]);
+    expect(s.added.layers.length).toBe(5);
+  });
+
+  it("ignores a refresh tick while the map has no source to feed", async () => {
+    const stubs = makeStubs("#4f8051");
+    globalThis.fetch = async () => { throw new Error("network down"); };
+    // eslint-disable-next-line no-new-func
+    new Function(scriptWithStubModule())();
+    await new Promise((r) => setTimeout(r, 50));
+    stubs.handlers.filter((h) => h.type === "load").forEach((h) => h.fn());
+    await new Promise((r) => setTimeout(r, 50));
+    const calls = [];
+    globalThis.fetch = async (url) => { calls.push(url); return { ok: true, json: async () => FEATURES }; };
+    stubs.docHandlers.find((h) => h.type === "swimreport:refresh").fn();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual([]);
   });
 
   it("names the feature count so a silent map has one line to check", async () => {

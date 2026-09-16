@@ -186,7 +186,7 @@ describe("favorites script constants", () => {
     expect(LIST_FAVORITES_SCRIPT).toContain("const ids = favorites.concat(recent).slice(0, IDS_MAX);");
     // A failed fetch leaves the section hidden.
     expect(LIST_FAVORITES_SCRIPT).toContain("}).catch(function (err) {");
-    expect(LIST_FAVORITES_SCRIPT).toContain("section.hidden = false;");
+    expect(LIST_FAVORITES_SCRIPT).toContain("section.hidden = savedCount === 0 && recentCount === 0;");
     // Server-owned markup: rows are copied as they came, never rebuilt, and the
     // caller's id order decides where each one lands.
     expect(LIST_FAVORITES_SCRIPT).toContain("const copy = document.importNode(row, true);");

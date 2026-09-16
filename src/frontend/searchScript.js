@@ -180,8 +180,6 @@ const SCRIPT_LINES = [
   // would sort by. seq plus the value/generation guards drop stale responses;
   // controller aborts the previous in-flight request.
   "  const DEBOUNCE_MS = 250;",
-  "  const mapEl = document.getElementById('home-map');",
-  "  const bakedCenter = mapEl ? (mapEl.getAttribute('data-center') || '') : '';",
   "  let timer = null;",
   "  let controller = null;",
   "  let seq = 0;",
@@ -233,13 +231,12 @@ const SCRIPT_LINES = [
   "    }",
   "    const queryString = params.toString();",
   "    const nextUrl = queryString ? ('/?' + queryString) : '/';",
-  // Prefer the URL's near (precise, post-grant), else the baked-in server
-  // center; near-less and uncacheable only when neither exists.
-  "    const fetchParams = new URLSearchParams(params);",
-  "    if (!fetchParams.get('near') && bakedCenter) {",
-  "      fetchParams.set('near', bakedCenter);",
-  "    }",
-  "    const fetchUrl = '/?' + fetchParams.toString();",
+  // The cacheable form of the same URL, from listSwapScript.js: the URL's near
+  // (precise, post-grant), else the map's baked-in server center; near-less
+  // and uncacheable only when neither exists.
+  "    const fetchUrl = window.__swimReportListFetchUrl",
+  "      ? window.__swimReportListFetchUrl(params)",
+  "      : ('/?' + params.toString());",
   "    if (controller) {",
   "      controller.abort();",
   "    }",

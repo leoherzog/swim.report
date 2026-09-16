@@ -30,7 +30,7 @@ function renderWith(wqfloor) {
 describe("water-quality advisory callout", () => {
   it("renders a danger callout with reason, source and updated line for a red advisory", () => {
     const html = renderWith(ADVISORY);
-    expect(html).toContain("<wa-callout variant=\"danger\" size=\"s\">");
+    expect(html).toContain("<wa-callout variant=\"danger\" size=\"s\" data-refresh=\"wqfloor\">");
     expect(html).toContain("<wa-icon slot=\"icon\" name=\"droplet\"></wa-icon>");
     expect(html).toContain("<strong>Water quality advisory</strong>");
     expect(html).toContain("beach posted for elevated E. coli");
@@ -47,13 +47,13 @@ describe("water-quality advisory callout", () => {
       color: "yellow",
       reason: "swim advisory in effect"
     }));
-    expect(html).toContain("<wa-callout variant=\"warning\" size=\"s\">");
+    expect(html).toContain("<wa-callout variant=\"warning\" size=\"s\" data-refresh=\"wqfloor\">");
     expect(html).toContain("swim advisory in effect");
   });
 
   it("never presents the advisory as an official reading", () => {
     const html = renderWith(ADVISORY);
-    const start = html.indexOf("<wa-callout variant=\"danger\" size=\"s\">");
+    const start = html.indexOf("<wa-callout variant=\"danger\" size=\"s\" data-refresh=\"wqfloor\">");
     const end = html.indexOf("</wa-callout>", start);
     const callout = html.slice(start, end);
     expect(callout).not.toContain("OFFICIAL");

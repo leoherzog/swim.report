@@ -4248,7 +4248,14 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // re-apply both of them. That event means fresh server markup arrived, so its
       // listener re-captures the server's empty-state copy before filtering; rows merely
       // appended elsewhere on the page announce themselves with "swimreport:rowsadded"
-      // instead, which only re-filters. It then rewrites the URL via history.replaceState and
+      // instead, which only re-filters. The swap helper (src/frontend/listSwapScript.js)
+      // also keeps two window values: window.__swimReportListHtml, the innerHTML of
+      // #beach-list-items as shown, seeded before any component upgrade and rewritten on
+      // every swap, which is how the live refresh tells an unchanged response from a
+      // changed one; and window.__swimReportListFetchUrl(params), which adds "near" from
+      // #home-map's data-center when the params carry none, so a fetch takes the
+      // cacheable "/?near=" form. The live search and the live refresh (Page skeleton)
+      // both fetch through it. The geo script then rewrites the URL via history.replaceState and
       // dispatches a "swimreport:nearupdate" CustomEvent on document so the map script
       // re-centers, and announces the reorder into the
       // #geo-live-region aria-live element (rendered empty, class wa-visually-hidden,
@@ -4426,7 +4433,13 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // makes the section filter along with the list.
       // __swimReportSwapList touches only #beach-list-items, #beach-list-empty and
       // #list-active-query, so the section itself survives every geo and search swap
-      // untouched and re-fetches nothing.
+      // untouched and re-fetches nothing. The fill is load(harvest): load(true) is the
+      // load-time pass above, and on "swimreport:refresh" (Page skeleton) the script runs
+      // load(false), which re-reads the stored ids so a beach saved in another tab
+      // appears, fetches every id through "/?ids=" with cache: 'no-cache', empties and
+      // refills both lists, hides the section when nothing came back and dispatches
+      // "swimreport:rowsadded" as at load. The tick is skipped while a fetch is in flight
+      // or focus is inside the section.
 
     export function renderDetailPage(data)
       // data = { beach: BeachRow, estimate: FlagEstimate|null,
@@ -4474,6 +4487,52 @@ exporting a CSS string); render.js is the sole module the router imports.
   progressive enhancements and neither is required for a correct page. The key names, the cap and IDS_LIST_LIMIT (src/idsListLimit.js, shared with the
   route in src/router.js) are interpolated into the script text from those constants, since
   a script body is text and cannot import.
+- Live refresh (src/frontend/refreshScript.js, LIVE_REFRESH_SCRIPT, embedded last on both
+  pages): a scheduler that fetches nothing. Every REFRESH_INTERVAL_MS (300000) while
+  document.visibilityState is not "hidden" it dispatches a "swimreport:refresh" CustomEvent
+  on document. A hidden tab's ticks are skipped, not deferred, and one fires on the next
+  visibilitychange to visible or a bfcache pageshow (event.persisted) when an interval has
+  passed since the last tick. Five minutes because the alerts refresh cron moves a color
+  every ten and the edge cache bounds a served page at two minutes old. Each consumer
+  refetches with cache: 'no-cache', skips while its own fetch is in flight, and logs a
+  failure while keeping what it has, so a visible tab costs at most one cacheable request
+  per consumer per tick.
+  - List page: LIST_REFRESH_SCRIPT (src/frontend/listRefreshScript.js) fetches
+    window.__swimReportListFetchUrl(new URLSearchParams(location.search)) and hands the
+    parsed document to window.__swimReportSwapList, so rows, empty state and active-query
+    line move exactly as for a search or geolocation upgrade and "swimreport:listswap"
+    re-applies the client filters; the URL is never rewritten. It drops a response when
+    __swimReportListGen moved during the fetch, skips when the fetched #beach-list-items
+    innerHTML equals window.__swimReportListHtml, and defers while document.activeElement
+    is inside the list. The map script, once its 'beaches' source exists, refetches
+    /api/beaches.geojson (revalidated against the ETag, so an unchanged directory answers
+    304) and calls source.setData: no layer rebuild, no view change, one refetch at a time.
+    LIST_FAVORITES_SCRIPT runs its load(false) refill (renderListPage above).
+  - Detail page: DETAIL_REFRESH_SCRIPT (src/frontend/detailRefreshScript.js) fetches
+    window.location.pathname, requires main.detail-main in the response (else logs "detail
+    refresh failed: not a detail page" and changes nothing) and reconciles the blocks
+    render.js marks data-refresh="<key>" (the keys are listed under "Detail page, in
+    order"). A leaf block, one with no keyed descendant, is replaced whole
+    (document.importNode) when its outerHTML differs from the serialization last applied
+    under its key, seeded from the live DOM before any component upgrade, which is why the
+    script sits before WAVE_TICKS_SCRIPT. A leaf the page lacked goes after the nearest
+    preceding keyed sibling the page has, else before the nearest following one, else it
+    waits for a reload; a leaf the fresh page no longer carries is removed. A container
+    block, one holding keyed blocks, only has its attributes synced and is never inserted
+    or removed; the hero is the only container and is on every page. A block with focus or
+    a non-collapsed text selection inside it waits for the next tick, and an open
+    wa-details inside a replaced block stays open in the replacement, matched by its
+    summary attribute or its slotted summary text.
+    Afterwards the fresh page's link[rel="icon"] href is copied onto the live one, so the
+    tab flag follows the color, and "swimreport:refreshed" is dispatched; waveTicksScript.js
+    relabels on it and skips rows carrying data-relabeled. Everything outside a keyed block
+    is untouched: back link, share row (copy, Share, Save), flag legend, shell.
+    rowTransitionScript.js looks the hero h1 up at each use because the refresh replaces it.
+  Script order: list page swap, search, geo, favorites, LIST_REFRESH, row transition,
+  MapLibre CSS plus map script, LIVE_REFRESH last; detail page hero, favorite, row
+  transition, DETAIL_REFRESH, ticks, LIVE_REFRESH last. The request path is
+  unchanged: every refresh is one of the cacheable GETs the pages already serve, and
+  nothing new reaches the server.
 - In head, load Web Awesome Pro via the version-pinned CDN kit (WA_KIT_BASE in
   render.js): the matter-theme, native, and utilities stylesheets plus the
   webawesome.loader.js module script.
@@ -4772,6 +4831,15 @@ exporting a CSS string); render.js is the sole module the router imports.
     icon and the site's own words, plus a note that estimated flags are computed here from
     forecasts and alerts, official flags are posted at the beach, and posted flags and
     lifeguards always win. Static copy, so nothing in it is escaped.
+  - Refresh keys: every block the live refresh (Page skeleton) reconciles carries
+    data-refresh. hero (section.detail-hero, the one container; data-flag is synced),
+    title (the h1), label (the flag-label paragraph), verdict (optional), glance (the
+    at-a-glance section), official (the official wa-card), estimate (the estimate wa-card,
+    always rendered, so official and wqfloor have a keyed sibling to land beside), wqfloor
+    (the water-quality wa-callout), waves (the wave-forecast section), wave-map (the Windy
+    section, which serializes identically on every fetch so its iframe is never rebuilt),
+    webcam (a rotated cam replaces itself) and nearby (the nearby-beaches section). The
+    back link, share row and flag legend carry no key and are never touched.
   Then the collapsed flag legend, then the flag cards, answer first and exploration
   second: official card (if any) → estimate card → water-quality advisory callout (if any) →
   wave forecast section → wave map section → nearby-webcam section (if any) → nearby beaches
@@ -5274,7 +5342,7 @@ test uses symbolically.
   the stat line, under the section heading), the outlook sentence (steady/rising/falling
   exact spans on the badge-carrying line, the badge-only row, omitted without a series), the
   hour ticks' data-iso instants (dated from the trimmed start, not the payload start) and the
-  WAVE_TICKS_SCRIPT embed gate, the hazard lane (positioned band + tooltip, rip band,
+  WAVE_TICKS_SCRIPT embed on every detail page, the hazard lane (positioned band + tooltip, rip band,
   no lane for legacy estimates or without a series), the buoy case (stat without strip),
   legacy/absent payload omission, and the stale warning.
 - test/renderAlertDetails.test.js — the estimate card's per-alert disclosures via
