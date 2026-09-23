@@ -239,3 +239,81 @@ describe("lakeCountyOhBeaches.scrape - off-season", function () {
     expect(result.source).toBe(LAKE_COUNTY_LABEL);
   });
 });
+
+// Mirrors the live lcghd.org structure: both names in the head metadata and
+// the intro, en dash separators, and the Fairport line's colon inside the
+// first mark with a space before <strong>.
+function livePageHead() {
+  return "<html><head>" +
+    "<meta name=\"description\" content=\"The Lake County General Health District monitors the bacteria level in lake water at Headlands Beach State Park and Fairport Harbor Lakefront Park beaches daily.\">" +
+    "<script type=\"application/ld+json\">{\"description\":\"Monitors the bacteria level at Headlands Beach State Park and Fairport Harbor Lakefront Park beaches daily.\"}</script>" +
+    "</head><body>" +
+    "<p>The Beach Water Quality Program monitors Headlands Beach State Park and Fairport Harbor Lakefront Park daily.</p>" +
+    "<p><strong><mark>The 2026 Beach Water Quality Sampling Program has ended for this year. </mark></strong></p>";
+}
+
+function livePageLines(headlandsValue, fairportValue, separator) {
+  return "<p class=\"has-red-color\"><mark class=\"has-inline-color has-gray-dark-color\">Headlands Beach State Park" +
+    separator + "Water Bacteria Quality Prediction: </mark><strong><mark class=\"has-inline-color has-green-color\">" +
+    headlandsValue + "</mark></strong></p>" +
+    "<p>Headlands Beach State Park Water Temperature*: <strong>00.0° F</strong></p>" +
+    "<p class=\"has-red-color\"><mark class=\"has-inline-color has-gray-dark-color\">Fairport Harbor Lakefront Park" +
+    separator + "Water Bacteria Quality Prediction:</mark> <strong><mark class=\"has-inline-color has-green-color\">" +
+    fairportValue + "</mark></strong></p>" +
+    "<p>Fairport Harbor Lakefront Park Water Temperature*: <strong>00.0° F</strong></p>";
+}
+
+function livePage(headlandsValue, fairportValue) {
+  return livePageHead() + livePageLines(headlandsValue, fairportValue, " – ") + "</body></html>";
+}
+
+describe("parseLakeCountyOhBeaches - live page structure", function () {
+  it("emits a yellow site for Headlands when only Headlands reads POOR", function () {
+    const sites = parseLakeCountyOhBeaches(livePage("POOR", "GOOD"), NOW_ISO);
+    expect(sites.length).toBe(1);
+    expect(sites[0].siteId).toBe("headlands-beach-state-park");
+    expect(sites[0].floorColor).toBe("yellow");
+    expect(sites[0].reason).toBe("Lake County GHD bacteria prediction: POOR");
+  });
+
+  it("credits Fairport's POOR to Fairport, never to Headlands", function () {
+    const sites = parseLakeCountyOhBeaches(livePage("GOOD", "POOR"), NOW_ISO);
+    expect(sites.length).toBe(1);
+    expect(sites[0].siteId).toBe("fairport-harbor-lakefront-park");
+    expect(sites[0].floorColor).toBe("yellow");
+  });
+
+  it("emits no sites for the off-season em dash placeholder", function () {
+    expect(parseLakeCountyOhBeaches(livePage("&#8212;", "&#8212;"), NOW_ISO)).toEqual([]);
+  });
+
+  it("emits no sites for an empty value rather than reading the next paragraph", function () {
+    expect(parseLakeCountyOhBeaches(livePage("", ""), NOW_ISO)).toEqual([]);
+  });
+
+  it("emits no site for an unrecognized word", function () {
+    expect(parseLakeCountyOhBeaches(livePage("PENDING", "GOOD"), NOW_ISO)).toEqual([]);
+  });
+
+  it("returns null when the names survive only in the head and intro", function () {
+    const html = livePageHead() + "</body></html>";
+    expect(parseLakeCountyOhBeaches(html, NOW_ISO)).toBe(null);
+  });
+
+  it("returns null when the line separator drifts to an unrecognized form", function () {
+    const html = livePageHead() + livePageLines("POOR", "POOR", " / ") + "</body></html>";
+    expect(parseLakeCountyOhBeaches(html, NOW_ISO)).toBe(null);
+  });
+});
+
+describe("extractStatusForBeach - live page structure", function () {
+  it("reads Fairport's own word, not the Headlands word that precedes it", function () {
+    const text = livePage("GOOD", "POOR")
+      .replace(/<head[\s\S]*?<\/head>/, " ")
+      .replace(/<\/p>/g, " | ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ");
+    expect(extractStatusForBeach(text, { names: ["fairport harbor lakefront park"] })).toBe("poor");
+    expect(extractStatusForBeach(text, { names: ["headlands beach state park"] })).toBe("good");
+  });
+});

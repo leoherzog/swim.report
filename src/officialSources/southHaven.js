@@ -3,9 +3,9 @@
 //
 // The flag information page carries only a static legend, one image each of
 // Green/Yellow/Red/Grey2.png explaining what the colors mean, and must never be
-// parsed for a live color. The live feed is the published Google Sheet linked
-// from that page as the "text version" (the ADA alternative): a headerless CSV
-// with one sentence per line, for example
+// parsed for a live color. The live feed is a published Google Sheet, a
+// headerless CSV. The flag page embeds a Safe Beach Day iframe and links no
+// sheet, so scrape() reads the pinned SOUTH_HAVEN_CSV_URL. The CSV carries one sentence per line, for example
 //   "Flag #6 North Beach is Green"
 //   "North Pier is Open"
 // Flags #6-#9 all belong to North Beach and #10-#12 to South Beach (multiple
@@ -29,8 +29,8 @@ import { fetchText, FLAG_SEVERITY } from "./util.js";
 export const SOUTH_HAVEN_URL =
   "https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php";
 
-// Known-good CSV export of the published Google Sheet (fallback when the
-// page-scrape extraction fails). The docs.google.com pub URL 307-redirects to
+// Known-good CSV export of the published Google Sheet (used whenever the flag
+// page links no sheet). The docs.google.com pub URL 307-redirects to
 // a signed, time-limited googleusercontent.com URL — always request this URL
 // fresh and follow redirects; never cache the redirect target.
 export const SOUTH_HAVEN_CSV_URL =
@@ -40,8 +40,8 @@ export const SOUTH_HAVEN_CSV_URL =
 // Workers' fetch sends none by default.
 export const SOUTH_HAVEN_USER_AGENT = "swim.report (hello@swim.report)";
 
-// Monitored season and daily hours in America/Detroit local time, from the flag
-// page's own legend: a gray flag means conditions are not being monitored
+// Monitored season and daily hours in America/Detroit local time, from the
+// city's published Beach Safety Program legend: a gray flag means conditions are not being monitored
 // (9pm-9am) or the Beach Safety Program is out of season (Sept 15 - May 15). The
 // sheet carries no timestamp, so an abandoned sheet left on a colored value would
 // republish that stale color forever; outside this window colored output drops to
@@ -370,6 +370,9 @@ export const southHaven = {
     });
     let csvUrl = pageHtml === null ? null : extractSouthHavenCsvUrl(pageHtml);
     if (!csvUrl) {
+      if (pageHtml !== null) {
+        console.log("southHaven: flag page links no sheet, using fallback CSV URL");
+      }
       csvUrl = SOUTH_HAVEN_CSV_URL;
     }
     // The docs.google.com pub URL 307-redirects to a signed, single-use

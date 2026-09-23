@@ -5,7 +5,7 @@
 // (matches/scrape) is exercised only for its pure matches() gate; scrape()
 // itself is a thin fetch wrapper and is not network-tested here.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseMnBeaches,
   normalizeMnStatus,
@@ -39,6 +39,34 @@ function skyHarborEntry(overrides) {
   };
   return Object.assign(base, overrides || {});
 }
+
+// Shaped like the live off-season feed: entries carry no Status, Reason or Date.
+function offSeasonPayload(statusEntries) {
+  return {
+    MNBdataUpdated: "Fri Sep 04 2026 CDT",
+    MNBsiteactive: "False",
+    MNBmessage: "Beach monitoring has ended for the 2026 season. It will resume again in May 2027.",
+    MNBstatus: statusEntries,
+    MNBregions: []
+  };
+}
+
+function offSeasonEntry(stnId, name, lat, lng) {
+  return {
+    StnID: stnId,
+    lat: lat,
+    lng: lng,
+    Name: name,
+    Region: "Duluth",
+    Jurisdiction: "City of Duluth",
+    url: "",
+    Message: ""
+  };
+}
+
+afterEach(function () {
+  vi.restoreAllMocks();
+});
 
 describe("normalizeMnStatus", function () {
   it("recognizes Water Contact Acceptable", function () {
@@ -169,10 +197,51 @@ describe("parseMnBeaches", function () {
   });
 
   it("skips an entry with an unrecognized Status rather than guessing", function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
     const payload = buildPayload([
       skyHarborEntry({ Status: "Beach Closed For Construction" })
     ]);
     expect(parseMnBeaches(payload, NOW_ISO)).toEqual([]);
+    const unrecognized = logSpy.mock.calls.filter(function (call) {
+      return String(call[0]).indexOf("unrecognized Status") !== -1;
+    });
+    expect(unrecognized.length).toBe(1);
+  });
+
+  it("emits no site and does not log for off-season entries with no Status", function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const payload = offSeasonPayload([
+      offSeasonEntry("324142", "Park Point Beach House", "46.73170278", "-92.05061271"),
+      offSeasonEntry("324150", "Lakewalk Beach", "46.7867", "-92.0810"),
+      offSeasonEntry("324151", "Lakewalk East / 16th Avenue East Beach", "46.7960", "-92.0700"),
+      offSeasonEntry("324141", "Sky Harbor Parking Lot", "46.7282128", "-92.0519435")
+    ]);
+    expect(parseMnBeaches(payload, NOW_ISO)).toEqual([]);
+    const unrecognized = logSpy.mock.calls.filter(function (call) {
+      return String(call[0]).indexOf("unrecognized Status") !== -1;
+    });
+    expect(unrecognized).toEqual([]);
+  });
+
+  it("skips an entry whose Status is an empty or whitespace string without logging", function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const payload = buildPayload([
+      skyHarborEntry({ Status: "   " }),
+      skyHarborEntry({ Status: null })
+    ]);
+    expect(parseMnBeaches(payload, NOW_ISO)).toEqual([]);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it("still emits a floor when MNBsiteactive is False but a curated row is Not Recommended", function () {
+    const entry = offSeasonEntry("324142", "Park Point Beach House", "46.73170278", "-92.05061271");
+    entry.Status = "Water Contact Not Recommended";
+    entry.Reason = "High E. coli";
+    const sites = parseMnBeaches(offSeasonPayload([entry]), NOW_ISO);
+    expect(sites.length).toBe(1);
+    expect(sites[0].siteId).toBe("park-point-beach-house");
+    expect(sites[0].floorColor).toBe("yellow");
+    expect(sites[0].reason).toBe("MN Dept. of Health beach monitoring: High E. coli");
   });
 
   it("resolves all six curated stations by name substring", function () {

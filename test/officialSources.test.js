@@ -1136,6 +1136,41 @@ describe("southHaven.scrape orchestration", function() {
     expect(calls[1].init.headers["User-Agent"]).toBe(SOUTH_HAVEN_USER_AGENT);
   });
 
+  it("logs when the flag page links no sheet and fetches the fallback CSV", async function() {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function() {});
+    const calls = installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return csvResponse("<iframe src=\"https://safebeachday.com/south-haven-beach/\"></iframe>");
+      }
+      return csvResponse(LIVE_CSV);
+    });
+    const result = await southHaven.scrape(IN_WINDOW_ISO);
+    expect(calls[1].url).toBe(SOUTH_HAVEN_CSV_URL);
+    expect(result.sources).toEqual([SOUTH_HAVEN_URL, SOUTH_HAVEN_CSV_URL]);
+    expect(logSpy).toHaveBeenCalledWith("southHaven: flag page links no sheet, using fallback CSV URL");
+    logSpy.mockRestore();
+  });
+
+  it("does not log the fallback line when the flag page fetch fails", async function() {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function() {});
+    const calls = installFetch(function(url) {
+      if (url === SOUTH_HAVEN_URL) {
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          text: function() {
+            return Promise.resolve("Forbidden");
+          }
+        });
+      }
+      return csvResponse(LIVE_CSV);
+    });
+    await southHaven.scrape(IN_WINDOW_ISO);
+    expect(calls[1].url).toBe(SOUTH_HAVEN_CSV_URL);
+    expect(logSpy).not.toHaveBeenCalledWith("southHaven: flag page links no sheet, using fallback CSV URL");
+    logSpy.mockRestore();
+  });
+
   it("uses the rebuilt CSV export URL from the page and reports both sources", async function() {
     const rebuiltCsvUrl =
       "https://docs.google.com/spreadsheets/d/e/2PACX-newid_123/pub?gid=42&single=true&output=csv";

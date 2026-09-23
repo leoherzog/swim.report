@@ -828,12 +828,12 @@ returns the first scraper whose `matches(beach)` is true:
 
 | Scraper (id) | Source | Color semantics |
 |---|---|---|
-| South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV (linked from the flag page as the "text version") | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data. A beach naming no pole resolves to the nearest one and carries `reportedFor`, so the card names the pole it borrowed |
+| South Haven MI (`south-haven-mi`) | City flag program's published Google Sheets CSV, read from a pinned URL; the flag page links no sheet | Real flag colors per site; multiple poles roll up to most severe; Gray = unmonitored → no data. A beach naming no pole resolves to the nearest one and carries `reportedFor`, so the card names the pole it borrowed |
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion, never an inferred green |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red; records >36 h old dropped; a beach reports green only when its own Surf row is fresh, so a green resting solely on a water-quality row is no data rather than a false green |
 | NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance and the posted flag is that morning's observation, so it declares a 4 h `officialMaxAgeMs`: the record expires 4 h after issuance, absolute, alongside the readings. `staleMs` matches the lease and a "Morning reading" note covers the window past 2 h. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
 | Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
-| PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only |
+| PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only. The host refuses Worker egress, so production runs return no data |
 | NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | Zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
 
 Only hazard, flag and closure sources are registered. An official color **overrides** the
@@ -871,7 +871,7 @@ consulted last, only for beaches no curated source claims):
 | NY State Parks (`ny-oprhp-beach-status`) | OPRHP Lake Erie/Ontario state-park beaches |
 | Lake County OH (`lake-county-oh-beaches`) | Lake County (OH) GHD water-quality program |
 | Kenosha County WI (`kenosha-beach-conditions`) | Kenosha County beach conditions |
-| Minnesota DoH (`mn-beaches`) | mnbeaches.org (~6 Duluth-area sites) |
+| Minnesota DoH (`mn-beaches`) | mnbeaches.org (~6 Duluth-area sites); unreachable from Worker egress, so no floor from production |
 | Grey Bruce ON (`grey-bruce-rec-water`) | Grey Bruce Health Unit (Lake Huron) — low confidence |
 | Ontario Parks (`ontario-parks-beach-postings`) | Ontario Parks per-park Alerts |
 | Evanston IL (`evanston-statusfy`) | City of Evanston beach status |

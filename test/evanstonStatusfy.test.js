@@ -1,13 +1,13 @@
 // test/evanstonStatusfy.test.js
 // Pure-parser unit tests for the Evanston Statusfy water-quality floor source.
-// No network: fixtures are built inline.
+// No network: fixtures are built inline and scrape() runs against a stubbed fetch.
 //
 // The safety-critical property under test: a status-3 "Closed" floors to RED
 // ONLY when the reason names a whitelisted surf hazard; the nightly after-hours
 // operational closure, an Open page, an unknown status, and unparseable markup
 // ALL degrade to null (no floor), never a wrong color.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseStatusfyPage,
   parseStatusfyStatus,
@@ -240,5 +240,41 @@ describe("integration with the wqFloor resolver", function () {
     };
     const beach = { id: "osm-node-evanston-1", name: "Lighthouse Beach", park_name: "", lat: 42.0611, lon: -87.6741 };
     expect(scrapeWqFloorFromResult(beach, evanstonStatusfy, result)).toBe(null);
+  });
+});
+
+afterEach(function () {
+  vi.unstubAllGlobals();
+});
+
+describe("evanstonStatusfy.scrape", function () {
+  it("sends the project User-Agent on every page and returns a clean off-season run", async function () {
+    const openPage = "<html><body><strong class=\"status-1\">Open</strong></body></html>";
+    const closedPage = "<html><body>" +
+      "<span id=\"last-updated-time\" data-timestamp=\"1788824333\">Updated</span>" +
+      "<strong class=\"status-3\">Closed</strong>" +
+      "<p>The Evanston swimming beaches have closed for the season. No lifeguard will be on duty; swimming is not allowed.</p>" +
+      "</body></html>";
+    const fetchMock = vi.fn(async function (url) {
+      const body = String(url).endsWith("/3") ? openPage : closedPage;
+      return new Response(body, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await evanstonStatusfy.scrape("2026-09-22T12:00:00.000Z");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    for (let i = 0; i < fetchMock.mock.calls.length; i++) {
+      expect(fetchMock.mock.calls[i][1].headers["User-Agent"]).toBe("swim.report (hello@swim.report)");
+    }
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites.length).toBe(0);
+    expect(result.source).toBe(EVANSTON_LABEL);
+  });
+
+  it("returns null when every page answers 403", async function () {
+    vi.stubGlobal("fetch", vi.fn(async function () {
+      return new Response("<html>403 Forbidden</html>", { status: 403 });
+    }));
+    expect(await evanstonStatusfy.scrape("2026-09-22T12:00:00.000Z")).toBe(null);
   });
 });

@@ -2402,9 +2402,8 @@ Date.now(), no ambient clock.
       "https://www.southhavenmi.gov/parks_and_recreation/beach_flag_information.php";
 
     // The flag page carries only a static legend explaining what the colors mean; it
-    // must never be parsed for a live color. The live feed is the published Google
-    // Sheet linked from the page as the "text version" (ADA alternative): a headerless
-    // CSV, one sentence per line, e.g. "Flag #6 North Beach is Green" / "North Pier is
+    // must never be parsed for a live color. The live feed is a published Google
+    // Sheet: a headerless CSV, one sentence per line, e.g. "Flag #6 North Beach is Green" / "North Pier is
     // Open". Flags #6-#9 belong to North Beach, #10-#12 to South Beach (multiple poles
     // per named beach); same-named flags roll up to the most severe color. Gray/Grey is
     // unmonitored (9pm-9am local, and the Sept 15 - May 15 off-season) and maps to no
@@ -2444,8 +2443,10 @@ Date.now(), no ambient clock.
       //   (beach.lat >= 42.35 && beach.lat <= 42.45 && beach.lon >= -86.32 && beach.lon <= -86.24)
       //   (covers South Beach / North Beach / Packard Park rows from OSM).
       // scrape(nowIso): GET SOUTH_HAVEN_URL with a User-Agent (the .gov host 403s
-      //   without one) to discover the CSV href via extractSouthHavenCsvUrl (fallback
-      //   SOUTH_HAVEN_CSV_URL); GET that CSV with redirect:"follow" (the docs.google
+      //   without one) to discover the CSV href via extractSouthHavenCsvUrl, falling
+      //   back to the pinned SOUTH_HAVEN_CSV_URL. The page embeds a Safe Beach Day
+      //   iframe and links no sheet, so the fallback carries the scraper and logs
+      //   "flag page links no sheet"; GET that CSV with redirect:"follow" (the docs.google
       //   pub URL 307s to a signed, single-use googleusercontent URL — never cache it);
       //   parseSouthHavenCsv(text, nowIso) — scrape() passes nowIso down for the
       //   freshness gate. Returns { perBeach: true, sites, source, sources, updated:
@@ -2534,7 +2535,9 @@ src/wqFloor registry below.
   hazard advisory is no site — so it can only raise to red. Proximity site (peninsula
   centroid, 6 mi) so a bare "Beach 6" resolves. Provisional: the live payload is
   off-axis boilerplate, so the hazard-keyword mapping is verified only against synthetic
-  fixtures, and every unrecognized shape degrades to null.
+  fixtures, and every unrecognized shape degrades to null. The DCNR host refuses Cloudflare
+  Workers egress by IP with a 500 whatever the headers, so from production nearly every
+  run returns null; a User-Agent does not help. TODO.md tracks the options.
 - src/officialSources/nwsMarineBeachForecast.js (nws-marine-beach-forecast) —
   registered last (broad Lake Erie/Ontario bbox; every tighter scraper wins first).
   NWS Marine Beach Forecast ArcGIS MapServer, per-WFO "Day 1" layers, verified-live only
@@ -2572,7 +2575,8 @@ and its absence is the "no floor".
       // ny-oprhp-beach-status         — NY State Parks (OPRHP) beach status
       // lake-county-oh-beaches        — Lake County (OH) GHD water-quality program
       // kenosha-beach-conditions      — Kenosha County (WI) beach conditions (E. coli)
-      // mn-beaches                    — Minnesota DoH monitoring (mnbeaches.org), ~6 Duluth sites
+      // mn-beaches                    — Minnesota DoH monitoring (mnbeaches.org), ~6 Duluth sites;
+      //                                 SiteGround challenges Worker egress, so null from production
       // grey-bruce-rec-water          — Grey Bruce Health Unit (ON, Lake Huron) [low confidence]
       // ontario-parks-beach-postings  — Ontario Parks per-park Alerts postings
       // evanston-statusfy             — City of Evanston (IL) beach status via RainoutLine

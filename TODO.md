@@ -375,24 +375,24 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   example by repurposing a status string, still needs a human to notice.
 - **Scraper health alerting is log-only.** `src/scraperHealth.js` logs a loud `ALERT:` line once
   a matched scraper has returned null for 24 consecutive hourly runs, but nothing pages a human.
-- **Four scrapers are unaudited for empty-success.** The contract (PLAN.md §6) distinguishes
-  "parsed cleanly, nothing to report" (an empty `sites: []` result, a health success) from
-  `null` (a genuine fetch or parse failure). metroparks, south-haven and chicago-park-district
-  comply; `nws-omr-grr`, `winnetka-tower-beach`, `pa-dcnr-presque-isle` and
-  `nws-marine-beach-forecast` have not been checked for a clean-parse-nothing-to-report path
-  that still returns `null`.
+- **`winnetka-tower-beach` reports a clean page as a failure.** The contract (PLAN.md §6)
+  distinguishes "parsed cleanly, nothing to report" (an empty `sites: []` result, a health
+  success) from `null` (a genuine fetch or parse failure). Every other registered scraper
+  complies. Winnetka collapses a non-hazard closure, such as the seasonal "closed for the 2026
+  season" posting, to a `scrape()` null, so its health streak fails every hourly run through
+  the off-season.
 - **Deferred: tier-2 HTML entity-decoder consolidation.** `decodeCellText` lives in
   `src/officialSources/util.js`, with the two byte-identical copies folded into it. Five
   near-variants are deliberately left alone: `kenoshaBeachConditions.js` `htmlToText`,
   `paDcnrPresqueIsle.js` `htmlToText`, `chautauquaCountyNy.js` `htmlToPlainText`,
   `evanstonStatusfy.js` `stripTags` and `lakeCountyOhBeaches.js` `stripTags`. Folding them into
-  a union decoder is **behavior-changing**, not a cleanup: evanston and lakeCountyOh strip
-  full-page HTML into a bounded character window (400 / 600 chars) that **gates** a red and a
-  yellow floor, and decoding one more entity demonstrably changes whether a floor is raised
-  (`prediction&mdash;poor` currently fails `lakeCountyOhBeaches`'s regex and raises no floor;
-  under a union decoder it would match and raise yellow). Both test suites use entity-free
-  synthetic fixtures, so a green run proves nothing — this needs real captured page samples and
-  its own reviewed commit. `erieCountyPaKml.js` `decodeAndStrip` is permanently excluded from
+  a union decoder is **behavior-changing**, not a cleanup. evanston strips full-page HTML into a
+  400-char window that gates a red floor, so decoding one more entity can change whether a floor
+  is raised. lakeCountyOh anchors each beach on its own full prediction line and decodes the
+  dash, nbsp and amp entities that line uses, so a decoder that changed its dash or block
+  handling would change which lines match. Its suite carries a fixture mirroring the live
+  markup; evanston's is entity-free and synthetic, so a green run there proves nothing. This
+  needs real captured page samples and its own reviewed commit. `erieCountyPaKml.js` `decodeAndStrip` is permanently excluded from
   any such consolidation: it decodes `&amp;` last on purpose, since decoding it first would
   double-decode, and it unwraps CDATA.
 
@@ -437,11 +437,43 @@ gaps, not wrong-color risks.
 - **`nws-marine-beach-forecast` ArcGIS layer enumeration** — only layers verified live (CLE =
   19, BUF = 7, Lake Erie/Ontario) are enabled. Enumerate the MapServer for additional Great
   Lakes Day-1 layers and enable each only after confirming it returns features live; a wrong
-  layer id silently yields no features, which is safe-fail.
+  layer id silently yields no features, which is safe-fail. Candidate Day-1 layers: LOT 16,
+  DTX 25, DLH 28, APX 34, GRR 37, GRB 40, MQT 67, MKX 79, IWX 94. Each needs curated
+  `SITE_DEFS` and a wider `matches()` bbox.
 - **`pa-dcnr-presque-isle` hazard-keyword mapping is PROVISIONAL** — the live DCNR
   advisory feed is currently 100% off-axis boilerplate, so the swimming-hazard →
   red mapping is verified only against synthetic fixtures. Re-verify against a real
   Danger-tier swimming-hazard advisory when one appears.
+- **Two sources refuse Cloudflare Worker egress by IP.** No request header fixes either, and
+  both fail closed to `null`, so the cost is a failing health streak and lost coverage, never a
+  wrong color.
+  - `pa-dcnr-presque-isle`: services.dcnr.pa.gov answers Worker egress with a 500 HTML page and
+    serves JSON to a residential IP.
+  - `mn-beaches`: SiteGround serves an sgcaptcha interstitial as HTTP 202 HTML, which fails the
+    JSON parse. Monitoring resumes in May 2027, which is the deadline.
+
+  Options, none chosen: fetch offline in a scheduled GitHub Actions job and publish to D1 with
+  an absolute expiry, which changes the rule that the cron path does all scraper fetching and
+  needs a PLAN.md design change (probe first whether Azure runner IPs are also refused); relay
+  through a non-Cloudflare egress; ask the operator to allowlist; or deregister for the season.
+- **`kenosha-beach-conditions` draws intermittent 403s** from the county's Cloudflare zone,
+  though Worker egress with and without a User-Agent gets 200 on a probe. The fetch sends
+  the project User-Agent, with no evidence yet that it helps. A single miss is ridden out by the
+  2 h wqfloor lease; consecutive misses let a live advisory lapse to no floor. If they persist
+  in season, consider a longer lease for this source or the offline fetch above.
+- **`mn-beaches` collapses two stations onto one site.** "Lakewalk Beach" and "Lakewalk East /
+  16th Avenue East Beach" both map to `lakewalk`, and the first Not Recommended row wins.
+  Splitting them is a product decision.
+- **`grey-bruce-rec-water` curation.** Six curated entries (sauble-beach-south, oliphant,
+  boiler, macgregor point, inverhuron, amberley) are absent from the live table and can never
+  produce a floor. OSM names Kincardine's beach "Station Beach", which misses the curated
+  "station park beach" alias; adding it needs a namesake check.
+- **`ny-oprhp-beach-status` coverage.** The feed also carries Southwick Beach SP, Sandy Island
+  Beach SP and Westcott Beach SP on Lake Ontario, which are not curated. The `2025_` in the
+  layer path is not the season year and does not roll.
+- **`nws-omr-grr` resumes in spring 2027.** GRR ended OMR issuance for the season on
+  2026-09-17. Check the first spring product for column changes; a changed table degrades to
+  `null` with a "no parseable beach rows" log.
 - **`winnetka-tower-beach` `staleMs` rests on a thin sample** — its 72 h staleness horizon is
   reasoned from one observation of the posting page plus the ~63 h Friday-post / Monday-read
   weekend bound, not a measured distribution. Re-verify the real in-season posting cadence; if
@@ -472,10 +504,14 @@ excluded: a clean-water green is a different axis from surf hazard and would mas
 hazard estimate such as a gale-driven red. Do not re-add a source whose clean reading would
 downgrade a hazard flag. Caveats for the registered set:
 
-- **South Haven CSV** (`south-haven-mi`) — the CSV URL is re-discovered from the flag page each
-  run, with a hardcoded fallback; Gray means unmonitored, so no data; colored output is gated to
-  the monitored season and hours (America/Detroit); same-named flag poles roll up to most
-  severe.
+- **South Haven CSV** (`south-haven-mi`) — the flag page links no sheet and embeds a
+  Safe Beach Day iframe, so every run reads the pinned `SOUTH_HAVEN_CSV_URL` and logs
+  "flag page links no sheet". Gray means unmonitored, so no data; colored output is gated to the
+  monitored season and hours (America/Detroit); same-named flag poles roll up to most severe.
+  Re-check when the season opens on 2027-05-15. The CSV carries no timestamp, so a sheet the
+  city abandons in season on a colored value would keep publishing that color. If the sheet
+  stays Gray while safebeachday.com/south-haven-beach shows colors, the feed has moved and
+  `southHaven.js` needs a parser for that site's page data.
 - **Chicago Park District `/flag-status` JSON** (`chicago-park-district`) — the payload mixes in
   stale prior-season rows, so the 36 h per-record staleness gate is load-bearing, and green
   additionally requires the beach's own Surf row to be fresh. "Afterhours" maps to red, a

@@ -11,16 +11,10 @@
 // "To Be Resampled" — that degrades to using nowIso for "updated", it does not
 // invalidate the row's status.
 //
-// The table contents and column order (Beach Name | E.coli Result | Condition |
-// Sampling Date) are confirmed live. The underlying HTML tag/class structure
-// has not been directly confirmed: inspecting this page through an agent
-// web-fetch tool returns rendered/markdown content rather than raw markup,
-// unlike fetchText's own runtime fetch, which reads the raw response body.
-// parseKenoshaBeachConditions is therefore written defensively against the
-// standard <table>/<tr>/<td> shape a CivicPlus-style county site is expected
-// to serve, and degrades to null (never a wrong color) if that structural
-// assumption breaks. Re-verify the raw HTML if this source starts returning
-// null in production.
+// The page serves one CivicPlus/Froala <table class="fr-alternate-rows"> with a
+// <th> header row and 4 <td> cells per row, in the order Beach | Result |
+// Condition | Date of Sampling. A structural change degrades to null, never to
+// a wrong color.
 //
 // CURATION: Kenosha County's table lists ~20+ INLAND lake beaches (Silver
 // Lake, Camp Lake, Lake George, etc.) alongside the ~6 LAKE MICHIGAN beaches
@@ -59,6 +53,9 @@ export const KENOSHA_BEACH_CONDITIONS_URL =
   "https://www.kenoshacountywi.gov/348/Beach-Conditions";
 
 export const KENOSHA_LABEL = "Kenosha County Beach Conditions";
+
+// The Kenosha County zone sits behind Cloudflare; identify the fetch as siblings do.
+const KENOSHA_USER_AGENT = "swim.report (hello@swim.report)";
 
 const KENOSHA_INFO_URL = KENOSHA_BEACH_CONDITIONS_URL;
 
@@ -268,6 +265,7 @@ export const kenoshaBeachConditions = {
   },
   scrape: async function(nowIso) {
     const html = await fetchText(KENOSHA_BEACH_CONDITIONS_URL, {
+      headers: { "User-Agent": KENOSHA_USER_AGENT },
       logPrefix: "kenoshaBeachConditions: fetch failed"
     });
     if (html === null) {

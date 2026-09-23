@@ -18,11 +18,10 @@
 //   - "Good" / "Safe" / "Open" prediction, OR the beach's status simply
 //     cannot be located on the page                -> NO site (never a
 //     green -- absence of an advisory IS the "no floor" state).
-//   - Anything ambiguous/unrecognized for a given beach's status word
-//     (a schema/markup change) -> NO site for that beach; if the page as a
-//     whole carries none of the two beaches' names at all, the WHOLE parse
-//     fails to null (unusable body), never a guessed color. "No data" always
-//     beats a guess.
+//   - Anything ambiguous or unrecognized in a beach's status word yields no
+//     site for that beach. If neither beach's own prediction line is on the
+//     page, the whole parse fails to null (unusable body), never a guessed
+//     color.
 //
 // SEASON: the program only publishes results Memorial Day through Labor Day.
 // scrape() checks the passed-in nowIso against isInLakeCountyBeachSeason and,
@@ -32,17 +31,11 @@
 // convention (see src/officialSources/metroparks.js) so the source still
 // counts as healthy when it has nothing to say.
 //
-// *** LIVE-MARKUP CONFIRMATION NEEDED ***
-// The site's Mod_Security WAF can reject an automated fetch outright ("Not
-// Acceptable!", no markup served), so the exact HTML structure around each
-// beach's prediction line is unconfirmed. "Water Bacteria Quality
-// Prediction: GOOD/POOR" is the assumed vocabulary, per the task spec. The parser below therefore works on VISIBLE TEXT
-// (tag-stripped), not brittle selectors, and is written to fail closed to
-// null/no-site on anything it cannot positively recognize. Before this
-// source is registered live, an integrator should re-confirm the exact
-// wording (GOOD/POOR vs. some other vocabulary) and, if the WAF still blocks
-// automated fetches, obtain a permitted access path (documented API, feed,
-// or a pre-cleared User-Agent) before wiring scrape() into production.
+// Each beach's prediction is a WordPress paragraph of the form
+// <p><mark>Name – Water Bacteria Quality Prediction: </mark><strong><mark>WORD</mark></strong></p>,
+// with an en dash separator. Off-season the value is the &#8212; placeholder,
+// which yields no site. The beach names also appear in the head metadata and
+// the intro, so the match is anchored on the full per-beach line.
 //
 // DEDUP: this is a New axis (Lake County, OH bacteria prediction), disjoint
 // from the SRF rip lane, NWS/ECCC alert lane, and the NOAA wave lane.
@@ -52,7 +45,7 @@
 // floorColorForStatus, parseLakeCountyOhBeaches, and isInLakeCountyBeachSeason
 // are pure and exported for unit tests (no network).
 
-import { fetchText, perBeachResult, matchesAnyAlias } from "../officialSources/util.js";
+import { fetchText, perBeachResult } from "../officialSources/util.js";
 
 export const LAKE_COUNTY_BEACHES_URL = "https://www.lcghd.org/beaches/";
 export const LAKE_COUNTY_LABEL = "Lake County General Health District Beach Water Quality Program";
@@ -86,48 +79,47 @@ const POOR_PATTERNS = [/\bpoor\b/, /\badvisory\b/, /\bunsafe\b/, /\bclosed\b/];
 // Words that indicate a clean reading -> no site (absence of a floor).
 const GOOD_PATTERNS = [/\bgood\b/, /\bsafe\b/, /\bopen\b/];
 
-// Pure. Strip HTML tags to plain text and collapse whitespace, mirroring the
-// other wqFloor parsers' tag-stripping approach (robust to markup/class
-// churn since we key off visible words, not selectors).
+// Pure. HTML -> visible text. Script, style and head blocks are dropped so
+// metadata mentions of the beach names never reach the matcher, and block
+// boundaries become " | " so a value regex cannot run into the next paragraph.
 function stripTags(html) {
-  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<head(?:\s[^>]*)?>[\s\S]*?<\/head>/gi, " ")
+    .replace(/<\/(?:p|div|li|h[1-6]|td|tr)>/gi, " | ")
+    .replace(/<br\s*\/?>/gi, " | ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&#8211;|&ndash;/g, "\u2013")
+    .replace(/&#8212;|&mdash;/g, "\u2014")
+    .replace(/&nbsp;|&#160;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-// Pure, exported for tests. Locates ONE curated beach's prediction word in
-// the page's VISIBLE TEXT. Scoped to a bounded window (600 chars) following
-// the beach's own name occurrence, so an unrelated mention of "good"/"poor"
-// elsewhere on the page (e.g. weather, water temperature commentary) cannot
-// leak into a different beach's result. Returns the raw lowercase status
-// word found ("good" | "poor" | "advisory" | "unsafe" | "closed" | "safe" |
-// "open"), or null when this beach's name or its prediction word cannot be
-// located at all.
+// Pure. The regex for one beach's own prediction line, anchored on its full
+// name (names[0]); group 1 is the lowercase status word when one is present.
+function predictionLineRe(def) {
+  const escaped = def.names[0].toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(escaped +
+    "\\s*[-\\u2013\\u2014:]\\s*(?:water\\s+)?bacteria\\s+quality\\s+prediction\\s*:?\\s*(?:([a-z]+)\\b)?");
+}
+
+// Pure, exported for tests. One beach's prediction word in the page's visible
+// text, lowercase, or null. The beach's own full name must immediately precede
+// its own prediction phrase, so one beach's word can never be credited to the other.
 export function extractStatusForBeach(text, beachDef) {
   if (typeof text !== "string" || text.length === 0) {
     return null;
   }
-  const lower = text.toLowerCase();
-  let nameIndex = -1;
-  for (let i = 0; i < beachDef.names.length; i++) {
-    const idx = lower.indexOf(beachDef.names[i]);
-    if (idx !== -1 && (nameIndex === -1 || idx < nameIndex)) {
-      nameIndex = idx;
-    }
-  }
-  if (nameIndex === -1) {
+  if (!beachDef || !Array.isArray(beachDef.names) || beachDef.names.length === 0) {
     return null;
   }
-  const windowEnd = Math.min(lower.length, nameIndex + 600);
-  const window = lower.slice(nameIndex, windowEnd);
-  // Require the documented "prediction" phrasing to anchor the match so a
-  // stray word elsewhere in the window (e.g. "the water looks good today" in
-  // unrelated copy) cannot masquerade as the actual prediction.
-  const predictionRe = /(?:water\s+)?bacteria\s+quality\s+prediction[\s:-]*([a-z]+)/;
-  const match = predictionRe.exec(window);
-  if (match !== null && match[1].length > 0) {
+  const match = predictionLineRe(beachDef).exec(text.toLowerCase());
+  if (match !== null && typeof match[1] === "string" && match[1].length > 0) {
     return match[1];
   }
-  // Fallback: no anchored "prediction" phrase found near the name at all --
-  // do not guess from loose keyword presence. Fail closed to null.
   return null;
 }
 
@@ -154,11 +146,9 @@ export function floorColorForStatus(word) {
 }
 
 // Pure, exported for tests. Full page HTML (+ the cron's ISO timestamp) ->
-// an array of Site objects (possibly empty on an all-clean page), or null
-// when the page cannot be positively recognized as a Lake County beach
-// report AT all (neither curated beach name appears anywhere in the text --
-// an unusable/redesigned page). A page that names the beaches but reports
-// "good" for both is a legitimate CLEAN result: [] (not null).
+// an array of Site objects, or null when neither beach's prediction line is
+// recognized. A page whose lines read "good" or the placeholder is a clean
+// result: [] (not null).
 export function parseLakeCountyOhBeaches(html, nowIso) {
   if (typeof html !== "string" || html.length === 0) {
     return null;
@@ -169,7 +159,7 @@ export function parseLakeCountyOhBeaches(html, nowIso) {
   const sites = [];
   for (let i = 0; i < SITE_DEFS.length; i++) {
     const def = SITE_DEFS[i];
-    if (!matchesAnyAlias(lower, def.names)) {
+    if (!predictionLineRe(def).test(lower)) {
       continue;
     }
     recognizedAny = true;
@@ -193,9 +183,8 @@ export function parseLakeCountyOhBeaches(html, nowIso) {
     });
   }
   if (!recognizedAny) {
-    // Neither curated beach name appears anywhere in the page -- the page is
-    // not the Lake County beach report we expect (redesign/outage/wrong
-    // page). Unusable body: fail to null, not an empty clean result.
+    // Neither beach's prediction line is on the page: a redesign or wrong
+    // page, reported as a source failure rather than a clean empty run.
     return null;
   }
   return sites;

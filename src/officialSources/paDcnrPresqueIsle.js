@@ -32,9 +32,9 @@
 // and htmlToText are pure and exported for tests.
 //
 // The endpoint below is openly readable and returns an array of
-// { IsAlert, Message }. No User-Agent is sent, because whether this .gov host
-// needs one is unprobed and a 403 degrades to null, which is the safe direction.
-// Add a probed User-Agent to the fetchText call if it ever starts 403ing.
+// { IsAlert, Message }. No User-Agent is sent: the host answers Cloudflare
+// Worker egress with a 500 whatever the headers, so scrape() returns null from
+// production. TODO.md tracks the options.
 
 import { fetchText, perBeachResult, containsAny } from "./util.js";
 
@@ -235,8 +235,7 @@ export const paDcnrPresqueIsle = {
     return name.indexOf("presque isle") !== -1 || park.indexOf("presque isle") !== -1;
   },
   scrape: async function(nowIso) {
-    // No headers: this .gov host has not been probed to require a User-Agent,
-    // and Workers' fetch sends none by default. A 403 degrades to null (safe).
+    // No headers: the host refuses Worker egress by IP whatever the headers.
     const text = await fetchText(PRESQUE_ISLE_URL, {
       logPrefix: "paDcnrPresqueIsle: fetch failed"
     });

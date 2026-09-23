@@ -71,6 +71,38 @@ describe("parseMetroparksHtml", function() {
     expect(baypointSites.length).toBe(1);
   });
 
+  it("does not read the Eastwood Beach paddle shack closure as an Eastwood Beach closure", function() {
+    const fixture =
+      "<div class=\"vc_tta-panel\" id=\"KensingtonMetropark\" data-vc-content=\".vc_tta-panel-body\">" +
+      "<div class=\"vc_tta-panel-body\">" +
+      "<p><strong>Martindale Beach:</strong> Open 10:00-8:00 through October1, 2026.</p>" +
+      "<p><strong>Maple Beach:</strong> Open 10:00-8:00 through October1, 2026.</p>" +
+      "</div></div>" +
+      "<div class=\"vc_tta-panel\" id=\"StonyCreekMetropark\" data-vc-content=\".vc_tta-panel-body\">" +
+      "<div class=\"vc_tta-panel-body\">" +
+      "<p><strong>       Eastwood Beach paddle shack</strong> &#8211; <strong>Closed for the season</strong></p>" +
+      "<p>Water slide &#8211; Closed for the season</p>" +
+      "</div></div>";
+    const sites = parseMetroparksHtml(fixture);
+    expect(Array.isArray(sites)).toBe(true);
+    expect(sites.length).toBe(0);
+  });
+
+  it("reports a beach posted Closed for the season as red", function() {
+    const fixture =
+      "<div class=\"vc_tta-panel\" id=\"KensingtonMetropark\" data-vc-content=\".vc_tta-panel-body\">" +
+      "<div class=\"vc_tta-panel-body\">" +
+      "<p><strong>Martindale Beach:</strong> Closed for the season.</p>" +
+      "<p><strong>Maple Beach:</strong> Open 10:00-8:00 through October1, 2026.</p>" +
+      "</div></div>";
+    const sites = parseMetroparksHtml(fixture);
+    expect(sites.length).toBe(1);
+    expect(sites[0].siteId).toBe("martindale-beach");
+    expect(sites[0].color).toBe("red");
+    const mapleSites = sites.filter(function(site) { return site.siteId === "maple-beach"; });
+    expect(mapleSites.length).toBe(0);
+  });
+
   it("never treats unrelated facility Open/Closed lines as beach sites", function() {
     const sites = parseMetroparksHtml(FULL_FIXTURE);
     const siteIds = sites.map(function(site) { return site.siteId; });

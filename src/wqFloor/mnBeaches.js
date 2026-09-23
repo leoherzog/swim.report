@@ -8,8 +8,10 @@
 //   { MNBdataUpdated, MNBsiteactive, MNBmessage,
 //     MNBstatus: [ { StnID, Date, Status, Reason, Name, lng, lat, Region, ... } ],
 //     MNBregions: [...] }
-// The endpoint needs no auth and has no bot wall. If it ever starts requiring
-// auth or changes shape, parseMnBeaches below fails closed to null.
+// SiteGround serves an sgcaptcha interstitial (HTTP 202 HTML) to Cloudflare
+// Worker egress under any User-Agent, so from production the JSON parse fails
+// and scrape() returns null; a non-JSON or reshaped response always fails
+// closed to null.
 //
 // Floor mapping:
 //   Status "Water Contact Not Recommended" + Reason indicating a harmful
@@ -49,10 +51,8 @@ import { perBeachResult, matchesAnyAlias } from "../officialSources/util.js";
 const MN_BEACHES_URL = "https://mnbeaches.org/map/data/results.json";
 const MN_BEACHES_LABEL = "Minnesota Department of Health Beach Monitoring (mnbeaches.org)";
 
-// mnbeaches.org does not document a required User-Agent, and a plain request
-// succeeds. Send a descriptive UA anyway (harmless, and matches the project
-// convention of identifying the bot to any upstream that later starts
-// caring).
+// Identifies the bot to the upstream. It does not get past SiteGround's
+// IP-level challenge.
 const MN_BEACHES_USER_AGENT = "swim.report (hello@swim.report)";
 
 // The Lake Superior / Duluth stations this source curates. names[] feed the
@@ -211,7 +211,13 @@ export function parseMnBeaches(data, nowIso) {
     if (!def) {
       continue;
     }
-    const status = normalizeMnStatus(entry.Status);
+    const rawStatus = entry.Status;
+    // Off-season entries carry no Status, and no reading means no floor.
+    if (rawStatus === undefined || rawStatus === null ||
+        (typeof rawStatus === "string" && rawStatus.trim().length === 0)) {
+      continue;
+    }
+    const status = normalizeMnStatus(rawStatus);
     if (status === null) {
       console.log("mnBeaches: unrecognized Status for " + def.label + ", skipping");
       continue;

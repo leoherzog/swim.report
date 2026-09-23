@@ -6,17 +6,15 @@
 //   https://services.arcgis.com/1xFZPtKn1wKC6POA/arcgis/rest/services/
 //     2025_Beach_Status_view/FeatureServer/0/query?where=1=1&outFields=*&f=json
 // Each feature.attributes carries: StateParkBeach, Beach_status
-// (Open / Reopened / Closed / "Open with Advisory" / Off-Season), Status_Reason
+// (Open / Reopened / Closed / "Open with Advisory" / "Off - Season"), Status_Reason
 // (Exceedance / "Harmful Algal Bloom" / "Clear after resample" / ...),
 // Indicator_ (E.coli / Enterococci), Results (double), Date_sampled ("13-Jul-26"),
 // Latitude, Longitude.
 //
-// NOTE: the version year in the layer path ("2025_...") rolls each season. When
-// it rolls, the pinned URL 404s -> fetchJson returns null -> scrape returns null
-// (fail closed to no-floor, never a wrong color). The URL below must be
-// re-confirmed / bumped when NYS publishes the next season's view. The parser
-// degrades to null on any shape change (missing features array, unrecognized
-// status).
+// NOTE: the "2025_" in the layer path is not the season year; the view carries
+// current-season samples. A 404, a non-JSON body or an empty features array
+// fails closed to null. The feed spells the off-season status "Off - Season",
+// and any status other than the two floor statuses yields no site.
 //
 // FLOOR MAPPING (raise-only; nothing else produces a site):
 //   Beach_status "Closed"  AND  Status_Reason contains "Exceedance" or
@@ -29,8 +27,9 @@
 //
 // CURATION: NY has many inland + ocean beaches; this floor is scoped to the
 // GREAT LAKES beaches only (Lake Ontario: Hamlin Beach, Fair Haven, Selkirk
-// Shores; Lake Erie / Niagara: Evangola, Beaver Island), by name substring and
-// lat/lon. matches() and the emitted sites cover only those.
+// Shores; Lake Erie / Niagara: Evangola, Beaver Island). A name match is
+// honored only within NAME_GATE_MI of that site's anchor. matches() and the
+// emitted sites cover only those.
 //
 // INTEGRATOR / DEDUP NOTE: register in src/wqFloor/index.js "wqFloorSources"
 // (append; there is no ordering conflict — it is the only NY source). Do Not add
@@ -55,18 +54,20 @@ const NY_OPRHP_INFO_URL = "https://parks.ny.gov/";
 // substrings matched both against the ArcGIS StateParkBeach field (to pick the
 // feature) and, as resolveSiteForBeach "names", against a swim.report beach's
 // park_name + name. Keep them tight so a namesake elsewhere can never inherit a
-// site's color. lat/lon anchor the proximity fallback and the emitted site.
+// site's color. lat/lon are the feed's own coordinates for each park's beach and
+// anchor both the proximity match and the emitted site.
 const GREAT_LAKES_SITES = [
-  { siteId: "hamlin-beach", aliases: ["hamlin beach"], lat: 43.362, lon: -77.947 },
-  { siteId: "fair-haven", aliases: ["fair haven"], lat: 43.343, lon: -76.703 },
-  { siteId: "selkirk-shores", aliases: ["selkirk shores", "selkirk"], lat: 43.535, lon: -76.203 },
-  { siteId: "evangola", aliases: ["evangola"], lat: 42.601, lon: -79.160 },
-  { siteId: "beaver-island", aliases: ["beaver island"], lat: 43.003, lon: -78.972 }
+  { siteId: "hamlin-beach", aliases: ["hamlin beach"], lat: 43.3655, lon: -77.9557 },
+  { siteId: "fair-haven", aliases: ["fair haven"], lat: 43.3443, lon: -76.7002 },
+  { siteId: "selkirk-shores", aliases: ["selkirk shores"], lat: 43.5525, lon: -76.2140 },
+  { siteId: "evangola", aliases: ["evangola"], lat: 42.6086, lon: -79.1127 },
+  { siteId: "beaver-island", aliases: ["beaver island"], lat: 42.9593, lon: -78.9504 }
 ];
 
-// How near (mi) a swim.report beach must sit to a curated site for the source's
-// matches() proximity gate to fire, when the name substring does not.
-const MATCH_RADIUS_MI = 4;
+// An alias match only counts within this distance of its own site, so a
+// namesake elsewhere, such as Michigan's Beaver Island, never inherits a NY
+// park's floor.
+const NAME_GATE_MI = 5;
 
 // Higher wins when a single park has several beach features (e.g. multiple swim
 // areas) reporting different statuses — the most restrictive floor is kept.
@@ -249,19 +250,21 @@ export function parseNyOprhpBeachStatus(json, nowIso) {
   return sites;
 }
 
-// Pure. True when a swim.report beach is one of the curated Great Lakes NYS-park
-// beaches — by name substring OR lat/lon proximity to a curated site.
+// Pure. True when a beach sits at a curated site: within DEFAULT_SITE_RADIUS_MI
+// of its anchor (the radius the emitted site resolves with), or name-matched
+// within NAME_GATE_MI. A beach without finite coordinates never matches.
 function inGreatLakesNyParks(beach) {
+  if (typeof beach.lat !== "number" || typeof beach.lon !== "number" ||
+      !isFinite(beach.lat) || !isFinite(beach.lon)) {
+    return false;
+  }
   const haystack = ((beach.park_name || "") + " " + (beach.name || "")).toLowerCase();
   for (let s = 0; s < GREAT_LAKES_SITES.length; s++) {
     const site = GREAT_LAKES_SITES[s];
-    if (matchesAnyAlias(haystack, site.aliases)) {
+    const d = distanceMi(beach.lat, beach.lon, site.lat, site.lon);
+    if (d <= NAME_GATE_MI &&
+        (matchesAnyAlias(haystack, site.aliases) || d <= DEFAULT_SITE_RADIUS_MI)) {
       return true;
-    }
-    if (typeof beach.lat === "number" && typeof beach.lon === "number") {
-      if (distanceMi(beach.lat, beach.lon, site.lat, site.lon) <= MATCH_RADIUS_MI) {
-        return true;
-      }
     }
   }
   return false;

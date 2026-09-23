@@ -240,6 +240,23 @@ describe("kenoshaBeachConditions.scrape", function() {
     expect(site.floorColor).toBe("yellow");
   });
 
+  it("identifies itself with the project User-Agent and reads an all-OPEN table as an empty result", async function() {
+    const html = "<table class=\"fr-alternate-rows\"><thead><tr><th>Beach</th>" +
+      "<th>Result</th><th>Condition</th><th>Date of Sampling</th></tr></thead><tbody>" +
+      "<tr><td>Alford Park</td><td>20 MPN/100mL</td><td>OPEN&nbsp;</td><td>09/02/26</td></tr>" +
+      "</tbody></table>";
+    const fetchStub = vi.fn(function() {
+      return Promise.resolve(new Response(html, { status: 200 }));
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    const result = await kenoshaBeachConditions.scrape("2026-09-22T12:00:00Z");
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(fetchStub.mock.calls[0][1].headers["User-Agent"]).toBe("swim.report (hello@swim.report)");
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+  });
+
   it("returns null when the fetch fails", async function() {
     vi.stubGlobal("fetch", function() {
       return Promise.resolve({ ok: false, status: 500 });

@@ -25,31 +25,23 @@
 // simply yields no floor (fail-open toward "no data", never a wrong color),
 // and the list can be extended by a later builder as more rows are observed.
 //
-// CADENCE: the health unit samples monthly, not in real time. scrape() has no
-// special monthly-cadence gating of its own (there is no "last week's stale
-// row" signal in the table itself — every row IS the latest sample for that
-// beach); the cron driving this registry is expected to run it at its own
-// cadence and let the KV TTL (owned by the cron/integrator, not this module)
-// govern staleness. Nothing here reads Date.now()/new Date() for "now" — the
-// only place nowIso would matter (an updated timestamp) falls back to the
-// caller-supplied nowIso when the table gives us no reliable machine-parseable
-// per-row timestamp (see buildGreyBruceSites).
+// CADENCE: the health unit samples monthly and the table keeps each beach's
+// last sample indefinitely. buildGreyBruceSites therefore drops a posted row
+// whose Date Tested is unparseable, more than a day after nowIso, or more than
+// MAX_SAMPLE_AGE_DAYS before the caller's nowIso. Nothing here reads the
+// wall clock.
 //
-// DEFENSIVE PARSING: any markup/schema change (missing table, reordered or
-// renamed columns, unrecognized Posted value) degrades a ROW to being skipped,
-// and a table that yields no rows at all degrades the whole parse to null.
-// parseGreyBruceRecWaterTable is pure and exported for tests; scrape() is the
-// only network-touching, cron-side-only piece and never throws across the
-// module boundary.
+// DEFENSIVE PARSING: a missing table, reordered or renamed header columns, or
+// zero data rows degrade the whole parse to null; a short row or an
+// unrecognized Posted value skips that row. parseGreyBruceRecWaterTable is
+// pure and exported for tests; scrape() is the only network-touching piece
+// and never throws across the module boundary.
 //
-// FETCH URL NOTE (integrator: please confirm before enabling in the
-// registry): this ASP.NET/GridView-style sortable table (it uses
-// javascript:__doPostBack sort handlers) carries no id/class in its markup to
-// anchor on, so the parser anchors on the literal header cell text "Public
-// Beach", the most change-resistant handle available. Unverified against
-// bot-protection challenges until fetched live. If the header text or table
-// structure ever changes, parseGreyBruceRecWaterTable degrades to null (fail
-// closed), never a wrong color.
+// FETCH URL NOTE: the table is a DNN GridView whose header cells wrap
+// javascript:__doPostBack sort links. The parser accepts the first <table>
+// whose header row begins with exactly Public Beach, Location, Test Result,
+// Date Tested, Posted, because intro prose above the grid also says "Public
+// Beaches" and a page-text search would anchor on it.
 //
 // INTEGRATOR DEDUP NOTE: this is the only Grey Bruce Health Unit source in the
 // project; it does not overlap with any existing hazard scraper or wave/alert
@@ -105,42 +97,74 @@ function decodeCells(rawCells) {
   return cells;
 }
 
+const EXPECTED_HEADER = ["public beach", "location", "test result", "date tested", "posted"];
+
+// The table keeps each beach's last sample indefinitely, so an end-of-season
+// posting must not floor a beach all winter.
+const MAX_SAMPLE_AGE_DAYS = 35;
+
+const DAY_MS = 86400000;
+
+// Pure. One <table> block -> its first <th>-bearing row's cell texts,
+// lowercased, or null when the block has no <th> row.
+function headerCells(tableHtml) {
+  const rowRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch = rowRegex.exec(tableHtml);
+  while (rowMatch !== null) {
+    const cells = [];
+    const cellRegex = /<th\b[^>]*>([\s\S]*?)<\/th>/gi;
+    let cellMatch = cellRegex.exec(rowMatch[1]);
+    while (cellMatch !== null) {
+      cells.push(decodeCellText(cellMatch[1]).toLowerCase());
+      cellMatch = cellRegex.exec(rowMatch[1]);
+    }
+    if (cells.length > 0) {
+      return cells;
+    }
+    rowMatch = rowRegex.exec(tableHtml);
+  }
+  return null;
+}
+
+// Pure. True when the header's first five cells are exactly EXPECTED_HEADER.
+function isGridHeader(cells) {
+  if (cells === null || cells.length < EXPECTED_HEADER.length) {
+    return false;
+  }
+  for (let i = 0; i < EXPECTED_HEADER.length; i++) {
+    if (cells[i] !== EXPECTED_HEADER[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Pure, exported for tests. html -> array of
 //   { beach, location, testResult, dateTested, posted, note }
-// or null when the table cannot be confidently located/parsed at all.
-//
-// Anchors on the literal header cell text "Public Beach" (the most
-// change-resistant handle for an un-ided sortable GridView-style table) to
-// locate the table, then reads every subsequent <tr> as a data row until the
-// table closes. A row with fewer than 5 cells, or an empty/garbage Public
-// Beach cell, is skipped (not fatal to the whole parse) — only a total
-// absence of the "Public Beach" header, or zero recognizable data rows,
-// degrades the WHOLE result to null.
+// or null when no <table> carries the expected header or it has no data rows.
+// A row with fewer than 5 cells or an empty Public Beach cell is skipped.
 export function parseGreyBruceRecWaterTable(html) {
   if (typeof html !== "string" || html.length === 0) {
     return null;
   }
-  const headerIdx = html.search(/Public\s+Beach/i);
-  if (headerIdx === -1) {
+  let tableHtml = null;
+  const tableRegex = /<table\b[\s\S]*?<\/table>/gi;
+  let tableMatch = tableRegex.exec(html);
+  while (tableMatch !== null) {
+    if (isGridHeader(headerCells(tableMatch[0]))) {
+      tableHtml = tableMatch[0];
+      break;
+    }
+    tableMatch = tableRegex.exec(html);
+  }
+  if (tableHtml === null) {
     return null;
   }
-  // Scope to the nearest enclosing <table>...</table> around the header, so
-  // we never wander into unrelated tables elsewhere on the page.
-  const tableStart = html.lastIndexOf("<table", headerIdx);
-  if (tableStart === -1) {
-    return null;
-  }
-  const tableEndTagIdx = html.indexOf("</table>", headerIdx);
-  const tableHtml = tableEndTagIdx === -1
-    ? html.slice(tableStart)
-    : html.slice(tableStart, tableEndTagIdx + "</table>".length);
 
   const rows = [];
   const rawRows = extractTableRowsRaw(tableHtml);
   for (let i = 0; i < rawRows.length; i++) {
     const cells = decodeCells(rawRows[i]);
-    // Header row (and any decorative rows) use <th> or have no <td> cells at
-    // all; skip those without failing the whole parse.
     if (cells.length >= 5) {
       const beach = cells[0];
       const location = cells[1];
@@ -184,20 +208,42 @@ export function normalizePosted(raw) {
   return null;
 }
 
-// Pure, exported for tests. rows (from parseGreyBruceRecWaterTable) + nowIso
-// -> Site[] (contract shape (b), field "floorColor" not "color") for every
-// curated LAKE_HURON_SITES entry whose table row has Posted === "Yes". Rows
-// for beaches not in the curated list, or with Posted !== "Yes" (including
-// unrecognized values), are simply omitted — never mapped to a color.
-//
-// The health unit table gives no machine-parseable per-row ISO timestamp (its
-// Date Tested column is a locale date string, not reliably parseable without
-// guessing a timezone), so site.updated is intentionally left undefined here;
-// the wqFloor resolver (scrapeWqFloorFromResult) falls back to the
-// perBeachResult-level "updated", which scrape() stamps with the passed-in
-// nowIso — never a wall-clock read inside this pure function.
-export function buildGreyBruceSites(rows) {
+// Pure, exported for tests. "M/D/YYYY" -> that calendar day's UTC midnight
+// in ms, or null for any other shape or an impossible date such as 2/31.
+export function parseTestedDate(raw) {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const m = /^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/.exec(raw);
+  if (m === null) {
+    return null;
+  }
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  const year = Number(m[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  const ms = Date.UTC(year, month - 1, day);
+  if (new Date(ms).getUTCDate() !== day) {
+    return null;
+  }
+  return ms;
+}
+
+// Pure, exported for tests. rows + nowIso -> a yellow floor Site for every
+// curated LAKE_HURON_SITES entry whose row is Posted "Yes" and was tested
+// within MAX_SAMPLE_AGE_DAYS of nowIso and no more than a day after it.
+// site.updated stays unset, so the resolver takes the result-level nowIso.
+// @param {Array} rows from parseGreyBruceRecWaterTable
+// @param {string} nowIso the run instant; unparseable yields []
+// @returns {Array} Site[] with field floorColor
+export function buildGreyBruceSites(rows, nowIso) {
   if (!Array.isArray(rows)) {
+    return [];
+  }
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(nowMs)) {
     return [];
   }
   const sites = [];
@@ -215,6 +261,10 @@ export function buildGreyBruceSites(rows) {
     }
     const posted = normalizePosted(matchedRow.posted);
     if (posted !== true) {
+      continue;
+    }
+    const testedMs = parseTestedDate(matchedRow.dateTested);
+    if (testedMs === null || nowMs - testedMs > MAX_SAMPLE_AGE_DAYS * DAY_MS || testedMs - nowMs > DAY_MS) {
       continue;
     }
     const detailBits = [];
@@ -273,7 +323,7 @@ export const greyBruceRecWater = {
         console.log("greyBruceRecWater: no recognizable table in body");
         return null;
       }
-      const sites = buildGreyBruceSites(rows);
+      const sites = buildGreyBruceSites(rows, nowIso);
       // Even zero posted advisories is a successful, clean parse — return an
       // empty perBeachResult (not null) so a genuinely all-clear month is
       // never mistaken for a fetch/parse failure by whatever caller tracks

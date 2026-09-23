@@ -261,7 +261,7 @@ describe("nyOprhpBeachStatus.matches", function() {
     expect(nyOprhpBeachStatus.matches(makeBeach({
       name: "Evangola State Park Beach",
       park_name: "Evangola State Park",
-      lat: 42.60, lon: -79.16
+      lat: 42.6086, lon: -79.1127
     }))).toBe(true);
   });
 
@@ -269,7 +269,7 @@ describe("nyOprhpBeachStatus.matches", function() {
     expect(nyOprhpBeachStatus.matches(makeBeach({
       name: "The Swimming Area",
       park_name: "",
-      lat: 43.362, lon: -77.948
+      lat: 43.3655, lon: -77.9557
     }))).toBe(true);
   });
 
@@ -279,6 +279,85 @@ describe("nyOprhpBeachStatus.matches", function() {
       park_name: "Ludington State Park",
       lat: 43.95, lon: -86.45
     }))).toBe(false);
+  });
+
+  it("does not match Michigan's Beaver Island by name", function() {
+    expect(nyOprhpBeachStatus.matches(makeBeach({
+      name: "Beaver Island Public Beach",
+      park_name: null,
+      lat: 45.593, lon: -85.5228
+    }))).toBe(false);
+    expect(nyOprhpBeachStatus.matches(makeBeach({
+      name: "Beaver Islands State Wildlife Research Area — East Beach",
+      park_name: "Beaver Islands State Wildlife Research Area — East Beach",
+      lat: 45.7935, lon: -85.3822
+    }))).toBe(false);
+  });
+
+  it("does not claim non-park beaches outside the site radius", function() {
+    expect(nyOprhpBeachStatus.matches(makeBeach({
+      name: "Hanover Town Beach",
+      park_name: null,
+      lat: 42.5684, lon: -79.1374
+    }))).toBe(false);
+    expect(nyOprhpBeachStatus.matches(makeBeach({
+      name: "Wide Beach",
+      park_name: null,
+      lat: 42.5868, lon: -79.1310
+    }))).toBe(false);
+  });
+
+  it("does not match a name-matched beach with no coordinates", function() {
+    expect(nyOprhpBeachStatus.matches(makeBeach({
+      name: "Evangola State Park Beach",
+      lat: null, lon: null
+    }))).toBe(false);
+  });
+});
+
+describe("proximity resolution at the feed's anchors", function() {
+  it("resolves a generically named beach at Beaver Island SP", function() {
+    const beach = makeBeach({ name: "Swimming Area", park_name: "", lat: 42.9590, lon: -78.9503 });
+    expect(nyOprhpBeachStatus.matches(beach)).toBe(true);
+    const sites = parseNyOprhpBeachStatus(buildResponse([
+      feature({ StateParkBeach: "Beaver Island SP", Beach_status: "Closed", Status_Reason: "Exceedance" })
+    ]), NOW_ISO);
+    const site = resolveSiteForBeach(beach, sites);
+    expect(site).not.toBe(null);
+    expect(site.siteId).toBe("beaver-island");
+  });
+
+  it("resolves a generically named beach at Evangola SP", function() {
+    const beach = makeBeach({ name: "Swimming Area", park_name: "", lat: 42.6086, lon: -79.1127 });
+    expect(nyOprhpBeachStatus.matches(beach)).toBe(true);
+    const sites = parseNyOprhpBeachStatus(buildResponse([
+      feature({ StateParkBeach: "Evangola SP", Beach_status: "Closed", Status_Reason: "Exceedance" })
+    ]), NOW_ISO);
+    const site = resolveSiteForBeach(beach, sites);
+    expect(site).not.toBe(null);
+    expect(site.siteId).toBe("evangola");
+  });
+});
+
+describe("live off-season spelling", function() {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  const offSeason = buildResponse([
+    feature({ StateParkBeach: "Evangola SP", Beach_status: "Off - Season", Status_Reason: "Closed for end of season" }),
+    feature({ StateParkBeach: "Hamlin Beach (H3)", Beach_status: "Off - Season", Status_Reason: null })
+  ]);
+
+  it("parses an all-off-season feed to no sites", function() {
+    expect(parseNyOprhpBeachStatus(offSeason, NOW_ISO)).toEqual([]);
+  });
+
+  it("scrape returns null for an all-off-season feed", async function() {
+    installFetch(function () {
+      return Promise.resolve(jsonResponse(offSeason));
+    });
+    expect(await nyOprhpBeachStatus.scrape(NOW_ISO)).toBe(null);
   });
 });
 
@@ -315,7 +394,7 @@ describe("scrapeWqFloorFromResult wiring (resolver contract)", function() {
       id: "osm-node-evangola",
       name: "Evangola State Park Beach",
       park_name: "Evangola State Park",
-      lat: 42.601, lon: -79.160
+      lat: 42.6086, lon: -79.1127
     });
     const advisory = scrapeWqFloorFromResult(beach, nyOprhpBeachStatus, result);
     expect(advisory).not.toBe(null);
@@ -335,7 +414,7 @@ describe("scrapeWqFloorFromResult wiring (resolver contract)", function() {
     const otherBeach = makeBeach({
       name: "Hamlin Beach",
       park_name: "Hamlin Beach State Park",
-      lat: 43.362, lon: -77.947
+      lat: 43.3655, lon: -77.9557
     });
     expect(scrapeWqFloorFromResult(otherBeach, nyOprhpBeachStatus, result)).toBe(null);
   });
@@ -347,7 +426,7 @@ describe("scrapeWqFloorFromResult wiring (resolver contract)", function() {
     const beach = makeBeach({
       name: "Selkirk Shores Beach",
       park_name: "Selkirk Shores State Park",
-      lat: 43.535, lon: -76.203
+      lat: 43.5525, lon: -76.2140
     });
     const site = resolveSiteForBeach(beach, sites);
     expect(site).not.toBe(null);

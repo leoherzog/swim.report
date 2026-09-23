@@ -31,12 +31,9 @@
 // alert lane, the SRF rip lane, or the NOAA wave lane — it only
 // RAISES, never competes with, those estimates. No dedup concern.
 //
-// FETCH-URL / MARKUP CONFIRMATION: the live page renders through JS/markdown so
-// the exact status-3 class + data-timestamp attribute markup could not be
-// byte-verified here. The parser is written to the DOCUMENTED shape and FAILS
-// CLOSED to null on any deviation (missing/unknown status code, no whitelisted
-// hazard phrase). If the markup differs from the documented form, this source
-// simply emits no floor (safe direction) until the selectors are confirmed.
+// MARKUP: the live page serves the documented <strong class="status-N"> element
+// and a data-timestamp in epoch seconds, and the parser fails closed to null on
+// any deviation.
 //
 // scrape() runs CRON-SIDE only. parseStatusfyPage / isEvanstonHazardReason /
 // parseStatusfyStatus / normalizeStatusfyTimestamp are pure and exported for
@@ -46,6 +43,8 @@ import { fetchText, perBeachResult } from "../officialSources/util.js";
 
 const STATUSFY_BASE = "https://statusfy.com/8474480034/";
 export const EVANSTON_LABEL = "City of Evanston Beach Status";
+// statusfy.com answers 403 to a request with no User-Agent, and a Workers fetch sends none.
+const STATUSFY_USER_AGENT = "swim.report (hello@swim.report)";
 
 // The six Evanston Lake Michigan beaches, keyed by their Statusfy page ext.
 // names[] feed resolveSiteForBeach (substring match against park_name + name);
@@ -237,6 +236,7 @@ export const evanstonStatusfy = {
       const def = EVANSTON_SITE_DEFS[i];
       const url = STATUSFY_BASE + def.ext;
       const html = await fetchText(url, {
+        headers: { "User-Agent": STATUSFY_USER_AGENT },
         logPrefix: "evanstonStatusfy: fetch failed for " + def.siteId
       });
       if (html === null) {
