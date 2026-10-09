@@ -1,7 +1,6 @@
 // Tests for scripts/lib/fgbReader.js, the FlatGeobuf reader the offline layer
-// pipeline runs on Deno. Deno.readFile and Deno.open are reached through
-// globalThis inside the two file readers, so importing the module under vitest
-// touches no Deno, no network and no files.
+// pipeline runs on Node. The byte-level tests build fixtures in memory; only the
+// file-reader tests write layer files, into a temporary directory.
 //
 // Half the budget here is on the artifact-is-corrupt paths and their exact throw
 // messages. A layer pipeline that half-parses is how you silently zero a layer,
@@ -9,7 +8,10 @@
 // gives no protection for free: a buffer truncated in the header region decodes
 // as zero features with no error at all, which is asserted below.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { serialize } from "flatgeobuf/lib/mjs/geojson.js";
 import { buildHeader } from "flatgeobuf/lib/mjs/generic/featurecollection.js";
 import { magicbytes } from "flatgeobuf/lib/mjs/constants.js";
@@ -334,24 +336,72 @@ describe("toLayerFeature tags and bounds", function () {
   });
 });
 
-// --- the Deno-only surface ------------------------------------------------------
+// --- the file readers ------------------------------------------------------------
 
-describe("the file readers are Deno-only and say so", function () {
-  it("readLayerFile rejects under Node with an actionable message", async function () {
-    await expect(readLayerFile("beaches-point.fgb", "beaches")).rejects.toThrow(
-      /^fgbReader: readLayerFile requires Deno/
-    );
+describe("the file readers read layer files from disk", function () {
+  let dir = null;
+
+  beforeAll(async function () {
+    dir = await mkdtemp(join(tmpdir(), "fgbReader-"));
   });
 
-  it("readFgbStream rejects under Node with an actionable message", async function () {
-    const iterate = async function () {
-      const out = [];
-      for await (const record of readFgbStream("water-polygon.fgb", "water")) {
-        out.push(record);
+  afterAll(async function () {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function collect(path, layerName, limit) {
+    const out = [];
+    for await (const record of readFgbStream(path, layerName)) {
+      out.push(record);
+      if (limit !== undefined && out.length >= limit) {
+        break;
       }
-      return out;
-    };
-    await expect(iterate()).rejects.toThrow(/^fgbReader: readFgbStream requires Deno/);
+    }
+    return out;
+  }
+
+  it("readLayerFile decodes and normalizes every feature of a file", async function () {
+    const path = join(dir, "beaches-point.fgb");
+    await writeFile(path, buildLayerBytes([
+      pointFeature("1001", { name: "Node Beach", natural: "beach" }),
+      pointFeature("1002", { name: "Other Beach", natural: "beach" })
+    ]));
+    const records = await readLayerFile(path, "beaches");
+    expect(records.map(function (r) { return "osm-" + r.osmType + "-" + r.osmId; }))
+      .toEqual(["osm-node-1001", "osm-node-1002"]);
+    expect(records[0].layer).toBe("beaches");
+    expect(records[0].tags).toEqual({ name: "Node Beach", natural: "beach" });
+  });
+
+  it("readFgbStream yields every feature of a multi-chunk file in order, and stops early on request",
+    async function () {
+      // Enough features that the file spans several stream chunks, so a feature
+      // split across a chunk boundary is on the path.
+      const features = [];
+      for (let i = 0; i < 3000; i = i + 1) {
+        features.push(lineFeature(String(5000 + i), { name: "Way " + String(i), natural: "coastline" }));
+      }
+      const path = join(dir, "coastline-line.fgb");
+      await writeFile(path, buildLayerBytes(features));
+      const all = await collect(path, "coastline");
+      expect(all.length).toBe(3000);
+      expect(all[0].osmId).toBe(5000);
+      expect(all[2999].osmId).toBe(7999);
+      expect(all[2999].osmType).toBe("way");
+      // A consumer that breaks out is a deliberate exit, never a truncated artifact.
+      const first = await collect(path, "coastline", 1);
+      expect(first.map(function (r) { return r.osmId; })).toEqual([5000]);
+    });
+
+  it("readFgbStream refuses a file that lost whole features off its tail", async function () {
+    const features = [pointFeature("1", {}), pointFeature("2", {}), pointFeature("3", {})];
+    const whole = buildLayerBytes(features);
+    const oneFeature = whole.length - buildLayerBytes(features.slice(0, 2)).length;
+    const path = join(dir, "water-polygon.fgb");
+    await writeFile(path, buildLayerBytes(features, { truncateTo: whole.length - oneFeature }));
+    await expect(collect(path, "water")).rejects.toThrow(
+      "fgbReader: truncated FlatGeobuf (" + path + "): header declares 3 features, decoded 2"
+    );
   });
 });
 

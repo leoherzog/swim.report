@@ -1,6 +1,6 @@
 // Tests for scripts/clip-layers.js, the build-side region filter (predicate A)
-// and proximity clip (predicate B). Importing its pure exports touches no Deno,
-// no file system and no subprocess. The failure this file exists to catch is a
+// and proximity clip (predicate B). Importing its pure exports touches no file
+// system and no subprocess. The failure this file exists to catch is a
 // predicate that silently keeps or drops the wrong half of a continent.
 
 import { describe, it, expect } from "vitest";

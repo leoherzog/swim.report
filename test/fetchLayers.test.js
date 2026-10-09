@@ -1,6 +1,6 @@
 // Tests for scripts/fetch-layers.js and scripts/print-spat-bbox.js, the two
-// fetch-side Deno scripts of the FlatGeobuf layer pipeline. Importing their pure
-// exports touches no Deno, no network and no file writes. print-spat-bbox.js has
+// fetch-side scripts of the FlatGeobuf layer pipeline. Importing their pure
+// exports touches no network and no file writes. print-spat-bbox.js has
 // no test file of its own, so its exports are exercised in the final describe
 // block below.
 //

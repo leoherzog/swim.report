@@ -2,16 +2,17 @@
 // NDJSON artifacts the SQL writer consumes. Two modes, both pure local math over
 // bytes on disk:
 //
-//   deno run --allow-read --allow-write scripts/sample-waves.js --mode plan \
-//     --dest ./.waves --out ./.waves/band-plan.json
-//   deno run --allow-read --allow-write scripts/sample-waves.js --mode sample \
+//   node --permission --allow-fs-read=. --allow-fs-write=./.waves/band-plan.json \
+//     scripts/sample-waves.js --mode plan --dest ./.waves --out ./.waves/band-plan.json
+//   node --permission --allow-fs-read=. --allow-fs-write='./.waves/out/*' \
+//     scripts/sample-waves.js --mode sample \
 //     --dest ./.waves --planes ./.waves/planes --snapshot snapshot.json --out ./.waves/out
 //
-// No --allow-net and no --allow-run. GDAL runs in the workflow shell and never
-// from here: plan mode reads the gdalinfo JSON the shell captured and says which
-// band of which file to extract; sample mode reads the flat ENVI rasters the shell
-// wrote and their gdalinfo sidecars. That keeps subprocess permission out of the
-// wave pipeline, and .github/workflows/test.yml enforces the no-network half.
+// No --allow-net and no --allow-child-process. GDAL runs in the workflow shell and
+// never from here: plan mode reads the gdalinfo JSON the shell captured and says
+// which band of which file to extract; sample mode reads the flat ENVI rasters the
+// shell wrote and their gdalinfo sidecars. That keeps subprocess permission out of
+// the wave pipeline, and .github/workflows/test.yml enforces both halves.
 //
 // The units contract. HTSGW is metres; feet = metres * 3.28084 (metersToFeet in
 // src/geo.js, never re-derived here). WIND is metres per second; mph = m/s *
@@ -38,6 +39,7 @@
 // hoursFt[0] === waveinput.waveHeightFt invariant and making the detail page's
 // "now" stat contradict its own first bar.
 
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
   GRIDS,
   REQUIRED_GRID_IDS,
@@ -538,7 +540,7 @@ export function planeIdentityMismatches(planeInfo, gridId, reference) {
 // --- I/O helpers (main only) ---------------------------------------------------------
 
 async function readJson(path) {
-  return JSON.parse(await Deno.readTextFile(path));
+  return JSON.parse(await readFile(path, "utf8"));
 }
 
 // One ENVI plane as a Float32Array over the raw bytes. Byte order is the runner's
@@ -547,7 +549,7 @@ async function readJson(path) {
 // absurd magnitudes, which is what the sentinel, mean-plausibility and
 // distinct-value gates in scripts/build-wave-manifest.js refuse.
 async function readPlane(path, header, what) {
-  const bytes = await Deno.readFile(path);
+  const bytes = await readFile(path);
   const expected = header.width * header.height * 4;
   if (bytes.length !== expected) {
     throw new Error("sample-waves: " + what + ": expected " + String(expected) +
@@ -638,7 +640,7 @@ async function runPlan(args) {
     gridStatus: plan.gridStatus,
     entries: plan.entries
   };
-  await Deno.writeTextFile(args.out, JSON.stringify(doc, null, 2) + "\n");
+  await writeFile(args.out, JSON.stringify(doc, null, 2) + "\n");
   log("planned " + String(plan.entries.length) + " band(s) -> " + args.out);
 }
 
@@ -850,10 +852,10 @@ async function runSample(args) {
     }
   }
 
-  await Deno.mkdir(args.out, { recursive: true });
-  await Deno.writeTextFile(args.out + "/" + WAVEINPUT_ARTIFACT,
+  await mkdir(args.out, { recursive: true });
+  await writeFile(args.out + "/" + WAVEINPUT_ARTIFACT,
     waveinputLines.length > 0 ? waveinputLines.join("\n") + "\n" : "");
-  await Deno.writeTextFile(args.out + "/" + WAVES_ARTIFACT,
+  await writeFile(args.out + "/" + WAVES_ARTIFACT,
     wavesLines.length > 0 ? wavesLines.join("\n") + "\n" : "");
 
   const bands = [];
@@ -891,14 +893,14 @@ async function runSample(args) {
     grids: stats,
     bands: bands
   };
-  await Deno.writeTextFile(args.out + "/sample-report.json",
+  await writeFile(args.out + "/sample-report.json",
     JSON.stringify(report, null, 2) + "\n");
   log("wrote " + String(waveRecords) + " waveinput and " + String(wavesRecords) +
     " waves record(s) to " + args.out);
 }
 
 async function main() {
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(process.argv.slice(2));
   if (args.mode === "plan") {
     await runPlan(args);
     return;
@@ -909,6 +911,6 @@ async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("sample-waves: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

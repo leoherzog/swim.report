@@ -1,7 +1,7 @@
 // src/layerManifest.js — the delete-path gate for the FlatGeobuf layer pipeline,
 // and the single choke point scripts/discovery-batch.js consults before any
 // DELETE. Pure: no fetch, no Date, no filesystem, and its only import is
-// src/regions.js, so the offline Deno batch, the build-side scripts and vitest
+// src/regions.js, so the offline batch, the build-side scripts and vitest
 // all load it verbatim.
 //
 // The failure mode this gate exists for is inverted from a network one. A wrong

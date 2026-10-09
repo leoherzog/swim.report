@@ -15,6 +15,45 @@ import { EXPECTED_LAYER_KEYS, regionsDigestInput } from "../src/layerManifest.js
 import { REGIONS } from "../src/regions.js";
 import { WATER_CLASS_VERSION } from "../src/waterClass.js";
 
+// main() and its layer reader reach the filesystem only through node:fs/promises,
+// so this in-memory stand-in replaces every file the batch reads or writes.
+const memfs = vi.hoisted(function () {
+  return { files: new Map(), written: new Map() };
+});
+
+vi.mock("node:fs/promises", function () {
+  function lookup(path) {
+    const value = memfs.files.get(path);
+    if (value === undefined) { throw new Error("ENOENT " + path); }
+    return value;
+  }
+  return {
+    readFile: async function (path, encoding) {
+      const value = lookup(path);
+      if (encoding === undefined) { return value; }
+      return typeof value === "string" ? value : new TextDecoder().decode(value);
+    },
+    writeFile: async function (path, text) { memfs.written.set(path, text); },
+    open: async function (path) {
+      const value = lookup(path);
+      let offset = 0;
+      return {
+        readableWebStream: function () {
+          return new ReadableStream({
+            pull: function (controller) {
+              if (offset >= value.length) { controller.close(); return; }
+              const end = Math.min(offset + 1024, value.length);
+              controller.enqueue(value.slice(offset, end));
+              offset = end;
+            }
+          });
+        },
+        close: async function () {}
+      };
+    }
+  };
+});
+
 const PROPS = { osm_id: null, osm_way_id: null, name: null, loc_name: null, natural: null,
   leisure: null, boundary: null, water: null, wikidata: null, type: null };
 
@@ -125,7 +164,9 @@ const NOW = "2026-09-05T00:00:00.000Z";
 
 async function runBatch(layers, extraArgs) {
   const dir = "/layers";
-  const files = new Map();
+  const files = memfs.files;
+  files.clear();
+  memfs.written.clear();
   const names = Object.keys(layers);
   for (let i = 0; i < names.length; i = i + 1) {
     files.set(dir + "/" + names[i], layerBytes(layers[names[i]]));
@@ -140,47 +181,16 @@ async function runBatch(layers, extraArgs) {
       previousPolygonCount: 1, previousLineCount: 0 }
   }));
   files.set("/snapshot.json", JSON.stringify([{ results: snapshotRows() }]));
-  const written = new Map();
   const logs = [];
   vi.spyOn(console, "error").mockImplementation(function (msg) { logs.push(String(msg)); });
   vi.spyOn(console, "log").mockImplementation(function () {});
-  vi.stubGlobal("Deno", {
-    args: ["--layers", dir, "--snapshot", "/snapshot.json", "--out", "/out.sql", "--now", NOW]
-      .concat(extraArgs || []),
-    readTextFile: async function (path) {
-      const value = files.get(path);
-      if (value === undefined) { throw new Error("ENOENT " + path); }
-      return typeof value === "string" ? value : new TextDecoder().decode(value);
-    },
-    writeTextFile: async function (path, text) { written.set(path, text); },
-    readFile: async function (path) {
-      const value = files.get(path);
-      if (value === undefined) { throw new Error("ENOENT " + path); }
-      return value;
-    },
-    open: async function (path) {
-      const value = files.get(path);
-      if (value === undefined) { throw new Error("ENOENT " + path); }
-      let offset = 0;
-      return {
-        readable: new ReadableStream({
-          pull: function (controller) {
-            if (offset >= value.length) { controller.close(); return; }
-            const end = Math.min(offset + 1024, value.length);
-            controller.enqueue(value.slice(offset, end));
-            offset = end;
-          }
-        }),
-        close: function () {}
-      };
-    }
-  });
-  await main();
-  return { sql: written.get("/out.sql"), logs: logs };
+  await main(["--layers", dir, "--snapshot", "/snapshot.json", "--out", "/out.sql", "--now", NOW]
+    .concat(extraArgs || []));
+  return { sql: memfs.written.get("/out.sql"), logs: logs };
 }
 
 describe("discovery-batch golden run", function () {
-  afterEach(function () { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  afterEach(function () { vi.restoreAllMocks(); });
 
   it("emits the pinned delta for the fixture layer set", async function () {
     const result = await runBatch(fixtureLayers());

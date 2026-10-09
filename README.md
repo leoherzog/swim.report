@@ -443,7 +443,7 @@ under the estimate card, and no rule reads it.
 
 ## Local development
 
-    npm install
+    npm install    # Node 26 or later
     npm run dev    # predev applies migrations/ to the local D1 automatically
 
 The production D1 database and KV namespace already exist and their IDs are committed in
@@ -629,9 +629,10 @@ prebuilt layer set into `./.layers` (the only step here that touches the network
 `--allow-net` on the batch. Then run `npm run seed:enrich` a few times for NWS zones, and
 `npm run seed:eccc` afterwards for the Canadian rows NWS parks — the NWS attempts cap means a
 fresh database needs about five `seed:enrich` passes before Canadian rows become ECCC
-candidates. For wave data run `npm run seed:wavegrids`, then `npm run seed:waveplanes`, then
-`npm run seed:waves`, before `seed:flags`. That last step ends by applying its own SQL delta
-into local D1 through `node scripts/apply-local-sql.js`, the same applier `npm run seed` uses.
+candidates. For wave data, which needs GDAL on the `PATH`, run `npm run seed:wavegrids`, then
+`npm run seed:waveplanes`, then `npm run seed:waves`, before `seed:flags`. That last step ends
+by applying its own SQL delta into local D1 through `node scripts/apply-local-sql.js`, the same
+applier `npm run seed` uses.
 
 ### Water temperature stations
 
@@ -677,9 +678,9 @@ for another.
 ### Discovery and classification (offline)
 
 Beach discovery and water-body classification run **outside** the Worker, in an offline
-GitHub Actions batch (`scripts/discovery-batch.js`, run on Deno). Both are pure local math
-over a prebuilt spatial layer set: the batch makes zero upstream data queries and runs with
-no network permission at all (`deno run --allow-read --allow-write`).
+GitHub Actions batch (`scripts/discovery-batch.js`, run on Node). Both are pure local math
+over a prebuilt spatial layer set: the batch makes zero upstream data queries and runs with no
+network permission at all (`node --permission` without `--allow-net`).
 `docs/offline-discovery.md` has the full design.
 
 `.github/workflows/build-layers.yml` (twice weekly) builds the layer set from the Geofabrik

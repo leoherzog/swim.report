@@ -135,16 +135,16 @@ decode path, so GRIB2 decoding inside the Worker is impossible and must never be
 there. `noaa_nwps_sew` is template 5.0 simple packing, which GDAL reads with no special
 handling and which proves nothing about the JPEG 2000 driver, so the smoke decode stays pointed
 at gfswave. GDAL runs in the **workflow shell**, which keeps subprocess permission out of the
-Deno pipeline entirely: no script carries `--allow-run`, and only
-`scripts/fetch-wave-grids.js` carries `--allow-net`.
-`.github/workflows/test.yml` enforces the network half machine-side; the subprocess half rests
-on review, and extending the guard is tracked in `TODO.md`.
+pipeline entirely: every script runs under `node --permission`, none carries
+`--allow-child-process`, and only `scripts/fetch-wave-grids.js` carries `--allow-net`.
+`.github/workflows/test.yml` enforces both halves machine-side, and its limits are tracked in
+`TODO.md`.
 
 Two GDAL traps the workflow accounts for. GDAL has a documented mode where it returns an empty
 result with a zero exit status, so a format-list grep does not prove the JPEG 2000 driver is
 present — only a smoke decode asserting a real valid-percent does. And `gdallocationinfo` with
 coordinates as arguments prints nothing for an out-of-extent point and exits 1, silently losing
-points; reading raw planes in Deno avoids that, and shell-side sampling reintroduces it.
+points; reading raw planes in Node avoids that, and shell-side sampling reintroduces it.
 
 ## The pipeline
 
@@ -459,8 +459,8 @@ delta into line-aligned chunks under the local `wrangler d1 execute --file` byte
 why the emitter writes one statement per line. A refused gate exits 1, so the `&&` chain never
 reaches the apply.
 
-Every Deno invocation must set `DENO_NO_PACKAGE_JSON=1`, or a plain `deno run` silently
-rewrites the checked-in `deno.lock`.
+The local steps need Node 26 or later and GDAL with the JPEG 2000 driver on the `PATH`. No wave
+script imports an npm package, so the pipeline runs without `node_modules/`.
 
 ## Inspecting what landed
 

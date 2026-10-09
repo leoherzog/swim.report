@@ -1,9 +1,11 @@
 // scripts/build-manifest.js — the build-side gate (PLAN.md section 5).
 //
-// Runs on Deno as the last step of .github/workflows/build-layers.yml before
+// Runs on Node as the last step of .github/workflows/build-layers.yml before
 // anything is uploaded:
 //
-//   deno run --allow-read --allow-write --allow-run scripts/build-manifest.js \
+//   node --permission --allow-child-process --allow-fs-read=. --allow-fs-read="$WORK/*" \
+//     --allow-fs-write="$WORK/layers/manifest.json*" --allow-fs-write="$WORK/layers/SHA256SUMS*" \
+//     scripts/build-manifest.js \
 //     --layers "$WORK/layers" --floors data/layer-floors.json \
 //     --previous "$WORK/prev-manifest.json" --snapshot "$OSM_SNAPSHOT" \
 //     --build-id "..." --git-sha "..." --run-id "..." \
@@ -25,9 +27,10 @@
 //
 // Every gate is a pure exported function over plain data — no file system, no
 // subprocess, no clock — so all of it is unit-tested in
-// test/buildManifest.test.js. main() does the I/O and calls them. Deno is
-// reached through globalThis so importing this module under vitest is legal.
+// test/buildManifest.test.js. main() does the I/O and calls them.
 
+import { execFile } from "node:child_process";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { EXPECTED_LAYER_KEYS, LAYER_SCHEMA_VERSION, regionsDigestInput } from "../src/layerManifest.js";
 import { REGIONS } from "../src/regions.js";
 import { GREAT_LAKE_QIDS } from "../src/waterClass.js";
@@ -1005,15 +1008,7 @@ export function verifySources(sources) {
   return { verified: true, oldestTimestamp: oldest, reason: null };
 }
 
-// --- Deno I/O ----------------------------------------------------------------------
-
-function requireDeno(what) {
-  const runtime = globalThis.Deno;
-  if (!runtime || typeof runtime.readTextFile !== "function") {
-    throw new Error("build-manifest: " + what + " requires Deno (globalThis.Deno is unavailable)");
-  }
-  return runtime;
-}
+// --- I/O ---------------------------------------------------------------------------
 
 function toHex(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -1034,13 +1029,13 @@ async function sha256OfText(text) {
   return await sha256Hex(new TextEncoder().encode(text));
 }
 
-async function readJsonIfPresent(runtime, path) {
+async function readJsonIfPresent(path) {
   if (!path) {
     return null;
   }
   let text = null;
   try {
-    text = await runtime.readTextFile(path);
+    text = await readFile(path, "utf8");
   } catch (err) {
     return null;
   }
@@ -1052,15 +1047,18 @@ async function readJsonIfPresent(runtime, path) {
   }
 }
 
-async function runCommand(runtime, bin, cmdArgs) {
-  const command = new runtime.Command(bin, { args: cmdArgs, stdout: "piped", stderr: "piped" });
-  const output = await command.output();
-  const decoder = new TextDecoder();
-  return {
-    code: output.code,
-    stdout: decoder.decode(output.stdout),
-    stderr: decoder.decode(output.stderr)
-  };
+// Resolves with the exit code and both streams for any process that ran to an exit,
+// zero or not. Rejects when the binary cannot be spawned or dies on a signal.
+function runCommand(bin, cmdArgs) {
+  return new Promise(function (resolve, reject) {
+    execFile(bin, cmdArgs, { encoding: "utf8", maxBuffer: Infinity }, function (err, stdout, stderr) {
+      if (err && typeof err.code !== "number") {
+        reject(err);
+        return;
+      }
+      resolve({ code: err ? err.code : 0, stdout: stdout, stderr: stderr });
+    });
+  });
 }
 
 // The runner image from its own env vars, or null off a runner. Null rather than
@@ -1074,9 +1072,9 @@ export function runnerImageOf(imageOs, imageVersion) {
   return version === "" ? os : os + "/" + version;
 }
 
-async function toolVersion(runtime, bin, cmdArgs) {
+async function toolVersion(bin, cmdArgs) {
   try {
-    const result = await runCommand(runtime, bin, cmdArgs);
+    const result = await runCommand(bin, cmdArgs);
     const text = (result.stdout + result.stderr).split("\n")[0];
     return text.trim() === "" ? null : text.trim();
   } catch (err) {
@@ -1087,15 +1085,14 @@ async function toolVersion(runtime, bin, cmdArgs) {
 // --- main ----------------------------------------------------------------------------
 
 async function main() {
-  const runtime = requireDeno("main");
-  const args = parseArgs(runtime.args);
+  const args = parseArgs(process.argv.slice(2));
 
-  const floorsFile = await readJsonIfPresent(runtime, args.floors);
+  const floorsFile = await readJsonIfPresent(args.floors);
   if (floorsFile === null) {
     throw new Error("build-manifest: could not read the floors file at " + args.floors);
   }
-  const previousManifest = await readJsonIfPresent(runtime, args.previous);
-  const sourcesFile = await readJsonIfPresent(runtime, args.sources);
+  const previousManifest = await readJsonIfPresent(args.previous);
+  const sourcesFile = await readJsonIfPresent(args.sources);
 
   const regionsDigest = "sha256:" + await sha256OfText(regionsDigestInput(REGIONS));
   console.log("build-manifest: regionsDigest " + regionsDigest);
@@ -1106,28 +1103,28 @@ async function main() {
   for (let i = 0; i < EXPECTED_LAYER_KEYS.length; i = i + 1) {
     const key = EXPECTED_LAYER_KEYS[i];
     const path = args.layers + "/" + key;
-    let stat = null;
+    let layerStat = null;
     try {
-      stat = await runtime.stat(path);
+      layerStat = await stat(path);
     } catch (err) {
       throw new Error("build-manifest: published layer is missing: " + path);
     }
-    const info = await runCommand(runtime, "ogrinfo", ["-json", "-so", "-al", path]);
+    const info = await runCommand("ogrinfo", ["-json", "-so", "-al", path]);
     if (info.code !== 0) {
       throw new Error("build-manifest: ogrinfo failed on " + path + " (exit " +
         String(info.code) + "): " + info.stderr.trim());
     }
     const parsed = parseOgrinfoLayer(info.stdout, key);
-    const bytes = await runtime.readFile(path);
+    const bytes = await readFile(path);
     layers.push({
       key: key,
       featureCount: parsed.featureCount,
-      bytes: stat.size,
+      bytes: layerStat.size,
       sha256: await sha256Hex(bytes),
       fields: parsed.fields
     });
     console.log("build-manifest: " + key + ": " + String(parsed.featureCount) +
-      " feature(s), " + String(stat.size) + " bytes, fields [" + parsed.fields.join(",") + "]");
+      " feature(s), " + String(layerStat.size) + " bytes, fields [" + parsed.fields.join(",") + "]");
   }
 
   // lakes-polygon identity: six features carrying exactly the six Great Lake QIDs.
@@ -1154,7 +1151,7 @@ async function main() {
       continue;
     }
     const name = key.slice(0, key.length - 4);
-    const sidecar = await readJsonIfPresent(runtime, args.counts + "/" + name + ".count");
+    const sidecar = await readJsonIfPresent(args.counts + "/" + name + ".count");
     if (sidecar !== null) {
       sidecars[name] = sidecar;
       if (isFiniteNumber(sidecar.count)) {
@@ -1215,7 +1212,7 @@ async function main() {
 
   let filtersDigest = null;
   try {
-    filtersDigest = "sha256:" + await sha256OfText(await runtime.readTextFile(args.filters));
+    filtersDigest = "sha256:" + await sha256OfText(await readFile(args.filters, "utf8"));
   } catch (err) {
     console.log("build-manifest: WARNING: could not digest " + args.filters);
   }
@@ -1231,9 +1228,9 @@ async function main() {
     sourcesVerified: sourceCheck.verified,
     oldestSourceTimestamp: sourceCheck.oldestTimestamp || args.snapshot || null,
     tools: {
-      osmium: await toolVersion(runtime, "osmium", ["--version"]),
-      gdal: await toolVersion(runtime, "ogrinfo", ["--version"]),
-      runnerImage: runnerImageOf(runtime.env.get("ImageOS"), runtime.env.get("ImageVersion")),
+      osmium: await toolVersion("osmium", ["--version"]),
+      gdal: await toolVersion("ogrinfo", ["--version"]),
+      runnerImage: runnerImageOf(process.env.ImageOS, process.env.ImageVersion),
       filtersDigest: filtersDigest
     },
     regionsDigest: regionsDigest,
@@ -1251,12 +1248,12 @@ async function main() {
   };
 
   const text = JSON.stringify(manifest, null, 2) + "\n";
-  await runtime.writeTextFile(args.out + ".tmp", text);
-  await runtime.rename(args.out + ".tmp", args.out);
+  await writeFile(args.out + ".tmp", text);
+  await rename(args.out + ".tmp", args.out);
 
   const sumsPath = args.layers + "/SHA256SUMS";
-  await runtime.writeTextFile(sumsPath + ".tmp", sha256SumsText(layers));
-  await runtime.rename(sumsPath + ".tmp", sumsPath);
+  await writeFile(sumsPath + ".tmp", sha256SumsText(layers));
+  await rename(sumsPath + ".tmp", sumsPath);
 
   console.log("build-manifest: wrote " + args.out + " and " + sumsPath);
   console.log("build-manifest: autoPublishAllowed=" + String(verdict.sanity.autoPublishAllowed) +
@@ -1267,6 +1264,6 @@ async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("build-manifest: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

@@ -1,6 +1,6 @@
 // Tests for scripts/build-manifest.js, the build-side gate that is the primary
-// defence against mass deletion. Importing its pure exports touches no Deno, no
-// subprocess and no file system.
+// defence against mass deletion. Importing its pure exports touches no subprocess
+// and no file system.
 //
 // Every fixture is built in memory by one named helper per artifact kind, each
 // carrying explicit malformation knobs rather than being hand-corrupted per

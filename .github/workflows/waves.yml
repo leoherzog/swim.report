@@ -44,9 +44,9 @@ name: Wave cycle
 # CLOUDFLARE_D1_EDIT_TOKEN, the same secret discovery.yml uses, and no AWS keys.
 # The artifact handoff between them needs no secret at all.
 #
-# It needs no npm private-registry tokens: it never runs npm install in the repo root,
-# which would reify package.json's private deps and fail E401. Every wrangler call
-# goes through npx --yes wrangler@<pin>.
+# It needs no npm private-registry tokens: none of its scripts has an npm dependency,
+# so it never runs npm install in the repo root, which would reify package.json's
+# private deps and fail E401. Every wrangler call goes through npx --yes wrangler@<pin>.
 
 on:
   # 4 slots a day, matching the 4 GFS cycles and the 24 h series each one publishes.
@@ -85,14 +85,6 @@ concurrency:
 
 permissions:
   contents: read
-
-# Workflow-scoped so it covers every deno invocation in every job and step. Deno
-# auto-discovers the repo-root deno.lock, and without this it also wants a
-# workspace.packageJson block for package.json's npm deps: "deno cache --frozen" then
-# fails with "The lockfile is out of date", and a plain "deno run" silently rewrites
-# the checked-in lock.
-env:
-  DENO_NO_PACKAGE_JSON: "1"
 
 jobs:
   sample:
@@ -147,26 +139,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
-
-      # Resolve the dependency tree from the committed deno.lock once, explicitly, and
-      # fail loudly if it drifts.
-      - name: Cache Deno dependencies (frozen lockfile)
-        run: |
-          deno cache --lock=deno.lock --frozen \
-            scripts/print-flag-worthy-sql.js \
-            scripts/fetch-wave-grids.js \
-            scripts/sample-waves.js \
-            scripts/build-wave-manifest.js \
-            scripts/build-wave-sql.js
+          node-version: 26
 
       - name: Install GDAL and prove it can decode GRIB2 JPEG 2000
         # gfswave packs with DRS template 5.40, which is JPEG 2000, and
@@ -240,7 +216,7 @@ jobs:
           # and the count guard. The guard compares the same predicate against itself,
           # so an empty value would snapshot the whole table and bless it;
           # --require-where fails the step instead.
-          FLAG_WORTHY=$(deno run --lock=deno.lock --frozen --allow-read scripts/print-flag-worthy-sql.js)
+          FLAG_WORTHY=$(node --permission --allow-fs-read=. scripts/print-flag-worthy-sql.js)
           node scripts/snapshot-d1.js --db "$DB_NAME" --remote \
             --columns "id, lat, lon, water_class, last_viewed" \
             --where "$FLAG_WORTHY" --require-where \
@@ -255,7 +231,7 @@ jobs:
         # documented 10 s and capped per grid.
         run: |
           set -euo pipefail
-          deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
+          node --permission --allow-net --allow-fs-read=. --allow-fs-write="$WORK/grib/*" \
             scripts/fetch-wave-grids.js --dest "$WORK/grib"
           node -e "
             const fs = require('fs');
@@ -385,7 +361,8 @@ jobs:
         # complete, plausible, silently time-shifted 24 h series.
         run: |
           set -euo pipefail
-          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+          node --permission --allow-fs-read=. --allow-fs-read="$WORK/grib/*" \
+            --allow-fs-write="$WORK/grib/band-plan.json" \
             scripts/sample-waves.js --mode plan --dest "$WORK/grib" --out "$WORK/grib/band-plan.json"
 
       - name: Extract every band as a flat lat/lon raster
@@ -520,11 +497,12 @@ jobs:
           echo "extracted $(ls "$PLANES"/*.img | wc -l) plane(s)"
 
       - name: Sample every beach
-        # No --allow-net and no --allow-run: GDAL ran in this shell and never from the
-        # script, so the sampler is pure local math over bytes on disk.
+        # No --allow-net and no --allow-child-process: GDAL ran in this shell and never
+        # from the script, so the sampler is pure local math over bytes on disk.
         run: |
           set -euo pipefail
-          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+          node --permission --allow-fs-read=. --allow-fs-read="$WORK/*" \
+            --allow-fs-write="$WORK/out/*" \
             scripts/sample-waves.js --mode sample --dest "$WORK/grib" \
             --planes "$PLANES" --snapshot "$WORK/snapshot.json" --out "$WORK/out"
           cat "$WORK/out/sample-report.json"
@@ -534,8 +512,8 @@ jobs:
           set -euo pipefail
           CYCLE_ID="${VALID_START_COMPACT}-g${GFS_CYCLE_COMPACT}-${GITHUB_SHA::7}"
           echo "CYCLE_ID=$CYCLE_ID" >> "$GITHUB_ENV"
-          deno run --lock=deno.lock --frozen --allow-read --allow-write \
-            --allow-env=ImageOS,ImageVersion \
+          node --permission --allow-fs-read=. --allow-fs-read="$WORK/*" \
+            --allow-fs-write="$WORK/out/manifest.json*" \
             scripts/build-wave-manifest.js \
             --sample "$WORK/out" \
             --grids-report "$WORK/grib/grids-report.json" \
@@ -686,18 +664,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
-
-      - name: Cache Deno dependencies (frozen lockfile)
-        run: deno cache --lock=deno.lock --frozen scripts/build-wave-sql.js
+          node-version: 26
 
       - name: Download the cycle from the sample job
         # The same run's wave-cycle artifact, so this job can only ever consume the
@@ -718,7 +688,8 @@ jobs:
           echo "DL=$DL" >> "$GITHUB_ENV"
           ls -l "$DL/wavecycle"
           mkdir -p "$DL/sql"
-          deno run --lock=deno.lock --frozen --allow-read --allow-write \
+          node --permission --allow-fs-read=. --allow-fs-read="$DL/wavecycle/*" \
+            --allow-fs-write="$DL/sql/*" \
             scripts/build-wave-sql.js --dir "$DL/wavecycle" --out "$DL/sql"
           cat "$DL/sql/wave-sql-report.json"
 

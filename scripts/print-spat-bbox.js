@@ -1,13 +1,12 @@
 // scripts/print-spat-bbox.js — prints the ogr2ogr -spat mask (and, under
 // --boxes, the per-region box list) derived from src/regions.js REGIONS.
 //
-// Run from .github/workflows/build-layers.yml, on Deno, with read permission
-// only:
+// Run from .github/workflows/build-layers.yml with read permission only:
 //
-//   SPAT=$(deno run --allow-read scripts/print-spat-bbox.js)
+//   SPAT=$(node --permission --allow-fs-read=. scripts/print-spat-bbox.js)
 //   ogr2ogr ... -spat $SPAT ...
 //
-//   deno run --allow-read scripts/print-spat-bbox.js --boxes
+//   node --permission --allow-fs-read=. scripts/print-spat-bbox.js --boxes
 //   # one "minLon minLat maxLon maxLat" line per REGIONS entry
 //
 // The default output is the union bounding box of every REGIONS entry, padded
@@ -168,6 +167,6 @@ export function parseArgs(argv) {
 }
 
 if (import.meta.main) {
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(process.argv.slice(2));
   console.log(renderOutput(REGIONS, args.mode));
 }

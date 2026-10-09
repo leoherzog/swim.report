@@ -2,9 +2,9 @@
 // src/waterClass.js so a shell WHERE clause and the request path can never
 // spell the hide-until-flag-worthy gate differently.
 //
-// Run on Deno with read permission only:
+// Run with read permission only:
 //
-//   FLAG_WORTHY=$(deno run --allow-read scripts/print-flag-worthy-sql.js)
+//   FLAG_WORTHY=$(node --permission --allow-fs-read=. scripts/print-flag-worthy-sql.js)
 //   wrangler d1 execute ... --command "SELECT id FROM beaches WHERE $FLAG_WORTHY"
 //
 // The predicate is interpolated into a double-quoted shell string, so the output
@@ -42,6 +42,6 @@ export function parseArgs(argv) {
 }
 
 if (import.meta.main) {
-  parseArgs(Deno.args);
+  parseArgs(process.argv.slice(2));
   console.log(renderOutput());
 }

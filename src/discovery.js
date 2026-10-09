@@ -5,7 +5,7 @@
 // to mergeBeachRows.
 //
 // Imports only src/geo.js, which is itself dependency-free, so it carries no
-// Worker-only baggage and loads in a plain Deno process. Pure: no fetch, no
+// Worker-only baggage and loads in a plain Node process. Pure: no fetch, no
 // Date, no env. Imported by scripts/discovery-batch.js and by tests.
 
 import { distanceKm, toRadians } from "./geo.js";

@@ -32,11 +32,11 @@ cannot reach the bucket even by accident.
 
 **`.github/workflows/build-layers.yml`** — twice weekly (`41 6 * * 0` and `41 6 * * 3`, plus
 `workflow_dispatch`), concurrency group `build-layers`, `timeout-minutes: 180`. Plain shell on
-a GitHub runner; not delete-bearing and not a Deno program. It reclaims runner disk against a
+a GitHub runner, and not delete-bearing. It reclaims runner disk against a
 40 GB floor, then per country (us, canada, mexico) **sequentially** downloads the Geofabrik
 extract, verifies its `.md5`, runs `osmium tags-filter` against `.github/build/expressions.txt`
 and deletes the `.pbf` before the next country, peaking at ~13.3 GB. Then `osmium merge`, one
-`ogr2ogr` OSM read, `scripts/clip-layers.js` (Deno) trimming the park, coastline and water
+`ogr2ogr` OSM read, `scripts/clip-layers.js` trimming the park, coastline and water
 layers to within ~1.1 km of the beach set, and `scripts/build-manifest.js`.
 
 Four things in that sequence are load-bearing:
@@ -81,8 +81,8 @@ fail TLS against a wildcard certificate covering one label.
 **Failure posture: last-good.** A failed or sanity-refused build publishes nothing and leaves
 the previous layer set live. That is delete-safe: an older extract is over-inclusive, so it can
 only fail to discover a new beach, never invent a stale one. `osmium-tool` and GDAL are
-**workflow shell dependencies only** — never a dependency of the Deno batch, the Worker, or the
-tests.
+**workflow shell dependencies only** — never a dependency of the discovery batch, the Worker, or
+the tests.
 
 ### The consuming job
 
@@ -101,20 +101,21 @@ tests.
   another never, and the count guard cannot see that. Any id that fails to ascend across pages
   aborts the run. `--require-where` refuses an empty predicate, which matters wherever the
   predicate is interpolated from another command.
-- **`scripts/fetch-layers.js`** — Deno, and the **only network-touching script in the offline
-  path**. It reads `layers/current.json` **once**, with a cache-buster, and derives every
+- **`scripts/fetch-layers.js`** — Node with `--allow-net`, and the **only network-touching
+  script in the offline path**. It reads `layers/current.json` **once**, with a cache-buster, and derives every
   subsequent URL from that one pinned prefix. Re-reading the pointer per file would let a build
   completing mid-run hand back three layers from set A and seven from set B: a set that passes
   every checksum, since each file matches its *own* manifest, while describing a world that
   never existed. The download list is `EXPECTED_LAYER_KEYS` from `src/layerManifest.js`, never
   `manifest.layers[].key`, which also keeps every written filename a compile-time constant of
   this repo rather than remote input. It writes `report.json`, the input to the delete gate.
-- **`scripts/discovery-batch.js`** — Deno, run as `deno run --allow-read --allow-write`, with
-  **no `--allow-net`**: the machine-enforced form of the claim that the only job here that can
-  DELETE production rows cannot talk to the network. Any surviving `--allow-net` on a
-  `discovery-batch.js` invocation is a leftover upstream call and a bug. It imports the pure
-  logic *verbatim* from `src/`, reads a D1 snapshot and the verified layer set, and emits **one
-  idempotent `.sql` delta**.
+- **`scripts/discovery-batch.js`** — Node under `--permission`, with reads granted to the
+  checkout and the layer set, one write grant for its delta, and **no `--allow-net`**: the
+  machine-enforced form of the claim that the only job here that can DELETE production rows
+  cannot talk to the network. A fetch it attempts throws `ERR_ACCESS_DENIED`, and any surviving
+  `--allow-net` on a `discovery-batch.js` invocation is a leftover upstream call and a bug,
+  which the guard in `.github/workflows/test.yml` refuses. It imports the pure logic *verbatim* from `src/`,
+  reads a D1 snapshot and the verified layer set, and emits **one idempotent `.sql` delta**.
 
 ### Modules
 
@@ -151,18 +152,13 @@ tests.
   `suncalc` in `src/frontend/sun.js`). It is never reachable from
   `src/index.js`, and a test asserts that.
 
-Note on the Deno setup, because it bites: `deno.json` and `deno.lock` are **committed**.
-`deno.json` carries `"nodeModulesDir": "none"`, so the batch resolves `flatgeobuf` from the npm
-cache rather than a CI-absent `node_modules/`, and one import-map entry,
-`"flatgeobuf/": "npm:/flatgeobuf@4.4.0/"` — note the **leading slash** after `npm:`, the
-canonical Deno form for a trailing-slash directory mapping. The bare specifier is what lets the
-same module load under both Deno and vitest, since `npm:` is a Deno-only URL scheme. And
-**every** `deno` invocation in this repo, npm script or workflow step, must set
-`DENO_NO_PACKAGE_JSON=1`: the repo-root lockfile is auto-discovered for all Deno commands here,
-and without that variable Deno folds `package.json`'s npm tree into the lockfile it expects, so
-`deno check --frozen` fails with "The lockfile is out of date" and a plain `deno run`
-**silently rewrites the checked-in lock**. Do not fix that by regenerating the lock without the
-variable.
+`flatgeobuf` is pinned at 4.4.0 by the committed `package-lock.json`, and `fgbReader.js`
+imports it by the bare deep specifier `flatgeobuf/lib/mjs/geojson.js`, which Node and vitest
+both resolve from `node_modules/`. So `discovery.yml` and `build-layers.yml` install npm
+dependencies the way `test.yml` does: `npm pkg delete` drops the two private-registry
+dependencies from the runner's ephemeral checkout, then `npm install` resolves the rest from the
+committed lockfile. A plain `npm ci` fails E401 without the private registry tokens, and these
+jobs are deliberately not given them.
 
 ## Faithful to the Worker's semantics
 
@@ -248,10 +244,10 @@ The emitted SQL satisfies the invariants the Worker depends on
    `CLOUDFLARE_API_TOKEN` from `CLOUDFLARE_WORKERS_EDIT_TOKEN` in `.dev.vars`, then
    `npx wrangler d1 migrations apply swim-report --remote`.
 2. **Repository secret `CLOUDFLARE_D1_EDIT_TOKEN`**, D1 edit scope on `swim-report`, read by
-   `discovery.yml`. No npm private-registry tokens are needed: the workflow never runs
-   `npm install` in the repo, which would reify `package.json`'s private `@web.awesome.me` and
-   `@fortawesome` dependencies and fail. Every wrangler call goes through
-   `npx --yes wrangler@<pin>`, which never consults the repo's `package.json`.
+   `discovery.yml`. No npm private-registry tokens are needed: before `npm install` the
+   workflow runs `npm pkg delete` on `package.json`'s private `@web.awesome.me` and
+   `@awesome.me` dependencies in the runner's ephemeral checkout, so the install never reaches
+   the private registries. Every wrangler call goes through `npx --yes wrangler@<pin>`.
 3. **The R2 bucket `swim-report`**, served publicly at `https://map.swim.report`, plus
    repository secrets **`CLOUDFLARE_R2_ACCESS_KEY`** and **`CLOUDFLARE_R2_SECRET_ACCESS_KEY`**,
    used by the **layer build only**. The discovery job needs no R2 credentials. Nothing in the
@@ -259,22 +255,23 @@ The emitted SQL satisfies the invariants the Worker depends on
 
 ## Running
 
-Locally (dry run: produce the SQL, do not apply; needs Deno and a snapshot):
+Locally (dry run: produce the SQL, do not apply; needs Node 26 or later and a snapshot):
 
     export CLOUDFLARE_API_TOKEN=…   # CLOUDFLARE_WORKERS_EDIT_TOKEN from .dev.vars
-    DENO_NO_PACKAGE_JSON=1 deno run --allow-net --allow-read --allow-write \
+    node --permission --allow-net --allow-fs-read=. --allow-fs-write='./.layers/*' \
       scripts/fetch-layers.js --dest ./.layers
     node scripts/snapshot-d1.js --db swim-report --remote \
       --columns "id, osm_id, name, lat, lon, park_name, nws_zone, marine_zone, water_class, water_class_version, water_class_attempts" \
       --out snapshot.json
-    DENO_NO_PACKAGE_JSON=1 deno run --allow-read --allow-write \
+    node --permission --allow-fs-read=. --allow-fs-write=discovery-delta.sql \
       scripts/discovery-batch.js --layers ./.layers --snapshot snapshot.json \
       --out discovery-delta.sql
     # inspect discovery-delta.sql, then apply when satisfied:
     npx wrangler d1 execute swim-report --remote --file discovery-delta.sql
 
-Note the permission sets: `fetch-layers.js` is the one script that needs `--allow-net`, and
-`discovery-batch.js` deliberately does not get it.
+Note the grants: `fetch-layers.js` is the one script that needs `--allow-net`, and
+`discovery-batch.js` deliberately does not get it. `snapshot-d1.js` runs without
+`--permission`, since it drives wrangler through npx, which would inherit the sandbox.
 
 Flags: `--layers <dir>` (required for discovery and classification), `--report <path>`
 (defaults to `<layers>/report.json`), `--no-classify`, `--no-discovery` (skips discovery,
@@ -352,7 +349,8 @@ holes), not its point count.
 
 1. Update `DEFAULT_ZIP_URL` and `RELEASE_VALID_DATE` in `scripts/build-marine-zones.js`; the
    zip filename changes each release.
-2. Run `deno run --allow-net --allow-read --allow-write scripts/build-marine-zones.js`. It uses
+2. Run `node --permission --allow-net --allow-fs-read=. --allow-fs-write=data/marine-zones.json
+   scripts/build-marine-zones.js`. It uses
    **no npm packages**: it reads the zip central directory, inflates with
    `DecompressionStream`, and parses the DBF and SHP binary layouts directly, importing only
    `pointInRing` from `src/geo.js`.

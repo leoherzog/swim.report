@@ -20,7 +20,7 @@ name: Beach discovery
 # Requires one repository secret, CLOUDFLARE_D1_EDIT_TOKEN. No R2 credentials, since
 # the layers are public data from https://map.swim.report — a blast-radius reduction
 # for the only job that can delete production rows — and no npm private-registry
-# tokens, because it never runs npm install in the repo.
+# tokens, because its install drops the two private packages first.
 
 on:
   # Daily. GitHub's scheduler defers crons by hours, which does not matter here: the
@@ -49,15 +49,6 @@ concurrency:
 permissions:
   contents: read
 
-# Workflow-scoped so it covers every deno invocation in every job and step. Deno
-# auto-discovers the repo-root deno.lock, and without this it also wants a
-# workspace.packageJson block for package.json's npm deps: "deno cache --frozen" then
-# fails with "The lockfile is out of date", and a plain "deno run" silently rewrites
-# the checked-in lock. On the one job that can delete production rows, a silently
-# rewritten lock is a retired guarantee.
-env:
-  DENO_NO_PACKAGE_JSON: "1"
-
 jobs:
   discover:
     # Skip the workflow_run path when the build failed or was cancelled.
@@ -83,25 +74,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Set up Node (for wrangler)
+      - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: 26
+          cache: npm
 
-      # The one job that can delete production rows must not resolve an unpinned
-      # transitive npm tree on every invocation. --frozen refuses any lockfile drift,
-      # and an npm outage fails here, loudly, before any D1 read.
-      - name: Cache Deno dependencies (frozen lockfile)
-        run: deno cache --lock=deno.lock --frozen scripts/fetch-layers.js scripts/discovery-batch.js
-
-      # No npm install here: it would reify package.json's private deps, whose
-      # registry tokens this job lacks, and fail E401. Every wrangler call goes
-      # through npx --yes wrangler@<pin>, which fetches only wrangler.
+      # The batch needs flatgeobuf, and the one job that can delete production rows
+      # must not resolve an unpinned transitive npm tree, so every version comes from
+      # the committed package-lock.json, and an npm outage fails here, loudly, before
+      # any D1 read. npm ci cannot be used: package.json's two private-registry deps
+      # need tokens this job lacks, so they are dropped from the runner's ephemeral
+      # checkout first, exactly as test.yml does, and npm install prunes them from
+      # the tree. Every wrangler call still goes through npx --yes wrangler@<pin>.
+      - name: Install dependencies without the private registries
+        run: |
+          set -euo pipefail
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm install --no-audit --no-fund
 
       - name: Fetch and verify the layer set
         # The only network-touching step. It pins layers/current.json once — so a
@@ -119,7 +109,7 @@ jobs:
           # env literal would never be re-expanded by the shell.
           LAYERS_DIR="$RUNNER_TEMP/layers"
           echo "LAYERS_DIR=$LAYERS_DIR" >> "$GITHUB_ENV"
-          deno run --lock=deno.lock --frozen --allow-net --allow-read --allow-write \
+          node --permission --allow-net --allow-fs-read=. --allow-fs-write="$LAYERS_DIR/*" \
             scripts/fetch-layers.js --dest "$LAYERS_DIR"
           cat "$LAYERS_DIR/report.json"
 
@@ -141,9 +131,11 @@ jobs:
             --out snapshot.json
 
       - name: Run discovery + classification (emit SQL)
-        # No --allow-net: the machine-enforced form of the offline-path contract. Any
-        # --allow-net on a discovery-batch.js invocation in this repo is a leftover
-        # upstream call, findable by one grep.
+        # No --allow-net under --permission: the machine-enforced form of the
+        # offline-path contract, so any fetch the batch attempts throws
+        # ERR_ACCESS_DENIED. Reads are scoped to the checkout and the layer set, and
+        # the one write to the delta. Any --allow-net on a discovery-batch.js
+        # invocation in this repo is a leftover upstream call, findable by one grep.
         run: |
           set -euo pipefail
           # GeoJSON in a JS heap costs many times its packed FGB footprint, and OOM
@@ -160,9 +152,9 @@ jobs:
           # the early warning for the North America expansion. The limits are 300 s
           # for the classification pass, 900 s for the whole batch, 6000 MB peak RSS
           # and 8e6 indexed lake segments.
-          /usr/bin/time -v deno run --lock=deno.lock --frozen \
-            --v8-flags=--max-old-space-size=12288 \
-            --allow-read --allow-write \
+          /usr/bin/time -v node --max-old-space-size=12288 \
+            --permission --allow-fs-read=. --allow-fs-read="$LAYERS_DIR/*" \
+            --allow-fs-write=discovery-delta.sql \
             scripts/discovery-batch.js \
             --layers "$LAYERS_DIR" \
             --snapshot snapshot.json \

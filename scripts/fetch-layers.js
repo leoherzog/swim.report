@@ -2,7 +2,8 @@
 // layer set that scripts/discovery-batch.js consumes, and writes the
 // report.json that src/layerManifest.js turns into a delete-path verdict.
 //
-//   deno run --allow-net --allow-read --allow-write scripts/fetch-layers.js --dest ./.layers
+//   node --permission --allow-net --allow-fs-read=. --allow-fs-write='./.layers/*' \
+//     scripts/fetch-layers.js --dest ./.layers
 //
 // The only network-touching script in the offline path. Everything downstream of
 // it — discovery, park association, water-body classification, the marine pass,
@@ -44,6 +45,7 @@
 // Exit status: 1 on any fatal conjunct, 0 otherwise. A "scope_or_stale" verdict
 // at this stage is structural and expected, not an error.
 
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
   EXPECTED_LAYER_KEYS,
   classifyManifestFailure,
@@ -507,7 +509,7 @@ async function fetchText(url, label) {
 // warns and continues rather than taking the run down.
 async function readFloors(path) {
   try {
-    const text = await Deno.readTextFile(path);
+    const text = await readFile(path, "utf8");
     return JSON.parse(text);
   } catch (err) {
     log("WARNING: could not read floors file " + path + ": " +
@@ -519,10 +521,10 @@ async function readFloors(path) {
 // --- main -----------------------------------------------------------------------
 
 async function main() {
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(process.argv.slice(2));
   const base = normalizeBase(args.base);
   const fetchedAt = new Date().toISOString();
-  await Deno.mkdir(args.dest, { recursive: true });
+  await mkdir(args.dest, { recursive: true });
 
   // One pointer read, with a cache-buster, before anything else. The pointer is
   // served no-store, but the cache-buster costs nothing and removes any doubt
@@ -533,7 +535,7 @@ async function main() {
   log("buildId " + pointer.buildId + " (prefix " + pointer.prefix + ")");
 
   const manifestText = await fetchText(manifestUrl(base, pointer.prefix), "manifest");
-  await Deno.writeTextFile(joinPath(args.dest, "manifest.json"), manifestText);
+  await writeFile(joinPath(args.dest, "manifest.json"), manifestText);
   let manifest = null;
   try {
     manifest = JSON.parse(manifestText);
@@ -561,7 +563,7 @@ async function main() {
       log("REFUSED " + problem);
       continue;
     }
-    await Deno.writeFile(joinPath(args.dest, entry.key), bytes);
+    await writeFile(joinPath(args.dest, entry.key), bytes);
     downloaded.push({ key: entry.key, bytes: observed.bytes, sha256: observed.sha256 });
     log("verified " + entry.key + " (" + String(observed.bytes) + " bytes, " +
       String(entry.featureCount === null ? "?" : entry.featureCount) + " features)");
@@ -578,7 +580,7 @@ async function main() {
     problems: problems,
     floorsDoc: floorsDoc
   });
-  await Deno.writeTextFile(joinPath(args.dest, "report.json"),
+  await writeFile(joinPath(args.dest, "report.json"),
     JSON.stringify(report, null, 2) + "\n");
 
   log("layers " + String(report.layersPresent) + "/" + String(report.layersExpected) +
@@ -605,7 +607,7 @@ async function main() {
     "discovery-batch.js, not here — they are unproven above by construction");
   if (failure.tier === "fatal") {
     log("FATAL: this layer set cannot be decoded — refusing to hand it to the batch");
-    Deno.exit(1);
+    process.exit(1);
   }
   log("wrote " + joinPath(args.dest, "report.json"));
 }
@@ -613,6 +615,6 @@ async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("fetch-layers: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

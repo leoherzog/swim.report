@@ -2,8 +2,8 @@
 // wave cycle and, when it passes, emits the SQL delta that writes each beach's
 // wave record into beach_state.
 //
-//   deno run --allow-read --allow-write scripts/build-wave-sql.js \
-//     --dir ./cycle --out ./sql
+//   node --permission --allow-fs-read=. --allow-fs-write='./sql/*' \
+//     scripts/build-wave-sql.js --dir ./cycle --out ./sql
 //
 // --dir holds manifest.json and the two NDJSON artifacts, handed from the sample
 // job to the publish-d1 job as a workflow artifact. No --allow-net. Every artifact
@@ -41,6 +41,7 @@
 // absolute wave_expires, which is correct: the lease is anchored to the model
 // valid time, never to the apply clock.
 
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
   EXPECTED_WAVE_ARTIFACTS,
   WAVE_SERIES_LEASE_SECONDS,
@@ -377,7 +378,7 @@ async function sha256Hex(bytes) {
 }
 
 async function main() {
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(process.argv.slice(2));
   const nowEpoch = args.now === null
     ? Math.floor(Date.now() / 1000)
     : Math.floor(Date.parse(args.now) / 1000);
@@ -385,7 +386,7 @@ async function main() {
   let manifest = null;
   const problems = [];
   try {
-    manifest = JSON.parse(await Deno.readTextFile(args.dir + "/manifest.json"));
+    manifest = JSON.parse(await readFile(args.dir + "/manifest.json", "utf8"));
   } catch (err) {
     problems.push("manifest.json is not readable JSON");
   }
@@ -397,7 +398,7 @@ async function main() {
     const entry = manifestArtifact(manifest, key);
     let bytes = null;
     try {
-      bytes = await Deno.readFile(args.dir + "/" + key);
+      bytes = await readFile(args.dir + "/" + key);
     } catch (err) {
       problems.push(key + ": not readable");
       continue;
@@ -429,7 +430,7 @@ async function main() {
     log("  " + failure.reasons[i]);
   }
 
-  await Deno.mkdir(args.out, { recursive: true });
+  await mkdir(args.out, { recursive: true });
   const summary = {
     cycleId: report.cycleId,
     tier: failure.tier,
@@ -448,11 +449,11 @@ async function main() {
   };
 
   if (!waveWriteAllowed(report)) {
-    await Deno.writeTextFile(args.out + "/wave-sql-report.json",
+    await writeFile(args.out + "/wave-sql-report.json",
       JSON.stringify(summary, null, 2) + "\n");
     log("REFUSED: writing no rows — the previous cycle's records ride their own " +
       "expiration and the flags age out to unknown, which is gray and honest");
-    Deno.exit(1);
+    process.exit(1);
   }
 
   const leases = {
@@ -465,14 +466,14 @@ async function main() {
 
   const refusals = waveRowRefusals(rows, leases);
   if (refusals.length > 0) {
-    await Deno.writeTextFile(args.out + "/wave-sql-report.json",
+    await writeFile(args.out + "/wave-sql-report.json",
       JSON.stringify(summary, null, 2) + "\n");
     for (let i = 0; i < refusals.length; i = i + 1) {
       log("REFUSED: " + refusals[i]);
     }
     log("REFUSED: " + String(refusals.length) + " row(s) failed the emitted-row gate — " +
       "no delta was written");
-    Deno.exit(1);
+    process.exit(1);
   }
 
   const lines = [];
@@ -492,13 +493,13 @@ async function main() {
   // Written atomically, once, at the end, so the run has a binary outcome: exit 0
   // with a complete delta, or exit 1 with no file at all.
   const delta = lines.join("\n") + "\n";
-  await Deno.writeTextFile(args.out + "/wave-delta.sql", delta);
+  await writeFile(args.out + "/wave-delta.sql", delta);
 
   summary.rows = rows.length;
   summary.statements = rows.length;
   summary.deltaBytes = new TextEncoder().encode(delta).length;
   summary.maxStatementBytes = maxStatementBytes;
-  await Deno.writeTextFile(args.out + "/wave-sql-report.json",
+  await writeFile(args.out + "/wave-sql-report.json",
     JSON.stringify(summary, null, 2) + "\n");
   log("wrote " + String(rows.length) + " row(s) in " + String(summary.deltaBytes) +
     " bytes, largest statement " + String(maxStatementBytes) + " bytes, expiration " +
@@ -509,6 +510,6 @@ async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("build-wave-sql: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

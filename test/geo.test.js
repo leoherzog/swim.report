@@ -60,7 +60,7 @@ describe("metersToFeet", function () {
 
 // --- The line-geometry extension -------------------------------------------
 //
-// src/geo.js is a pure src module with no Deno, no fs, no fetch and no npm
+// src/geo.js is a pure src module with no fs, no fetch and no npm
 // dependency, so importing it under vitest performs no I/O.
 //
 // Every expected distance below was computed by hand in the same local

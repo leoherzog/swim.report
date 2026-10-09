@@ -1,6 +1,6 @@
 // Tests for scripts/build-marine-zones.js, the manual generator for
 // data/marine-zones.json, regenerated roughly biannually. Importing
-// its pure exports touches no Deno and no network; every fixture is a synthetic
+// its pure exports touches no file and no network; every fixture is a synthetic
 // in-memory buffer built with DataView.
 
 import { describe, it, expect } from "vitest";

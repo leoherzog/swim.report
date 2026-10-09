@@ -1,5 +1,5 @@
 // Tests for scripts/fetch-wave-grids.js, the only network-touching script in the
-// wave pipeline. Importing its pure exports touches no Deno, no network and no
+// wave pipeline. Importing its pure exports touches no network and no
 // filesystem.
 //
 // The failure these guard is a silent wrong slice. A byte range computed one
@@ -495,8 +495,8 @@ describe("gridFailureIsFatal", function () {
   // The single decision that separates a partial cycle from no cycle: a required
   // grid's failure writes grids-report.json and exits 1, and any other grid's failure
   // is recorded while the run continues. Reaching it through main() would need a fake
-  // network as well as a fake Deno, and a mocked download is a restatement of the
-  // loop, not a test of this verdict.
+  // network as well as a fake filesystem, and a mocked download is a restatement of
+  // the loop, not a test of this verdict.
   it("is fatal for every required grid and for no other", function () {
     for (let i = 0; i < GRIDS.length; i = i + 1) {
       const id = GRIDS[i].id;

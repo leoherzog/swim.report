@@ -1,9 +1,11 @@
 // scripts/clip-layers.js — the build-side region filter and proximity clip.
 //
-// Runs on Deno inside .github/workflows/build-layers.yml, between the raw
+// Runs on Node inside .github/workflows/build-layers.yml, between the raw
 // ogr2ogr conversion and the per-layer FlatGeobuf carve:
 //
-//   deno run --lock=deno.lock --frozen --allow-read --allow-write \
+//   node --permission --allow-fs-read=. --allow-fs-read="$WORK/raw/*" \
+//     --allow-fs-read="$WORK/raw-lines/*" --allow-fs-read="$WORK/clipped/*" \
+//     --allow-fs-write="$WORK/clipped/*" \
 //     scripts/clip-layers.js --raw "$WORK/raw" --raw-lines "$WORK/raw-lines" \
 //     --out "$WORK/clipped"
 //
@@ -47,6 +49,7 @@
 // is Hilbert-ordered, which is the shape the proportional delete rails are worst
 // at catching, so it has to be caught here by an exact equality.
 
+import { mkdir, open, rename, writeFile } from "node:fs/promises";
 import { REGIONS } from "../src/regions.js";
 import { buildLayerGrid, queryGridByBounds } from "../src/layerGrid.js";
 import { readFgbStream } from "./lib/fgbReader.js";
@@ -419,17 +422,7 @@ export function toGeoJsonFeature(record, keys) {
   return { type: "Feature", properties: properties, geometry: record.geometry };
 }
 
-// --- Deno I/O ------------------------------------------------------------------
-
-// Deno is reached through globalThis so importing this module stays legal under
-// Node, where vitest exercises the pure predicates above.
-function requireDeno(what) {
-  const runtime = globalThis.Deno;
-  if (!runtime || typeof runtime.open !== "function") {
-    throw new Error("clip-layers: " + what + " requires Deno (globalThis.Deno is unavailable)");
-  }
-  return runtime;
-}
+// --- I/O -----------------------------------------------------------------------
 
 // A buffered line writer. GeoJSONSeq is one JSON object per line, and a per-line
 // write syscall on a layer this size is minutes of syscall overhead, so lines
@@ -451,7 +444,7 @@ const WRITE_FLUSH_BYTES = 1 << 20;
 // count is zero.
 const EMPTY_LAYER_LINE = "{\"type\":\"FeatureCollection\",\"features\":[]}";
 
-function makeWriter(runtime, path) {
+function makeWriter(path) {
   return {
     path: path,
     file: null,
@@ -460,7 +453,7 @@ function makeWriter(runtime, path) {
     pendingBytes: 0,
     count: 0,
     open: async function () {
-      this.file = await runtime.open(path, { write: true, create: true, truncate: true });
+      this.file = await open(path, "w");
     },
     writeLine: async function (text) {
       await this.writeRaw(text);
@@ -484,7 +477,7 @@ function makeWriter(runtime, path) {
       this.pendingBytes = 0;
       let offset = 0;
       while (offset < chunk.length) {
-        const written = await this.file.write(chunk.subarray(offset));
+        const written = (await this.file.write(chunk.subarray(offset))).bytesWritten;
         if (written <= 0) {
           throw new Error("clip-layers: short write to " + this.path);
         }
@@ -493,7 +486,7 @@ function makeWriter(runtime, path) {
     },
     close: async function () {
       await this.flush();
-      this.file.close();
+      await this.file.close();
       this.file = null;
     }
   };
@@ -618,9 +611,8 @@ function sidecarText(entry, state) {
 }
 
 async function main() {
-  const runtime = requireDeno("main");
-  const args = parseArgs(runtime.args);
-  await runtime.mkdir(args.out, { recursive: true });
+  const args = parseArgs(process.argv.slice(2));
+  await mkdir(args.out, { recursive: true });
 
   const boxes = regionBoxes(REGIONS, REGION_SPAT_PAD_DEG);
   if (boxes.length === 0) {
@@ -632,7 +624,7 @@ async function main() {
   const states = {};
   for (let i = 0; i < LAYER_PLAN.length; i = i + 1) {
     const entry = LAYER_PLAN[i];
-    const writer = makeWriter(runtime, args.out + "/" + entry.name + ".geojsonseq.tmp");
+    const writer = makeWriter(args.out + "/" + entry.name + ".geojsonseq.tmp");
     await writer.open();
     states[entry.key] = {
       writer: writer,
@@ -676,10 +668,10 @@ async function main() {
     }
     await state.writer.close();
     const finalPath = args.out + "/" + entry.name + ".geojsonseq";
-    await runtime.rename(state.writer.path, finalPath);
+    await rename(state.writer.path, finalPath);
     const sidecarTmp = args.out + "/" + entry.name + ".count.tmp";
-    await runtime.writeTextFile(sidecarTmp, sidecarText(entry, state));
-    await runtime.rename(sidecarTmp, args.out + "/" + entry.name + ".count");
+    await writeFile(sidecarTmp, sidecarText(entry, state));
+    await rename(sidecarTmp, args.out + "/" + entry.name + ".count");
     console.log("clip-layers: " + entry.name + ": kept " + String(state.writer.count) +
       " feature(s)");
   }
@@ -689,6 +681,6 @@ async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("clip-layers: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

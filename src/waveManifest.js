@@ -1,7 +1,7 @@
 // src/waveManifest.js — the consumer gate for the NOAA GRIB2 wave pipeline: the
 // one place that decides whether a published wave cycle may be written into
 // production. Pure, fail-closed, and never imported by the Worker; it runs
-// inside scripts/build-wave-sql.js on Deno, and is modelled on
+// inside scripts/build-wave-sql.js on Node, and is modelled on
 // src/layerManifest.js.
 //
 // The records this pipeline writes are the only wave input src/rules.js sees. Two

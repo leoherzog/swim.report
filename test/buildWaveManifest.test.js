@@ -1,6 +1,6 @@
 // Tests for scripts/build-wave-manifest.js, the build-side gate of the NOAA
-// GRIB2 wave pipeline. Importing its pure exports touches no Deno API, no
-// subprocess and no file system.
+// GRIB2 wave pipeline. Importing its pure exports touches no subprocess and no
+// file system.
 //
 // The split these tests defend is the whole design: everything that could
 // produce a wrong number is non-overridable, and everything that is merely less
@@ -59,6 +59,35 @@ import {
   evaluateWaveGates,
   main
 } from "../scripts/build-wave-manifest.js";
+
+// main() reads and writes only through node:fs/promises, so this in-memory
+// stand-in replaces the whole filesystem without touching the module's logic.
+const memfs = vi.hoisted(function () {
+  return { fs: {}, written: [], renamed: [] };
+});
+
+vi.mock("node:fs/promises", function () {
+  return {
+    readFile: function (path, encoding) {
+      const text = memfs.fs[path];
+      if (text === undefined) {
+        return Promise.reject(new Error("no such file: " + path));
+      }
+      return Promise.resolve(encoding === undefined ? new TextEncoder().encode(text) : text);
+    },
+    writeFile: function (path, text) {
+      memfs.written.push(path);
+      memfs.fs[path] = text;
+      return Promise.resolve();
+    },
+    rename: function (from, to) {
+      memfs.renamed.push(from + " -> " + to);
+      memfs.fs[to] = memfs.fs[from];
+      delete memfs.fs[from];
+      return Promise.resolve();
+    }
+  };
+});
 
 const VALID_START = 1788415200;
 const DIGEST = "sha256:" + "e".repeat(64);
@@ -1380,15 +1409,13 @@ describe("the manifest literal", function () {
 
 // --- main ---------------------------------------------------------------------------------
 
-// main() is exported purely so these three outcomes are reachable: every Deno call it
-// makes already goes through the handle requireDeno returns, so an in-memory stub
-// replaces the whole filesystem without touching the module's logic.
+// main() is exported purely so these three outcomes are reachable, over the
+// in-memory node:fs/promises mocked at the top of this file.
 describe("main", function () {
   const SAMPLE_DIR = "/w/sample";
   const OUT = "/w/manifest.json";
 
   afterEach(function () {
-    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -1463,36 +1490,11 @@ describe("main", function () {
     return store;
   }
 
-  function stubDeno(store, argv) {
-    const written = [];
-    const renamed = [];
-    const fs = Object.assign({}, store);
-    vi.stubGlobal("Deno", {
-      args: argv,
-      readTextFile: function (path) {
-        return fs[path] === undefined
-          ? Promise.reject(new Error("no such file: " + path))
-          : Promise.resolve(fs[path]);
-      },
-      readFile: function (path) {
-        return fs[path] === undefined
-          ? Promise.reject(new Error("no such file: " + path))
-          : Promise.resolve(new TextEncoder().encode(fs[path]));
-      },
-      writeTextFile: function (path, text) {
-        written.push(path);
-        fs[path] = text;
-        return Promise.resolve();
-      },
-      rename: function (from, to) {
-        renamed.push(from + " -> " + to);
-        fs[to] = fs[from];
-        delete fs[from];
-        return Promise.resolve();
-      },
-      env: { get: function () { return undefined; } }
-    });
-    return { written: written, renamed: renamed, fs: fs };
+  function useFiles(store) {
+    memfs.fs = Object.assign({}, store);
+    memfs.written = [];
+    memfs.renamed = [];
+    return memfs;
   }
 
   const ARGV = ["--sample", SAMPLE_DIR, "--grids-report", "/w/grids-report.json",
@@ -1501,8 +1503,8 @@ describe("main", function () {
 
   it("writes NOTHING when a gate refuses, so the pointer stays on the last good cycle",
     async function () {
-      const io = stubDeno(files({ gridOverrides: { validPercent: 0 } }), ARGV);
-      await expect(main()).rejects.toThrow(/refusing to publish/);
+      const io = useFiles(files({ gridOverrides: { validPercent: 0 } }));
+      await expect(main(ARGV)).rejects.toThrow(/refusing to publish/);
       expect(io.written).toEqual([]);
       expect(io.renamed).toEqual([]);
       expect(io.fs[OUT]).toBe(undefined);
@@ -1514,8 +1516,8 @@ describe("main", function () {
       // src/waveManifest.js treats a buildStatus other than "complete" as FATAL.
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-09-03T12:34:56.000Z"));
-      const io = stubDeno(files(), ARGV);
-      await main();
+      const io = useFiles(files());
+      await main(ARGV);
       expect(io.written).toEqual([OUT + ".tmp"]);
       expect(io.renamed).toEqual([OUT + ".tmp -> " + OUT]);
       const manifest = JSON.parse(io.fs[OUT]);
@@ -1538,11 +1540,11 @@ describe("main", function () {
       // grid was fetched, and everyGridSampled says every grid produced records. A
       // grid lost at plan time is fetch-complete and still contributed nothing, and
       // without the conjunction that cycle reaches src/waveManifest.js as tier "ok".
-      const io = stubDeno(files({
+      const io = useFiles(files({
         sampledIds: ["noaa_gfswave", "noaa_gfswave_arctic"],
         statusOverrides: { noaa_glwu: outGrid("planned but produced no sampled plane") }
-      }), ARGV);
-      await main();
+      }));
+      await main(ARGV);
       const manifest = JSON.parse(io.fs[OUT]);
       expect(manifest.sanity.everyGridSampled).toBe(false);
       expect(manifest.gridsComplete).toBe(false);

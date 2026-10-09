@@ -4,7 +4,7 @@
 // once per beach vertex, tens per beach across the whole table. That is hours of
 // segment evaluations, not the seconds a per-run job can afford.
 //
-// Pure: no fetch, no Date, no I/O, no npm dependency, no Deno or fs access.
+// Pure: no fetch, no Date, no I/O, no npm dependency, no fs access.
 // Imports src/geo.js and nothing else, so the offline batch and the tests both
 // load it directly.
 //

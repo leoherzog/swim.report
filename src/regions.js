@@ -1,7 +1,7 @@
 // src/regions.js — the discovery scope: a curated set of coastal bounding boxes
 // tracing the Great Lakes shoreline and the Pacific, Gulf, Atlantic and Alaskan
 // coasts of the United States and Canada. Pure data plus one pure predicate,
-// with no imports, so the offline Deno batch imports it verbatim.
+// with no imports, so the offline batch imports it verbatim.
 //
 // Coastal boxes rather than continental rectangles. A rectangle enclosing a
 // whole coast also encloses the interior behind it, which is dense with

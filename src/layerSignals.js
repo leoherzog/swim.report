@@ -2,7 +2,7 @@
 // layer pipeline. scripts/discovery-batch.js passes it as classifyQueue's
 // opts.fetchSignals. Pure: no fetch, no Date, no filesystem; it imports the
 // probe radii and vertex anchor from src/osmSelect.js and the spatial index from
-// src/layerGrid.js, and loads verbatim under Deno, workerd and vitest.
+// src/layerGrid.js, and loads verbatim under Node, workerd and vitest.
 //
 // The object it returns is consumed by classifyWaterBody in src/waterClass.js.
 // Every key, type and threshold below must stay fixed, because a divergence

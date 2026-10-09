@@ -38,13 +38,6 @@ concurrency:
 permissions:
   contents: read
 
-# Workflow-scoped so a new step cannot forget it. Without it Deno auto-discovers the
-# repo-root deno.lock, wants a workspace.packageJson block for package.json's npm
-# deps, and "deno check --frozen" fails with "The lockfile is out of date" while a
-# plain "deno run" silently rewrites the checked-in lock.
-env:
-  DENO_NO_PACKAGE_JSON: "1"
-
 jobs:
   vitest:
     runs-on: ubuntu-latest
@@ -56,11 +49,11 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          # 24, not the 22 the wrangler jobs use: node:sqlite is unflagged from Node
-          # 24, and test/demandOrdering.test.js skips with a printed reason when
-          # node:sqlite is unavailable rather than failing. On Node 22 the suite would
-          # stay green while quietly testing less.
-          node-version: "24"
+          # 26, the floor package.json's engines field sets and the version every
+          # workflow runs. test/demandOrdering.test.js needs node:sqlite and skips with
+          # a printed reason when it is unavailable rather than failing, so an older
+          # Node would stay green while quietly testing less.
+          node-version: 26
           cache: npm
 
       - name: Install dependencies without the private registries
@@ -74,11 +67,23 @@ jobs:
       - name: Run the vitest suite
         run: npm test
 
-  deno-lock:
-    # The offline batch and the build scripts run on Deno with a frozen lockfile, and
-    # both delete-adjacent workflows depend on that staying true. Type-checking them
-    # under --frozen here catches lock drift on the commit that causes it, rather than
-    # inside the only job that can delete production rows.
+      - name: Load every offline script under plain Node
+        # vitest resolves modules more leniently than node does, and the workflows run
+        # plain node, so an unresolvable import would otherwise surface only when a
+        # cron fires. Every offline script belongs here, including
+        # scripts/build-marine-zones.js, which no workflow invokes: an operator runs
+        # it by hand about twice a year, the cadence at which unchecked rot is most
+        # expensive. Importing never runs main(), which import.meta.main gates.
+        run: |
+          set -euo pipefail
+          for script in discovery-batch fetch-layers build-marine-zones clip-layers \
+                        build-manifest print-spat-bbox print-flag-worthy-sql fetch-wave-grids \
+                        sample-waves build-wave-manifest build-wave-sql; do
+            node --input-type=module -e "await import('./scripts/$script.js')"
+            echo "scripts/$script.js loads"
+          done
+
+  workflow-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -100,65 +105,35 @@ jobs:
         with:
           args: -color -shellcheck=
 
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Check the offline scripts against the frozen lockfile
-        # Every offline script belongs here, including scripts/build-marine-zones.js,
-        # which no workflow invokes: an operator runs it by hand about twice a year,
-        # the cadence at which unchecked rot is most expensive.
-        run: |
-          set -euo pipefail
-          deno check --lock=deno.lock --frozen \
-            scripts/discovery-batch.js \
-            scripts/fetch-layers.js \
-            scripts/build-marine-zones.js \
-            scripts/clip-layers.js \
-            scripts/build-manifest.js \
-            scripts/print-spat-bbox.js \
-            scripts/print-flag-worthy-sql.js \
-            scripts/fetch-wave-grids.js \
-            scripts/sample-waves.js \
-            scripts/build-wave-manifest.js \
-            scripts/build-wave-sql.js
-
-      - name: Assert deno.lock is unchanged
-        # Belt to the --frozen brace. If a future Deno relaxes the refusal, the
-        # working tree still tells the truth.
-        run: |
-          set -euo pipefail
-          if ! git diff --quiet -- deno.lock; then
-            echo "::error::deno.lock was rewritten by a deno invocation in this job — the frozen-lockfile guarantee is not in force"
-            git diff -- deno.lock
-            exit 1
-          fi
-          echo "deno.lock unchanged"
-
-      - name: Assert no --allow-net or --allow-run reaches an offline-only script
-        # The machine-enforced form of the offline-path contract: these scripts make no
-        # upstream requests, and the absence of the permission flag is the proof.
-        # Whole-line YAML comments are stripped first, since discovery.yml and waves.yml
-        # state the rule in prose and would otherwise match, and backslash continuations
-        # are joined so the comparison is per command rather than per source line: a
-        # permission flag and a script name three lines apart are one invocation.
-        # test.yml is excluded because this guard's own command line contains the
-        # tokens.
+      - name: Assert no offline script runs outside its permission grants
+        # The machine-enforced form of the offline-path contract. Every offline script
+        # runs under node --permission, which denies network, child processes and any
+        # filesystem path not granted, so the absence of a grant flag is the proof.
+        # Whole-line YAML comments are stripped first, backslash continuations are
+        # joined, and each line is split at && || ; | and $( so the check is per
+        # command: a grant flag and a script name three lines apart are one
+        # invocation, and two commands on one line are two. Only flags between node
+        # and the script path count, since anything after it is the script's own.
+        # test.yml is excluded because this guard's own lines contain the tokens.
         #
-        # The --allow-net list must name every pure-math offline script in both
-        # pipelines; a script missing from it is one whose network silence nothing
-        # enforces. scripts/fetch-layers.js, scripts/fetch-wave-grids.js and
-        # scripts/build-marine-zones.js are the only network-capable offline scripts and
-        # are deliberately absent. scripts/build-wave-sql.js belongs in the list even
-        # though a later shell step applies its delta to production D1: the emitter
-        # itself reads bytes on disk and writes a file, and this guard is what keeps
-        # that true.
+        # Every node scripts/<name>.js invocation must carry --permission, except
+        # the three local tools that drive wrangler through npx, which would inherit
+        # the sandbox through NODE_OPTIONS. An unclassified script fails, as does a
+        # listed script that no longer exists or is never invoked, so a rename cannot
+        # silently drop out. NODE_OPTIONS is refused outright, since it widens the
+        # grants of every node process it reaches.
         #
-        # The --allow-run list names every Deno script in the wave pipeline, the
-        # network-capable fetcher included: GDAL runs in the workflow shell, so no wave
-        # script may spawn a subprocess. The layer build's build-manifest.js is not in
-        # it, since that script legitimately runs ogrinfo and osmium.
+        # The --allow-net list names every pure-math offline script in both
+        # pipelines. scripts/fetch-layers.js, scripts/fetch-wave-grids.js and
+        # scripts/build-marine-zones.js are the only network-capable offline scripts.
+        # scripts/build-wave-sql.js belongs in the list even though a later shell
+        # step applies its delta to production D1: the emitter itself reads bytes on
+        # disk and writes a file, and this guard is what keeps that true.
+        #
+        # The --allow-child-process list names every script in the wave pipeline,
+        # the network-capable fetcher included: GDAL runs in the workflow shell, so no
+        # wave script may spawn a subprocess. The layer build's build-manifest.js is
+        # not in it, since that script legitimately runs ogrinfo and osmium.
         run: |
           set -euo pipefail
           joined=$(mktemp)
@@ -166,27 +141,65 @@ jobs:
             sed -e "s/^[[:space:]]*#.*$//" "$f" \
               | sed -e ":a" -e "/\\\\$/{N;s/\\\\[[:space:]]*\\n[[:space:]]*/ /;ta}" >> "$joined"
           done
-          for script in discovery-batch clip-layers build-manifest print-spat-bbox \
-                        print-flag-worthy-sql sample-waves build-wave-manifest build-wave-sql; do
-            if grep -n -- "--allow-net" "$joined" | grep -- "$script"; then
-              echo "::error::a $script.js invocation was given --allow-net — that script is pure local math over bytes on disk"
-              exit 1
+          if grep -n "NODE_OPTIONS" "$joined"; then
+            echo "::error::NODE_OPTIONS would widen the permission grants of every node process it reaches"
+            exit 1
+          fi
+          node_cmd="(^|[^-[:alnum:]_./])node[[:space:]]"
+          commands=$(mktemp)
+          sed -e 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g; s/\$(/\n/g' "$joined" \
+            | grep -E "${node_cmd}.*scripts/[a-z0-9-]+\.js" > "$commands" || true
+          failed=0
+          while IFS= read -r cmd; do
+            name=$(printf '%s\n' "$cmd" | sed -E 's/.*scripts\/([a-z0-9-]+)\.js.*/\1/')
+            flags=$(printf '%s\n' "$cmd" | sed -E "s/.*${node_cmd}(.*)scripts\/[a-z0-9-]+\.js.*/\2/")
+            case "$name" in
+              snapshot-d1|apply-local-sql|build-brand-assets) continue ;;
+              discovery-batch|clip-layers|build-manifest|print-spat-bbox|print-flag-worthy-sql) ;;
+              sample-waves|build-wave-manifest|build-wave-sql) ;;
+              fetch-layers|fetch-wave-grids|build-marine-zones) ;;
+              *)
+                echo "::error::$name.js is not classified in this guard; add it to the pure-math, network or unsandboxed list"
+                failed=1 ;;
+            esac
+            if ! printf '%s\n' "$flags" | grep -qE -- "(^|[[:space:]])--permission([[:space:]]|$)"; then
+              echo "::error::a $name.js invocation runs without --permission: $cmd"
+              failed=1
             fi
-            echo "no --allow-net on any $script.js invocation"
-          done
-          for script in fetch-wave-grids print-flag-worthy-sql sample-waves \
-                        build-wave-manifest build-wave-sql; do
-            if grep -n -- "--allow-run" "$joined" | grep -- "$script"; then
-              echo "::error::a $script.js invocation was given --allow-run — GDAL runs in the workflow shell, never from a wave-pipeline script"
-              exit 1
+            case " discovery-batch clip-layers build-manifest print-spat-bbox print-flag-worthy-sql sample-waves build-wave-manifest build-wave-sql " in
+              *" $name "*)
+                if printf '%s\n' "$flags" | grep -q -- "--allow-net"; then
+                  echo "::error::a $name.js invocation was given --allow-net — that script is pure local math over bytes on disk"
+                  failed=1
+                fi ;;
+            esac
+            case " fetch-wave-grids print-flag-worthy-sql sample-waves build-wave-manifest build-wave-sql " in
+              *" $name "*)
+                if printf '%s\n' "$flags" | grep -q -- "--allow-child-process"; then
+                  echo "::error::a $name.js invocation was given --allow-child-process — GDAL runs in the workflow shell, never from a wave-pipeline script"
+                  failed=1
+                fi ;;
+            esac
+          done < "$commands"
+          for script in discovery-batch clip-layers build-manifest print-spat-bbox print-flag-worthy-sql \
+                        fetch-layers fetch-wave-grids sample-waves build-wave-manifest build-wave-sql; do
+            count=$(grep -c "scripts/$script\.js" "$commands" || true)
+            if [ ! -f "scripts/$script.js" ]; then
+              echo "::error::scripts/$script.js does not exist, so a renamed script has dropped out of this guard"
+              failed=1
+            elif [ "$count" -eq 0 ]; then
+              echo "::error::no node invocation of scripts/$script.js found, so a renamed script has dropped out of this guard"
+              failed=1
+            else
+              echo "$script.js: $count invocation(s) checked"
             fi
-            echo "no --allow-run on any $script.js invocation"
           done
+          exit "$failed"
 
   worker-bundle:
     # Nothing else in CI bundles or boots the Worker: vitest imports src/index.js as a
     # plain ES module, which every valid and several invalid Workers satisfy, and the
-    # deno-lock job never touches it. Two steps, catching different things:
+    # workflow-lint job never touches it. Two steps, catching different things:
     #
     #   deploy --dry-run  — a broken wrangler.toml, an unresolvable import, a missing
     #                       binding, the bundle size cap. Needs no auth.
@@ -215,7 +228,7 @@ jobs:
       - name: Set up Node (for wrangler)
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: 26
           cache: npm
 
       - name: Install dependencies without the private registries

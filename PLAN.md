@@ -1331,7 +1331,7 @@ no module keeps a private haversine or ray cast that could drift. Safe on both p
 
 ### src/regions.js (discovery expansion rail — pure data + one predicate, no imports)
 
-A pure, dependency-free module the offline Deno batch imports verbatim. It is a curated set
+A pure, dependency-free module the offline batch imports verbatim. It is a curated set
 of coastal bounding boxes tracing the Great Lakes shoreline, US and Canadian shores.
 Coastal boxes rather than one continental rectangle keep the discovery universe to actual
 coast: a lakes-enclosing rectangle would also enclose the continental interior, dense with
@@ -1833,7 +1833,7 @@ WINDY_WEBCAM_API_TOKEN secret; the daily cron skips webcam hydration when it is 
 ### src/osmSelect.js (pure OSM selection semantics — offline batch only, no fetch)
 
 The OSM selection semantics: thresholds, tag predicates, the park-association rule, the
-pond filter and the probe anchor. Imports nothing but src/geo.js, so Deno, workerd and
+pond filter and the probe anchor. Imports nothing but src/geo.js, so Node, workerd and
 vitest all load it verbatim. It is not reachable from src/index.js and must never become
 so.
 
@@ -2050,11 +2050,11 @@ scripts/discovery-batch.js passes it as classifyQueue's opts.fetchSignals.
 
 ### scripts/lib/fgbReader.js (the only offline module with an npm dependency)
 
-Deep-imports flatgeobuf. It is a vitest devDependency, resolved under Deno through the
-committed deno.json import map ("flatgeobuf/": "npm:/flatgeobuf@4.4.0/" — note the leading
-slash, the canonical Deno form for a trailing-slash directory mapping) with
-nodeModulesDir "none", so CI needs no node_modules. It is never reachable from
-src/index.js, and test/workerExports.test.js guards that.
+Deep-imports flatgeobuf through the bare specifier flatgeobuf/lib/mjs/geojson.js, which
+Node and vitest both resolve from node_modules. flatgeobuf is an npm devDependency pinned at
+4.4.0 by the committed package-lock.json, so every job that runs an offline script importing
+this module installs npm dependencies first. It is never reachable from src/index.js, and
+test/workerExports.test.js guards that.
 
     export const LAYER_TAG_KEYS
       // The tag columns .github/build/osmconf.ini promotes to first-class fields,
@@ -2646,12 +2646,13 @@ function satisfies the check. test/workerExports.test.js asserts every named exp
 src/index.js other than `default` is a function.
 
 Beach discovery and water-body classification are not in-Worker crons: the offline GitHub
-Actions batch (scripts/discovery-batch.js on Deno) owns both. Their logic lives in
+Actions batch (scripts/discovery-batch.js on Node) owns both. Their logic lives in
 src/discovery.js, src/waterClass.js, src/geo.js, src/regions.js and src/marineZones.js,
 plus the offline-only pure modules src/osmSelect.js, src/layerGrid.js,
 src/layerDiscovery.js, src/layerSignals.js and src/layerManifest.js, all imported verbatim
 by the batch. One module is not importable here and must never become so:
-scripts/lib/fgbReader.js, whose npm dependency (flatgeobuf) resolves only under Deno.
+scripts/lib/fgbReader.js, which reads layer files from local disk and pulls the flatgeobuf
+devDependency into anything that imports it.
 The D1 schema (section 2) and the KV shapes (section 3) are unaffected: the batch
 writes the same D1 rows out-of-band, the request path still reads only D1 and KV, and the
 prebuilt layer set in R2 is read by the offline batch alone — wrangler.toml deliberately
@@ -3250,7 +3251,7 @@ not shipped.
 ### Discovery pipeline (offline batch — GitHub Actions, not an in-Worker cron)
 
 Discovery, water classification and the marine_zone derivation run only in the offline
-GitHub Actions batch that bulk-loads D1 (`scripts/discovery-batch.js` on Deno,
+GitHub Actions batch that bulk-loads D1 (`scripts/discovery-batch.js` on Node,
 `docs/offline-discovery.md`), and all three are pure local math over a prebuilt FlatGeobuf
 layer set. The batch reuses the Worker logic verbatim — the merge cluster in
 `src/discovery.js`, the classification decision in `src/waterClass.js`, the region rail in
@@ -3262,15 +3263,16 @@ layer set. The batch reuses the Worker logic verbatim — the merge cluster in
 out-of-band, the layer set is read by the offline batch alone, and the request path reads
 only D1 and KV.
 
-`scripts/discovery-batch.js` requires no `--allow-net`. It runs as
-`deno run --allow-read --allow-write`, and any surviving `--allow-net` on a
-`discovery-batch.js` invocation — in a workflow, in an npm script, anywhere — is a leftover
+`scripts/discovery-batch.js` requires no `--allow-net`. It runs as `node --permission` with
+reads granted to the checkout and the layer set and one write grant for its delta, so a fetch
+it attempts throws `ERR_ACCESS_DENIED`, and any surviving `--allow-net` on a
+`discovery-batch.js` invocation, in a workflow, an npm script or anywhere else, is a leftover
 upstream call and a bug. This is the machine-enforced form of the claim that the only job in
 this repo that can delete production rows cannot talk to the network.
 
 Layer build (`.github/workflows/build-layers.yml`, twice weekly `41 6 * * 0` and
 `41 6 * * 3`, concurrency group `build-layers`, job timeout 180 min). Plain shell on a
-GitHub runner, not delete-bearing and not a Deno program:
+GitHub runner and not delete-bearing:
 - Reclaim runner disk and assert a 40 GB floor. Then, per country (us, canada, mexico)
   sequentially: download the Geofabrik extract, verify its published `.md5`, assert every
   extract carries the same `osmosis_replication_timestamp` (osmium merge is documented as
@@ -3286,7 +3288,7 @@ GitHub runner, not delete-bearing and not a Deno program:
 - `.github/build/osmconf.ini` / `osmconf-lines.ini` promote `wikidata` and the other
   `LAYER_TAG_KEYS` to first-class columns in every layer; the stock GDAL `osmconf.ini`
   buries the QID in an HSTORE blob.
-- A Deno proximity clip (`scripts/clip-layers.js`) trims the park, coastline and water
+- A Node proximity clip (`scripts/clip-layers.js`) trims the park, coastline and water
   layers to within ~1.1 km of the beach set, making the published set O(beaches) rather
   than O(continent).
 - Output: ten FlatGeobuf files (`EXPECTED_LAYER_KEYS`) plus a manifest
@@ -3304,7 +3306,7 @@ GitHub runner, not delete-bearing and not a Deno program:
   good layer set live, which is delete-safe because an older extract is over-inclusive — it
   can only fail to discover a new beach, never invent a stale one.
 - `osmium-tool` and GDAL are workflow shell dependencies only, never a dependency of the
-  Deno batch, the Worker or the tests.
+  discovery batch, the Worker or the tests.
 
 The batch's flag surface (parsed in parseArgs, whose `discovery` field defaults to true):
 - `--layers <dir>` — the verified local layer set written by `scripts/fetch-layers.js`.
@@ -3366,10 +3368,10 @@ only appends change-only UPDATEs.
   snapshotting the whole table.
 
 Locally, `npm run seed:layers` fetches and verifies the layer set into `./.layers`, then
-`npm run seed` runs the batch against local D1 over it (`deno run --allow-read
---allow-write scripts/discovery-batch.js --layers ./.layers --out ./.seed.sql` then
-`node scripts/apply-local-sql.js ./.seed.sql`) — note the absent `--allow-net`. Every seed
-classifies; a local join is cheap enough that there is nothing to opt out of.
+`npm run seed` runs the batch against local D1 over it (`node --permission --allow-fs-read=.
+--allow-fs-write=./.seed.sql scripts/discovery-batch.js --layers ./.layers --out ./.seed.sql`
+then `node scripts/apply-local-sql.js ./.seed.sql`). Note the absent `--allow-net`.
+Every seed classifies; a local join is cheap enough that there is nothing to opt out of.
 apply-local-sql.js splits the delta into <90 KB line-aligned chunks (one statement per
 line, so a split can never tear a statement) and applies each with its own
 `wrangler d1 execute --local --file` call, because wrangler's local apply passes the whole
@@ -3784,10 +3786,10 @@ about 13% with the tidal phase at validStart.
 
 Decoding requires GDAL. GRIB2 DRS template 5.40 is JPEG 2000 and there is no pure-JS decode
 path, so GRIB2 decoding inside the Worker is impossible and must never be attempted. GDAL
-runs in the workflow shell: no Deno script in this pipeline carries --allow-run, and only
-scripts/fetch-wave-grids.js carries --allow-net. The permission guard in
-.github/workflows/test.yml enforces the network half machine-side; the subprocess half rests
-on review (TODO.md).
+runs in the workflow shell: every script in this pipeline runs under node --permission, none
+carries --allow-child-process, and only scripts/fetch-wave-grids.js carries --allow-net. The
+permission guard in .github/workflows/test.yml enforces both halves machine-side, and its
+limits are tracked in TODO.md.
 
 Pipeline. scripts/fetch-wave-grids.js resolves the cycle at runtime — validStart is the top
 of the current UTC hour, GFS cycles are walked newest-first back 24 h and the first whose

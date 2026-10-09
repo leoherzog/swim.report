@@ -1,9 +1,9 @@
 // scripts/lib/fgbReader.js — reads FlatGeobuf bytes into plain feature records.
 //
-// The one module in the repo with an npm dependency. It runs on Deno (the
-// offline layer pipeline) and on Node under vitest, and everything downstream of
-// it is pure and dependency-free: the LayerFeature record shape below is the
-// single contract crossing the scripts/ to src/ boundary.
+// The one module in the repo with an npm dependency. It runs on Node, in the
+// offline layer pipeline and under vitest, and everything downstream of it is
+// pure and dependency-free: the LayerFeature record shape below is the single
+// contract crossing the scripts/ to src/ boundary.
 //
 // It reads a whole file and scans it sequentially, never using the packed
 // R-tree, so it behaves identically on ogr2ogr-written layers (indexNodeSize 16)
@@ -29,22 +29,8 @@
 // read here compares the number of features decoded against the featuresCount
 // the header declares and throws an identifiable Error on any mismatch. Callers
 // must let that throw propagate, never catch it into a "layer is empty" branch.
-//
-// The flatgeobuf specifier is bare. Deno resolves it through the committed
-// deno.json import map ("flatgeobuf/": "npm:/flatgeobuf@4.4.0/") plus deno.lock;
-// vitest resolves it through the package.json devDependency and node_modules. A
-// literal npm: URL would make every test touching this module fail at collection
-// (npm: is a Deno-only URL scheme), and a bare specifier without the map would
-// need an npm install on the runner, which the workflows forbid.
-//
-// Any deno command whose module graph reaches this file must run with
-// DENO_NO_PACKAGE_JSON=1. Deno otherwise auto-discovers the repo's package.json
-// once the graph contains an npm resolution and eagerly resolves every
-// dependency declared there, including the token-gated private-registry
-// packages, which fails the whole command on a runner with no .npmrc token. The
-// env var stops that discovery; the import map still resolves flatgeobuf from
-// the global deno cache with no node_modules on the runner.
 
+import { open, readFile } from "node:fs/promises";
 import { deserialize } from "flatgeobuf/lib/mjs/geojson.js";
 
 // The OSM tag keys carried across the boundary: everything the pure src/ modules
@@ -261,7 +247,7 @@ export function toLayerFeature(feature, layerName) {
 
 // Returns an array of { geometry, properties } in file order. Throws on
 // undecodable bytes: a corrupt download must never read as an empty layer. Not
-// layer-aware and not Deno-bound, so the tests exercise it on in-memory
+// layer-aware and touches no file, so the tests exercise it on in-memory
 // fixtures.
 export async function readFgb(bytes) {
   if (!(bytes instanceof Uint8Array)) {
@@ -291,29 +277,16 @@ export async function readFgb(bytes) {
   return features;
 }
 
-// --- Deno file readers --------------------------------------------------------
+// --- File readers -------------------------------------------------------------
 
-// Deno.readFile and Deno.open are reached through globalThis so that importing
-// this module stays legal under Node, where vitest tests the pure half. The two
-// file readers below are the Deno-only surface and say so when called elsewhere.
-function requireDeno(what) {
-  const runtime = globalThis.Deno;
-  if (!runtime || typeof runtime.readFile !== "function" || typeof runtime.open !== "function") {
-    throw new Error("fgbReader: " + what + " requires Deno (globalThis.Deno is unavailable) — " +
-      "use readFgb(bytes) on other runtimes");
-  }
-  return runtime;
-}
-
-// Reads a file path, decodes it and normalizes every feature. Deno-only.
+// Reads a file path, decodes it and normalizes every feature.
 //
 // Only for layers whose whole geometry must be retained: beaches and parks.
 // Never for coastline, water or lakes, where GeoJSON coordinate pairs cost
 // roughly 10-20x their packed FlatGeobuf footprint in a JS heap. Those go
 // through readFgbStream.
 export async function readLayerFile(path, layerName) {
-  const runtime = requireDeno("readLayerFile");
-  const bytes = await runtime.readFile(path);
+  const bytes = await readFile(path);
   const features = await readFgb(bytes);
   const out = [];
   let skipped = 0;
@@ -332,39 +305,26 @@ export async function readLayerFile(path, layerName) {
   return out;
 }
 
-// Best-effort close. A ReadableStream taken from a Deno.FsFile closes the file
-// once it is fully read or cancelled, so this second close usually throws
-// BadResource, which is the case being swallowed. It protects the other case: a
-// consumer that breaks out early, where nothing else closes the descriptor.
-function closeQuietly(file) {
-  try {
-    file.close();
-  } catch (err) {
-    // Already closed by the stream, or never opened. Nothing to do.
-  }
-}
-
 // The streaming path: an async generator yielding one normalized LayerFeature at
-// a time, never materialising the layer. Deno-only. Every consumer of a
-// coastline, water or lakes layer, and clip-layers.js for every raw layer, must
-// use this rather than readLayerFile.
+// a time, never materialising the layer. Every consumer of a coastline, water or
+// lakes layer, and clip-layers.js for every raw layer, must use this rather than
+// readLayerFile.
 //
 // layerName is optional: pass it to stamp the logical layer onto each record
 // (the discovery/signals consumers want it), omit it for a pass that only
 // re-serializes what it reads (clip-layers.js).
 export async function* readFgbStream(path, layerName) {
-  const runtime = requireDeno("readFgbStream");
-  const file = await runtime.open(path, { read: true });
+  const file = await open(path);
   let header = null;
   const onHeader = function (meta) { header = meta; };
   let decoded = 0;
   let completed = false;
   let iterator = null;
   try {
-    // file.readable is a web ReadableStream, so this takes the library's stream
-    // branch, where the dispatcher discards the second argument and reads the
-    // third as headerMetaFn. The rect slot stays an explicit undefined.
-    const source = deserialize(file.readable, undefined, onHeader);
+    // readableWebStream() is a web ReadableStream, so this takes the library's
+    // stream branch, where the dispatcher discards the second argument and reads
+    // the third as headerMetaFn. The rect slot stays an explicit undefined.
+    const source = deserialize(file.readableWebStream(), undefined, onHeader);
     iterator = source[Symbol.asyncIterator]();
     while (true) {
       let step;
@@ -398,7 +358,9 @@ export async function* readFgbStream(path, layerName) {
         // The underlying reader is already released; nothing to unwind.
       }
     }
-    closeQuietly(file);
+    // The web stream never closes its FileHandle, and a consumer that breaks out
+    // early leaves nothing else to close it.
+    await file.close();
   }
   // Reached only when the loop ran to the end of the file. A consumer that
   // breaks out early terminates the generator at the yield above, so a

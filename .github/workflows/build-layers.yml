@@ -15,8 +15,8 @@ name: Build layers
 #
 # Requires two repository secrets, the S3-API key pair on the swim-report bucket:
 # CLOUDFLARE_R2_ACCESS_KEY and CLOUDFLARE_R2_SECRET_ACCESS_KEY. It needs no
-# Cloudflare API token and no npm registry tokens, since it never runs npm install in
-# the repo root, which would reify package.json's private deps and fail E401.
+# Cloudflare API token and no npm registry tokens, since its install drops
+# package.json's two private deps first rather than failing E401 on them.
 
 on:
   # Twice weekly. Geofabrik publishes daily and beaches change slowly, so this loses
@@ -50,15 +50,6 @@ concurrency:
 
 permissions:
   contents: read
-
-# Workflow-scoped so it covers every deno invocation in every job and step. Deno
-# auto-discovers the repo-root deno.lock, and without this it also wants a
-# workspace.packageJson block for package.json's npm deps: "deno check --frozen" then
-# fails with "The lockfile is out of date", and a plain "deno run" silently rewrites
-# the checked-in lock, retiring the frozen-lock guarantee that keeps the only
-# delete-adjacent pipeline off an unpinned transitive npm tree.
-env:
-  DENO_NO_PACKAGE_JSON: "1"
 
 jobs:
   build:
@@ -99,16 +90,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
+      - name: Set up Node
+        uses: actions/setup-node@v7
         with:
-          deno-version: v2.x
+          node-version: 26
+          cache: npm
 
-      # Resolve the flatgeobuf tree from the committed deno.lock once, explicitly,
-      # and fail loudly if it drifts, rather than letting a pipeline that feeds the
-      # delete path resolve an unpinned transitive npm tree on every invocation.
-      - name: Cache Deno dependencies (frozen lockfile)
-        run: deno cache --lock=deno.lock --frozen scripts/clip-layers.js scripts/build-manifest.js scripts/print-spat-bbox.js
+      # clip-layers.js and build-manifest.js need flatgeobuf, and a pipeline that
+      # feeds the delete path must not resolve an unpinned transitive npm tree, so
+      # every version comes from the committed package-lock.json. npm ci cannot be
+      # used: package.json's two private-registry deps need tokens this job lacks,
+      # so they are dropped from the runner's ephemeral checkout first, exactly as
+      # test.yml does, and npm install prunes them from the tree.
+      - name: Install dependencies without the private registries
+        run: |
+          set -euo pipefail
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm install --no-audit --no-fund
 
       # Reclaim runner disk. The per-country sequential plan peaks around 13.3 GB in
       # the PBF stage, and $WORK/raw, $WORK/raw-lines and $WORK/gdaltmp are a second
@@ -118,8 +116,8 @@ jobs:
       # floor asserted below covers both stages: Actions commits only 14 GB and
       # anything above it is best effort, so this step buys the margin rather than
       # betting on an observation.
-      # tool-cache is deliberately not reclaimed: it holds the Node and Deno the
-      # later steps need.
+      # tool-cache is deliberately not reclaimed: it holds the Node the later steps
+      # need.
       - name: Reclaim disk
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -325,7 +323,7 @@ jobs:
       - name: Convert OSM to raw layer FlatGeobuf
         run: |
           set -euo pipefail
-          SPAT=$(deno run --lock=deno.lock --frozen --allow-read scripts/print-spat-bbox.js)
+          SPAT=$(node --permission --allow-fs-read=. scripts/print-spat-bbox.js)
           echo "spat mask: $SPAT"
           echo "SPAT=$SPAT" >> "$GITHUB_ENV"
           # The output path has no .fgb suffix, which makes the driver write a
@@ -414,8 +412,12 @@ jobs:
       - name: Clip parks, coastline and water to the beach neighbourhood
         run: |
           set -euo pipefail
-          deno run --lock=deno.lock --frozen --allow-read --allow-write scripts/clip-layers.js \
-            --raw "$WORK/raw" --raw-lines "$WORK/raw-lines" \
+          # rename needs read access to the file it moves, so the output directory is
+          # granted for reading as well as writing.
+          node --permission --allow-fs-read=. --allow-fs-read="$WORK/raw/*" \
+            --allow-fs-read="$WORK/raw-lines/*" --allow-fs-read="$WORK/clipped/*" \
+            --allow-fs-write="$WORK/clipped/*" \
+            scripts/clip-layers.js --raw "$WORK/raw" --raw-lines "$WORK/raw-lines" \
             --out "$WORK/clipped"
           cd "$WORK/layers"
           for n in beaches-point beaches-line beaches-polygon other-relations \
@@ -434,30 +436,29 @@ jobs:
           # The absolute floors, per-region floors and shrink ratios live in the
           # script rather than this YAML, so they are unit-tested.
           #
-          # --allow-run covers the ogrinfo feature-count and schema probe plus the
-          # version stamps, and --allow-env the two runner-image vars the manifest
-          # records. Both are scoped to exactly what the script touches, so adding a
-          # third tool or env var fails here rather than widening this job's reach in
-          # silence. Without --allow-env the script dies at manifest-assembly time
-          # with a NotCapable throw, after every expensive step has run.
-          deno run --lock=deno.lock --frozen \
-            --allow-read --allow-write \
-            --allow-run=ogrinfo,osmium \
-            --allow-env=ImageOS,ImageVersion \
+          # --allow-child-process covers the ogrinfo feature-count and schema probe
+          # plus the osmium and ogrinfo version stamps. Node cannot scope it to those
+          # two binaries or restrict the env vars the manifest records, so the write
+          # grants are what stay narrow: the manifest and SHA256SUMS, each with its
+          # .tmp sibling.
+          node --permission --allow-child-process \
+            --allow-fs-read=. --allow-fs-read="$WORK/*" \
+            --allow-fs-write="$WORK/layers/manifest.json*" \
+            --allow-fs-write="$WORK/layers/SHA256SUMS*" \
             scripts/build-manifest.js \
-              --layers "$WORK/layers" \
-              --floors data/layer-floors.json \
-              --previous "$WORK/prev-manifest.json" \
-              --snapshot "$OSM_SNAPSHOT" \
-              --build-id "$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}" \
-              --git-sha "$GITHUB_SHA" \
-              --run-id "$GITHUB_RUN_ID" \
-              --allow-shrink "$ALLOW_SHRINK" \
-              --counts "$WORK/clipped" \
-              --sources "$WORK/sources.json" \
-              --filters .github/build/expressions.txt \
-              --relation-warnings "$REL_ASSEMBLY_WARNINGS" \
-              --out "$WORK/layers/manifest.json"
+            --layers "$WORK/layers" \
+            --floors data/layer-floors.json \
+            --previous "$WORK/prev-manifest.json" \
+            --snapshot "$OSM_SNAPSHOT" \
+            --build-id "$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}" \
+            --git-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --allow-shrink "$ALLOW_SHRINK" \
+            --counts "$WORK/clipped" \
+            --sources "$WORK/sources.json" \
+            --filters .github/build/expressions.txt \
+            --relation-warnings "$REL_ASSEMBLY_WARNINGS" \
+            --out "$WORK/layers/manifest.json"
           cp docs/ODbL-ATTRIBUTION.txt "$WORK/layers/LICENSE.txt"
           cat "$WORK/layers/manifest.json"
           node -e "

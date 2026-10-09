@@ -4,7 +4,7 @@
 //
 // Offline only. Nothing in the Worker's import closure may import this module: it
 // exists for scripts/fetch-wave-grids.js, scripts/sample-waves.js,
-// scripts/build-wave-manifest.js and scripts/build-wave-sql.js, which run on Deno
+// scripts/build-wave-manifest.js and scripts/build-wave-sql.js, which run on Node
 // inside .github/workflows/waves.yml. The Worker request path reads only D1 and
 // KV, and the cron path reads the beach_state.wave record this pipeline writes.
 //
@@ -381,7 +381,7 @@ export function gridsDigestInput(grids) {
 
 // sha256 over gridsDigestInput, rendered the way src/layerManifest.js's regions
 // digest is rendered ("sha256:" + 64 lowercase hex) so the two read alike in a
-// manifest. Async because crypto.subtle is; Deno, Node and vitest all provide it.
+// manifest. Async because crypto.subtle is; workerd, Node and vitest all provide it.
 export async function gridsDigest(grids) {
   const bytes = new TextEncoder().encode(gridsDigestInput(grids));
   const digest = await crypto.subtle.digest("SHA-256", bytes);

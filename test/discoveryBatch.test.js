@@ -4,10 +4,10 @@
 // mirrors the statements the Worker upsert used, that classification queueing
 // matches the Worker's semantics, and — the part that carries the real risk —
 // that every one of the four safety rails refuses what it is supposed to refuse.
-// The Deno-bound layer reading is not exercised here; only main()'s argument
-// guards are, which all fire before a single layer byte is read.
+// The layer reading is not exercised here; only main()'s argument guards are,
+// which all fire before a single layer byte is read.
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   main,
   sqlStr,
@@ -1070,15 +1070,10 @@ describe("classificationFlipRailAllows — the rail on mass RE-classification", 
 });
 
 describe("main's argument guards", function () {
-  // All three fire before any layer byte is read, so a Deno stub carrying nothing but
-  // args reaches them. Everything past them needs real FlatGeobuf bytes.
-  afterEach(function () {
-    vi.unstubAllGlobals();
-  });
-
+  // All three fire before any layer byte is read, so an argv alone reaches them.
+  // Everything past them needs real FlatGeobuf bytes.
   function run(argv) {
-    vi.stubGlobal("Deno", { args: argv });
-    return main();
+    return main(argv);
   }
 
   it("refuses a run with no discovery, no classification and no marine pass",

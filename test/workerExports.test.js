@@ -50,12 +50,12 @@ describe("Worker entry module exports", function () {
 // Guards the TWO-PATH RULE for both offline pipelines.
 //
 // The layer pipeline (src/layer*.js, scripts/lib/fgbReader.js) reads FlatGeobuf
-// files and is OFFLINE-ONLY: it runs in the Deno batch under GitHub Actions and
+// files and is OFFLINE-ONLY: it runs in the Node batch under GitHub Actions and
 // must never become reachable from the Worker. Two things break if it does. The
-// flatgeobuf dependency resolves through a Deno-only import map that workerd
-// cannot load, so the Worker would fail at startup rather than at test time; and
-// more importantly, the request path is contractually limited to D1 and KV, so a
-// module that opens layer bytes has no business in its import closure.
+// Worker bundle would pull in flatgeobuf, a devDependency that exists only for
+// the batch, and the node:fs/promises file readers; and more importantly, the
+// request path is contractually limited to D1 and KV, so a module that opens
+// layer bytes has no business in its import closure.
 //
 // The wave pipeline (src/waveGrids.js, src/waveManifest.js) is the same class of
 // module: GRIB grid geometry and the fail-closed publication gate, consumed only
@@ -131,7 +131,7 @@ describe("Worker import closure (two-path rule)", function () {
     });
     expect(bareOffenders).toEqual([]);
 
-    // 2. No offline module in the closure. These are Deno-batch modules; if one
+    // 2. No offline module in the closure. These are offline-batch modules; if one
     //    shows up here, something in the request or cron path started importing
     //    the layer or wave pipeline.
     const offlineOffenders = [];

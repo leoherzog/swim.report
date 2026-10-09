@@ -1,5 +1,5 @@
 // scripts/discovery-batch.js — offline beach discovery + water-body
-// classification, run from GitHub Actions on Deno (see
+// classification, run from GitHub Actions on Node (see
 // .github/workflows/discovery.yml and docs/offline-discovery.md).
 //
 // Discovery and classification are pipeline work, not serving work: they run
@@ -20,9 +20,10 @@
 // downloaded, verified and reported on by scripts/fetch-layers.js). Discovery is a
 // local scan (src/layerDiscovery.js) and classification a local spatial join
 // (src/layerSignals.js) against segment grids built once per run. The workflow
-// runs this with --allow-read --allow-write and no --allow-net, which is the
-// machine-enforced form of that claim: any surviving --allow-net on a
-// discovery-batch.js invocation is a leftover upstream call, findable by one grep.
+// runs this under node --permission with no --allow-net, which is the
+// machine-enforced form of that claim: any fetch throws ERR_ACCESS_DENIED, and any
+// surviving --allow-net on a discovery-batch.js invocation is a leftover upstream
+// call, findable by one grep.
 //
 // The inverted failure mode — read this before touching the delete path. A wrong
 // tag filter exits 0, the build exits 0, the manifest is well-formed, every
@@ -35,10 +36,11 @@
 // count.
 //
 // Exactly one npm dependency, reached only through scripts/lib/fgbReader.js. Every
-// src/ module reached from here is dependency-free. The workflows run
-// "deno cache --lock=deno.lock --frozen" first, so the only delete-bearing job in
-// the repo never resolves an unpinned transitive tree from the network.
+// src/ module reached from here is dependency-free. The workflows install it from
+// the committed package-lock.json, so the only delete-bearing job in the repo never
+// resolves an unpinned transitive tree.
 
+import { readFile, writeFile } from "node:fs/promises";
 import { mergeBeachRows } from "../src/discovery.js";
 import {
   buildPondEvidenceFilter,
@@ -308,7 +310,7 @@ export function splitOtherRelations(features) {
   return { beaches: beaches, parks: parks };
 }
 
-// Read one logical layer as an ARRAY of normalized LayerFeatures. Deno-only.
+// Read one logical layer as an ARRAY of normalized LayerFeatures.
 async function readLogicalLayer(dir, fileNames) {
   const out = [];
   for (let i = 0; i < fileNames.length; i = i + 1) {
@@ -342,7 +344,7 @@ export async function splitProbeLayer(features, layerName, builder, filter) {
   return { streamed: streamed, retained: retained };
 }
 
-// Stream one logical layer's files through splitProbeLayer. Deno-only.
+// Stream one logical layer's files through splitProbeLayer.
 async function streamLogicalLayer(dir, layerName, builder, filter) {
   let streamed = 0;
   let retained = [];
@@ -428,8 +430,8 @@ async function loadLayerSet(dir, wantSignals) {
 
 // --- The manifest gate ------------------------------------------------------
 
-// sha256 hex of a UTF-8 string, through Web Crypto so it is identical under Deno,
-// workerd and node — and identical to what scripts/build-manifest.js computes. The
+// sha256 hex of a UTF-8 string, through Web Crypto so it is identical under workerd
+// and Node — and identical to what scripts/build-manifest.js computes. The
 // two sides must agree bit for bit or every run refuses to delete.
 async function sha256OfText(text) {
   const bytes = new TextEncoder().encode(text);
@@ -1188,7 +1190,7 @@ export function nothingToDo(args) {
 
 async function readReportFile(path) {
   try {
-    return JSON.parse(await Deno.readTextFile(path));
+    return JSON.parse(await readFile(path, "utf8"));
   } catch (err) {
     log("layer report unreadable at " + path + ": " + (err && err.message ? err.message : String(err)));
     return null;
@@ -1197,9 +1199,9 @@ async function readReportFile(path) {
 
 // Exported so the three argument guards below are reachable from a test; they all
 // fire before a single layer byte is read.
-export async function main() {
+export async function main(argv = process.argv.slice(2)) {
   const runStartMs = Date.now();
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(argv);
   // Discovery and classification run in one pass over one verified layer set, so
   // a beach is classified in the run that discovers it and the
   // FLAG_WORTHY_WATER_SQL fail-open window — an unclassified beach served live
@@ -1229,7 +1231,7 @@ export async function main() {
 
   let snapshotRows = [];
   if (args.snapshot) {
-    snapshotRows = parseSnapshot(await Deno.readTextFile(args.snapshot));
+    snapshotRows = parseSnapshot(await readFile(args.snapshot, "utf8"));
     log("snapshot rows=" + String(snapshotRows.length));
   } else {
     log("no --snapshot given: reconciliation deletes and classification-queue skipping will be conservative (treats table as empty)");
@@ -1426,7 +1428,7 @@ export async function main() {
       log("marine zone pass skipped: marine pass needs --snapshot");
     } else {
       try {
-        const zonesData = JSON.parse(await Deno.readTextFile(args.marineZones));
+        const zonesData = JSON.parse(await readFile(args.marineZones, "utf8"));
         const index = buildMarineZoneIndex(zonesData);
         const marine = marineZoneSql(snapshotRows, deletedIds, index);
         const marineOut = [];
@@ -1512,7 +1514,7 @@ export async function main() {
   // binary outcome: exit 0 with a complete file, or exit 1 with no file. The
   // workflow's Apply step therefore needs no torn-tail truncation and no always()
   // belt.
-  await Deno.writeTextFile(args.out, out.join("\n") + "\n");
+  await writeFile(args.out, out.join("\n") + "\n");
   log("wrote " + args.out + " (" + String(out.length) + " lines) in " +
     String(Date.now() - runStartMs) + "ms total");
 }
@@ -1522,6 +1524,6 @@ export async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("discovery-batch: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

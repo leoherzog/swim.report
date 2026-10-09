@@ -14,7 +14,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   No confirmed real instance yet. The fix is cheap — consult the lakes-polygon layer, a local
   lookup. See the Scale-out section.
 - **Flag-worthy water classification** (migration 0009, `src/waterClass.js`). Runs only in the
-  offline GitHub Actions batch (`scripts/discovery-batch.js`, Deno). Each beach's adjacent water
+  offline GitHub Actions batch (`scripts/discovery-batch.js`, Node). Each beach's adjacent water
   body is resolved by a **local spatial join** over the prebuilt FlatGeobuf layers
   (`src/layerSignals.js`), anchored on member vertices at 150 m / 120 m radii, and classified
   ocean / great_lake / inland by the pure `classifyWaterBody` (Great Lakes matched by wikidata
@@ -56,14 +56,16 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   cycle**, so a present-but-under-covering GLWU takes the ocean down with it. Dropping that
   grid's records instead would mean re-emitting and rescanning both NDJSON artifacts inside the
   build. The exposure is dormant while every floor in `data/wave-floors.json` is null.
-- **The `test.yml` permission guard is a fixed script list.** It checks `--allow-net` on
-  every pure-math offline script and `--allow-run` on every wave-pipeline Deno script;
-  `build-manifest.js` keeps `--allow-run=ogrinfo,osmium` by design, so the run check is
-  scoped to the wave list and a new script on either side needs its own entry. The guard
-  matches by substring, so a name that matches nothing prints a green "no `--allow-net` on
-  any X.js invocation" forever: a rename is the operation most likely to defeat it. After
-  renaming a script, confirm by eye that the frozen `deno check` list and both permission
-  loops name the new file — `scripts/build-wave-sql.js` appears in all three.
+- **The `test.yml` permission guard reads invocations as text.** It splits the workflows and
+  `package.json` into commands and checks the node flags in front of each `scripts/<name>.js`:
+  `--permission` on every offline script, no `--allow-net` on a pure-math script and no
+  `--allow-child-process` on a wave-pipeline script. An unclassified script, a listed script
+  that no longer exists and a listed script with no invocation all fail it, so a rename cannot
+  slip past. It cannot see an invocation that does not read as `node ... scripts/<name>.js`: a
+  script path held in a shell variable, a shell script outside the workflows, or grants passed
+  any way other than the command line, which is why it refuses `NODE_OPTIONS` outright.
+  `build-manifest.js` keeps `--allow-child-process` by design, and Node cannot narrow that
+  grant to `ogrinfo` and `osmium`.
 - **Measure the slot hit rate before trusting the cadence.** No second wave source is left to
   shadow against, so read the hit rate from `waves.yml`'s run history and the per-beach coverage
   from `manifest.beaches.resolved` across consecutive cycles. Four slots a day against the 24 h
@@ -212,12 +214,6 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   - **The relation-mapped-inland-lake pond filter is cheap to fix.** The narrow residual at
     the top of this file (ways-only water evidence) can be closed by consulting the
     lakes-polygon layer directly, a local lookup rather than a new upstream probe.
-- **Every `deno` step in every workflow must set `DENO_NO_PACKAGE_JSON=1`.** The repo-root
-  `deno.lock` is auto-discovered for all Deno commands here; without that env var Deno folds
-  `package.json`'s npm tree into the lockfile it expects, `deno check --frozen` fails with "The
-  lockfile is out of date", and a plain `deno run` silently rewrites the checked-in lock. The
-  npm scripts already set it. Do not "fix" this by regenerating the lock without the env var —
-  that trades a loud failure for silent drift in the only delete-bearing job in the repo.
 - **Demand-priority cron ordering — mechanism landed.** The
   request path stamps `beaches.last_viewed` (migration 0007; detail page and `/api/flag`,
   throttled to 1/h per beach, `ctx.waitUntil`). `runFlagRecompute` and `runWaterTempRefresh`

@@ -7,9 +7,9 @@
 // everything downstream of the splice point (mergeBeachRows, upsertSql,
 // reconcileStaleRows) consumes.
 //
-// Pure: no fetch, no Date, no Deno, no npm. Imports only src/osmSelect.js,
-// src/layerGrid.js, src/geo.js and src/regions.js, and runs identically under
-// Deno and under vitest.
+// Pure: no fetch, no Date, no fs, no npm. Imports only src/osmSelect.js,
+// src/layerGrid.js, src/geo.js and src/regions.js, and runs identically in the
+// offline batch and under vitest.
 //
 // The size thresholds, tag allowlist, pond rule, association rule and field
 // derivations all live in src/osmSelect.js. This file is the wiring: region

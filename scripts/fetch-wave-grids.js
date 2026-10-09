@@ -2,14 +2,14 @@
 // scripts/sample-waves.js consumes, and writes the grids-report.json that records
 // exactly which cycle it pinned.
 //
-//   deno run --allow-net --allow-read --allow-write scripts/fetch-wave-grids.js \
-//     --dest ./.waves
+//   node --permission --allow-net --allow-fs-read=. --allow-fs-write='./.waves/*' \
+//     scripts/fetch-wave-grids.js --dest ./.waves
 //
 // The only network-touching script in the wave pipeline. Everything downstream of
 // it — band planning, point sampling, the gates, the SQL delta assembly — is pure
 // local math over the bytes this script put on disk, and
 // .github/workflows/test.yml asserts that machine-side by refusing --allow-net on
-// any of the other three scripts.
+// any of the other scripts.
 //
 // Cycle resolution happens at runtime, not by cron offset. validStart is the top
 // of the current UTC hour, the hour the published series describes. GFS cycles are
@@ -34,6 +34,7 @@
 // failing is recorded as a problem and leaves gridsComplete false, which the
 // consumer gate treats as degraded — less data, not wrong data.
 
+import { mkdir, writeFile } from "node:fs/promises";
 import {
   GRIDS,
   GRID_ELEMENTS,
@@ -444,7 +445,7 @@ async function downloadStepped(grid, candidate, destDir) {
     }
     const bytes = concatBytes(chunks);
     const name = "f" + pad3(step) + ".grib2";
-    await Deno.writeFile(destDir + "/" + name, bytes);
+    await writeFile(destDir + "/" + name, bytes);
     const elements = [];
     for (let r = 0; r < ranges.length; r = r + 1) { elements.push(ranges[r].element); }
     files.push({
@@ -482,7 +483,7 @@ async function downloadWhole(grid, candidate, destDir, prefetched, prefetchedLas
     throw new Error("response is not a GRIB2 message (" + String(bytes.length) + " bytes)");
   }
   const name = "cycle.grib2";
-  await Deno.writeFile(destDir + "/" + name, bytes);
+  await writeFile(destDir + "/" + name, bytes);
   return [{
     name: name,
     hour: null,
@@ -520,7 +521,7 @@ export function gridFailureIsFatal(gridId, requiredIds) {
 }
 
 async function main() {
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(process.argv.slice(2));
   const nowMs = Date.now();
   const validStartEpoch = args.validStart === null
     ? validStartEpochFor(nowMs)
@@ -528,7 +529,7 @@ async function main() {
   if (!isFiniteNumber(validStartEpoch)) {
     throw new Error("fetch-wave-grids: --valid-start is not a parseable ISO timestamp");
   }
-  await Deno.mkdir(args.dest, { recursive: true });
+  await mkdir(args.dest, { recursive: true });
   log("validStart " + isoFromEpoch(validStartEpoch));
 
   const grids = selectedGrids(args.gridIds);
@@ -553,7 +554,7 @@ async function main() {
     const grid = grids[i];
     resetNomadsBudget();
     const destDir = args.dest + "/" + grid.id;
-    await Deno.mkdir(destDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
     try {
       let candidate = null;
       let prefetched = null;
@@ -594,16 +595,16 @@ async function main() {
       report.problems.push(grid.id + ": " + message);
       log("PROBLEM " + grid.id + ": " + message);
       if (gridFailureIsFatal(grid.id, REQUIRED_GRID_IDS)) {
-        await Deno.writeTextFile(args.dest + "/grids-report.json",
+        await writeFile(args.dest + "/grids-report.json",
           JSON.stringify(report, null, 2) + "\n");
         log("FATAL: " + grid.id + " is required and could not be resolved — publishing nothing");
-        Deno.exit(1);
+        process.exit(1);
       }
     }
   }
 
   report.gridsComplete = report.problems.length === 0;
-  await Deno.writeTextFile(args.dest + "/grids-report.json",
+  await writeFile(args.dest + "/grids-report.json",
     JSON.stringify(report, null, 2) + "\n");
   log("wrote " + args.dest + "/grids-report.json (gridsComplete " +
     String(report.gridsComplete) + ")");
@@ -612,6 +613,6 @@ async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("fetch-wave-grids: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

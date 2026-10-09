@@ -6,8 +6,10 @@
 // Run manually, never in CI, whenever NWS publishes a new coastal marine zone
 // shapefile release (https://www.weather.gov/gis/MarineZones):
 //
-//   deno run --allow-net --allow-read --allow-write scripts/build-marine-zones.js
-//   deno run --allow-read --allow-write scripts/build-marine-zones.js --zip /path/to/mzXXxxYY.zip
+//   node --permission --allow-net --allow-fs-read=. --allow-fs-write=data/marine-zones.json \
+//     scripts/build-marine-zones.js
+//   node --permission --allow-fs-read=. --allow-fs-read=/path/to/mzXXxxYY.zip \
+//     --allow-fs-write=data/marine-zones.json scripts/build-marine-zones.js --zip /path/to/mzXXxxYY.zip
 //
 // Then review the logged per-prefix counts against the previous release, diff
 // the JSON, and commit. The zip filename changes each release, so update
@@ -28,6 +30,7 @@
 // [lon, lat] points; ring 0 is the outer ring, the rest are holes; rings are
 // closed; coords rounded to 5 decimals (~1 m).
 
+import { readFile, writeFile } from "node:fs/promises";
 import { pointInRing } from "../src/geo.js";
 
 // Update both constants together when a new release lands.
@@ -346,7 +349,7 @@ function round5(v) {
 // --- Main ---------------------------------------------------------------------
 
 async function main() {
-  const args = parseArgs(Deno.args);
+  const args = parseArgs(process.argv.slice(2));
   let zipBytes = null;
   if (args.zip.indexOf("http://") === 0 || args.zip.indexOf("https://") === 0) {
     log("downloading " + args.zip);
@@ -357,7 +360,7 @@ async function main() {
     zipBytes = new Uint8Array(await res.arrayBuffer());
   } else {
     log("reading local zip " + args.zip);
-    zipBytes = await Deno.readFile(args.zip);
+    zipBytes = await readFile(args.zip);
   }
   log("zip bytes: " + String(zipBytes.length));
 
@@ -444,13 +447,13 @@ async function main() {
   }
   lines.push("]");
   lines.push("}");
-  await Deno.writeTextFile(args.out, lines.join("\n") + "\n");
+  await writeFile(args.out, lines.join("\n") + "\n");
   log("wrote " + args.out);
 }
 
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("build-marine-zones: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }

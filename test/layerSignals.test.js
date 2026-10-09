@@ -1,7 +1,7 @@
 // Tests for src/layerSignals.js, the water-class signal provider.
 //
 // The module is pure: no fetch, no Date, no filesystem and no entrypoint, so
-// importing it under vitest exercises exactly the code the Deno batch runs. A
+// importing it under vitest exercises exactly the code the offline batch runs. A
 // LayerFeature is a plain object, so the FlatGeobuf reader is not in the loop
 // for any assertion here.
 //

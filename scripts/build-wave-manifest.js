@@ -1,8 +1,9 @@
 // scripts/build-wave-manifest.js — the build-side gate for the NOAA GRIB2 wave
-// pipeline. Runs on Deno as the last step before anything is uploaded:
+// pipeline. Runs on Node as the last step before anything is uploaded:
 //
-//   deno run --allow-read --allow-write --allow-env=ImageOS,ImageVersion \
-//     scripts/build-wave-manifest.js --sample ./.waves/out --grids-report ./.waves/grids-report.json \
+//   node --permission --allow-fs-read=. --allow-fs-write='./.waves/out/manifest.json*' \
+//     scripts/build-wave-manifest.js \
+//     --sample ./.waves/out --grids-report ./.waves/grids-report.json \
 //     --expect data/wave-grids.json --floors data/wave-floors.json \
 //     --previous ./.waves/prev-manifest.json --cycle-id "..." --git-sha "..." --run-id "..." \
 //     --allow-shrink false --out ./.waves/out/manifest.json
@@ -41,9 +42,9 @@
 // the only gates that can tell a real ocean from a filled buffer.
 //
 // Every gate is a pure exported function over plain data, so all of it is
-// unit-tested in test/buildWaveManifest.test.js. main() does the I/O. Deno is
-// reached through globalThis so importing this module under vitest is legal.
+// unit-tested in test/buildWaveManifest.test.js. main() does the I/O.
 
+import { readFile, rename, writeFile } from "node:fs/promises";
 import {
   WAVE_SCHEMA_VERSION,
   EXPECTED_WAVE_ARTIFACTS,
@@ -1295,14 +1296,6 @@ export function parseArgs(argv) {
 
 // --- I/O (main only) --------------------------------------------------------------------
 
-function requireDeno(what) {
-  const runtime = globalThis.Deno;
-  if (runtime === undefined) {
-    throw new Error("build-wave-manifest: " + what + " requires Deno");
-  }
-  return runtime;
-}
-
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const view = new Uint8Array(digest);
@@ -1314,12 +1307,12 @@ async function sha256Hex(bytes) {
   return out;
 }
 
-async function readJsonIfPresent(runtime, path) {
+async function readJsonIfPresent(path) {
   if (typeof path !== "string" || path === "") {
     return null;
   }
   try {
-    return JSON.parse(await runtime.readTextFile(path));
+    return JSON.parse(await readFile(path, "utf8"));
   } catch (err) {
     return null;
   }
@@ -1368,20 +1361,18 @@ export function sentinelValues(grids) {
 }
 
 // Exported so the refusal path, the tmp-then-rename write and the gridsComplete
-// conjunction are reachable from a test with a stubbed Deno; every runtime call
-// already goes through requireDeno's handle rather than a bare global.
-export async function main() {
-  const runtime = requireDeno("main");
-  const args = parseArgs(runtime.args);
+// conjunction are reachable from a test with a mocked node:fs/promises.
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
 
-  const sampleReport = JSON.parse(await runtime.readTextFile(args.sample + "/sample-report.json"));
-  const gridsReport = JSON.parse(await runtime.readTextFile(args.gridsReport));
-  const expectDoc = JSON.parse(await runtime.readTextFile(args.expect));
-  const floorsFile = await readJsonIfPresent(runtime, args.floors);
+  const sampleReport = JSON.parse(await readFile(args.sample + "/sample-report.json", "utf8"));
+  const gridsReport = JSON.parse(await readFile(args.gridsReport, "utf8"));
+  const expectDoc = JSON.parse(await readFile(args.expect, "utf8"));
+  const floorsFile = await readJsonIfPresent(args.floors);
   if (floorsFile === null) {
     throw new Error("build-wave-manifest: could not read the floors file at " + args.floors);
   }
-  const previousManifest = await readJsonIfPresent(runtime, args.previous);
+  const previousManifest = await readJsonIfPresent(args.previous);
 
   const digest = await gridsDigest();
   console.log("build-wave-manifest: gridsDigest " + digest);
@@ -1393,7 +1384,7 @@ export async function main() {
   for (let i = 0; i < EXPECTED_WAVE_ARTIFACTS.length; i = i + 1) {
     const key = EXPECTED_WAVE_ARTIFACTS[i];
     const path = args.sample + "/" + key;
-    const bytes = await runtime.readFile(path);
+    const bytes = await readFile(path);
     const records = parseNdjson(new TextDecoder().decode(bytes), key);
     parsed[key] = records;
     artifacts.push({
@@ -1533,7 +1524,7 @@ export async function main() {
       verdict.sanity.everyGridSampled === true,
     tools: {
       gdal: args.gdal || null,
-      runnerImage: runnerImageOf(runtime.env.get("ImageOS"), runtime.env.get("ImageVersion")),
+      runnerImage: runnerImageOf(process.env.ImageOS, process.env.ImageVersion),
       gridsDigest: digest
     },
     gridsDigest: digest,
@@ -1565,8 +1556,8 @@ export async function main() {
   };
 
   const text = JSON.stringify(manifest, null, 2) + "\n";
-  await runtime.writeTextFile(args.out + ".tmp", text);
-  await runtime.rename(args.out + ".tmp", args.out);
+  await writeFile(args.out + ".tmp", text);
+  await rename(args.out + ".tmp", args.out);
 
   console.log("build-wave-manifest: wrote " + args.out);
   console.log("build-wave-manifest: autoPublishAllowed=" +
@@ -1580,6 +1571,6 @@ export async function main() {
 if (import.meta.main) {
   main().catch(function (err) {
     console.error("build-wave-manifest: FATAL: " + (err && err.stack ? err.stack : err));
-    Deno.exit(1);
+    process.exit(1);
   });
 }
