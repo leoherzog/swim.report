@@ -14,18 +14,22 @@
 //   status "Closed" AND reason mentions a HAZARD keyword        -> red
 //     (beach hazard statement, rip current(s), high waves/surf,
 //      dangerous surf/conditions, high surf)
-//   status "Closed" AND reason mentions a WATER-QUALITY keyword -> null
+//   status "Closed" AND reason mentions a WATER-QUALITY keyword -> no site (empty result)
 //     (e.coli, bacteria, water quality, advisory — that signal belongs to
 //      the separate src/wqFloor raise-only mechanism, not this registry)
-//   status "Closed" for any other/unrecognized reason           -> null
+//   status "Closed" for any other/unrecognized reason           -> no site (empty result)
 //     (season, maintenance, staffing, or anything we cannot confirm)
 //   unrecognized/missing status, or markup we cannot parse      -> null
+//
+// An empty result is a successful scrape with nothing on the hazard axis to
+// report: the health tracker counts it as a success and every matched beach
+// resolves to no official. null is reserved for a page we could not read.
 //
 // KNOWN AMBIGUITY: the generic "advisory" water-quality keyword can collide
 // with a hazard product NAME that happens to include the word "advisory"
 // (e.g. an NWS "High Surf Advisory" quoted verbatim in the closure reason).
 // Per the never-a-wrong-color rule the water-quality check runs first, so
-// such a reason degrades to null (no site) rather than red. That is the
+// such a reason degrades to no site rather than red. That is the
 // safe-fail direction (a missed red beats a red asserted from an
 // unconfirmed reading), but it does mean a hazard closure phrased with the
 // word "advisory" will be under-reported here rather than surfaced. If this
@@ -39,11 +43,12 @@
 // independent of wave/rip/alert signal already gathered elsewhere (SRF, NWS,
 // NOAA waves) — it is a distinct posted-closure override, not a fallback
 // for any of them, and must never be duplicated as a wqFloor source (a
-// water-quality closure here already returns null so it cannot masquerade as
+// water-quality closure here yields no site so it cannot masquerade as
 // a hazard override).
 //
-// scrape() runs cron-side only; parseTowerBeachStatus is pure and exported
-// for tests. Contract v2 (perBeach / sites[] with "color", not "floorColor").
+// scrape() runs cron-side only; parseTowerBeachSites and parseTowerBeachStatus
+// are pure and exported for tests. Contract v2 (perBeach / sites[] with
+// "color", not "floorColor").
 
 import { fetchText, perBeachResult, containsAny } from "./util.js";
 
@@ -147,11 +152,14 @@ export function parseTowerBeachUpdated(text, nowIso) {
 }
 
 // Pure. Raw page text (any encoding of markup, defensively regex-matched) +
-// nowIso -> a single site object ({siteId, color, reason, reportSiteName,
-// names, lat, lon, updated}) or null. Never throws. A markup change, an
-// unrecognized status word, or an unrecognized closure reason all degrade to
-// null (never a wrong color).
-export function parseTowerBeachStatus(text, nowIso) {
+// nowIso -> sites[] or null. Never throws.
+//   null  the page could not be read: not a non-empty string, no status2
+//         span, or a status word other than Open/Closed (markup drift).
+//   []    the page parsed but the hazard axis has nothing to report: Closed
+//         for water quality, or Closed for any other or empty reason.
+//   [site] Open -> green; Closed with a hazard keyword -> red. The site is
+//         {siteId, color, reason, reportSiteName, names, lat, lon, updated}.
+export function parseTowerBeachSites(text, nowIso) {
   if (typeof text !== "string" || text.length === 0) {
     return null;
   }
@@ -170,7 +178,7 @@ export function parseTowerBeachStatus(text, nowIso) {
   const updated = parseTowerBeachUpdated(text, nowIso) || nowIso;
 
   if (status === "open") {
-    return {
+    return [{
       siteId: TOWER_BEACH_SITE_ID,
       color: "green",
       reason: "Official status reported by " + TOWER_BEACH_LABEL + ": Open",
@@ -179,7 +187,7 @@ export function parseTowerBeachStatus(text, nowIso) {
       lat: TOWER_BEACH_LAT,
       lon: TOWER_BEACH_LON,
       updated: updated
-    };
+    }];
   }
 
   if (status !== "closed") {
@@ -192,12 +200,12 @@ export function parseTowerBeachStatus(text, nowIso) {
   // raise-only wqFloor mechanism elsewhere, never here) — do not report a
   // hazard color for them.
   if (containsAny(reasonLower, WATER_QUALITY_KEYWORDS)) {
-    console.log("winnetkaTowerBeach: closure reason is water-quality, not hazard; omitting");
-    return null;
+    console.log("winnetkaTowerBeach: water-quality closure, nothing to report: " + reasonRaw);
+    return [];
   }
 
   if (containsAny(reasonLower, HAZARD_KEYWORDS)) {
-    return {
+    return [{
       siteId: TOWER_BEACH_SITE_ID,
       color: "red",
       reason: "Official status reported by " + TOWER_BEACH_LABEL +
@@ -207,13 +215,20 @@ export function parseTowerBeachStatus(text, nowIso) {
       lat: TOWER_BEACH_LAT,
       lon: TOWER_BEACH_LON,
       updated: updated
-    };
+    }];
   }
 
-  // Closed for an unrecognized/non-hazard reason (season, maintenance,
-  // staffing, or anything we cannot confirm as a hazard) — no data, not red.
-  console.log("winnetkaTowerBeach: closure reason not recognized as hazard, omitting site");
-  return null;
+  // Closed for a non-hazard reason (season, maintenance, staffing, or
+  // anything we cannot confirm as a hazard): a recognized page, not red.
+  console.log("winnetkaTowerBeach: non-hazard closure, nothing to report: " + reasonRaw);
+  return [];
+}
+
+// Pure. The single site parseTowerBeachSites yields, or null when it yields
+// none or could not read the page.
+export function parseTowerBeachStatus(text, nowIso) {
+  const sites = parseTowerBeachSites(text, nowIso);
+  return sites !== null && sites.length === 1 ? sites[0] : null;
 }
 
 function inTowerBeachBbox(beach) {
@@ -249,7 +264,7 @@ export const winnetkaTowerBeach = {
   },
   scrape: async function (nowIso) {
     // The response is plain server-rendered HTML with no auth or bot wall. If
-    // that ever changes, fetchText's ok-check and parseTowerBeachStatus's regex
+    // that ever changes, fetchText's ok-check and parseTowerBeachSites's regex
     // both fail closed to null.
     const text = await fetchText(TOWER_BEACH_URL, {
       logPrefix: "winnetkaTowerBeach: fetch failed"
@@ -258,17 +273,13 @@ export const winnetkaTowerBeach = {
       return null;
     }
     try {
-      const site = parseTowerBeachStatus(text, nowIso);
-      if (site === null) {
-        // This is a single-beach source, so — like South Haven/Chicago — a
-        // null site (page fetched fine but nothing color-worthy: a genuine
-        // markup change, an unrecognized status word, or a Closed reason
-        // that is non-hazard/water-quality) collapses to a scrape() null.
-        // "No data" always beats a guess; see the module header comment for
-        // the exact color/omit mapping.
+      const sites = parseTowerBeachSites(text, nowIso);
+      if (sites === null) {
         return null;
       }
-      return perBeachResult([site], TOWER_BEACH_URL, nowIso);
+      // An empty sites[] is a recognized page with nothing to report, which
+      // the health tracker counts as a success.
+      return perBeachResult(sites, TOWER_BEACH_URL, nowIso);
     } catch (err) {
       console.log("winnetkaTowerBeach: parse failed: " + err.message);
       return null;

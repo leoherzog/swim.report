@@ -1,6 +1,8 @@
 // test/winnetkaTowerBeach.test.js
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
+  parseTowerBeachSites,
   parseTowerBeachStatus,
   parseTowerBeachUpdated,
   winnetkaTowerBeach,
@@ -8,10 +10,19 @@ import {
   TOWER_BEACH_SITE_ID
 } from "../src/officialSources/winnetkaTowerBeach.js";
 import { scrapeOfficialFlagFromResult } from "../src/officialSources/index.js";
+import { updateScraperHealth } from "../src/scraperHealth.js";
 import { installFetch } from "./helpers/fetch.js";
 import { makeBeach } from "./helpers/beach.js";
 
 const NOW_ISO = "2026-07-21T21:43:00.000Z";
+
+// The live page as captured after the 2026 season closed: a Closed status
+// with a seasonal reason and a stamped "Last updated" line.
+const CLOSED_SEASON_FIXTURE = readFileSync(
+  new URL("./fixtures/winnetka-tower-beach-closed-season-2026-10-13.html", import.meta.url),
+  "utf8"
+);
+const CLOSED_SEASON_NOW_ISO = "2026-10-13T13:40:00.000Z";
 
 // Trimmed but structurally faithful fixture mirroring the rainoutline.com
 // response: the status2 span, the "&nbsp;-&nbsp;" separator, free-text reason,
@@ -165,6 +176,83 @@ describe("parseTowerBeachStatus", function () {
   });
 });
 
+describe("parseTowerBeachSites", function () {
+  it("reads the live closed-season page as a recognized page with nothing to report", function () {
+    expect(parseTowerBeachSites(CLOSED_SEASON_FIXTURE, CLOSED_SEASON_NOW_ISO)).toEqual([]);
+    expect(parseTowerBeachUpdated(CLOSED_SEASON_FIXTURE, CLOSED_SEASON_NOW_ISO))
+      .toBe("2026-09-10T20:13:00.000Z");
+  });
+
+  it("yields one green site for Open, equal to parseTowerBeachStatus", function () {
+    const sites = parseTowerBeachSites(openPage(), NOW_ISO);
+    expect(sites.length).toBe(1);
+    expect(sites[0].color).toBe("green");
+    expect(sites[0]).toEqual(parseTowerBeachStatus(openPage(), NOW_ISO));
+  });
+
+  it("yields one red site for a hazard closure", function () {
+    const sites = parseTowerBeachSites(closedHazard(), NOW_ISO);
+    expect(sites.length).toBe(1);
+    expect(sites[0].color).toBe("red");
+    expect(sites[0].siteId).toBe(TOWER_BEACH_SITE_ID);
+  });
+
+  it("yields an empty list for a maintenance closure", function () {
+    expect(parseTowerBeachSites(closedMaintenance(), NOW_ISO)).toEqual([]);
+  });
+
+  it("yields an empty list for a water-quality closure", function () {
+    expect(parseTowerBeachSites(closedWaterQuality(), NOW_ISO)).toEqual([]);
+  });
+
+  it("yields an empty list for each water-quality keyword variant", function () {
+    const keywords = ["bacteria", "water quality", "e.coli", "e. coli", "advisory"];
+    for (let i = 0; i < keywords.length; i++) {
+      const page = buildPage(
+        "<span class=\"status2\">Closed</span>&nbsp;-&nbsp;Beach closed due to " +
+          keywords[i] + " concerns.",
+        "Last updated at 7/21/26 4:43 pm"
+      );
+      expect(parseTowerBeachSites(page, NOW_ISO)).toEqual([]);
+    }
+  });
+
+  it("yields an empty list for a hazard phrased with the word advisory", function () {
+    const page = buildPage(
+      "<span class=\"status2\">Closed</span>&nbsp;-&nbsp;High Surf Advisory in effect.",
+      "Last updated at 7/21/26 4:43 pm"
+    );
+    expect(parseTowerBeachSites(page, NOW_ISO)).toEqual([]);
+  });
+
+  it("yields an empty list for a Closed line with an empty reason", function () {
+    const page = buildPage(
+      "<span class=\"status2\">Closed</span>&nbsp;-&nbsp;",
+      "Last updated at 7/21/26 4:43 pm"
+    );
+    expect(parseTowerBeachSites(page, NOW_ISO)).toEqual([]);
+  });
+
+  it("returns null for an unrecognized status word", function () {
+    const page = buildPage(
+      "<span class=\"status2\">Unknown</span>&nbsp;-&nbsp;Something changed upstream.",
+      "Last updated at 7/21/26 4:43 pm"
+    );
+    expect(parseTowerBeachSites(page, NOW_ISO)).toBe(null);
+  });
+
+  it("returns null when the status2 span is missing", function () {
+    expect(parseTowerBeachSites("<div>completely different page structure</div>", NOW_ISO))
+      .toBe(null);
+  });
+
+  it("returns null for garbage, null and empty-string input", function () {
+    expect(parseTowerBeachSites("<<< not the expected format >>>", NOW_ISO)).toBe(null);
+    expect(parseTowerBeachSites(null, NOW_ISO)).toBe(null);
+    expect(parseTowerBeachSites("", NOW_ISO)).toBe(null);
+  });
+});
+
 describe("parseTowerBeachUpdated", function () {
   it("parses a well-formed Last Updated line to a valid ISO timestamp", function () {
     const iso = parseTowerBeachUpdated(
@@ -313,7 +401,27 @@ describe("winnetkaTowerBeach.scrape", function () {
     expect(result).toBe(null);
   });
 
-  it("returns null (collapses empty) for a non-hazard closure", async function () {
+  function expectEmptyResult(result, nowIso) {
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    expect(result.source).toBe(TOWER_BEACH_URL);
+    expect(result.sources[0]).toBe(TOWER_BEACH_URL);
+    expect(result.updated).toBe(nowIso);
+  }
+
+  it("returns an empty result for the live closed-season page", async function () {
+    installFetch(function () {
+      return Promise.resolve({
+        ok: true,
+        text: function () { return Promise.resolve(CLOSED_SEASON_FIXTURE); }
+      });
+    });
+    const result = await winnetkaTowerBeach.scrape(CLOSED_SEASON_NOW_ISO);
+    expectEmptyResult(result, CLOSED_SEASON_NOW_ISO);
+  });
+
+  it("returns an empty result for a non-hazard closure", async function () {
     installFetch(function () {
       return Promise.resolve({
         ok: true,
@@ -321,14 +429,29 @@ describe("winnetkaTowerBeach.scrape", function () {
       });
     });
     const result = await winnetkaTowerBeach.scrape(NOW_ISO);
-    expect(result).toBe(null);
+    expectEmptyResult(result, NOW_ISO);
   });
 
-  it("returns null for a water-quality closure, never masquerading as hazard", async function () {
+  it("returns an empty result for a water-quality closure, never masquerading as hazard", async function () {
     installFetch(function () {
       return Promise.resolve({
         ok: true,
         text: function () { return Promise.resolve(closedWaterQuality()); }
+      });
+    });
+    const result = await winnetkaTowerBeach.scrape(NOW_ISO);
+    expectEmptyResult(result, NOW_ISO);
+  });
+
+  it("returns null for an unrecognized status word (markup drift)", async function () {
+    const page = buildPage(
+      "<span class=\"status2\">Unknown</span>&nbsp;-&nbsp;Something changed upstream.",
+      "Last updated at 7/21/26 4:43 pm"
+    );
+    installFetch(function () {
+      return Promise.resolve({
+        ok: true,
+        text: function () { return Promise.resolve(page); }
       });
     });
     const result = await winnetkaTowerBeach.scrape(NOW_ISO);
@@ -343,5 +466,34 @@ describe("winnetkaTowerBeach.scrape", function () {
       });
     });
     await expect(winnetkaTowerBeach.scrape(NOW_ISO)).resolves.toBe(null);
+  });
+});
+
+// An empty result is a success for the health tracker and writes no official
+// for any matched beach.
+describe("winnetkaTowerBeach empty-result health contract", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+  });
+
+  it("resets the consecutive-null streak and resolves to no official", async function () {
+    installFetch(function () {
+      return Promise.resolve({
+        ok: true,
+        text: function () { return Promise.resolve(CLOSED_SEASON_FIXTURE); }
+      });
+    });
+    const result = await winnetkaTowerBeach.scrape(CLOSED_SEASON_NOW_ISO);
+    expect(result).not.toBe(null);
+    const health = updateScraperHealth(
+      "winnetka-tower-beach", { consecutiveNulls: 5 }, result !== null, CLOSED_SEASON_NOW_ISO
+    );
+    expect(health.next.consecutiveNulls).toBe(0);
+    expect(health.next.lastSuccess).toBe(CLOSED_SEASON_NOW_ISO);
+    expect(health.alert).toBe(null);
+
+    const beach = makeBeach({ name: "Tower Road Beach", lat: 42.115585, lon: -87.733837 });
+    expect(winnetkaTowerBeach.matches(beach)).toBe(true);
+    expect(scrapeOfficialFlagFromResult(beach, winnetkaTowerBeach, result)).toBe(null);
   });
 });

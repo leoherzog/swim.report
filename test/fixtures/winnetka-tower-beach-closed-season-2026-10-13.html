@@ -1,0 +1,297 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "https://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="https://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+        <title>Tower Road Beach</title>
+                <meta name="keywords" content="Rainout Line, rain out line" />
+        <meta name="description" content="Current status info" />
+        <meta name="apple-itunes-app" content="app-id=1252877535">
+                <link rel="stylesheet" href="/styles/v1.css" type="text/css" media="screen" />
+        <link rel="shortcut icon" href="https://rainoutline.com/images/favicon.ico">
+            <script type="text/javascript" src="https://rainoutline.com/js/legacy_js.js"></script>
+            <script type="text/javascript">
+                var timer1;
+                function reLoad(b) {
+                    if(b) timer1 = setTimeout("window.location.reload(true);",60*1000);
+                    else {
+                        clearTimeout(timer1);
+                        timer1 = setTimeout("window.location.reload(true);",60*1000)
+                    }
+                }
+            </script>
+            <script type="text/javascript" language="javascript" src="https://rainoutline.com/lib/niftyPlayer/niftyplayer.js"></script>
+            <script type="text/javascript" src="https://rainoutline.com/js/jquery-1.4.2.js"></script>
+            <script type="text/javascript" src="https://rainoutline.com/lib/tipTipv13/jquery.tipTip.js"></script>
+            <link href="https://rainoutline.com/lib/tipTipv13/tipTip.css" rel="stylesheet" type="text/css" />
+            <script type="text/javascript">
+                $(document).ready(function()
+                {
+                    reLoad(true);
+                    $('#extensionKeywords').tipTip();
+                    $('.star0, .star1, .star2, .star3, .star4, .star5, .star6, .subscribe').tipTip( {defaultPosition: 'top'} );
+
+                    $(".adminLinks").hide();
+                    $(".admin_show_hide").show();
+                    $('.admin_show_hide').click(function()
+                    {
+                        $(".adminLinks").slideToggle();
+                    });
+
+                    $('.message').delay(800).fadeOut(4000);
+		   
+                });
+	
+
+	
+                function favorite_extension(dnis,extension)
+                {
+                    $(document).ready(function()
+                    {
+                        var state = 0;
+                        var link_id  = 'favorite_link_' + extension;
+                        if('star2 floatleft'==$('#'+link_id).attr('class')) state = 1;
+                        else state = 0;
+
+                        $.post("https://rainoutline.com/home/favorite_extension", { dnis: dnis, extension: extension, state: state },
+                        function(data)
+                        {
+                            var data_obj = jQuery.parseJSON(data);
+
+                            if( data_obj.status == 'success' )
+                            {
+                                $('#'+link_id).attr('class', 'star2 floatleft');
+                            }
+                            if( data_obj.status == 'success_removed' )
+                            {
+                                $('#'+link_id).attr('class', 'star0 floatleft');
+                            }
+                            if(data_obj.status == 'error') alert(data_obj.message);
+                        });
+                    });
+                }
+		
+                function allow_to_login(dnis)
+                {
+                    document.location="https://rainoutline.com/login/index/"+dnis;
+                }
+	
+            </script>
+
+    </head>
+    <body>
+
+        <div id="wrapper">
+
+                <div class="accessibility-notice">
+        <a href="https://statusfy.com/8475633131/9"
+           class="conforming-link"
+           aria-label="Access the fully compliant, accessible version of this page">
+            View an accessible version of this page
+        </a>
+    </div>
+<div id="searchLogo" ><a href="https://rainoutline.com/"><img src="https://rainoutline.com/images/logo48x339.png" width="220" height="34" alt="Rainout Line"></a></div>
+
+<!-- search -->
+
+<!-- search end -->
+
+<div id="searchNav" class="floatright">
+        <a href="https://rainoutline.com/">Home</a>&nbsp;&nbsp; | &nbsp;&nbsp;
+	<a href="https://rainoutline.com/login">Log In / Register</a>
+</div>
+
+
+<br class="clear" />
+            <div id="content4">
+                                <div class="column4 rborder">
+
+
+
+<div class="dnisName">Winnetka Park District</div>
+                    <img class="dnisLogo" src="https://cdn.rainoutline.com/logos/8475633131-1422997354.jpg">
+                        <p>(847) 563-3131                                                        </p>
+                            <br/>
+                            <ul class="pageLinks">
+
+                                
+                                
+
+                                <li><a class="commentLink" href="https://rainoutline.com/subscribe/notify/8475633131/0" title="Click to subscribe or unsubscribe from email/text updates of this extension">Email & Text Alerts</a></li>
+                                
+                                
+                                
+                                    
+                                                                    <li><a class="webLink" href="http://www.winpark.org" target="_blank">Go to Website</a></li>
+                                    
+  
+
+                                    <li><a class="listenLink" href="javascript:document.getElementById('niftyPlayer1').style.marginLeft='0';niftyplayer('niftyPlayer1').loadAndPlay('https://cdn.rainoutline.com/sounds/mp3/847/8475633131m.mp3?d='+Date());reLoad(false);">Listen to Phone Menu</a></li>
+                                </ul>
+                                <object style="margin-left:-1000px;" classid="clsid:D27CDB6E-AE6D-11cf-96B8-444553540000" codebase="https://download.macromedia.com/pub/shockwave/cabs/flash/swflash.cab#version=6,0,0,0" width="165" height="38" id="niftyPlayer1" align="">
+                                    <param name=movie value="https://rainoutline.com/lib/niftyPlayer/niftyplayer.swf?file=https://cdn.rainoutline.com/sounds/mp3/847/8475633131m.mp3">
+                                        <param name="quality" value=high/>
+                                        <param name="bgcolor" value="#FFFFFF"/>
+                                        <param name="wmode" value="opaque"/>
+                                        <embed src="https://rainoutline.com/lib/niftyPlayer/niftyplayer.swf?file=https://cdn.rainoutline.com/sounds/mp3/847/8475633131m.mp3" wmode="opaque" quality=high bgcolor=#FFFFFF width="165" height="38" name="niftyPlayer1" align="" type="application/x-shockwave-flash" pluginspage="https://www.macromedia.com/go/getflashplayer">
+                                        </embed>
+                                </object>
+
+                               
+
+
+<br>
+<strong>Title II Accessibility</strong><br />
+<p>We made RainoutLine data accessible and WCAG 2.1 AA compliant via Statusfy.</p>
+<a href="https://statusfy.com/docs/accessibility" style="display:block;margin:15px 15px 15px 0;" target="_blank">View Details</a>
+<hr/>
+<br>
+<strong>Android and iPhone Apps</strong><br />
+<p>Download our free apps to
+    check or update status.
+</p>
+<a href="https://apps.apple.com/app/id6448003606" style="display:block;margin:15px 15px 15px 0;" target="_blank"><img src="https://rainoutline.com/images/appstoreBadge40.png"></a>
+<a href="https://play.google.com/store/apps/details?id=com.rainoutline.app2" style="display:block;margin:0 15px 15px 0;" target="_blank"><img src="https://rainoutline.com/images/androidMarket40.png"></a>
+
+                        </div>
+                <div class="column5">
+                    
+                    <div id="breadcrumbs">
+                        <a href="https://rainoutline.com/search">Search</a>                        &raquo; <a href="https://rainoutline.com/search/dnis/8475633131">Winnetka Park District</a>
+                        &raquo; Tower Road Beach                    </div>
+                    <div id="ext_details_right">
+
+
+                    </div>
+
+                    <div class="floatleft gridcell9 padding5">
+                        <div class="floatright statusImage cell-35"></div>                    </div>
+                    <div class="floatleft gridcell7 padding5 ">
+
+                        <div class="extensionName">
+Tower Road Beach                            <a class="listenLink" href="javascript:document.getElementById('niftyPlayer1').style.marginLeft='0';niftyplayer('niftyPlayer1').loadAndPlay('https://cdn.rainoutline.com/sounds/mp3/847/84756331319.mp3?d='+Date());reLoad(false);">&nbsp;</a>
+                        </div>
+                        <strong>Updated over 30 days ago</strong>
+                        <span style="margin-left:15px;">Extension 9                        </span>
+
+                    </div>
+                    <br clear="left">
+                        <div class="floatleft gridcell9 padding5">
+<a class="listenLinkExt" href="javascript:document.getElementById('niftyPlayer1').style.marginLeft='0';niftyplayer('niftyPlayer1').loadAndPlay('https://cdn.rainoutline.com/sounds/mp3/847/84756331319s.mp3?d='+Date());reLoad(false);">&nbsp;</a>                            <br/>
+
+                        </div>
+                        <div class="floatleft gridcell7 padding5">
+
+                            <span class="status2">Closed</span>&nbsp;-&nbsp;Tower beach is closed for the 2026 season.  There is no swimming and no lifeguards on duty.                            <br /><br />
+                            <span class="clue"><em>Last updated at 9/10/26 3:13 pm
+                                                         by Matt Barton                            
+                            </em></span>
+           
+
+
+                                                        <div style="margin-top:25px;">
+                                                            <a  href="https://www.google.com/maps/place/42.115585,-87.733837/@42.115585,-87.733837,15z" target="_blank">899 Sheridan Road<br/>Winnetka, IL 60093                                    <br /><br />
+                                    <img src="https://cdn.rainoutline.com/maps/42.115585_-87.733837_15_635x500.png"></a>
+                                                        </div>
+                            
+                        </div>
+
+
+                </div>
+
+<div class="floatleft" style="margin:8px 0 0 4px;">
+<!-- ad here -->
+   <!--<iframe src="https://rcm.amazon.com/e/cm?t=rainline-20&o=1&p=48&l=ur1&category=sports&banner=04XMCHDMTG0EWW8WWXG2&f=ifr" width="728" height="90" scrolling="no" border="0" marginwidth="0" style="border:none;" frameborder="0"></iframe>-->
+
+    <!--<img src="/images/728x90-full-color-big.gif" width="728" height="90">-->
+
+
+
+
+</div>
+
+                <br class="clear" />
+
+<div id="footer">
+&copy; 2026 Status Share, LLC
+ &diams; <a  href="https://rainoutline.com/legal/privacy" style="color:#fff;text-decoration:underline;">Privacy Policy</a>
+ &diams; <a  href="https://rainoutline.com/legal/terms" style="color:#fff;text-decoration:underline;">Terms and Conditions</a>
+ &diams; (888) 255-6110
+ &diams; <script>var e="%73%75%70%70%6F%72%74%40";document.write(unescape(e+"%73%74%61%74%75%73%68%61%72%65%2E%63%6F%6D"));</script>
+<span class="floatright" style="color:#999;">v2w2</span>
+</div>
+
+<script type="text/javascript">
+
+  var _gaq = _gaq || [];
+  _gaq.push(['_setAccount', 'UA-23744216-1']);
+  _gaq.push(['_setDomainName', '.rainoutline.com']);
+  _gaq.push(['_trackPageview']);
+
+  (function() {
+    var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+      ga.src = ('https:' == document.location.protocol ? 'https://' : 'https://') + 'stats.g.doubleclick.net/dc.js';
+    var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+  })();
+
+</script>
+
+
+<!-- Facebook Pixel Code -->
+<script>
+  !function(f,b,e,v,n,t,s)
+  {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+  if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+  n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];
+  s.parentNode.insertBefore(t,s)}(window, document,'script',
+  'https://connect.facebook.net/en_US/fbevents.js');
+  fbq('init', '2260593754000390');
+  fbq('track', 'PageView');
+</script>
+
+<noscript><img height="1" width="1" style="display:none"
+  src="https://www.facebook.com/tr?id=2260593754000390&ev=PageView&noscript=1"
+/></noscript>
+<!-- End Facebook Pixel Code -->
+
+
+<script>(function() {
+        var _fbq = window._fbq || (window._fbq = []);
+        if (!_fbq.loaded) {
+            var fbds = document.createElement('script');
+            fbds.async = true;
+            fbds.src = '//connect.facebook.net/en_US/fbds.js';
+            var s = document.getElementsByTagName('script')[0];
+            s.parentNode.insertBefore(fbds, s);
+            _fbq.loaded = true;
+        }
+        _fbq.push(['addPixelId', '656754317712417']);
+    })();
+    window._fbq = window._fbq || [];
+    window._fbq.push(['track', 'PixelInitialized', {}]);
+</script>
+
+
+
+
+<!-- Global site tag (gtag.js) - Google AdWords: 993904169 -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=AW-993904169"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'AW-993904169');
+</script>
+
+
+<noscript><img height="1" width="1" border="0" alt="" style="display:none" src="https://www.facebook.com/tr?id=656754317712417&amp;ev=NoScript" /></noscript>
+
+            </div>
+        </div>
+       
+        <script type="text/javascript">var addthis_config = {"data_track_clickback":false};</script>
+        <script type="text/javascript" src="https://s7.addthis.com/js/250/addthis_widget.js#pubid=ra-4d93cb6f628a7f86"></script>
+    </body>
+</html>

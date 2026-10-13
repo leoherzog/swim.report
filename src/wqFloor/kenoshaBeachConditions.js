@@ -54,8 +54,15 @@ export const KENOSHA_BEACH_CONDITIONS_URL =
 
 export const KENOSHA_LABEL = "Kenosha County Beach Conditions";
 
-// The Kenosha County zone sits behind Cloudflare; identify the fetch as siblings do.
+// The zone's Cloudflare WAF blocks a request carrying no browser-navigation
+// header, and the project User-Agent alone is blocked, so the fetch sends
+// Upgrade-Insecure-Requests beside it. Unverified from Worker egress until
+// three hourlies run without an HTTP 403.
 const KENOSHA_USER_AGENT = "swim.report (hello@swim.report)";
+const KENOSHA_HEADERS = {
+  "User-Agent": KENOSHA_USER_AGENT,
+  "Upgrade-Insecure-Requests": "1"
+};
 
 const KENOSHA_INFO_URL = KENOSHA_BEACH_CONDITIONS_URL;
 
@@ -91,6 +98,8 @@ export function htmlToText(html) {
     .replace(/&#39;/g, "'")
     .replace(/&#0*39;/g, "'")
     .replace(/&quot;/gi, "\"")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -265,7 +274,7 @@ export const kenoshaBeachConditions = {
   },
   scrape: async function(nowIso) {
     const html = await fetchText(KENOSHA_BEACH_CONDITIONS_URL, {
-      headers: { "User-Agent": KENOSHA_USER_AGENT },
+      headers: KENOSHA_HEADERS,
       logPrefix: "kenoshaBeachConditions: fetch failed"
     });
     if (html === null) {

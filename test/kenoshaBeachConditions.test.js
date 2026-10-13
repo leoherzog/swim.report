@@ -1,5 +1,6 @@
 // test/kenoshaBeachConditions.test.js
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   htmlToText,
   extractTableRows,
@@ -15,6 +16,17 @@ import { findSite } from "./helpers/sites.js";
 import { installFetch } from "./helpers/fetch.js";
 
 const NOW_ISO = "2026-07-21T12:00:00Z";
+
+// The live page as served past the WAF: the full CivicPlus table with every
+// row reading OPEN after the sampling season.
+const ALL_OPEN_FIXTURE = readFileSync(
+  new URL("./fixtures/kenosha-beach-conditions-200-all-open-2026-10-13.html", import.meta.url),
+  "utf8"
+);
+const CURATED_ROW_NAMES = [
+  "Alford Park", "Eichelman Beach", "Pennoyer Park",
+  "Simmons Island Park", "Southport Park", "Prairie Shores"
+];
 
 // Builds a minimal HTML table body from row-cell arrays, mirroring the live
 // Kenosha County page's column order: [name, ecoli reading, status, date].
@@ -40,6 +52,11 @@ describe("htmlToText", function() {
 
   it("decodes common entities", function() {
     expect(htmlToText("Tom&#39;s &amp; Jerry&nbsp;Beach")).toBe("Tom's & Jerry Beach");
+  });
+
+  it("decodes a below-detection reading's angle bracket", function() {
+    expect(htmlToText("&lt;10 MPN/100mL")).toBe("<10 MPN/100mL");
+    expect(htmlToText("&gt;2400 MPN/100mL")).toBe(">2400 MPN/100mL");
   });
 
   it("returns empty string for non-string input", function() {
@@ -130,6 +147,16 @@ describe("parseKenoshaBeachConditions", function() {
     expect(site.floorColor).toBe("red");
   });
 
+  it("renders a below-detection reading verbatim in the reason", function() {
+    const rows = extractTableRows(kenoshaTable([
+      ["Southport Park", "&lt;10 MPN/100mL", "ADVISORY", "07/20/26"]
+    ]));
+    const sites = parseKenoshaBeachConditions(rows, NOW_ISO);
+    const site = findSite(sites, "southport-park");
+    expect(site).not.toBe(null);
+    expect(site.reason).toBe("Kenosha County beach conditions: ADVISORY (<10 MPN/100mL)");
+  });
+
   it("uses nowIso for updated when the date column is a non-date placeholder", function() {
     const rows = extractTableRows(kenoshaTable([
       ["Southport Park", "1300 MPN/100mL", "CLOSED", "To Be Resampled"]
@@ -176,6 +203,22 @@ describe("parseKenoshaBeachConditions", function() {
       ["Camp Lake", "276 E.coli/100 mL", "ADVISORY", "07/21/26"]
     ]));
     expect(parseKenoshaBeachConditions(rows, NOW_ISO)).toBe(null);
+  });
+
+  it("reads the live all-OPEN page as every curated row present and nothing to report", function() {
+    const rows = extractTableRows(ALL_OPEN_FIXTURE);
+    expect(rows.length).toBe(27);
+    for (let i = 0; i < CURATED_ROW_NAMES.length; i++) {
+      let found = null;
+      for (let r = 0; r < rows.length; r++) {
+        if (rows[r][0] === CURATED_ROW_NAMES[i]) {
+          found = rows[r];
+        }
+      }
+      expect(found, CURATED_ROW_NAMES[i]).not.toBe(null);
+      expect(found[2].trim()).toBe("OPEN");
+    }
+    expect(parseKenoshaBeachConditions(rows, NOW_ISO)).toEqual([]);
   });
 
   it("returns null for a non-array rows argument", function() {
@@ -240,7 +283,7 @@ describe("kenoshaBeachConditions.scrape", function() {
     expect(site.floorColor).toBe("yellow");
   });
 
-  it("identifies itself with the project User-Agent and reads an all-OPEN table as an empty result", async function() {
+  it("sends the project User-Agent plus a navigation hint and reads an all-OPEN table as an empty result", async function() {
     const html = "<table class=\"fr-alternate-rows\"><thead><tr><th>Beach</th>" +
       "<th>Result</th><th>Condition</th><th>Date of Sampling</th></tr></thead><tbody>" +
       "<tr><td>Alford Park</td><td>20 MPN/100mL</td><td>OPEN&nbsp;</td><td>09/02/26</td></tr>" +
@@ -251,10 +294,31 @@ describe("kenoshaBeachConditions.scrape", function() {
     vi.stubGlobal("fetch", fetchStub);
     const result = await kenoshaBeachConditions.scrape("2026-09-22T12:00:00Z");
     expect(fetchStub).toHaveBeenCalledTimes(1);
-    expect(fetchStub.mock.calls[0][1].headers["User-Agent"]).toBe("swim.report (hello@swim.report)");
+    const headers = fetchStub.mock.calls[0][1].headers;
+    expect(headers["User-Agent"]).toBe("swim.report (hello@swim.report)");
+    expect(headers["Upgrade-Insecure-Requests"]).toBe("1");
+    const headerNames = Object.keys(headers);
+    for (let i = 0; i < headerNames.length; i++) {
+      expect(headerNames[i].toLowerCase().indexOf("sec-fetch-")).toBe(-1);
+    }
     expect(result).not.toBe(null);
     expect(result.perBeach).toBe(true);
     expect(result.sites).toEqual([]);
+  });
+
+  it("reads the live all-OPEN page as an empty result", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve({
+        ok: true,
+        text: function() { return Promise.resolve(ALL_OPEN_FIXTURE); }
+      });
+    });
+    const result = await kenoshaBeachConditions.scrape("2026-10-13T13:40:00.000Z");
+    expect(calls.length).toBe(1);
+    expect(result).not.toBe(null);
+    expect(result.perBeach).toBe(true);
+    expect(result.sites).toEqual([]);
+    expect(result.source).toBe(KENOSHA_BEACH_CONDITIONS_URL);
   });
 
   it("returns null when the fetch fails", async function() {
@@ -262,6 +326,21 @@ describe("kenoshaBeachConditions.scrape", function() {
       return Promise.resolve({ ok: false, status: 500 });
     });
     const result = await kenoshaBeachConditions.scrape(NOW_ISO);
+    expect(result).toBe(null);
+  });
+
+  it("returns null on a WAF 403 without parsing the block page", async function() {
+    const calls = installFetch(function() {
+      return Promise.resolve({
+        ok: false,
+        status: 403,
+        text: function() {
+          throw new Error("block page must never be read");
+        }
+      });
+    });
+    const result = await kenoshaBeachConditions.scrape(NOW_ISO);
+    expect(calls.length).toBe(1);
     expect(result).toBe(null);
   });
 
