@@ -20,7 +20,7 @@ name: Beach discovery
 # Requires one repository secret, CLOUDFLARE_D1_EDIT_TOKEN. No R2 credentials, since
 # the layers are public data from https://map.swim.report — a blast-radius reduction
 # for the only job that can delete production rows — and no npm private-registry
-# tokens, because its install drops the two private packages first.
+# token, because its install drops the private package first.
 
 on:
   # Daily. GitHub's scheduler defers crons by hours, which does not matter here: the
@@ -83,14 +83,14 @@ jobs:
       # The batch needs flatgeobuf, and the one job that can delete production rows
       # must not resolve an unpinned transitive npm tree, so every version comes from
       # the committed package-lock.json, and an npm outage fails here, loudly, before
-      # any D1 read. npm ci cannot be used: package.json's two private-registry deps
-      # need tokens this job lacks, so they are dropped from the runner's ephemeral
-      # checkout first, exactly as test.yml does, and npm install prunes them from
+      # any D1 read. npm ci cannot be used: package.json's private-registry dep
+      # needs a token this job lacks, so it is dropped from the runner's ephemeral
+      # checkout first, exactly as test.yml does, and npm install prunes it from
       # the tree. Every wrangler call still goes through npx --yes wrangler@<pin>.
       - name: Install dependencies without the private registries
         run: |
           set -euo pipefail
-          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]'
           npm install --no-audit --no-fund
 
       - name: Fetch and verify the layer set

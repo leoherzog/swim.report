@@ -44,9 +44,9 @@ name: Wave cycle
 # CLOUDFLARE_D1_EDIT_TOKEN, the same secret discovery.yml uses, and no AWS keys.
 # The artifact handoff between them needs no secret at all.
 #
-# It needs no npm private-registry tokens: none of its scripts has an npm dependency,
+# It needs no npm private-registry token: none of its scripts has an npm dependency,
 # so it never runs npm install in the repo root, which would reify package.json's
-# private deps and fail E401. Every wrangler call goes through npx --yes wrangler@<pin>.
+# private dep and fail E401. Every wrangler call goes through npx --yes wrangler@<pin>.
 
 on:
   # 4 slots a day, matching the 4 GFS cycles and the 24 h series each one publishes.

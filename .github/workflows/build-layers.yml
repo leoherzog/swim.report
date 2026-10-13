@@ -16,7 +16,7 @@ name: Build layers
 # Requires two repository secrets, the S3-API key pair on the swim-report bucket:
 # CLOUDFLARE_R2_ACCESS_KEY and CLOUDFLARE_R2_SECRET_ACCESS_KEY. It needs no
 # Cloudflare API token and no npm registry tokens, since its install drops
-# package.json's two private deps first rather than failing E401 on them.
+# package.json's private dep first rather than failing E401 on it.
 
 on:
   # Twice weekly. Geofabrik publishes daily and beaches change slowly, so this loses
@@ -99,13 +99,13 @@ jobs:
       # clip-layers.js and build-manifest.js need flatgeobuf, and a pipeline that
       # feeds the delete path must not resolve an unpinned transitive npm tree, so
       # every version comes from the committed package-lock.json. npm ci cannot be
-      # used: package.json's two private-registry deps need tokens this job lacks,
-      # so they are dropped from the runner's ephemeral checkout first, exactly as
-      # test.yml does, and npm install prunes them from the tree.
+      # used: package.json's private-registry dep needs a token this job lacks,
+      # so it is dropped from the runner's ephemeral checkout first, exactly as
+      # test.yml does, and npm install prunes it from the tree.
       - name: Install dependencies without the private registries
         run: |
           set -euo pipefail
-          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]'
           npm install --no-audit --no-fund
 
       # Reclaim runner disk. The per-country sequential plan peaks around 13.3 GB in

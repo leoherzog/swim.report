@@ -2,15 +2,14 @@ name: Tests
 
 # Runs the vitest suite on every push and pull request.
 #
-# The install is deliberately not "npm ci". Two of package.json's runtime dependencies
-# (@web.awesome.me/webawesome-pro and @awesome.me/kit-*) come from private registries
-# whose tokens live in .dev.vars, and .npmrc routes those scopes through
-# ${WEBAWESOME_NPM_TOKEN} / ${FONTAWESOME_NPM_TOKEN}. A plain npm ci here fails E401,
-# and the fix is not to hand CI those secrets. Nothing under src/ or test/ imports
-# either package: Web Awesome and Font Awesome load from a version-pinned CDN kit at
+# The install is deliberately not "npm ci". One of package.json's runtime dependencies,
+# @web.awesome.me/webawesome-pro, comes from a private registry whose token lives in
+# .dev.vars, and .npmrc routes that scope through ${WEBAWESOME_NPM_TOKEN}. A plain
+# npm ci here fails E401, and the fix is not to hand CI that secret. Nothing under src/
+# or test/ imports the package: Web Awesome and Font Awesome load from a version-pinned CDN kit at
 # runtime (see WA_KIT_BASE in src/frontend/render.js), and the local package exists
 # only so a developer can read the bundled Web Awesome agent skill. So the job drops
-# those two by name from the ephemeral checkout's manifest and installs the rest,
+# it by name from the ephemeral checkout's manifest and installs the rest,
 # including suncalc, which src/frontend/sun.js imports and the Worker bundles:
 #
 #   npm pkg delete 'dependencies[<private>]' ...  (touches only the runner's copy)
@@ -18,7 +17,7 @@ name: Tests
 #
 # npm ci cannot be used after that edit, because it requires package.json and
 # package-lock.json to agree and the edit deliberately makes them disagree; npm
-# install reconciles by pruning the two private trees, which is the intended effect.
+# install reconciles by pruning the private tree, which is the intended effect.
 # Every remaining version still comes from the lockfile.
 #
 # If this job ever fails with E401, the cause is a new import of a private package
@@ -60,7 +59,7 @@ jobs:
         # See the header. This edits only the runner's ephemeral checkout.
         run: |
           set -euo pipefail
-          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]'
           npm install --no-audit --no-fund
           npx vitest --version
 
@@ -212,7 +211,7 @@ jobs:
     #                       the fast static guard on the one known instance.
     #
     # The bundle resolves suncalc from node_modules, so this job installs the way the
-    # vitest job does, minus the two private-registry packages it has no tokens for.
+    # vitest job does, minus the private-registry package it has no token for.
     # wrangler is still fetched on its own through npx, as discovery.yml and waves.yml
     # do it.
     runs-on: ubuntu-latest
@@ -235,7 +234,7 @@ jobs:
         # See the header. This edits only the runner's ephemeral checkout.
         run: |
           set -euo pipefail
-          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]' 'dependencies[@awesome.me/kit-ddd41b2d81]'
+          npm pkg delete 'dependencies[@web.awesome.me/webawesome-pro]'
           npm install --no-audit --no-fund
 
       - name: Bundle the Worker

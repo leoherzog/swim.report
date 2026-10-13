@@ -155,9 +155,9 @@ the tests.
 `flatgeobuf` is pinned at 4.4.0 by the committed `package-lock.json`, and `fgbReader.js`
 imports it by the bare deep specifier `flatgeobuf/lib/mjs/geojson.js`, which Node and vitest
 both resolve from `node_modules/`. So `discovery.yml` and `build-layers.yml` install npm
-dependencies the way `test.yml` does: `npm pkg delete` drops the two private-registry
-dependencies from the runner's ephemeral checkout, then `npm install` resolves the rest from the
-committed lockfile. A plain `npm ci` fails E401 without the private registry tokens, and these
+dependencies the way `test.yml` does: `npm pkg delete` drops the private-registry
+dependency from the runner's ephemeral checkout, then `npm install` resolves the rest from the
+committed lockfile. A plain `npm ci` fails E401 without the private registry token, and these
 jobs are deliberately not given them.
 
 ## Faithful to the Worker's semantics
@@ -244,10 +244,10 @@ The emitted SQL satisfies the invariants the Worker depends on
    `CLOUDFLARE_API_TOKEN` from `CLOUDFLARE_WORKERS_EDIT_TOKEN` in `.dev.vars`, then
    `npx wrangler d1 migrations apply swim-report --remote`.
 2. **Repository secret `CLOUDFLARE_D1_EDIT_TOKEN`**, D1 edit scope on `swim-report`, read by
-   `discovery.yml`. No npm private-registry tokens are needed: before `npm install` the
-   workflow runs `npm pkg delete` on `package.json`'s private `@web.awesome.me` and
-   `@awesome.me` dependencies in the runner's ephemeral checkout, so the install never reaches
-   the private registries. Every wrangler call goes through `npx --yes wrangler@<pin>`.
+   `discovery.yml`. No npm private-registry token is needed: before `npm install` the
+   workflow runs `npm pkg delete` on `package.json`'s private `@web.awesome.me`
+   dependency in the runner's ephemeral checkout, so the install never reaches the private
+   registry. Every wrangler call goes through `npx --yes wrangler@<pin>`.
 3. **The R2 bucket `swim-report`**, served publicly at `https://map.swim.report`, plus
    repository secrets **`CLOUDFLARE_R2_ACCESS_KEY`** and **`CLOUDFLARE_R2_SECRET_ACCESS_KEY`**,
    used by the **layer build only**. The discovery job needs no R2 credentials. Nothing in the

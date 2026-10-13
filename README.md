@@ -455,9 +455,8 @@ network, no Workers runtime).
 
 ### Environment variables
 
-`.dev.vars` holds local secrets. `WEBAWESOME_NPM_TOKEN` and `FONTAWESOME_NPM_TOKEN` are
-build-tooling credentials for `npm install`, referenced as `${VAR}` placeholders in `.npmrc` —
-export both before installing, and never hardcode a token in `.npmrc`.
+`.dev.vars` holds local secrets. `WEBAWESOME_NPM_TOKEN` is the build-tooling credential for
+`npm install`, referenced as a `${VAR}` placeholder in `.npmrc` — export it before installing, and never hardcode a token in `.npmrc`.
 `WINDY_WEBCAM_API_TOKEN` is a Worker **runtime** secret, which `wrangler dev` loads into `env`
 automatically. `CLOUDFLARE_WORKERS_EDIT_TOKEN` authenticates wrangler itself: export it as
 `CLOUDFLARE_API_TOKEN` before any wrangler command that talks to the Cloudflare API, since this
