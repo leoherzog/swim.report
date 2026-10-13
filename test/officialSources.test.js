@@ -765,6 +765,84 @@ describe("scrapeOfficialFlagFromResult: staleMs / readingNote contract", functio
   });
 });
 
+// The optional kind contract. A scraper may declare kind "forecast" to say its
+// color is a forecast for the day rather than a flag someone raised. Read off
+// the SCRAPER OBJECT by exact match; posted is the default and is never
+// written, and a result-carried kind never survives.
+describe("scrapeOfficialFlagFromResult: kind contract", function() {
+  function scraperWith(extra) {
+    return Object.assign({
+      id: "fake-v2",
+      label: "Fake Flag Program",
+      url: "https://example.gov/flags"
+    }, extra || {});
+  }
+
+  function perBeachFlag(extra, siteExtra) {
+    return scrapeOfficialFlagFromResult(V2_BEACH, scraperWith(extra), multiSiteResult([
+      Object.assign({ siteId: "oval", color: "green", reason: "Oval flag is green", names: ["oval beach"] },
+        siteExtra || {})
+    ]));
+  }
+
+  function singleColorFlag(scraperExtra, resultExtra) {
+    return scrapeOfficialFlagFromResult(V2_BEACH, scraperWith(scraperExtra), Object.assign({
+      color: "red",
+      reason: "Official flag reported by Fake Flag Program",
+      official: true,
+      scraperId: "fake-v2",
+      source: "https://example.gov/flags",
+      sources: ["https://example.gov/flags"],
+      updated: "2026-07-05T12:00:00.000Z"
+    }, resultExtra || {}));
+  }
+
+  it("copies kind forecast onto the record on both branches", function() {
+    expect(perBeachFlag({ kind: "forecast" }).kind).toBe("forecast");
+    expect(singleColorFlag({ kind: "forecast" }).kind).toBe("forecast");
+  });
+
+  it("omits the key entirely when the scraper declares no kind", function() {
+    expect("kind" in perBeachFlag(null)).toBe(false);
+    expect("kind" in singleColorFlag(null)).toBe(false);
+  });
+
+  it("rejects any value other than the exact string forecast", function() {
+    expect("kind" in perBeachFlag({ kind: "posted" })).toBe(false);
+    expect("kind" in perBeachFlag({ kind: "Forecast" })).toBe(false);
+    expect("kind" in perBeachFlag({ kind: true })).toBe(false);
+    expect("kind" in perBeachFlag({ kind: null })).toBe(false);
+    expect("kind" in singleColorFlag({ kind: "posted" })).toBe(false);
+  });
+
+  it("strips a result-carried kind the scraper never declared", function() {
+    expect("kind" in singleColorFlag(null, { kind: "forecast" })).toBe(false);
+    expect("kind" in perBeachFlag(null, { kind: "forecast" })).toBe(false);
+  });
+
+  it("lets the scraper declaration win over a result-carried value", function() {
+    expect(singleColorFlag({ kind: "forecast" }, { kind: "posted" }).kind).toBe("forecast");
+  });
+
+  it("never mutates the result while stripping", function() {
+    const result = { color: "red", reason: "r", official: true, scraperId: "fake-v2",
+      source: "u", sources: ["u"], updated: "2026-07-05T12:00:00.000Z", kind: "forecast" };
+    scrapeOfficialFlagFromResult(V2_BEACH, scraperWith(null), result);
+    expect(result.kind).toBe("forecast");
+  });
+
+  it("is declared only by the marine beach forecast across the registry", function() {
+    const declaring = [];
+    for (const scraper of scrapers) {
+      expect(scraper.kind === undefined || scraper.kind === "forecast", scraper.id).toBe(true);
+      if (scraper.kind === "forecast") {
+        declaring.push(scraper.id);
+      }
+    }
+    expect(declaring).toEqual(["nws-marine-beach-forecast"]);
+  });
+});
+
 // The optional transferred-reading contract. A shape-(b) site may declare
 // reportSiteName; when it is neither the beach's display name (park_name ||
 // name) nor claimed by the site's own names[], the record carries reportedFor

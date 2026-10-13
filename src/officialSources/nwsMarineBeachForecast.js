@@ -1,12 +1,22 @@
 // src/officialSources/nwsMarineBeachForecast.js
 //
-// KIND: official HAZARD scraper (src/officialSources). An official color from
-// this source overrides the swim.report estimate everywhere it is shown
-// (every surface that shows the beach's flag, via src/displayFlag.js
-// displayFlag, except that once a reading ages past the 2 h STALE_MS horizon a
-// fresher estimate may raise the displayed color, never lower it),
-// so this source may only sit on the HAZARD axis — it reports the NWS-forecast
-// swim risk (rip) and surf-height conditions, both genuine surf hazards.
+// KIND: official HAZARD scraper (src/officialSources), declared kind
+// "forecast": its color is the office's Day-1 beach forecast, not a flag anyone
+// raised at the beach. displayFlag (src/displayFlag.js) credits a forecast only
+// while it is strictly more severe than the estimate, so it can raise the
+// displayed color at any age and never lower it. This source may only sit on the
+// HAZARD axis — it reports the NWS-forecast swim risk (rip) and surf-height
+// conditions, both genuine surf hazards.
+//
+// STAMP: every site's updated is the product's issuance instant, productdat +
+// producttim in the office's own zone (productIssuanceIso), falling back to the
+// layer's idp_filedate when the time or zone does not parse. A feature with no
+// resolvable issuance is dropped rather than stamped with the cron tick: the
+// displayFlag gate reads updated, and a stamp rewritten every hour would let a
+// morning green outrank an afternoon red estimate all day. The scraper declares
+// staleMs (30 h) and a readingNote, so the official card carries a neutral
+// "Forecast issued" note between the 2 h gate and the next issuance instead of
+// a daily stale warning.
 //
 // SOURCE: NWS Marine Beach Forecast ArcGIS MapServer, per-WFO "Day 1" layers.
 //   Base: https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/
@@ -14,7 +24,8 @@
 //   Per-WFO Day1 layer query:
 //     /{layer}/query?where=1=1&outFields=*&f=json
 //   Each feature carries attributes { beachname, rip, surf, wtemp, winds,
-//   producttim, productdat, srfprod, ... }. The two verified Great Lakes layers:
+//   producttim, productdat, idp_filedate, srfprod, ... }; off season every
+//   product field and idp_filedate are null. The two verified Great Lakes layers:
 //     layer 19 = CLE (Cleveland, Lake Erie OH/PA Day 1)
 //     layer  7 = BUF (Buffalo, Lake Erie/Ontario NY Day 1)
 //   only verified layers are enabled below. Never enable an unverified layer id:
@@ -59,9 +70,25 @@ export const NWS_MARINE_BEACH_MAP_URL =
 const NWS_MARINE_BEACH_LABEL = "NWS Marine Beach Forecast";
 
 // A Day-1 product older than this many days (by productdat vs nowIso) is treated
-// as a stale cached response and dropped — the product timezone is unknown, so
-// a 2-day slack avoids rejecting a same-day product read across midnight UTC.
+// as a stale cached response and dropped. The gate reads the date alone, so a
+// 2-day slack avoids rejecting a same-day product read across midnight UTC.
 export const STALE_MAX_DAYS = 2;
+
+// Thirty hours: a Day-1 product is reissued each morning, so a record that has
+// outlived the next issuance is genuinely stale.
+export const FORECAST_STALE_MS = 30 * 60 * 60 * 1000;
+
+// producttim's zone abbreviation -> UTC offset in minutes. An abbreviation
+// outside this table makes the time unparseable and the stamp falls back.
+const ZONE_OFFSET_MINUTES = {
+  EDT: -240, EST: -300,
+  CDT: -300, CST: -360,
+  MDT: -360, MST: -420,
+  PDT: -420, PST: -480,
+  AKDT: -480, AKST: -540,
+  HST: -600,
+  AST: -240, ADT: -180
+};
 
 // VERIFIED-live Great Lakes Day-1 layers only. Each id maps a WFO to the
 // SITE_DEFS whose layer field matches. Add a layer here only after confirming
@@ -241,11 +268,45 @@ export function isFreshProduct(productdat, nowIso) {
   return diffDays <= STALE_MAX_DAYS;
 }
 
+/**
+ * The product's issuance instant: productdat + producttim ("416 AM EDT") in the
+ * office's zone, else a finite idp_filedate (epoch ms), else null.
+ * @param {?string} productdat "M/D/YYYY"
+ * @param {?string} producttim "HMM AM ZONE" or "HHMM PM ZONE"
+ * @param {?number} idpFileDate the layer's GIS file date, epoch ms
+ * @returns {?string} ISO instant, never guessed
+ */
+export function productIssuanceIso(productdat, producttim, idpFileDate) {
+  const dateMs = productDateMs(productdat);
+  if (dateMs !== null && typeof producttim === "string") {
+    const m = producttim.trim().match(/^(\d{1,2})(\d{2}) (AM|PM) ([A-Z]{2,4})$/);
+    if (m) {
+      let hour = parseInt(m[1], 10);
+      const minute = parseInt(m[2], 10);
+      const offset = ZONE_OFFSET_MINUTES[m[4]];
+      if (hour >= 1 && hour <= 12 && minute <= 59 && offset !== undefined) {
+        if (m[3] === "AM" && hour === 12) {
+          hour = 0;
+        } else if (m[3] === "PM" && hour !== 12) {
+          hour = hour + 12;
+        }
+        const ms = dateMs + hour * 3600000 + minute * 60000 - offset * 60000;
+        return new Date(ms).toISOString();
+      }
+    }
+  }
+  if (typeof idpFileDate === "number" && Number.isFinite(idpFileDate)) {
+    return new Date(idpFileDate).toISOString();
+  }
+  return null;
+}
+
 // Pure, exported for tests. One layer's ArcGIS query JSON text -> a plain object
-// mapping lowercase beachname -> { beachname, color } for every fresh,
-// confidently-classifiable feature. Returns null on malformed/non-feature JSON,
-// unparseable nowIso, or when zero features were recognized (unusable body).
-// Tolerates both Esri (feature.attributes) and GeoJSON (feature.properties).
+// mapping lowercase beachname -> { beachname, color, updated } for every fresh,
+// confidently-classifiable feature with a resolvable issuance. Returns null on
+// malformed/non-feature JSON, unparseable nowIso, or when zero features were
+// recognized (unusable body). Tolerates both Esri (feature.attributes) and
+// GeoJSON (feature.properties). A zone named twice takes the last fresh feature.
 export function parseLayerZones(text, nowIso) {
   let data;
   try {
@@ -289,7 +350,13 @@ export function parseLayerZones(text, nowIso) {
     if (color === null) {
       continue;
     }
-    zones[name.toLowerCase()] = { beachname: name, color: color };
+    // A color with no issuance instant is dropped: the stamp is what lets
+    // displayFlag age the forecast, and a cron-tick stamp would never age.
+    const updated = productIssuanceIso(attrs.productdat, attrs.producttim, attrs.idp_filedate);
+    if (updated === null) {
+      continue;
+    }
+    zones[name.toLowerCase()] = { beachname: name, color: color, updated: updated };
     recognized = recognized + 1;
   }
   if (recognized === 0) {
@@ -300,9 +367,10 @@ export function parseLayerZones(text, nowIso) {
 }
 
 // Pure, exported for tests. Map(layerId -> zonesObject) -> sites[]. Walks the
-// curated SITE_DEFS and, for each whose live zone color is present, emits one
-// contract-v2 site (names + centroid for resolveSiteForBeach). Zones with no
-// live color yield no site.
+// curated SITE_DEFS and, for each whose live zone color and issuance stamp are
+// present, emits one contract-v2 site (names + centroid for resolveSiteForBeach)
+// carrying updated. A zone with no live color or no stamp yields no site, so
+// the registry's result-level updated fallback is never reached from here.
 export function buildSites(zoneColorsByLayer) {
   const sites = [];
   if (!zoneColorsByLayer || typeof zoneColorsByLayer.get !== "function") {
@@ -318,11 +386,15 @@ export function buildSites(zoneColorsByLayer) {
     if (!entry || FLAG_SEVERITY[entry.color] === undefined) {
       continue;
     }
+    if (typeof entry.updated !== "string" || entry.updated.length === 0) {
+      continue;
+    }
     sites.push({
       siteId: def.siteId,
       color: entry.color,
-      reason: "Official swim risk and surf conditions from " +
+      reason: "Forecast swim risk and surf conditions from " +
         NWS_MARINE_BEACH_LABEL + " for the " + entry.beachname + " zone",
+      updated: entry.updated,
       names: def.names,
       lat: def.lat,
       lon: def.lon,
@@ -342,6 +414,12 @@ export const nwsMarineBeachForecast = {
   id: "nws-marine-beach-forecast",
   label: NWS_MARINE_BEACH_LABEL,
   url: NWS_MARINE_BEACH_MAP_URL,
+  // A forecast for the day, not a flag someone raised; the registry copies it
+  // onto the record and the detail page words the badge and verdict by it.
+  kind: "forecast",
+  staleMs: FORECAST_STALE_MS,
+  // Rendered with the age appended: "Forecast issued 6 hours ago."
+  readingNote: "Forecast issued",
   matches: function(beach) {
     return inGreatLakesEastBox(beach);
   },
@@ -375,6 +453,8 @@ export const nwsMarineBeachForecast = {
     if (sites.length === 0) {
       return null;
     }
+    // Every site carries its own issuance stamp, which the registry prefers;
+    // nowIso here is the result-level default no site falls back to.
     return perBeachResult(sites, NWS_MARINE_BEACH_MAP_URL, nowIso);
   }
 };

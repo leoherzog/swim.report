@@ -172,10 +172,15 @@ const OG_IMAGE_ALT = {
 // A detail page's meta description: the page's displayFlag color, worded by its
 // source. The wave clause is omitted rather than invented without a finite height.
 function detailMetaDescription(beach, estimate, flag) {
-  const phrase = flag.source === "none"
-    ? "flag status unknown right now"
-    : ((flag.source === "official" ? "official " : "estimated ") +
-      META_FLAG_WORDS[flag.color] + " flag right now");
+  let phrase;
+  if (flag.source === "none") {
+    phrase = "flag status unknown right now";
+  } else if (flag.forecast) {
+    phrase = "forecast " + META_FLAG_WORDS[flag.color] + " flag today";
+  } else {
+    phrase = (flag.source === "official" ? "official " : "estimated ") +
+      META_FLAG_WORDS[flag.color] + " flag right now";
+  }
   const waves = (estimate && typeof estimate.waveHeightFt === "number" &&
     isFinite(estimate.waveHeightFt))
     ? (", " + estimate.waveHeightFt.toFixed(1) + " ft waves")
@@ -278,10 +283,22 @@ function renderOfficialBadge(sizeClass, slotName) {
     "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>";
 }
 
+// The badge for an official record of kind "forecast": filled like OFFICIAL,
+// since the record still outranks the estimate, but never green and never a
+// check mark, so a forecast cannot read as a flag someone raised.
+function renderForecastBadge(sizeClass, slotName) {
+  const cls = sizeClass ? (" class=\"" + sizeClass + "\"") : "";
+  const slotAttr = slotName ? (" slot=\"" + slotName + "\"") : "";
+  return "<wa-badge" + slotAttr + " variant=\"brand\" appearance=\"filled\"" + cls + ">" +
+    "<wa-icon slot=\"start\" name=\"cloud-sun\"></wa-icon>FORECAST</wa-badge>";
+}
+
 /**
  * The compact flag a list row or nearby card carries: one wa-badge, filled when
- * the posted record supplied its color and outlined otherwise. An official chip
- * also gets a hover tooltip and a hidden "Official " prefix for screen readers.
+ * the official record supplied its color and outlined otherwise. An official
+ * chip also gets a hover tooltip and a hidden prefix for screen readers:
+ * "Official" for a posted flag, "Official forecast" in the brand variant when
+ * the decision credits a forecast, so a forecast never reads as a flag someone raised.
  * The tooltip comes back separately so the caller places it outside the link,
  * where its body cannot join the link's accessible name.
  * @param {object} flag displayFlag result
@@ -300,10 +317,13 @@ function renderCompactFlag(flag, chipId) {
     };
   }
   const id = escapeHtml(chipId);
+  const variant = flag.forecast ? "brand" : "neutral";
+  const prefix = flag.forecast ? "Official forecast " : "Official ";
   return {
-    badgeHtml: "<wa-badge variant=\"neutral\" appearance=\"filled\" id=\"" + id + "\">" + iconHtml +
-      "<span class=\"wa-visually-hidden\">Official </span>" + escapeHtml(label) + "</wa-badge>",
-    tooltipHtml: renderTooltipFor(id, "Official")
+    badgeHtml: "<wa-badge variant=\"" + variant + "\" appearance=\"filled\" id=\"" + id + "\">" +
+      iconHtml + "<span class=\"wa-visually-hidden\">" + prefix + "</span>" +
+      escapeHtml(label) + "</wa-badge>",
+    tooltipHtml: renderTooltipFor(id, flag.forecast ? "Official forecast" : "Official")
   };
 }
 
@@ -311,7 +331,7 @@ function renderCompactFlag(flag, chipId) {
 // unknown is supplied by neither, so it carries no badge.
 function renderHeroSourceBadge(flag) {
   if (flag.source === "official") {
-    return renderOfficialBadge(null);
+    return flag.forecast ? renderForecastBadge(null) : renderOfficialBadge(null);
   }
   if (flag.source === "estimate") {
     return renderEstimateBadge();
@@ -627,11 +647,14 @@ function renderOfficialCard(official, nowIso) {
   }
   const sourceUrl = firstSourceUrl(official);
   const sourcesHtml = renderOfficialSourceLink(sourceUrl);
+  // The card renders its own record verbatim, so it reads kind off the record
+  // rather than off the displayFlag decision the hero badge follows.
+  const forecast = official.kind === "forecast";
   return renderFlagCard({
-    cardClass: "official-card",
+    cardClass: "official-card" + (forecast ? " forecast-card" : ""),
     refreshKey: "official",
     appearance: "filled-outlined",
-    badgeHtml: renderOfficialBadge(null, "header"),
+    badgeHtml: forecast ? renderForecastBadge(null, "header") : renderOfficialBadge(null, "header"),
     color: normalizeColor(official.color),
     reason: official.reason || "",
     sourcesHtml: sourcesHtml,
@@ -1912,8 +1935,9 @@ export function renderDetailPage(data) {
     escapeHtml(osmHref) + "\" rel=\"noopener noreferrer\">" +
     "<wa-icon name=\"location-dot\"></wa-icon> " + lat + ", " + lon + "</a></p>";
 
-  // The badge names displayFlag's source, never freshness alone. Same two badge
+  // The badge names displayFlag's source, never freshness alone. Same badge
   // builders as the cards, so the official/estimated distinction cannot drift.
+  // A forecast record that supplied the color is badged FORECAST, not OFFICIAL.
   const heroBadgeHtml = renderHeroSourceBadge(flag);
 
   // One plain-language sentence under the flag label, branched on the same

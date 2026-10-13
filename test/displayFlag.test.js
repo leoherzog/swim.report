@@ -38,8 +38,8 @@ function decide(estimate, official, nowIso) {
     nowIso === undefined ? NOW_ISO : nowIso);
 }
 
-function result(color, keyword, source) {
-  return { color: color, keyword: keyword, source: source };
+function result(color, keyword, source, forecast) {
+  return { color: color, keyword: keyword, source: source, forecast: forecast === true };
 }
 
 const UNKNOWN_NONE = result("unknown", "unknown", "none");
@@ -237,7 +237,7 @@ describe("displayFlag invariants", function () {
       expect(d.keyword, c.label).toBe(collapseFlagColor(d.color));
       expect(["green", "yellow", "red", "unknown"], c.label).toContain(d.keyword);
       expect(["official", "estimate", "none"], c.label).toContain(d.source);
-      expect(Object.keys(d), c.label).toEqual(["color", "keyword", "source"]);
+      expect(Object.keys(d), c.label).toEqual(["color", "keyword", "source", "forecast"]);
       // Raise-only past the gate, outright before it.
       if (officialColor !== "unknown") {
         if (c.aged) {
@@ -281,6 +281,39 @@ describe("displayFlag invariants", function () {
     const blob = displayFlag(liveBeachState(row, NOW_MS), NOW_ISO);
     expect(chip).toEqual(blob);
     expect(chip).toEqual(result("yellow", "yellow", "official"));
+
+    const forecast = Object.assign({}, official, { kind: "forecast" });
+    const forecastRow = Object.assign({}, row, {
+      official: JSON.stringify(forecast),
+      official_kind: "forecast"
+    });
+    const forecastChip = displayFlag(liveChipState(forecastRow, NOW_MS), NOW_ISO);
+    expect(forecastChip).toEqual(displayFlag(liveBeachState(forecastRow, NOW_MS), NOW_ISO));
+    expect(forecastChip).toEqual(result("yellow", "yellow", "official", true));
+  });
+
+  it("marks a credited forecast official, and only a credited one", function () {
+    const fresh = Object.assign(off("yellow", FRESH), { kind: "forecast" });
+    expect(decide(est("green"), fresh)).toEqual(result("yellow", "yellow", "official", true));
+    const aged = Object.assign(off("yellow", AGED), { kind: "forecast" });
+    expect(decide(est("green"), aged)).toEqual(result("yellow", "yellow", "official", true));
+    expect(decide(est("red"), aged)).toEqual(result("red", "red", "estimate"));
+    const other = Object.assign(off("yellow", FRESH), { kind: "posted" });
+    expect(decide(est("green"), other)).toEqual(result("yellow", "yellow", "official"));
+  });
+
+  it("never lets a forecast lower or tie the estimate, however fresh", function () {
+    const issued = [FRESH, AGED, undefined];
+    for (const updated of issued) {
+      const green = Object.assign(off("green", updated), { kind: "forecast" });
+      expect(decide(est("red"), green)).toEqual(result("red", "red", "estimate"));
+      expect(decide(est("green"), green)).toEqual(result("green", "green", "estimate"));
+      const red = Object.assign(off("red", updated), { kind: "forecast" });
+      expect(decide(est("double-red"), red)).toEqual(result("double-red", "red", "estimate"));
+      expect(decide(null, green)).toEqual(result("green", "green", "official", true));
+    }
+    // A posted flag still decides outright while fresh.
+    expect(decide(est("red"), off("green", FRESH))).toEqual(result("green", "green", "official"));
   });
 });
 
@@ -288,7 +321,7 @@ describe("displayFlag reads only what it declares", function () {
   function guarded(record) {
     return new Proxy(record, {
       get: function (target, key) {
-        if (key !== "color" && key !== "updated") {
+        if (key !== "color" && key !== "updated" && key !== "kind") {
           throw new Error("displayFlag read " + String(key));
         }
         return target[key];
@@ -296,7 +329,7 @@ describe("displayFlag reads only what it declares", function () {
     });
   }
 
-  it("touches only color and updated on each record, and only the two records on state", function () {
+  it("touches only color, updated and kind on each record, and only the two records on state", function () {
     const entry = {
       beach: { id: "b-1" },
       distanceMi: 1.2,
@@ -445,6 +478,21 @@ describe("no second copy of the display decision", function () {
     expect(text).not.toContain("new Date");
   });
 
+  it("has displayFlag read only each record's color and the official's updated and kind", function () {
+    // Chip pairs carry no staleMs or reason, so the decision may not read them.
+    // kind only marks the decision; a forecast is gated by its issuance stamp.
+    const text = read("src/displayFlag.js");
+    // One guarded read: the typeof test and the value it yields.
+    expect(count(text, "official.updated")).toBe(2);
+    expect(count(text, "official.color")).toBe(1);
+    expect(count(text, "estimate.color")).toBe(1);
+    expect(count(text, ".kind")).toBe(1);
+    expect(text).not.toContain(".staleMs");
+    expect(text).not.toContain(".readingNote");
+    expect(text).not.toContain(".reason");
+    expect(text).not.toContain(".source");
+  });
+
   it("leaves render.js no raw-record read that could decide a beach's flag", function () {
     const text = read("src/frontend/render.js");
     expect(text).not.toContain("SEVERITY_RANK");
@@ -458,8 +506,13 @@ describe("no second copy of the display decision", function () {
     expect(count(text, "collapseFlagColor(")).toBe(1);
     // The row, the nearby card and the detail page.
     expect(count(text, "= displayFlag(")).toBe(3);
-    // The definition, the official card and the hero badge.
+    // The definition, the official card and the hero badge, each badge builder
+    // chosen by the record's kind and never by a color.
     expect(count(text, "renderOfficialBadge(")).toBe(3);
+    expect(count(text, "renderForecastBadge(")).toBe(3);
+    // displayFlag decides forecast for every surface; only the official card,
+    // which renders its own record verbatim, reads the record's kind.
+    expect(count(text, "official.kind")).toBe(1);
     const dataFlags = [];
     const pattern = /data-flag=\\"" \+\s*(\S+)/g;
     let match = pattern.exec(text);

@@ -582,7 +582,7 @@ async function handleApiFlag(env, ctx, beachId) {
       estimate: state.estimate,
       official: state.official,
       // Built field by field so no internal decision field reaches the public shape.
-      display: { color: flag.color, source: flag.source }
+      display: { color: flag.color, source: flag.source, forecast: flag.forecast }
     },
     { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
   );

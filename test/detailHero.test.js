@@ -230,6 +230,139 @@ describe("detail-page hero", () => {
   });
 });
 
+// An official record of kind "forecast" (the NWS Marine Beach Forecast): it
+// can raise the flag but never lower it, and every surface that names it says
+// FORECAST, never OFFICIAL.
+describe("detail-page hero: the forecast record", () => {
+  const FORECAST_BADGE = "<wa-badge variant=\"brand\" appearance=\"filled\">" +
+    "<wa-icon slot=\"start\" name=\"cloud-sun\"></wa-icon>FORECAST</wa-badge>";
+
+  function forecastWith(color, updated) {
+    return {
+      color: color,
+      reason: "Forecast swim risk and surf conditions from NWS Marine Beach Forecast for the Lucas Area Beaches zone",
+      official: true,
+      scraperId: "nws-marine-beach-forecast",
+      kind: "forecast",
+      staleMs: 108000000,
+      readingNote: "Forecast issued",
+      source: "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/marine_beachforecast/MapServer",
+      updated: updated
+    };
+  }
+
+  function metaDescription(html) {
+    const m = html.match(/<meta name="description" content="([^"]*)">/);
+    return m ? m[1] : null;
+  }
+
+  it("carries the FORECAST badge, and no OFFICIAL text, when a fresh forecast raises the flag", () => {
+    const html = render({
+      estimate: estimateWith({ color: "green" }),
+      official: forecastWith("yellow", FRESH)
+    });
+    const block = hero(html);
+    expect(block).toContain("data-flag=\"yellow\"");
+    expect(block).toContain(">YELLOW</span>");
+    expect(block).toContain(FORECAST_BADGE);
+    expect(block).not.toContain("OFFICIAL");
+    expect(block).not.toContain(">ESTIMATE</wa-badge>");
+    expect(block).toContain("<p class=\"wa-body-l\" data-refresh=\"verdict\">" +
+      "The NWS beach forecast calls for yellow-flag conditions today.</p>");
+    expect(metaDescription(html)).toBe("Ottawa Beach: forecast YELLOW flag today.");
+  });
+
+  it("keeps a more severe estimate even while the forecast is fresh", () => {
+    const html = render({
+      estimate: estimateWith({ color: "red" }),
+      official: forecastWith("green", FRESH)
+    });
+    const block = hero(html);
+    expect(block).toContain("data-flag=\"red\"");
+    expect(block).toContain(">ESTIMATE</wa-badge>");
+    expect(block).not.toContain("FORECAST");
+  });
+
+  it("hands the color back to a more severe estimate three hours after issuance", () => {
+    const html = render({
+      estimate: estimateWith({ color: "red" }),
+      official: forecastWith("green", AGED)
+    });
+    const block = hero(html);
+    expect(block).toContain("data-flag=\"red\"");
+    expect(block).toContain(">ESTIMATE</wa-badge>");
+    expect(block).not.toContain("FORECAST");
+    expect(block).not.toContain("OFFICIAL");
+    expect(metaDescription(html)).toBe("Ottawa Beach: estimated RED flag right now.");
+  });
+
+  it("keeps the FORECAST badge on an aged forecast that is still the more severe half", () => {
+    const html = render({
+      estimate: estimateWith({ color: "green" }),
+      official: forecastWith("yellow", AGED)
+    });
+    const block = hero(html);
+    expect(block).toContain("data-flag=\"yellow\"");
+    expect(block).toContain(FORECAST_BADGE);
+    expect(block).not.toContain("OFFICIAL");
+    expect(block).toContain("The NWS beach forecast calls for yellow-flag conditions today.");
+    expect(metaDescription(html)).toBe("Ottawa Beach: forecast YELLOW flag today.");
+  });
+
+  it("renders the official card with the FORECAST badge, the source link and the issuance note", () => {
+    const html = render({
+      estimate: estimateWith({ color: "green" }),
+      official: forecastWith("yellow", AGED)
+    });
+    const cardStart = html.indexOf("<wa-card class=\"official-card forecast-card\"");
+    expect(cardStart).toBeGreaterThan(-1);
+    const card = html.slice(cardStart, html.indexOf("</wa-card>", cardStart));
+    expect(card).toContain("<wa-badge slot=\"header\" variant=\"brand\" appearance=\"filled\">" +
+      "<wa-icon slot=\"start\" name=\"cloud-sun\"></wa-icon>FORECAST</wa-badge>");
+    expect(card).not.toContain("OFFICIAL");
+    expect(card).toContain(">mapservices.weather.noaa.gov</a>");
+    expect(card).toContain("Forecast swim risk and surf conditions");
+    // 4 h after issuance: past the 2 h default and inside the 30 h horizon, so
+    // the neutral note renders and the stale warning does not.
+    expect(card).toContain("<wa-callout variant=\"neutral\" size=\"s\">" +
+      "<wa-icon slot=\"icon\" name=\"clock\"></wa-icon>Forecast issued " +
+      "<wa-relative-time date=\"" + AGED + "\" sync></wa-relative-time>.</wa-callout>");
+    expect(card).not.toContain("Stale data");
+  });
+
+  it("warns on a forecast card past its 30 h horizon", () => {
+    const html = render({
+      estimate: estimateWith({ color: "green" }),
+      official: forecastWith("yellow", "2026-07-04T04:00:00.000Z")
+    });
+    const cardStart = html.indexOf("<wa-card class=\"official-card forecast-card\"");
+    const card = html.slice(cardStart, html.indexOf("</wa-card>", cardStart));
+    expect(card).toContain("Stale data");
+    expect(card).not.toContain("Forecast issued");
+  });
+
+  it("still says OFFICIAL everywhere for a posted record", () => {
+    const html = render({
+      estimate: estimateWith({ color: "green" }),
+      official: officialWith("red", FRESH)
+    });
+    expect(hero(html)).toContain("OFFICIAL</wa-badge>");
+    expect(html.indexOf("FORECAST")).toBe(-1);
+    expect(html.indexOf("forecast-card")).toBe(-1);
+    expect(metaDescription(html)).toBe("Ottawa Beach: official RED flag right now.");
+    expect(html).toContain("<wa-card class=\"official-card\"");
+  });
+
+  it("keeps posted copy for a legacy record carrying another or no kind", () => {
+    const html = render({
+      estimate: estimateWith({ color: "green" }),
+      official: Object.assign(officialWith("red", FRESH), { kind: "posted" })
+    });
+    expect(hero(html)).toContain("OFFICIAL</wa-badge>");
+    expect(html.indexOf("FORECAST")).toBe(-1);
+  });
+});
+
 describe("detail-page hero script", () => {
   it("ships inline on the detail page and can never break out of its tag", () => {
     expect(render({})).toContain("<script>" + DETAIL_HERO_SCRIPT + "</script>");

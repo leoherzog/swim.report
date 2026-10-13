@@ -28,10 +28,13 @@ export const BEACH_STATE_JOIN = " LEFT JOIN beach_state s ON s.beach_id = b.id";
 // features. Those surfaces render only displayFlag, which reads each record's
 // color and updated, so they take the scalar mirror columns and never the JSON
 // blobs: an alert-bearing estimate runs kilobytes, and the home proximity branch
-// ranks five times the rows it renders.
+// ranks five times the rows it renders. official_kind is the one value read out
+// of a blob, extracted in SQL so only the scalar crosses the wire; json_valid
+// keeps a malformed blob from failing the whole statement.
 export const CHIP_STATE_SELECT =
   "s.estimate_color, s.estimate_updated, s.estimate_expires, " +
-  "s.official_color, s.official_updated, s.official_expires";
+  "s.official_color, s.official_updated, s.official_expires, " +
+  "CASE WHEN json_valid(s.official) THEN json_extract(s.official, '$.kind') END AS official_kind";
 
 // Selected only by the two readers that consume a wave record: the detail route,
 // which draws the 24 h strip, and the hourly cron, which indexes the series at
@@ -147,26 +150,32 @@ export function liveWaveRecord(row, nowMs) {
 
 // The color/updated pair a chip renders from, or null when the record is absent
 // or past its lease. Same boundary as parseBlob: expires at or below the current
-// epoch second is expired.
-function liveChipRecord(color, updated, expires, nowEpoch) {
+// epoch second is expired. kind is carried only when it is "forecast",
+// matching the blob, which carries no kind for a posted record.
+function liveChipRecord(color, updated, expires, nowEpoch, kind) {
   if (typeof color !== "string" || color === "") {
     return null;
   }
   if (typeof expires !== "number" || !Number.isFinite(expires) || expires <= nowEpoch) {
     return null;
   }
-  return {
+  const record = {
     color: color,
     updated: typeof updated === "string" ? updated : null
   };
+  if (kind === "forecast") {
+    record.kind = kind;
+  }
+  return record;
 }
 
 // Row from a query that selected CHIP_STATE_SELECT (extra columns ignored), or
 // null. Returns { estimate, official }, each { color, updated } or null, under
-// the same expiry rule liveBeachState applies. These are deliberately partial
-// records: exactly what displayFlag reads and nothing else, so a surface that
-// renders a reason string, sources or a reading must select BEACH_STATE_SELECT
-// and use liveBeachState instead. Never throws.
+// the same expiry rule liveBeachState applies; a forecast official also carries
+// kind "forecast". These are deliberately partial records: what displayFlag and
+// the compact chip read and nothing else, so a surface that renders a reason
+// string, sources or a reading must select BEACH_STATE_SELECT and use
+// liveBeachState instead. Never throws.
 export function liveChipState(row, nowMs) {
   const nowEpoch = Math.floor(nowMs / 1000);
   if (!row) {
@@ -177,7 +186,8 @@ export function liveChipState(row, nowMs) {
       row.estimate_color, row.estimate_updated, row.estimate_expires, nowEpoch
     ),
     official: liveChipRecord(
-      row.official_color, row.official_updated, row.official_expires, nowEpoch
+      row.official_color, row.official_updated, row.official_expires, nowEpoch,
+      row.official_kind
     )
   };
 }

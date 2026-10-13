@@ -430,8 +430,8 @@ describe("handleHome reads the list's flags from beach_state", () => {
     for (const sql of listSql) {
       expect(sql).toContain("s.estimate_color");
       expect(sql).toContain("s.official_color");
-      expect(sql).not.toContain("s.estimate,");
-      expect(sql).not.toContain("s.official,");
+      // A blob may be read inside an SQL expression, never selected as a column.
+      expect(/(SELECT |, )s\.(estimate|official)(,| FROM)/.test(sql)).toBe(false);
       expect(sql).not.toContain("s.wqfloor");
       expect(sql).not.toContain("s.reading");
     }
@@ -1497,7 +1497,7 @@ function estimateCardOf(html) {
 }
 
 function officialCardOf(html) {
-  return sliceBetween(html, "<wa-card class=\"official-card\"", "</wa-card>");
+  return sliceBetween(html, "<wa-card class=\"official-card", "</wa-card>");
 }
 
 function beachRowOf(html) {
@@ -1818,8 +1818,8 @@ describe("every surface shows the one displayFlag decision", () => {
       updated: updated
     };
   }
-  function expected(color, keyword, source) {
-    return { color: color, keyword: keyword, source: source };
+  function expected(color, keyword, source, forecast) {
+    return { color: color, keyword: keyword, source: source, forecast: forecast === true };
   }
 
   const HOST = { id: "osm-way-9000", name: "Host Beach", lat: 42.6579, lon: -86.2114 };
@@ -1845,7 +1845,19 @@ describe("every surface shows the one displayFlag decision", () => {
     { name: "bad-official", estimate: est("yellow"), official: off("magenta", ago(600000)),
       want: expected("yellow", "yellow", "estimate") },
     { name: "nothing", estimate: null, official: null,
-      want: expected("unknown", "unknown", "none") }
+      want: expected("unknown", "unknown", "none") },
+    // A kind "forecast" record raises the flag like a posted one but never lowers
+    // it; every surface that credits it must say forecast, never a posted flag.
+    { name: "forecast", estimate: est("green"),
+      official: Object.assign(off("yellow", ago(1800000)), { kind: "forecast" }),
+      want: expected("yellow", "yellow", "official", true) },
+    { name: "forecast-outranked", estimate: est("red"),
+      official: Object.assign(off("yellow", ago(10800000)), { kind: "forecast" }),
+      want: expected("red", "red", "estimate") },
+    // A forecast never lowers the estimate, even inside its fresh window.
+    { name: "forecast-fresh-lower", estimate: est("red"),
+      official: Object.assign(off("green", ago(1800000)), { kind: "forecast" }),
+      want: expected("red", "red", "estimate") }
   ];
   const HERO_LABELS = {
     "green": "GREEN",
@@ -1890,10 +1902,12 @@ describe("every surface shows the one displayFlag decision", () => {
     expect(chip).toContain(">" + shortLabel(d.color) + "</wa-badge>");
     if (d.source === "official") {
       expect(chip).toContain("appearance=\"filled\"");
-      expect(chip).toContain(">Official </span>");
+      const text = d.forecast ? "Official forecast" : "Official";
+      expect(chip).toContain("variant=\"" + (d.forecast ? "brand" : "neutral") + "\"");
+      expect(chip).toContain(">" + text + " </span>");
       const id = /id="([^"]+)"/.exec(chip)[1];
       // The tooltip sits outside the link, bound to the chip by id.
-      const tip = "<wa-tooltip for=\"" + id + "\">Official</wa-tooltip>";
+      const tip = "<wa-tooltip for=\"" + id + "\">" + text + "</wa-tooltip>";
       expect(markup).toContain(tip);
       expect(markup.indexOf("</a>")).toBeLessThan(markup.indexOf(tip));
     } else {
@@ -1961,12 +1975,16 @@ describe("every surface shows the one displayFlag decision", () => {
       const h1 = sliceBetween(html, "<h1 class=\"beach-title", "</h1>");
       expect(h1).toContain("flag-icon-" + d.keyword);
       const heroFlag = sliceBetween(html, "<p class=\"wa-cluster wa-gap-s\" data-refresh=\"label\">", "</p>");
-      expect(heroFlag.indexOf("OFFICIAL</wa-badge>") !== -1).toBe(d.source === "official");
+      expect(heroFlag.indexOf("OFFICIAL</wa-badge>") !== -1).toBe(d.source === "official" && !d.forecast);
+      expect(heroFlag.indexOf("FORECAST</wa-badge>") !== -1).toBe(d.forecast);
       expect(heroFlag.indexOf(">ESTIMATE</wa-badge>") !== -1).toBe(d.source === "estimate");
       expect(html).toContain("<meta property=\"og:image\" content=\"https://swim.report/og/" +
         d.color + ".png\">");
       const description = metaDescription(html);
-      if (d.source === "official") {
+      if (d.forecast) {
+        expect(description).toContain("forecast ");
+        expect(description).not.toContain("official ");
+      } else if (d.source === "official") {
         expect(description).toContain("official ");
       } else if (d.source === "estimate") {
         expect(description).toContain("estimated ");
@@ -1995,7 +2013,7 @@ describe("every surface shows the one displayFlag decision", () => {
       const body = await res.json();
       expect(Object.keys(body)).toEqual(["beachId", "estimate", "official", "display"]);
       expect(body.beachId).toBe(shortId);
-      expect(body.display).toEqual({ color: d.color, source: d.source });
+      expect(body.display).toEqual({ color: d.color, source: d.source, forecast: d.forecast });
       expect(body.estimate).toEqual(fixture.estimate);
       expect(body.official).toEqual(fixture.official);
     });

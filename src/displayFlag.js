@@ -1,9 +1,11 @@
 // src/displayFlag.js — the one decision of which flag a beach shows: its color,
-// its collapsed keyword and the record that supplied it. Every surface that shows
-// a beach's flag reads displayFlag and derives none of the three itself.
+// its collapsed keyword, the record that supplied it and whether that record is
+// a forecast. Every surface that shows a beach's flag reads displayFlag and
+// derives none of the four itself.
 //
-// Pure: no fetch, no clock, no env. It reads only each record's color and the
-// official's updated, so liveChipState pairs and liveBeachState blobs decide alike.
+// Pure: no fetch, no clock, no env. It reads only each record's color, the
+// official's updated and the official's kind, so liveChipState pairs and
+// liveBeachState blobs decide alike.
 import { SEVERITY_RANK, normalizeColor } from "./rules.js";
 
 // The display gate and the official card's default stale horizon, calibrated to
@@ -36,19 +38,26 @@ function recordOf(value) {
   return value !== null && typeof value === "object" ? value : null;
 }
 
-function decision(color, source) {
-  return Object.freeze({ color: color, keyword: collapseFlagColor(color), source: source });
+function decision(color, source, forecast) {
+  return Object.freeze({
+    color: color,
+    keyword: collapseFlagColor(color),
+    source: source,
+    forecast: forecast === true
+  });
 }
 
 // "Official" is not the same as "current": several sources are one morning
 // reading. Past STALE_MS a posted flag decides only while strictly more severe
 // than the estimate, so a fresher estimate can raise the flag but never lower it.
-// The gate is the 2 h default, never the record's own staleMs.
+// The gate is the 2 h default, never the record's own staleMs. A forecast is
+// raise-only at any age: it predicts conditions nobody observed, so it may add
+// caution to the estimate but never clear a hazard the estimate holds.
 /**
  * The flag a beach displays and the record that supplied it.
  * @param {{estimate: ?Object, official: ?Object}} state live records: chip pairs or parsed blobs
  * @param {?string} nowIso the instant the records were lease-resolved at
- * @returns {{color: string, keyword: string, source: string}} frozen decision
+ * @returns {{color: string, keyword: string, source: string, forecast: boolean}} frozen decision
  */
 export function displayFlag(state, nowIso) {
   const estimate = recordOf(state ? state.estimate : null);
@@ -59,12 +68,13 @@ export function displayFlag(state, nowIso) {
   if (officialColor !== "unknown") {
     // A non-string stamp reads as absent, as liveChipRecord reads it.
     const updated = typeof official.updated === "string" ? official.updated : null;
-    if (!isStale(nowIso, updated, STALE_MS)) {
-      return decision(officialColor, "official");
+    const forecast = official.kind === "forecast";
+    if (!forecast && !isStale(nowIso, updated, STALE_MS)) {
+      return decision(officialColor, "official", false);
     }
     if (SEVERITY_RANK[officialColor] > SEVERITY_RANK[estimateColor]) {
-      return decision(officialColor, "official");
+      return decision(officialColor, "official", forecast);
     }
   }
-  return decision(estimateColor, estimateColor === "unknown" ? "none" : "estimate");
+  return decision(estimateColor, estimateColor === "unknown" ? "none" : "estimate", false);
 }

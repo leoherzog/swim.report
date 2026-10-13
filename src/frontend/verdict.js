@@ -3,7 +3,8 @@
 // the caller escapes it.
 //
 // flag is the hero's displayFlag decision. Source official returns the
-// posted-flag sentence for its color. Source estimate explains the estimate's own
+// posted-flag sentence for its color, or the forecast sentence when the
+// decision says the official is a forecast. Source estimate explains the estimate's own
 // signals (trigger, wave height, rip risk, echoed alerts) and names no color, so
 // no estimate can read as an official flag status. Source none reads no data.
 // The sentence and the badge read one field.
@@ -30,6 +31,14 @@ const OFFICIAL_SENTENCES = {
   "yellow": "A yellow flag is posted at the beach.",
   "red": "A red flag is posted at the beach.",
   "double-red": "Water closed by the posted flag."
+};
+
+// The one forecast source emits no double-red; the entry keeps the table total.
+const FORECAST_SENTENCES = {
+  "green": "The NWS beach forecast calls for green-flag conditions today.",
+  "yellow": "The NWS beach forecast calls for yellow-flag conditions today.",
+  "red": "The NWS beach forecast calls for red-flag conditions today.",
+  "double-red": "The NWS beach forecast closes the water today."
 };
 
 const RIP_CLAUSES = {
@@ -199,7 +208,7 @@ function reinforces(clauseColor, color, leadIsEvent) {
  * One sentence for the detail hero, branched on displayFlag's source, or "" when
  * the estimate carries nothing worth saying and no verdict line renders.
  * @param {?Object} estimate the live estimate blob
- * @param {?{color: string, keyword: string, source: string}} flag displayFlag's decision
+ * @param {?{color: string, keyword: string, source: string, forecast: boolean}} flag displayFlag's decision
  * @param {?string} waterClass the beach's water_class
  * @returns {string} plain text, unescaped
  */
@@ -208,7 +217,7 @@ export function verdictSentence(estimate, flag, waterClass) {
     return NO_DATA_SENTENCE;
   }
   if (flag.source === "official") {
-    return OFFICIAL_SENTENCES[flag.color];
+    return flag.forecast === true ? FORECAST_SENTENCES[flag.color] : OFFICIAL_SENTENCES[flag.color];
   }
   if (!estimate) {
     return NO_DATA_SENTENCE;

@@ -512,6 +512,56 @@ describe("verdictSentence: the posted flag", function () {
   });
 });
 
+describe("verdictSentence: the forecast record", function () {
+  function forecast(color, updated) {
+    return { color: color, kind: "forecast", updated: updated };
+  }
+
+  it("says the forecast calls for the color, per color, while it decides", function () {
+    // An unknown estimate, so every forecast color outranks it.
+    const none = estimateWith({ color: "unknown", trigger: "no-data" });
+    expect(verdictFor(none, forecast("green"), null))
+      .toBe("The NWS beach forecast calls for green-flag conditions today.");
+    expect(verdictFor(none, forecast("yellow"), null))
+      .toBe("The NWS beach forecast calls for yellow-flag conditions today.");
+    expect(verdictFor(none, forecast("red"), null))
+      .toBe("The NWS beach forecast calls for red-flag conditions today.");
+    expect(verdictFor(none, forecast("double-red"), null))
+      .toBe("The NWS beach forecast closes the water today.");
+  });
+
+  it("keeps the posted sentence for a record without kind, or with another kind", function () {
+    expect(verdictFor(estimateWith({}), { color: "red" }, null))
+      .toBe("A red flag is posted at the beach.");
+    expect(verdictFor(estimateWith({}), { color: "red", kind: "posted" }, null))
+      .toBe("A red flag is posted at the beach.");
+    expect(verdictSentence(estimateWith({}),
+      { color: "red", keyword: "red", source: "official" }, null))
+      .toBe("A red flag is posted at the beach.");
+    expect(verdictSentence(estimateWith({}),
+      { color: "red", keyword: "red", source: "official", forecast: false }, null))
+      .toBe("A red flag is posted at the beach.");
+    expect(verdictSentence(estimateWith({}),
+      { color: "red", keyword: "red", source: "official", forecast: true }, null))
+      .toBe("The NWS beach forecast calls for red-flag conditions today.");
+  });
+
+  it("explains the estimate when an aged forecast merely ties it", function () {
+    expect(verdictFor(estimateWith({}), forecast("green", "2026-07-05T08:00:00.000Z"), null))
+      .toBe("Calm water, no alerts.");
+  });
+
+  it("credits an aged forecast that is still the more severe half", function () {
+    expect(verdictFor(estimateWith({}), forecast("red", "2026-07-05T08:00:00.000Z"), null))
+      .toBe("The NWS beach forecast calls for red-flag conditions today.");
+  });
+
+  it("never reaches the forecast branch for an unusable color", function () {
+    expect(verdictFor(estimateWith({}), forecast("chartreuse"), null))
+      .toBe("Calm water, no alerts.");
+  });
+});
+
 describe("alertsChecked", function () {
   it("is true only for a seal object carrying alertsResolved === true", function () {
     expect(alertsChecked(estimateWith({}))).toBe(true);

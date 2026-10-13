@@ -102,6 +102,24 @@ describe("detail-page verdict line", function () {
     expect(verdict(html)).toBe("Water closed by the posted flag.");
   });
 
+  it("says what the forecast calls for when a forecast record decides", function () {
+    const forecast = Object.assign(officialWith("yellow", FRESH), { kind: "forecast" });
+    const html = render({ official: forecast });
+    expect(verdict(html)).toBe("The NWS beach forecast calls for yellow-flag conditions today.");
+    expect(html).not.toContain("is posted at the beach");
+  });
+
+  it("credits the estimate when an aged forecast only agrees with it", function () {
+    const forecast = Object.assign(officialWith("green", AGED), { kind: "forecast" });
+    expect(verdict(render({ official: forecast }))).toBe("Calm water, no alerts.");
+  });
+
+  it("credits an aged forecast that is more severe than the estimate", function () {
+    const forecast = Object.assign(officialWith("red", AGED), { kind: "forecast" });
+    expect(verdict(render({ official: forecast })))
+      .toBe("The NWS beach forecast calls for red-flag conditions today.");
+  });
+
   it("is honest with no estimate at all", function () {
     expect(verdict(render({ estimate: null }))).toBe("No data yet for this beach.");
   });

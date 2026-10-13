@@ -54,10 +54,11 @@ describe("beachState constants", function () {
   it("gives the chip surfaces the scalar mirror columns and no blob", function () {
     expect(CHIP_STATE_SELECT).toBe(
       "s.estimate_color, s.estimate_updated, s.estimate_expires, " +
-      "s.official_color, s.official_updated, s.official_expires"
+      "s.official_color, s.official_updated, s.official_expires, " +
+      "CASE WHEN json_valid(s.official) THEN json_extract(s.official, '$.kind') END AS official_kind"
     );
-    expect(CHIP_STATE_SELECT.indexOf("s.estimate,")).toBe(-1);
-    expect(CHIP_STATE_SELECT.indexOf("s.official,")).toBe(-1);
+    // official_kind reads the blob inside SQL; no blob is a selected column.
+    expect(/(^|, )s\.(estimate|official)(,|$)/.test(CHIP_STATE_SELECT)).toBe(false);
     expect(CHIP_STATE_SELECT.indexOf("wqfloor")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("reading")).toBe(-1);
     expect(CHIP_STATE_SELECT.indexOf("tides")).toBe(-1);
@@ -177,6 +178,48 @@ describe("liveChipState", function () {
     expect(liveChipState(noStamp, NOW_MS).estimate).toEqual({
       color: "yellow", updated: null
     });
+  });
+
+  it("carries kind only for a live forecast official", function () {
+    const forecast = Object.assign({}, ROW, { official_kind: "forecast" });
+    expect(liveChipState(forecast, NOW_MS).official).toEqual({
+      color: "red", updated: "2026-07-05T11:00:00.000Z", kind: "forecast"
+    });
+    const other = Object.assign({}, ROW, { official_kind: "posted" });
+    expect(liveChipState(other, NOW_MS).official).toEqual({
+      color: "red", updated: "2026-07-05T11:00:00.000Z"
+    });
+    const expired = Object.assign({}, forecast, { official_expires: NOW_EPOCH });
+    expect(liveChipState(expired, NOW_MS).official).toBeNull();
+  });
+
+  it("extracts official_kind from the blob in SQL, and a malformed blob reads as posted", function () {
+    const env = makeD1();
+    env.seedBeaches([{ id: "osm-node-1" }, { id: "osm-node-2" }, { id: "osm-node-3" }, { id: "osm-node-4" }]);
+    const official = { color: "yellow", updated: "2026-07-05T11:00:00.000Z", official: true };
+    env.seedState("osm-node-1", {
+      official: Object.assign({}, official, { kind: "forecast" }),
+      official_color: "yellow", official_updated: official.updated, official_expires: NOW_EPOCH + 60
+    });
+    env.seedState("osm-node-2", {
+      official: official,
+      official_color: "yellow", official_updated: official.updated, official_expires: NOW_EPOCH + 60
+    });
+    env.seedState("osm-node-3", {
+      official: "{not json",
+      official_color: "yellow", official_updated: official.updated, official_expires: NOW_EPOCH + 60
+    });
+    env.seedState("osm-node-4", { estimate_color: "green", estimate_expires: NOW_EPOCH + 60 });
+    const rows = env.sqlite.prepare(
+      "SELECT s.beach_id, " + CHIP_STATE_SELECT + " FROM beach_state s ORDER BY s.beach_id"
+    ).all();
+    expect(rows.map(function (r) { return r.official_kind; }))
+      .toEqual(["forecast", null, null, null]);
+    expect(liveChipState(rows[0], NOW_MS).official.kind).toBe("forecast");
+    expect(liveChipState(rows[2], NOW_MS).official).toEqual({
+      color: "yellow", updated: official.updated
+    });
+    env.close();
   });
 });
 

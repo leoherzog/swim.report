@@ -126,3 +126,54 @@ describe("official card: reported-for-another-site provenance line", function ()
     expect(html).not.toContain("Reported for");
   });
 });
+
+// The header badge follows the record's kind: FORECAST for a forecast source,
+// OFFICIAL for everything else, with the source link in both cases.
+describe("official card: the header badge by kind", function () {
+  const MAP_URL = "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/" +
+    "marine_beachforecast/MapServer";
+
+  function cardOf(official) {
+    const html = renderDetailPage({
+      beach: beachWith({ name: "Maumee Bay State Park Beach" }),
+      estimate: null,
+      official: official,
+      nowIso: NOW_ISO
+    });
+    const start = html.indexOf("<wa-card class=\"official-card");
+    return html.slice(start, html.indexOf("</wa-card>", start));
+  }
+
+  it("carries the FORECAST badge and still links the source hostname for kind forecast", function () {
+    const card = cardOf(officialWith({
+      kind: "forecast",
+      scraperId: "nws-marine-beach-forecast",
+      source: MAP_URL,
+      sources: [MAP_URL],
+      reason: "Forecast swim risk and surf conditions from NWS Marine Beach Forecast for the Lucas Area Beaches zone"
+    }));
+    expect(card.indexOf("<wa-card class=\"official-card forecast-card\"")).toBe(0);
+    expect(card).toContain("<wa-badge slot=\"header\" variant=\"brand\" appearance=\"filled\">" +
+      "<wa-icon slot=\"start\" name=\"cloud-sun\"></wa-icon>FORECAST</wa-badge>");
+    expect(card).not.toContain("OFFICIAL");
+    expect(card).toContain("<a slot=\"header-actions\" class=\"wa-body-s\" href=\"" + MAP_URL +
+      "\" rel=\"noopener noreferrer\">mapservices.weather.noaa.gov</a>");
+    expect(card).toContain(">RED</span>");
+  });
+
+  it("carries the OFFICIAL badge for a legacy record without kind", function () {
+    const card = cardOf(officialWith(null));
+    expect(card.indexOf("<wa-card class=\"official-card\"")).toBe(0);
+    expect(card).toContain("<wa-badge slot=\"header\" variant=\"success\" appearance=\"filled\">" +
+      "<wa-icon slot=\"start\" name=\"circle-check\"></wa-icon>OFFICIAL</wa-badge>");
+    expect(card).not.toContain("FORECAST");
+    expect(card).toContain(">forecast.weather.gov</a>");
+  });
+
+  it("treats any kind other than forecast as posted", function () {
+    const card = cardOf(officialWith({ kind: "posted" }));
+    expect(card).toContain("OFFICIAL</wa-badge>");
+    expect(card).not.toContain("FORECAST");
+    expect(card).not.toContain("forecast-card");
+  });
+});

@@ -30,6 +30,11 @@ import { nwsMarineBeachForecast } from "./nwsMarineBeachForecast.js";
 // horizon a fresher estimate may raise the displayed color but never lower it.
 // The official card always reports the scraped color verbatim.
 //
+// A scraper may declare kind "forecast" to mark a source whose color is a
+// forecast for the day, not a flag someone raised. A forecast is raise-only at
+// any age, and every surface that credits it says forecast. Posted is the
+// default and is never written.
+//
 // Water-quality (E. coli, bacteria) monitoring belongs in src/wqFloor/, not here:
 // a clean-water reading is a different axis from surf hazard, and letting its
 // green win would mask a genuine hazard estimate such as a gale-driven red.
@@ -138,6 +143,8 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       scraper.readingNote.length > 0
       ? scraper.readingNote
       : null;
+    // Same contract field rules: read off the scraper object, exact match only.
+    const kind = scraper.kind === "forecast" ? "forecast" : null;
     if (result.perBeach === true) {
       const site = resolveSiteForBeach(beach, result.sites);
       if (!site) {
@@ -187,6 +194,9 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       if (readingNote !== null) {
         record.readingNote = readingNote;
       }
+      if (kind !== null) {
+        record.kind = kind;
+      }
       // Same attach-after-the-literal rule: a beach reading a neighboring site's
       // posted flag carries the provenance, everyone else carries no key at all.
       const reportedFor = reportedForSite(beach, site);
@@ -221,6 +231,11 @@ export function scrapeOfficialFlagFromResult(beach, scraper, result) {
       flag.readingNote = readingNote;
     } else {
       delete flag.readingNote;
+    }
+    if (kind !== null) {
+      flag.kind = kind;
+    } else {
+      delete flag.kind;
     }
     // A single-color source reports one reading for every beach it matches, so
     // there is no neighboring site to name. Deleted for the same reason: this
