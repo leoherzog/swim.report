@@ -19,7 +19,7 @@ import {
   ecccZoneNameForPoint
 } from "./clients/eccc.js";
 import { fetchActiveEcccMarineAlerts } from "./clients/ecccMarine.js";
-import { parseRipCurrentRisk, parseSrfTides } from "./clients/srfParser.js";
+import { ripRiskByZone, parseSrfTides } from "./clients/srfParser.js";
 import { FLAG_WORTHY_WATER_SQL } from "./waterClass.js";
 import {
   fetchNearestWebcam,
@@ -248,6 +248,21 @@ function runBudget(env) {
     gatherDeadlineMs: gather,
     writeDeadlineMs: write
   };
+}
+
+// The rip current risk the beach's own zone segment states for the period
+// covering this run, from its office's SRF entry, or null when the product
+// resolved nothing for that zone. Pure: the entry's riskByZone is
+// ripRiskByZone's output, so an inland zone, an ended period or a stale product
+// all read as no rip input here.
+function ripRiskForBeach(beach, srfEntry) {
+  const byZone = srfEntry.riskByZone;
+  const zone = beach.nws_zone;
+  if (!byZone || typeof zone !== "string" ||
+      !Object.prototype.hasOwnProperty.call(byZone, zone)) {
+    return null;
+  }
+  return byZone[zone];
 }
 
 // The beach's own zone's tide table from its office's SRF entry, as the
@@ -667,11 +682,11 @@ async function runFlagRecompute(env) {
       try {
         const srf = await fetchLatestSrfText(wfo);
         if (srf !== null) {
-          const risk = parseRipCurrentRisk(srf.text);
-          // The zone-keyed tide tables ride the same entry, so a beach's tides
-          // come from its own office's product and its own zone segment.
+          // Both maps are keyed by UGC zone id, so a beach's rip risk and tides
+          // come from its own office's product and its own zone segment; the
+          // risk is the one stated for the period covering this run.
           srfMap.set(wfo, {
-            risk: risk,
+            riskByZone: ripRiskByZone(srf.text, nowIso),
             sourceUrl: srf.sourceUrl,
             productId: srf.productId,
             issuanceTime: srf.issuanceTime,
@@ -774,12 +789,16 @@ async function runFlagRecompute(env) {
         if (wfo) {
           const srfEntry = srfMap.get(wfo);
           if (srfEntry) {
-            ripCurrentRisk = srfEntry.risk;
-            signalSources.push({
-              label: "NWS Surf Zone Forecast",
-              url: srfEntry.sourceUrl
-            });
+            ripCurrentRisk = ripRiskForBeach(beach, srfEntry);
             tides = tidesForBeach(beach, srfEntry, nowIso);
+            // Cited only when the product contributed something to this beach:
+            // an inland zone of a coastal office gets no SRF source entry.
+            if (ripCurrentRisk !== null || tides !== null) {
+              signalSources.push({
+                label: "NWS Surf Zone Forecast",
+                url: srfEntry.sourceUrl
+              });
+            }
           }
         }
 

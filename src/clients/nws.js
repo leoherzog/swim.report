@@ -180,7 +180,7 @@ export function wfoFromGridUrl(nwsGridUrl) {
 //   { text, productId: "SRF <wfo>", sourceUrl, issuanceTime }  (sourceUrl is the
 //   /latest URL; issuanceTime is the product's own ISO stamp, or null)
 // any fetch failure or a response missing productText -> null (data-or-null
-// contract, consumed by parseRipCurrentRisk and the hourly cron).
+// contract; the hourly cron hands .text to ripRiskByZone and parseSrfTides).
 export async function fetchLatestSrfText(wfo) {
   const latestUrl = "https://api.weather.gov/products/types/SRF/locations/" + wfo + "/latest";
   const latestJson = await fetchNwsJson(latestUrl, "SRF latest for " + wfo);

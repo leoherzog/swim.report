@@ -11,6 +11,7 @@
 // The network is stubbed to fail entirely, so every client returns null and
 // both beaches land on the honest "unknown" terminal fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
 import { HOT_VIEW_WINDOW_MS } from "../src/demandWindow.js";
 import { NDBC_HEAD_BYTES } from "../src/waveSources/ndbcBuoys.js";
@@ -1016,14 +1017,35 @@ describe("runFlagRecompute wind fallback from the stored wave record", function 
 
 // SRF (Surf Zone Forecast) wiring: step 4 fetches the latest SRF product text
 // once per distinct WFO (api.weather.gov /products/types/SRF/locations/<wfo>/
-// latest), parses the rip-current risk, and step 6 feeds it into the estimate
-// with an "NWS Surf Zone Forecast" source entry.
+// latest) and resolves the rip-current risk per UGC zone for the period covering
+// the run; step 6 feeds the beach's own zone's risk into the estimate, citing an
+// "NWS Surf Zone Forecast" source only when the product contributed to it.
 const SRF_LATEST_URL = "https://api.weather.gov/products/types/SRF/locations/GRR/latest";
+// The run instant every product below is read at: 9:30 AM EDT / 8:30 AM CDT,
+// inside each product's TODAY period.
+const SRF_RUN_ISO = "2026-10-13T13:30:00Z";
 
 describe("runFlagRecompute SRF rip-current wiring", function () {
+  beforeEach(function () {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(SRF_RUN_ISO));
+  });
+
   afterEach(function () {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
+
+  // A minimal one-segment product stamped on the run's own date, so the
+  // segment's TODAY period covers SRF_RUN_ISO.
+  function stampedProduct(wfo, ugcHeader, stampLine, riskLine) {
+    return [
+      "000", "SRF" + wfo, "", "Surf Zone Forecast", stampLine, "",
+      ugcHeader, "Somewhere-", stampLine, "",
+      ".TODAY...", riskLine, "",
+      "$$", ""
+    ].join("\n");
+  }
 
   function makeSrfFetchStub(urls) {
     return function (url) {
@@ -1035,7 +1057,8 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
           status: 200,
           json: function () {
             return Promise.resolve({
-              productText: "SRFGRR\n\n.TODAY...\nRIP CURRENT RISK IS HIGH.\n"
+              productText: stampedProduct("GRR", "MIZ071-056-132200-",
+                "410 AM EDT Tue Oct 13 2026", "Rip Current Risk*...........High.")
             });
           }
         });
@@ -1045,6 +1068,68 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
       return Promise.reject(new Error("network disabled in test"));
     };
   }
+
+  it("resolves each beach's risk from its own zone segment of the captured BOX product", async function () {
+    const raw = readFileSync(new URL("./fixtures/srf/BOX.json", import.meta.url), "utf8");
+    const boxBody = JSON.parse(raw);
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("/products/types/SRF/locations/BOX/latest") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () { return Promise.resolve(boxBody); }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+
+    const boxGrid = "https://api.weather.gov/gridpoints/BOX/70,60";
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-1", nws_zone: "MAZ022", nws_grid_url: boxGrid }),
+      makeBeachRow({ id: "osm-node-2", name: "Test Beach Beta", lat: 44.81, lon: -83.31, nws_zone: "MAZ020", nws_grid_url: boxGrid }),
+      makeBeachRow({ id: "osm-node-3", name: "Test Beach Gamma", lat: 44.82, lon: -83.32, nws_zone: "MAZ005", nws_grid_url: boxGrid })
+    ]);
+    for (const id of ["osm-node-2", "osm-node-3"]) {
+      made.db.seedWave(id, {
+        beachId: id,
+        waveHeightFt: 1.0,
+        model: "noaa_gfswave",
+        windSpeedMph: null,
+        windGustMph: null,
+        updated: "2026-10-13T12:00:00.000Z"
+      });
+    }
+    await runHourlyCron(made.env);
+
+    const srfSource = {
+      label: "NWS Surf Zone Forecast",
+      url: "https://api.weather.gov/products/types/SRF/locations/BOX/latest"
+    };
+    // MAZ022: "East Coast...High" under the TODAY label-only line.
+    const outer = estimateOf(made, "osm-node-1");
+    expect(outer.color).toBe("red");
+    expect(outer.trigger).toBe("rip-current");
+    expect(outer.reason).toBe("NWS surf zone forecast rip current risk: HIGH");
+    expect(outer.ripCurrentRisk).toBe("HIGH");
+    expect(outer.sources).toContainEqual(srfSource);
+    expect(recordOf(made, "osm-node-1", "tides").zone).toBe("MAZ022");
+
+    // MAZ020: Low, so the 1 ft wave decides and the risk rides along echoed.
+    const south = estimateOf(made, "osm-node-2");
+    expect(south.color).toBe("green");
+    expect(south.trigger).not.toBe("rip-current");
+    expect(south.ripCurrentRisk).toBe("LOW");
+    expect(south.sources).toContainEqual(srfSource);
+
+    // MAZ005 is inland: the product names no such segment, so the beach gets no
+    // rip input, no tides and no SRF citation.
+    const inland = estimateOf(made, "osm-node-3");
+    expect(inland.color).toBe("green");
+    expect(inland.ripCurrentRisk).toBeNull();
+    expect(inland.sources.some(function (s) { return s.label === "NWS Surf Zone Forecast"; })).toBe(false);
+    expect(recordOf(made, "osm-node-3", "tides")).toBeNull();
+  });
 
   it("a successful SRF fetch parsing to HIGH -> red rip-current flag with the SRF source", async function () {
     const urls = [];
@@ -1077,7 +1162,7 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
   it("stores the zone's tide table beside the estimate, and none for a zone without one", async function () {
     const product = [
       "SRFILM", "",
-      "NCZ106-152115-", "Coastal Pender-", "348 AM EDT Tue Sep 15 2026", "",
+      "NCZ106-132115-", "Coastal Pender-", "348 AM EDT Tue Oct 13 2026", "",
       "...MODERATE RISK OF RIP CURRENTS IN EFFECT THROUGH THIS EVENING...", "",
       ".TODAY...",
       "Rip Current Risk*...........Moderate.",
@@ -1086,7 +1171,7 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
       "                            Low at 05:19 PM EDT.",
       "Remarks.....................Strong longshore current.", "",
       "$$", "",
-      "NCZ108-152115-", "Coastal New Hanover-", "348 AM EDT Tue Sep 15 2026", "",
+      "NCZ108-132115-", "Coastal New Hanover-", "348 AM EDT Tue Oct 13 2026", "",
       ".TODAY...",
       "Rip Current Risk*...........Moderate.", "",
       "$$", ""
@@ -1100,7 +1185,7 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
           json: function () {
             return Promise.resolve({
               productText: product,
-              issuanceTime: "2026-09-15T07:48:00+00:00"
+              issuanceTime: "2026-10-13T07:48:00+00:00"
             });
           }
         });
@@ -1132,7 +1217,7 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
       locations: [{ name: "Topsail Inlet", events: ["High at 10:58 AM EDT.", "Low at 05:19 PM EDT."] }],
       productId: "SRF ILM",
       source: "https://api.weather.gov/products/types/SRF/locations/ILM/latest",
-      issued: "2026-09-15T07:48:00+00:00",
+      issued: "2026-10-13T07:48:00+00:00",
       updated: estimateOf(made, "osm-node-1").updated
     });
     expect(expiresOf(made, "osm-node-1", "tides_expires"))
@@ -1207,7 +1292,8 @@ describe("runFlagRecompute SRF rip-current wiring", function () {
               // route to a genuine throw past fetchLatestSrfText's null contract.
               const text = target.indexOf("/locations/GRR/") !== -1
                 ? { toString: function () { throw new Error("bad product text"); } }
-                : "SRFMKX\n\n.TODAY...\nRIP CURRENT RISK IS HIGH.\n";
+                : stampedProduct("MKX", "WIZ066-132200-",
+                  "310 AM CDT Tue Oct 13 2026", "Rip Current Risk*...........High.");
               return Promise.resolve({ productText: text });
             }
           });
