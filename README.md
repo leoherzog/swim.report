@@ -95,6 +95,8 @@ names the record that supplied it — `official`, `estimate`, or `none` when the
 unknown. It follows the `properties.flag` rule without collapsing double-red, and never
 alters either record. Once the official record is more than 2 h old it is credited only while
 strictly more severe than the estimate; on a tie `display.source` is `estimate`.
+`display.forecast` is `true` only when the credited official record is a forecast for the day
+(`kind: "forecast"`) rather than a posted flag.
 
 `:beachId` is the public id — `n`, `w` or `r` followed by the OSM id. The storage form
 `osm-<node|way|relation>-<id>` redirects to it with a `301`.
@@ -112,7 +114,7 @@ Example response:
         "color": "yellow",
         "reason": "Estimated wave height 2.6 ft (at or above 2 ft)",
         "trigger": "wave-height",
-        "rules_version": "1.8.0",
+        "rules_version": "1.9.0",
         "official": false,
         "waveHeightFt": 2.62,
         "alertDetails": [
@@ -135,7 +137,7 @@ Example response:
         "updated": "2026-07-04T15:00:03.000Z"
       },
       "official": null,
-      "display": { "color": "yellow", "source": "estimate" }
+      "display": { "color": "yellow", "source": "estimate", "forecast": false }
     }
 
 The statement's onset is still ahead of `alertsAt`, so it is echoed for the detail
@@ -185,13 +187,16 @@ fires, so it is never a blank framed box while tiles arrive.
 
 The detail page opens with a **flag hero**: the beach name behind its flag icon, the flag's
 label, and a badge naming the record that supplied that color — OFFICIAL for a posted flag,
-ESTIMATE for the estimate, none when the status is unknown — over a background washed 12% in that flag's own color. The
+FORECAST for an official record that is the source's forecast for the day (today only the
+NWS Marine Beach Forecast), ESTIMATE for the estimate, none when the status is unknown — over
+a background washed 12% in that flag's own color. The
 hero carries a copy-link button and, where the browser supports `navigator.share`, a Share
 button. Directly under it, up to six **at a glance** tiles summarize the waves now, the
 water temperature, the rip-current risk, the count of active alerts, the day's tides and the
 next sunrise or sunset. A reading nobody published gets no tile, so the row carries only
-answers, and a beach with no readings at all shows no section. The full official and
-estimate cards follow unchanged.
+answers, and a beach with no readings at all shows no section; the alerts tile is also
+omitted when the run's alert fetch failed, since an empty list then proves nothing. The full
+official and estimate cards follow unchanged.
 
 The tide tile is the "Tides" block of the beach's own zone segment in its office's NWS Surf
 Zone Forecast, the product the hourly cron already fetches for the rip-current risk. It
@@ -209,7 +214,8 @@ there. Inside the polar circles, where there is no next event, the tile is omitt
 Under the flag's label the hero carries a one-sentence **plain-language verdict** built from
 the same estimate the flag card explains — "Calm water, no alerts.", "Beach Hazards Statement
 in effect; high rip current risk." A sentence names a flag color only when it also says who
-decided it, so a posted flag reads "Water closed by the posted flag." while an estimate names
+decided it, so a posted flag reads "Water closed by the posted flag.", a forecast record
+reads "The NWS beach forecast calls for green-flag conditions today.", an estimate names
 its signals instead, and a beach with nothing usable reads "No data yet for this beach."
 After the at-a-glance tiles, a collapsed **What the flags mean** disclosure gives one line per
 color — green, yellow, red, double red and unknown — and says that estimated flags are
@@ -235,7 +241,8 @@ segment carries a `wa-tooltip` and a matching `aria-label` naming its band and h
 ft waves (estimated) — +5 h to +8 h"), and a visually-hidden prose summary keeps the forecast
 readable by assistive tech. Active hazards overlay the strip as a lane of labeled bands: each
 flag-relevant NWS alert spans its onset-to-ends period, and a HIGH or MODERATE rip-current risk
-renders a full-window band, since the SRF product carries no parseable end time. The section
+renders a full-window band, since the estimate echoes the risk level without the forecast
+period it was read from. The section
 carries the same ESTIMATE badge as the estimate card and is omitted for beaches with no wave
 series.
 
@@ -352,7 +359,7 @@ reads that location, so both are fully determined by the URL.
 
 Flag estimation is a pure, deterministic, versioned function (`estimateFlag` in
 `src/rules.js`) — no ML, no LLM, no network access, no clock access. The current
-`rules_version` is `1.8.0`, and the same inputs always return the same output.
+`rules_version` is `1.9.0`, and the same inputs always return the same output.
 
 Precedence is strict: the first matching rule (steps 1–5) wins, top to bottom. Steps 6, 6b and
 7 are raise-only *floors* applied after a color is decided — an NWS severe-weather
@@ -362,16 +369,15 @@ raising a lower result but never downgrading a higher color.
 | # | Signal | Source | Condition | Color | Reason |
 |---|--------|--------|-----------|-------|--------|
 | 1 | NWS alert in effect | `api.weather.gov/alerts/active` (land matched by `nws_zone`, marine by `marine_zone`), onset at or before the run and ends after it | Event = "Tsunami Warning", "Hurricane Warning", "Storm Surge Warning", "Extreme Wind Warning", "Tornado Warning", "High Surf Warning", marine "Hurricane Force Wind Warning", or marine "Storm Warning" | double-red | "Active NWS alert: &lt;event&gt;" |
-| 1 | Active NWS alert | same | Event = "Tropical Storm Warning", "Tsunami Advisory", "Severe Thunderstorm Warning", "Beach Hazards Statement", "High Surf Advisory", "Rip Current Statement", "High Wind Warning", marine "Gale Warning", marine "Special Marine Warning", "Lakeshore Flood Warning", or "Coastal Flood Warning" | red | "Active NWS alert: &lt;event&gt;" |
+| 1 | Active NWS alert | same | Event = "Tropical Storm Warning", "Tsunami Advisory", "Severe Thunderstorm Warning", "Beach Hazards Statement", "High Surf Advisory", "Rip Current Statement", "High Wind Warning", marine "Gale Warning", marine "Hazardous Seas Warning", marine "Special Marine Warning", "Lakeshore Flood Warning", or "Coastal Flood Warning" | red | "Active NWS alert: &lt;event&gt;" |
 | 1b | Active ECCC alert (Canadian beaches) | `api.weather.gc.ca` `weather-alerts` matched by alert-region polygon; `marineweather-realtime` matched by marine-zone polygon | Event = "tornado warning", "storm surge warning", or marine "storm warning" (≥ 48 kt) | double-red | "Active Environment Canada alert: &lt;event&gt;" |
-| 1b | Active ECCC alert | same | Event = "squall warning", "waterspout warning", "severe thunderstorm warning", marine "gale warning" (≥ 34 kt), or "wind warning" | red | "Active Environment Canada alert: &lt;event&gt;" |
-| 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product, regex-parsed | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
+| 1b | Active ECCC alert | same | Event = "squall warning", "waterspout warning", "severe thunderstorm warning", marine "gale warning" (≥ 34 kt), "wind warning", "les suêtes wind warning", or "wreckhouse wind warning" | red | "Active Environment Canada alert: &lt;event&gt;" |
+| 2 | Rip current risk | NWS Surf Zone Forecast (SRF) text product: the beach's own UGC zone segment, the forecast period covering the run, products older than 36 h ignored | HIGH | red | "NWS surf zone forecast rip current risk: HIGH" |
 | 2 | Rip current risk | same | MODERATE | yellow | "NWS surf zone forecast rip current risk: MODERATE" |
-| 3 | Wave height | NOAA wave-model HTSGW (m converted to ft, `m * 3.28084`), thresholds by `water_class` | Great Lakes and every non-ocean class: >= 4 ft / >= 2 ft / < 2 ft non-null. `ocean`: >= 6 ft / >= 3 ft / < 3 ft (provisional, uncalibrated) | red / yellow / green | "Estimated wave height X.X ft (at or above R ft \| at or above Y ft \| below Y ft)" with the deciding threshold quoted |
+| 3 | Wave height | NOAA wave-model HTSGW (m converted to ft, `m * 3.28084`), thresholds by `water_class` | Great Lakes and every non-ocean class: >= 4 ft / >= 2 ft / < 2 ft finite. `ocean`: >= 6 ft / >= 3 ft / < 3 ft (provisional, uncalibrated) | red / yellow / green | "Estimated wave height X.X ft (at or above R ft \| at or above Y ft \| below Y ft)" with the deciding threshold quoted |
 | 4 | Wind (fallback only when wave height is null) | NOAA wave-model WIND (m/s converted to mph, `m/s * 2.2369362920544`); gusts are always null | sustained >= 25 mph or gust >= 35 mph / sustained >= 15 mph or gust >= 25 mph / below both | red / yellow / green | "No wave data; wind S mph sustained, G mph gusts (at or above 25 mph sustained or 35 mph gust threshold \| at or above 15 mph sustained or 25 mph gust threshold \| below advisory thresholds)" |
-| 5 | Terminal fallback | rip current risk LOW, nothing else usable | — | green | "NWS surf zone forecast rip current risk: LOW; no wave or wind data available" |
 | 5 | Terminal fallback | no usable data anywhere | — | unknown | "No wave or weather data is available for this beach yet" |
-| 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Hurricane, Tropical Storm, Storm Surge, Tsunami, Tornado, Severe Thunderstorm, High Wind, Hurricane Force Wind} Watch or {Wind, Lake Wind, Small Craft, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
+| 6 | NWS yellow watch/advisory floor | `api.weather.gov/alerts/active` (land `nws_zone` / marine `marine_zone`) | Event in {Hurricane, Tropical Storm, Storm Surge, Tsunami, Tornado, Severe Thunderstorm, High Wind, Hurricane Force Wind} Watch or {Wind, Lake Wind, Small Craft, Brisk Wind, Lakeshore Flood, Coastal Flood} Advisory, **and** steps 1–5 decided green/unknown | yellow | "Active NWS alert: <event>" |
 | 6b | ECCC marine yellow floor (Canadian beaches) | `marineweather-realtime` collection | Event = "strong wind warning" or "marine weather advisory", **and** the decided color is green/unknown | yellow | "Active Environment Canada alert: <event>" |
 | 7 | Water-quality advisory floor (raise-only) | `src/wqFloor/` registry (E. coli / bacteria / HAB advisories) | An active advisory whose floor color (yellow or red) **outranks** the color steps 1–6b decided | yellow or red | "Water-quality advisory (<source>): <detail>" |
 
@@ -391,8 +397,8 @@ Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
   of color, so the list must place every double-red before every red — otherwise a red could
   shadow a co-active double-red such as a Storm Warning. Every step-1 event is red or
   double-red, so step 1 can only raise the flag, never lower it.
-- **Marine** alerts (Hurricane Force Wind / Storm / Gale / Special Marine Warning, Hurricane
-  Force Wind Watch, Small Craft Advisory) are issued
+- **Marine** alerts (Hurricane Force Wind / Storm / Gale / Hazardous Seas / Special Marine
+  Warning, Hurricane Force Wind Watch, Small Craft Advisory, Brisk Wind Advisory) are issued
   for a beach's adjacent *marine* zone, not its land `nws_zone`. A US beach's `marine_zone` is
   derived once offline by the discovery batch and matched from the **same** national
   `/alerts/active` fetch. They are a bonus signal: a beach with no resolved `marine_zone` still
@@ -405,8 +411,11 @@ Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
 - Canadian beaches use ECCC, which issues no rip current, high surf or beach hazards product,
   so step 1b maps a curated set of severe-weather **warnings** for hazards dangerous to people
   in or on the water. Watches are deliberately unmapped, since a watch-to-yellow rule could
-  mask a wave-height red. Event names are exact-match against GeoMet's lowercase
-  `alert_name_en` strings, and each beach is alert-checked by exactly one authority. ECCC
+  mask a wave-height red. The keys are GeoMet's `alert_name_en` strings in lowercase. Both
+  ECCC clients store each name lowercased and every ECCC lookup folds it again, because ECCC
+  capitalizes the proper nouns in "Les Suêtes wind warning" and "Wreckhouse wind warning" (the
+  Wreckhouse string is inferred from the Les Suêtes product and unverified until one is
+  live); each beach is alert-checked by exactly one authority. ECCC
   marine warnings come from a **separate**, disjoint collection (`marineweather-realtime`,
   `src/clients/ecccMarine.js`) concatenated onto the land matches exactly as the US path does;
   Strong Wind Warning and Marine Weather Advisory are yellow floors at step 6b instead.
@@ -416,7 +425,20 @@ Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
   the same worst-of logic as the NWS/ECCC floors; a clean or absent reading has zero effect. It
   is baked into the estimate (`official: false`) and is never an official override.
 - Rip current risk beats wave height in both directions: a MODERATE rip risk yields yellow even
-  with a 6 ft wave reading.
+  with a 6 ft wave reading. A LOW risk never decides a color: it rides in the echoed
+  `ripCurrentRisk` and, with nothing else usable, the result is `unknown`.
+- The rip risk is read per zone and per period from the SRF text: each UGC zone segment's own
+  "Rip Current Risk" line (inline value, wrapped value lines joined, or the worst of its
+  indented sub-areas such as BOX's East Coast and South Coast), inside the forecast period
+  whose window covers the run instant (TODAY 6 AM to 6 PM local, TONIGHT 6 PM to 6 AM, a named
+  weekday, and so on). A segment headline such as "...MODERATE RIP CURRENT RISK IN EFFECT
+  UNTIL 8 PM EDT THIS EVENING..." carries the daytime period to that hour, up to midnight. A
+  period that has ended, a run instant no period covers (most offices print no TONIGHT, so
+  overnight waves decide), an inland zone of a coastal office, and a product older
+  than 36 h all yield no rip input rather than a guessed one, and the SRF is cited as a
+  source only for beaches it contributed to.
+- A non-finite or non-numeric wave height is treated exactly as null: it decides nothing,
+  leaves the wind fallback open and is echoed as null.
 - Wind is used **only** as a fallback when the wave reading is null, never blended with it.
   Gust is always null on this data source, so the wind red test is sustained speed alone and
   the reason string renders `n/a` for the gust.
@@ -432,7 +454,7 @@ Notes on the precedence design (see `src/rules.js` and `test/rules.test.js`):
 
 Every `FlagEstimate` carries `color`, a human-readable `reason`, `trigger` (the precedence
 branch that decided the color: `nws-alert`, `eccc-alert`, `rip-current`, `wave-height`, `wind`,
-`rip-current-low`, `no-data`, `nws-floor`, `eccc-floor` or `wq-floor`, which the detail page
+`no-data`, `nws-floor`, `eccc-floor` or `wq-floor`, which the detail page
 renders as a natural-language explanation), `rules_version`, `official: false`, `sources`
 (`{ label, url }` entries for the data actually used for that beach), `updated` (ISO 8601
 UTC), and the structured echoes `waveHeightFt`, `alertDetails` (every matched alert, upcoming
@@ -832,15 +854,16 @@ returns the first scraper whose `matches(beach)` is true:
 | Huron-Clinton Metroparks (`huron-clinton-metroparks`) | metroparks.com park-closures page (Martindale, Maple, Baypoint, Eastwood) | **Closure-only**: Closed → red; Open → no assertion, never an inferred green |
 | Chicago Park District (`chicago-park-district`) | chicagoparkdistrict.com `/flag-status` JSON API (~23 lakefront beaches) | Real flag colors; "Afterhours" → red; records >36 h old dropped; a beach reports green only when its own Surf row is fresh, so a green resting solely on a water-quality row is no data rather than a false green |
 | NWS Grand Rapids beach report (`nws-omr-grr`) | NWS WFO GRR "Other Marine Reports" text product — the "Lake Michigan Beach Reports" table (~7 west-Michigan state-park beaches) | **Posted flag colors**: Green/Yellow/Red map 1:1; no double-red; None or unrecognized → no data. Also carries the table's observed water temperature and wave height per site as a `reading` record, including for a site reporting no flag. `updated` is the product's once-daily morning issuance and the posted flag is that morning's observation, so it declares a 4 h `officialMaxAgeMs`: the record expires 4 h after issuance, absolute, alongside the readings. `staleMs` matches the lease and a "Morning reading" note covers the window past 2 h. Nearby beaches served by a park's row carry `reportedFor`, and the card names the site the reading was posted for |
-| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data. `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
+| Winnetka Tower Beach (`winnetka-tower-beach`) | Winnetka Park District status page for Tower Road Beach (Lake Michigan, IL) | **Dangerous-conditions closure**: Open → green; Closed with a surf-hazard reason → red; closed for water quality or any other reason → no data (an empty result, a health success, not a failure). `updated` is the page's own stamp, which moves only when a staffer posts, hence a 72 h `staleMs`. The bbox also claims the neighboring Winnetka beaches, which carry `reportedFor` so the card names Tower Road Beach |
 | PA DCNR Presque Isle (`pa-dcnr-presque-isle`) | PA DCNR Park Advisory feed for Presque Isle State Park (Lake Erie, PA) | **Closure-only, red-only**: a Danger-tier advisory describing a swimming hazard → park-wide red; water-quality or off-axis → no data; never green. Hazard-keyword mapping is verified against fixtures only. The host refuses Worker egress, so production runs return no data |
-| NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | Zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
+| NWS Marine Beach Forecast (`nws-marine-beach-forecast`) | NWS Marine Beach Forecast ArcGIS MapServer, per-WFO Day-1 layers (CLE, BUF) | **Forecast, not a posted flag** (`kind: "forecast"`, so the detail page badges it FORECAST and says "The NWS beach forecast calls for ..."): zonal rip "Swim Risk" and surf-height text through `waveColorForHeight`; site color is the more severe of the two; both null → no data. `updated` is the product's issuance (`productdat` + `producttim`, falling back to the layer's `idp_filedate`; a feature with neither is dropped), and the forecast is raise-only at any age, never lowering the estimate; a 30 h `staleMs` and a "Forecast issued" note cover the rest of the day. Bound by a curated name/proximity table, registered **last** because its bbox is broad |
 
 Only hazard, flag and closure sources are registered. An official color **overrides** the
-estimate wherever it is shown, with one bounded exception: a reading older than 2 h may be
+estimate wherever it is shown, with two bounded exceptions: a reading older than 2 h may be
 **raised** (never lowered) by a more severe fresh estimate on every surface that shows the
 beach's flag, and is credited as the source only while strictly more severe, so an aged
-reading the estimate ties shows as the estimate. The OFFICIAL card always reports the scraped
+reading the estimate ties shows as the estimate; and a `kind: "forecast"` source follows
+that aged rule at every age, so it can raise the flag but never lower it. The OFFICIAL card always reports the scraped
 color verbatim. Water-quality monitoring
 sources are deliberately excluded from *this* registry, because a clean-water reading is a
 different axis from surf hazard and letting its green win would mask a genuine hazard estimate.
@@ -912,6 +935,8 @@ nothing to report must never return null, or it would raise a false alert.
          // OPTIONAL, see "Staleness horizons" below:
          staleMs: 108000000,         // this source's own staleness horizon (ms)
          readingNote: "Morning reading — conditions may have changed since it was posted",
+         // OPTIONAL, see "Forecast sources" below: the only accepted value.
+         // kind: "forecast",
          // OPTIONAL, unrelated to the two above: extends this record's own
          // official_expires when the source fetches on a reduced cadence. Free to
          // run past the estimate's 25200 s — every reader checks each record's
@@ -1049,6 +1074,18 @@ nothing to report must never return null, or it would raise a false alert.
    It wins over `officialTtlSeconds`; declare one or the other. Set `staleMs` to the same
    value, so the card carries the `readingNote` rather than a stale warning between 2 h and
    expiry.
+
+   **Forecast sources (`kind`).** A source whose color is its forecast for the day rather
+   than a flag someone raised declares `kind: "forecast"`, the only accepted value. The
+   record then carries `kind`, the detail page badges it FORECAST (cloud-sun icon, never the
+   OFFICIAL check mark) on the hero and the card, its verdict reads "The NWS beach forecast
+   calls for <color>-flag conditions today.", and its meta description says "forecast". It
+   is raise-only at any age: `displayFlag` credits it only while strictly more severe than the
+   estimate, since a forecast predicts conditions nobody observed, and marks the decision
+   `forecast: true`. Stamp `updated` with the product's issuance so the card's age is honest.
+   List chips and nearby cards
+   label it "Official forecast" in the brand color, `/api/flag` sets `display.forecast`, and
+   map markers carry only the color keyword.
 
 2. Register it in the `scrapers` array in `src/officialSources/index.js`, most-specific
    `matches()` first — `findScraper(beach)` returns the first match, so tight city boxes go

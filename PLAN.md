@@ -56,8 +56,9 @@ cross-module interface.
                                      // geometry committed at
                                      // data/marine-zones.json, only for US beaches
                                      // (nws_zone NOT NULL). Change-only UPDATEs; never NULLed
-                                     // once set. Marine warnings (Gale/Storm/Special Marine)
-                                     // + Small Craft Advisory are zoned here, not to
+                                     // once set. Marine warnings (Gale/Storm/Hazardous
+                                     // Seas/Special Marine) + Small Craft and Brisk Wind
+                                     // Advisory are zoned here, not to
                                      // nws_zone; the hourly cron matches them from the same
                                      // national /alerts/active fetch and merges into inputs.alerts.
       marine_attempts: 0,            // number: vestigial — column retained, nothing writes it.
@@ -205,6 +206,15 @@ accepts legacy bare-string entries, rendered as their hostname with "www." strip
                                      // staleMs; the renderer appends a
                                      // <wa-relative-time> and a "." after it, so it must
                                      // read naturally as "... 11 hours ago."
+      "kind": "forecast",            // Optional. Marks a color that is the source's
+                                     // forecast for the day, not a flag someone raised.
+                                     // Copied from the scraper object only when it is
+                                     // exactly "forecast", never written otherwise, and
+                                     // stripped from a single-color result like
+                                     // staleMs. The detail page badges and words such a
+                                     // record as FORECAST (section 9); displayFlag
+                                     // credits it only while strictly more severe
+                                     // than the estimate. Posted is the default.
       "reportedFor": { "name": "Grand Haven State Park",
                        "distanceMi": 1.1093174085230862 }
                                      // Optional. Present only when this beach reads a
@@ -320,8 +330,9 @@ sitewide, and handing it m/s makes an actual 25 mph arrive as 11, with no error 
 either case. GRIB nodata is a number that survives JSON — 9999 on gfswave, 9.999000260554009e+20
 on GLWU, read per band from the raster header and never hardcoded — and 9999 m is 32,808 ft,
 which colors a flag red with a straight-faced reason string, so every masked cell is coerced
-to JSON null in the offline writer. rules.js tests waveHeightFt !== null with no isFinite
-guard and the cron guards with typeof === "number" only; containment belongs to the writer.
+to JSON null in the offline writer. rules.js treats a non-finite waveHeightFt as null and
+the cron reads it with Number.isFinite, but a finite sentinel passes both, so containment
+belongs to the writer.
 
 Absolute expiration, not a TTL, and one of two leases per record. A record carrying the
 series expires at validStartEpoch + 86400 (WAVE_SERIES_LEASE_SECONDS), the span it describes.
@@ -525,8 +536,9 @@ It reads INGREDIENTS and never a stored marker color: displayFlag (section 9) de
 read time and the feature takes its keyword, the same call every surface that shows a
 beach's flag makes, so no two surfaces can disagree about one beach. Deciding at write time
 would also always under-report, because displayFlag is raise-only in time: while the
-official is fresher than STALE_MS it wins outright, and past that it wins only while
-strictly more severe, which is never lower.
+official is a posted flag fresher than STALE_MS it wins outright, and otherwise (an aged
+posted flag, or a forecast at any age) it wins only while strictly more severe, which is
+never lower.
 
 Each record honors its OWN lease. estimate_expires and official_expires are checked
 separately, and a record at or past its lease reads as null: the resolution is
@@ -816,10 +828,11 @@ estimateCasStatement for writers, chunkStatements to keep a D1 batch at 200 stat
 Readers come in three widths. A surface that renders a record — the detail page, /api/flag —
 selects BEACH_STATE_SELECT and resolves it with liveBeachState. A surface that renders only
 a beach's display flag — the home list, ?ids=, the nearby cards, the map features — selects
-CHIP_STATE_SELECT, the scalar mirror columns, and resolves it with liveChipState, which
-returns { estimate, official } as { color, updated } pairs, exactly the fields displayFlag
-reads. Those are
-deliberately partial records: the list never parses a blob, which is what keeps the home
+CHIP_STATE_SELECT, the scalar mirror columns plus official_kind, which SQL extracts from the
+official blob (json_extract behind a json_valid guard, so a malformed blob reads as posted
+rather than failing the statement), and resolves it with liveChipState, which returns
+{ estimate, official } as { color, updated } pairs, plus kind "forecast" on a forecast
+official, exactly the fields displayFlag reads. Those are deliberately partial records: the list never parses a blob, which is what keeps the home
 proximity branch from shipping four JSON columns for the 400 ranked rows it discards. The
 two surfaces that consume a wave record — the detail route, which draws the strip, and the
 hourly cron, which indexes the series — add WAVE_STATE_SELECT and resolve it with
@@ -906,7 +919,7 @@ water-temperature tile reads "No data", and a scraper starts its failure streak 
 
 Pure module. No fetch, no Date, no env. Exports:
 
-    export const RULES_VERSION = "1.8.0";
+    export const RULES_VERSION = "1.9.0";
 
     export const ALERTS_UNAVAILABLE_CAVEAT = "weather alerts are not checked here yet";
       // Appended to the reason (see the caveat rule after step 5) when the cron
@@ -932,6 +945,7 @@ Pure module. No fetch, no Date, no env. Exports:
       "Rip Current Statement",       // -> red
       "High Wind Warning",           // -> red
       "Gale Warning",                // -> red (marine, 34-47 kt)
+      "Hazardous Seas Warning",      // -> red (marine, seas hazardous to small craft)
       "Special Marine Warning",      // -> red (marine, short-fused)
       "Lakeshore Flood Warning",     // -> red
       "Coastal Flood Warning"        // -> red
@@ -958,6 +972,7 @@ Pure module. No fetch, no Date, no env. Exports:
       "Lake Wind Advisory",          // -> yellow
       "Hurricane Force Wind Watch",  // -> yellow (marine)
       "Small Craft Advisory",        // -> yellow (marine)
+      "Brisk Wind Advisory",         // -> yellow (marine; Small Craft Advisory on ice-covered Alaska waters)
       "Lakeshore Flood Advisory",    // -> yellow
       "Coastal Flood Advisory"       // -> yellow
     ];
@@ -977,16 +992,24 @@ Pure module. No fetch, no Date, no env. Exports:
       "waterspout warning",          // -> red
       "severe thunderstorm warning", // -> red
       "gale warning",                // -> red (MARINE, >= 34 kt)
-      "wind warning"                 // -> red
+      "wind warning",                // -> red
+      "les su\u00eates wind warning",  // -> red (Cape Breton highlands; written as the
+                                     //    escape so the key stays NFC)
+      "wreckhouse wind warning"      // -> red (southwest Newfoundland; feed string
+                                     //    unverified until a product is live)
     ];
       // Environment and Climate Change Canada issues no beach-specific hazard
       // products — no rip current / high surf / beach hazards analog exists in the
       // Canadian system — so Canadian beaches map this curated set of severe-weather
       // warnings for hazards dangerous to people in or on the water. Watches are
       // deliberately excluded: a watch->yellow mapping would let it mask a wave-height
-      // red under strict step precedence. Names are exact-match against GeoMet's
-      // alert_name_en strings, which ECCC serves lowercase, so the two authorities'
-      // namespaces can never collide with NWS Title Case. Marine warnings (the GeoMet
+      // red under strict step precedence. Keys are GeoMet's alert_name_en strings in
+      // lowercase. ECCC lowercases its generic names but capitalizes the proper nouns
+      // in its two location-based wind warnings ("Les Suêtes wind warning",
+      // "Wreckhouse wind warning"), so both ECCC clients store the name lowercased and
+      // every ECCC lookup (steps 1b and 6b, alertColorForEvent, alertAuthorityForEvent)
+      // folds it again with toLowerCase; NWS lookups stay exact and run first, which is what keeps an
+      // NWS "Gale Warning" or "Storm Warning" attributed to NWS. Marine warnings (the GeoMet
       // marineweather-realtime collection, src/clients/ecccMarine.js — section 5) fold
       // into this same lowercase namespace: "storm warning" (>= 48 kt) and "gale
       // warning" (>= 34 kt) short-circuit here, while the two weaker marine products
@@ -1000,7 +1023,7 @@ Pure module. No fetch, no Date, no env. Exports:
       // yellow floor at step 6b exactly like NWS_FLOOR_PRECEDENCE — raise a
       // green/unknown estimate to yellow, never downgrade a decided higher color — so
       // a marine advisory can never mask a wave-height red. Kept out of
-      // ECCC_ALERT_PRECEDENCE for that reason. Same lowercase namespace as the ECCC
+      // ECCC_ALERT_PRECEDENCE for that reason. Same case-folded namespace as the ECCC
       // short-circuit warnings.
 
     // metersToFeet lives in src/geo.js (section 5).
@@ -1027,20 +1050,24 @@ Pure module. No fetch, no Date, no env. Exports:
       // "double-red", the rest -> "red"; NWS_FLOOR_PRECEDENCE -> "yellow") and ECCC
       // ("tornado warning" / "storm surge warning" / marine "storm warning" ->
       // "double-red"; the other ECCC_ALERT_PRECEDENCE events -> "red";
-      // ECCC_FLOOR_PRECEDENCE -> "yellow"); null for any other event. Steps 1/1b/6/6b
+      // ECCC_FLOOR_PRECEDENCE -> "yellow"); null for any other event. The NWS lookup is
+      // exact and runs first; the ECCC lookup folds a string event name with
+      // toLowerCase, and a non-string never reaches it. Steps 1/1b/6/6b
       // and the frontend's hazard lane (section 9) both derive their colors here, so
       // they can never disagree.
 
     export function alertAuthorityForEvent(eventName)
-      // Pure. "NWS" for ALERT_PRECEDENCE / NWS_FLOOR_PRECEDENCE events,
-      // "Environment Canada" for ECCC_ALERT_PRECEDENCE events, null otherwise. The
+      // Pure. "NWS" for ALERT_PRECEDENCE / NWS_FLOOR_PRECEDENCE events (exact match,
+      // checked first), "Environment Canada" for ECCC_ALERT_PRECEDENCE /
+      // ECCC_FLOOR_PRECEDENCE events (case-folded), null otherwise. The
       // single home of the issuing-body attribution the hazard-band text uses
       // (section 9).
 
     export function ripRiskColor(risk)
-      // Pure. "HIGH" -> "red", "MODERATE" -> "yellow", anything else -> null. Step 2
-      // and the hazard lane's rip band both derive from it — the single home of that
-      // mapping.
+      // Pure. "HIGH" -> "red", "MODERATE" -> "yellow", anything else -> null. LOW never
+      // decides a color: it falls through to steps 3-4 and, with nothing else usable,
+      // ends as unknown. Step 2 and the hazard lane's rip band both derive from it —
+      // the single home of that mapping.
 
     export function alertInEffectAt(entry, atIso)
       // Pure. true when { event, onset, ends } is in effect at atIso: onset <= at < ends.
@@ -1130,34 +1157,41 @@ is never mutated.
      reason: "Active NWS alert: " + eventName
    - "Tropical Storm Warning" / "Tsunami Advisory" / "Severe Thunderstorm Warning" /
      "Beach Hazards Statement" / "High Surf Advisory" / "Rip Current Statement" /
-     "High Wind Warning" / "Gale Warning" (marine) / "Special Marine Warning" (marine) /
-     "Lakeshore Flood Warning" / "Coastal Flood Warning"
+     "High Wind Warning" / "Gale Warning" (marine) / "Hazardous Seas Warning" (marine) /
+     "Special Marine Warning" (marine) / "Lakeshore Flood Warning" / "Coastal Flood Warning"
      → "red", reason: "Active NWS alert: " + eventName
 1b. Environment Canada alerts. Same inputs.alerts array (the cron fills it from ECCC
    for Canadian beaches, merging land weather-alerts AND marine warnings — the two
-   collections are disjoint, and the namespaces cannot collide with NWS), scanned
-   against ECCC_ALERT_PRECEDENCE in ECCC_ALERT_PRECEDENCE order; exact string equality;
-   unknown events (watches, heat/air-quality warnings) ignored.
+   collections are disjoint, and step 1 has already claimed any NWS name that folds onto
+   an ECCC key), scanned against ECCC_ALERT_PRECEDENCE in ECCC_ALERT_PRECEDENCE order;
+   case-folded equality (each string entry lowered with toLowerCase once, non-string
+   entries left as they are and matching nothing); unknown events (watches,
+   heat/air-quality warnings) ignored.
    - "tornado warning" / "storm surge warning" / "storm warning" (marine) → "double-red",
      reason: "Active Environment Canada alert: " + eventName
    - "squall warning" / "waterspout warning" / "severe thunderstorm warning" /
-     "gale warning" (marine) / "wind warning" → "red",
-     reason: "Active Environment Canada alert: " + eventName
+     "gale warning" (marine) / "wind warning" / "les suêtes wind warning" /
+     "wreckhouse wind warning" → "red",
+     reason: "Active Environment Canada alert: " + eventName (the lowercase key, whatever
+     case the feed served)
 2. Rip current risk (from SRF product).
    - "HIGH" → "red",     reason: "NWS surf zone forecast rip current risk: HIGH"
    - "MODERATE" → "yellow", reason: "NWS surf zone forecast rip current risk: MODERATE"
-   - "LOW" → fall through to step 3 (LOW is not terminal unless steps 3 and 4 have no data —
-     see step 5). Strict precedence is intentional: MODERATE rip risk yields yellow even at
-     6 ft wave height.
-3. Wave height (feet, threshold comparisons use >=). Let { yellow, red } =
+   - "LOW" → fall through to step 3. LOW never decides a color; it only rides in the
+     echoed ripCurrentRisk. Strict precedence is intentional: MODERATE rip risk yields
+     yellow even at 6 ft wave height.
+3. Wave height (feet, threshold comparisons use >=). waveHeightFt is normalized at intake
+   with Number.isFinite: a non-number or non-finite value is identical to null from here on
+   (decides nothing, leaves step 4 open, echoes as null, never throws). Let { yellow, red } =
    waveThresholdsForWaterClass(waterClass), where waterClass is the beach's water_class read
    from D1 by both crons (buildEstimateInputs) and never sealed: 2 / 4 ft for every class but
-   "ocean", 3 / 6 ft for "ocean".
+   "ocean", 3 / 6 ft for "ocean". The color is waveColorForHeight(waveHeightFt, waterClass),
+   which never returns null for a finite height:
    - waveHeightFt >= red → "red",
      reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " + red + " ft)"
    - waveHeightFt >= yellow → "yellow",
      reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " + yellow + " ft)"
-   - waveHeightFt !== null → "green",
+   - any other finite waveHeightFt → "green",
      reason: "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (below " + yellow + " ft)"
 4. Wind fallback — only when waveHeightFt === null and at least one of windSpeedMph /
    windGustMph is non-null. Null members fail every threshold (compare only the non-null
@@ -1173,14 +1207,12 @@ is never mutated.
                     " mph gusts (at or above 15 mph sustained or 25 mph gust threshold)"
    - green reason:  "No wave data; wind " + speedStr + " mph sustained, " + gustStr +
                     " mph gusts (below advisory thresholds)"
-5. Terminal fallbacks:
-   - If ripCurrentRisk === "LOW" (and steps 3–4 had no data) → "green",
-     reason: "NWS surf zone forecast rip current risk: LOW; no wave or wind data available"
-   - Otherwise → "unknown",
-     reason: "No wave or weather data is available for this beach yet"
+5. Terminal fallback: nothing usable decided a color → "unknown",
+   reason: "No wave or weather data is available for this beach yet"
    Note: alerts === [] (successful fetch, zero alerts) does not count as usable data on its
-   own; with everything else null the result is "unknown". That reason string is reproduced
-   here verbatim because it is pinned in test/rules.test.js.
+   own, and neither does ripCurrentRisk "LOW"; with everything else null the result is
+   "unknown". That reason string is reproduced here verbatim because it is pinned in
+   test/rules.test.js.
 6. NWS yellow watch/advisory floor, applied after steps 1–5 decide a color. Scan
    inputs.alerts (if non-null) against NWS_FLOOR_PRECEDENCE in that order. If one is
    present and the decided color is "green" or "unknown", raise it to "yellow"; it never
@@ -1190,11 +1222,13 @@ is never mutated.
    - "Hurricane Watch" / "Tropical Storm Watch" / "Storm Surge Watch" / "Tsunami Watch" /
      "Tornado Watch" / "Severe Thunderstorm Watch" / "High Wind Watch" / "Wind Advisory" /
      "Lake Wind Advisory" / "Hurricane Force Wind Watch" (marine) / "Small Craft Advisory"
-     (marine) / "Lakeshore Flood Advisory" / "Coastal Flood Advisory" (over green/unknown)
+     (marine) / "Brisk Wind Advisory" (marine) / "Lakeshore Flood Advisory" /
+     "Coastal Flood Advisory" (over green/unknown)
      → "yellow",
      trigger "nws-floor", reason: "Active NWS alert: " + eventName
 6b. Environment Canada marine yellow floor, applied after step 6. Scan inputs.alerts
-   against ECCC_FLOOR_PRECEDENCE in that order. If one is present and the decided color
+   (case-folded as in step 1b) against ECCC_FLOOR_PRECEDENCE in that order. If one is
+   present and the decided color
    is "green" or "unknown", raise it to "yellow"; it never downgrades an already-higher
    color (worst-of, like step 6). Same rationale — a below-gale marine product can never
    mask a wave-height red.
@@ -1225,8 +1259,7 @@ true or null. Colors, triggers, thresholds, precedence and sources are unaffecte
 
 Return value: a FlagEstimate (section 1) with beachId, color, reason as above, trigger
 (the branch that decided the color: step 1 → "nws-alert", step 1b → "eccc-alert",
-step 2 → "rip-current", step 3 → "wave-height", step 4 → "wind",
-step 5 LOW → "rip-current-low", step 5 otherwise → "no-data",
+step 2 → "rip-current", step 3 → "wave-height", step 4 → "wind", step 5 → "no-data",
 step 6 watch/advisory floor → "nws-floor", step 6b ECCC marine floor → "eccc-floor",
 step 7 water-quality floor → "wq-floor"), rules_version: RULES_VERSION, official: false,
 sources: inputs.sources (or []), updated: inputs.updated, plus the structured
@@ -1439,7 +1472,15 @@ shapes it walks are the clients' wire shapes, not general geography.
       //   properties.affectedZones URL. Forecast-zone (MIZxxx) and county (MICxxx) UGC
       //   namespaces never collide, and beach.nws_zone is always a forecast zone, so
       //   exact membership is sound. Features without an event name or with zero
-      //   resolvable zone ids are skipped. Failure -> null.
+      //   resolvable zone ids are skipped. Failure -> null, and so is an unreadable
+      //   feed: a body whose features is missing or not an array ("nws: alerts feed
+      //   unreadable: features=none"), or one where more than half the features were
+      //   skipped for shape (dropped * 2 > features.length, logged as "nws: alerts feed
+      //   unreadable: features=<n> dropped=<d>"). A schema drift renames a property on
+      //   every feature while a healthy feed drops almost none, so the majority bound
+      //   separates the two with no minimum population; features: [] is a quiet nation
+      //   and stays a success. Both crons read that null as no feed, so neither
+      //   reimplements the verdict.
 
     export function nwsAlertsForZone(alerts, zoneId)
       // Pure, exported for tests. Filters a fetchAllActiveAlerts result down to the
@@ -1460,7 +1501,8 @@ shapes it walks are the clients' wire shapes, not general geography.
       //   -> the newest matching product object with json.productText inline.
       // Success -> { text: productText, productId: "SRF " + wfo,
       //              sourceUrl: "https://api.weather.gov/products/types/SRF/locations/" + wfo + "/latest" }
-      // Missing productText or failure -> null (parseRipCurrentRisk reads only .text).
+      // Missing productText or failure -> null; the hourly hands .text to ripRiskByZone
+      // and parseSrfTides.
 
     export async function fetchPointMetadataDetailed(lat, lon)
       // -> { meta, notFound }. meta as fetchPointMetadata below; notFound true only for an
@@ -1515,7 +1557,9 @@ fetch and matches beaches locally via pointInGeometry.
       //   erroring); an exactly-full page logs a truncation warning.
       // Success -> { alerts: [{ event, onset, ends, description, area, geometry }],
       //              sourceUrl }
-      //   event = properties.alert_name_en (GeoMet serves lowercase names); onset =
+      //   event = properties.alert_name_en lowercased (the feed capitalizes the proper
+      //   nouns in the Les Suêtes and Wreckhouse wind warnings, and the stored echo and
+      //   the verdict ranking compare against lowercase lists); onset =
       //   validity_datetime falling back to publication_datetime; ends =
       //   event_end_datetime falling back to expiration_datetime; description =
       //   alert_text_en and area = feature_name_en, both passed to matchedAlerts to trim
@@ -1523,8 +1567,12 @@ fetch and matches beaches locally via pointInGeometry.
       //   alert_text_en. geometry = the alert-region Polygon/MultiPolygon. The collection also returns recently-ended
       //   alerts and keeps rows briefly past expiry — both are dropped here (status_en
       //   "ended"; parseable expiration_datetime < nowIso). Features without a usable
-      //   event name or geometry are skipped.
-      // Failure -> null.
+      //   event name or geometry object are skipped as shape drops.
+      // Failure -> null, and so is an unreadable feed: features missing or not an array
+      //   ("eccc: alerts feed unreadable: features=none"), or more than half the features
+      //   dropped for shape ("eccc: alerts feed unreadable: features=<n> dropped=<d>").
+      //   Ended and expired features are not shape drops and never trigger that verdict,
+      //   so a page of recently-ended alerts still succeeds.
 
     export function ecccAlertsForPoint(alerts, lat, lon)
       // Pure, exported for tests. Filters a fetchActiveEcccAlerts result down to the
@@ -1578,7 +1626,10 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
       // event-level scope is category.en === "marine". Marine events carry no per-event datetime, only a
       // status — keep IN EFFECT / CONTINUED, drop ENDED. name.en arrives Title-cased and
       // is lowercased to match rules.js's keys; an unmapped string yields no event,
-      // never a wrong color.
+      // never a wrong color. Null when the top-level payload is unusable (features not
+      // an array) and when more than half the features lack a properties object, an
+      // area object or a geometry object ("ecccMarine: feed unreadable: features=<n>
+      // dropped=<d>"); an all-clear collection returns [].
 
     export async function fetchActiveEcccMarineAlerts(nowIso)
       // Cron-side only. One GET of the marineweather-realtime collection
@@ -1618,15 +1669,61 @@ detail page's water-temperature tile and never src/rules.js.
 
 ### src/clients/srfParser.js (pure, no fetch)
 
-    export function parseRipCurrentRisk(srfText)
-      // srfText: string | null -> "HIGH" | "MODERATE" | "LOW" | null
-      // Try these regexes IN ORDER against the whole text; first match wins;
-      // return the captured group uppercased:
-      //   1. /RIP\s+CURRENT\s+RISK[\s.:]*(?:IS\s+)?[\s.]*\b(HIGH|MODERATE|LOW)\b/i
-      //   2. /\b(HIGH|MODERATE|LOW)\s+RISK\s+OF\s+RIP\s+CURRENTS?/i
-      //   3. /RISK\s+OF\s+RIP\s+CURRENTS?\s+(?:IS|WILL\s+BE|REMAINS)\s+(HIGH|MODERATE|LOW)/i
-      // Null/empty/non-matching input -> null. Accepted limitation: "LOW TO MODERATE"
-      // captures "LOW", a conservative parse, pinned by a test.
+    export const SRF_MAX_AGE_MS = 36 * 60 * 60 * 1000;
+      // A product older than this at the run instant yields no rip risk at all, even
+      // when one of its periods would still cover the instant. Period windows already
+      // bound a product to about 38 h of use; this is the hard ceiling for an office
+      // that skipped an issuance, and it keeps a bare weekday label unambiguous.
+
+    export function ripRiskByZone(srfText, nowIso)
+      // srfText: string | null, nowIso: ISO instant -> { <UGC zone id>: "HIGH" |
+      // "MODERATE" | "LOW" }. The risk each zone segment states for the forecast period
+      // covering nowIso. Never throws; non-string or empty input, or an unparseable
+      // nowIso, yields {}. Walks the product segment by segment with the same UGC header
+      // reader as parseSrfTides (wrapped headers, ranges, UGC_RANGE_CAP); a segment runs
+      // to "$$" or the next header, and the first segment naming a zone wins.
+      // Per segment:
+      //   stamp: the first "410 AM EDT Tue Oct 13 2026" line inside the segment (TAE
+      //     prints CDT under its zones and EDT in the header, so the segment's wins),
+      //     else the product header's stamp; zone abbreviations EST/EDT/CST/CDT/MST/MDT/
+      //     PST/PDT/AKST/AKDT/HST/AST/CHST/SST as fixed offsets, an unknown one or no
+      //     stamp anywhere -> the segment yields nothing.
+      //   age gate: nowIso - stamp > SRF_MAX_AGE_MS -> nothing.
+      //   periods: ".LABEL..." lines in order, each block closed by the next label, "&&"
+      //     or an ".EXTENDED..." heading; a label line carrying text after its ellipsis
+      //     (".THURSDAY...Low rip current risk.") is an extended-outlook summary and is
+      //     never a candidate. Windows in the stamp's local wall time: TODAY [06:00,
+      //     18:00) of the stamp date; TONIGHT [18:00, 06:00 next); THIS AFTERNOON /
+      //     REST OF THIS AFTERNOON [12:00, 18:00); REST OF TODAY / THIS MORNING
+      //     [issuance, 18:00); THIS EVENING / REST OF TONIGHT / OVERNIGHT / EARLY THIS
+      //     MORNING [issuance, next 06:00); <DAY> [06:00, 18:00) of the first date on or
+      //     after the stamp date with that weekday, so ".MONDAY..." in a Sunday-evening
+      //     product is the next day; <DAY> NIGHT / EVENING [18:00, 06:00 next); <DAY>
+      //     AFTERNOON [12:00, 18:00); <DAY> MORNING [06:00, 12:00); any other label has no
+      //     window. A segment headline before the first period that names an end for
+      //     a HIGH or MODERATE risk ("...MODERATE RIP CURRENT RISK IN EFFECT UNTIL 8 PM
+      //     EDT THIS EVENING...", wrapped lines joined) carries a period ending at 18:00
+      //     to that instant, at most 6 h later; a headline never shortens a window. The
+      //     first period whose window covers nowIso is read; none covering (overnight for
+      //     an office that prints no TONIGHT, or a period that has ended) -> nothing,
+      //     never the earliest period.
+      //   risk: inside that block only, a line starting "Rip Current Risk" or "Swim
+      //     Risk" (optional footnote asterisk, dot leaders or colon) with an inline value
+      //     joined with any indented continuation lines the formatter wrapped it onto,
+      //     or a label-only line followed by indented sub-area lines up to the first
+      //     unindented line, worst sub-area winning (HIGH > MODERATE > LOW). A sub-area is
+      //     a name, one or more dots, and a value opening with a risk word: a name that
+      //     fills the column takes a single dot ("East of Ocean Isle Beach.Low."), and
+      //     anchoring on the risk word keeps "St. Augustine Beach...Low." whole. Only the
+      //     value phrase up to its first period is read, and a range ("Low to Moderate")
+      //     resolves to its worst word. A label line whose value opens with no risk word
+      //     ("Rip Current Risk Category", "Rip Current Risks:") is a heading and the scan
+      //     continues past it. Line-start anchoring excludes the "* Low Risk - ..." legend
+      //     bullets and the "...HIGH RIP CURRENT RISK IN EFFECT..." headline. No risk line
+      //     in the block -> the zone is absent.
+      // The Swim Risk grammar is unverified until a Great Lakes office issues an SRF.
+      // Period windows use the stamp's fixed offset, so a window spanning a DST
+      // transition is off by one hour that night.
 
     export function parseSrfTides(srfText)
       // srfText: string | null -> { <UGC zone id>: { period, locations } }
@@ -2301,6 +2398,15 @@ Date.now(), no ambient clock.
                                          // ("... 11 hours ago."). Only for
                                          // point-in-time observations; a persistent
                                          // posted status declares staleMs alone.
+      kind: "forecast",                  // Optional. The only accepted value. Marks a
+                                         // source whose color is a forecast for the day,
+                                         // not a flag someone raised; copied onto the
+                                         // OfficialFlag record (section 1) exactly as
+                                         // staleMs is, and the detail page badges and
+                                         // words the record FORECAST. displayFlag
+                                         // credits it only while strictly more severe
+                                         // than the estimate, at any age. Posted is the
+                                         // default and is never written.
       // officialTtlSeconds: optional — extends this record's own official_expires
       // (section 2 / section 7 step 8) when it fetches on a reduced cadence. Free
       // to run past the estimate's lease, because every reader checks each
@@ -2511,9 +2617,12 @@ src/wqFloor registry below.
   server-rendered status page. Dangerous-conditions closure, hazard axis only: "Open" ->
   green; "Closed" plus a hazard keyword (beach hazard statement / rip current / high
   waves-surf / dangerous surf-conditions) -> red; "Closed" plus a water-quality keyword
-  (e.coli / bacteria / water quality / advisory) -> null, since that is the separate
-  wqFloor axis; any other closure or unrecognized markup -> null. The water-quality check
-  runs first so an ambiguous "advisory" fails safe to null. Tight name-within-bbox
+  (e.coli / bacteria / water quality / advisory) -> no site, since that is the separate
+  wqFloor axis; "Closed" for any other or empty reason (season, maintenance, staffing)
+  -> no site. Both "no site" cases are an empty sites: [] result, a health success,
+  from parseTowerBeachSites; null is reserved for a page it could not read (no status2
+  span, or a status word other than Open/Closed). The water-quality check runs first so
+  an ambiguous "advisory" fails safe to no site. Tight name-within-bbox
   matches(); register ahead of any broad regional scraper. That bbox claims the
   neighboring Winnetka Park District beaches too, and the single located site resolves
   them by proximity, so it declares reportSiteName "Tower Road Beach" (section 6) and
@@ -2547,7 +2656,20 @@ src/wqFloor registry below.
   waveColorForHeight); the site color is the more severe of the two, no double-red, and
   both null omits the zone. Zonal rather than per-beach: bound to swim.report beaches via
   a curated SITE_DEFS table (name substrings, then nearest centroid within radius).
-  STALE_MAX_DAYS = 2 gate. Its rip overlaps the primary SRF client, but it emits a
+  STALE_MAX_DAYS = 2 gate on productdat. Every site's updated is the product's issuance
+  instant, productIssuanceIso(productdat, producttim, idp_filedate): "416 AM EDT" on the
+  product date through a fixed zone-offset table (EDT/EST/CDT/CST/MDT/MST/PDT/PST/AKDT/
+  AKST/HST/AST/ADT), else a finite idp_filedate (epoch ms), else null, and a feature
+  with no resolvable issuance is dropped rather than stamped with the cron tick, since
+  the card's age and reading note read updated and an hourly restamp would present a
+  morning forecast as just issued all day. As kind "forecast" it is raise-only at any
+  age (section 9), so it never lowers an estimate. buildSites also refuses a zone with no
+  stamp, so the registry's result-level updated fallback is unreachable from here. Its
+  reason reads "Forecast swim risk and surf conditions from NWS Marine Beach Forecast for
+  the <zone> zone". It declares kind "forecast", staleMs FORECAST_STALE_MS (30 h, one
+  issuance a day) and readingNote "Forecast issued", so the card carries "Forecast
+  issued <n> hours ago." between the 2 h gate and the next issuance instead of a daily
+  stale warning. Its rip overlaps the primary SRF client, but it emits a
   resolved official color rather than a rip input, so it does not double-count into
   estimateFlag and the SRF client stays the one authoritative rip input lane.
 
@@ -2705,9 +2827,9 @@ HOT_VIEW_WINDOW_MS = 604800000 (7 days — shared with runWaterTempRefresh; live
 src/demandWindow.js rather than src/index.js — see "Entry-module export shape" below).
 FLAG_TTL_SECONDS lives in src/flagTtl.js for the same entry-module reason and is imported
 back.
-The step-7 wave and wind reads use Number.isFinite, not typeof x === "number", so a
-malformed stored wave record cannot reach rules.js step 3's unguarded else branch and decide
-green. That is caller-side input validation, not a rule change, and bumps no RULES_VERSION.
+The step-7 wave and wind reads use Number.isFinite, not typeof x === "number". rules.js
+normalizes waveHeightFt the same way at intake, so a malformed stored wave record decides
+nothing on either side; the cron's guard is what keeps the wave source label honest.
 
 The run walks the whole flag-worthy queue in pages. A page is one wave read, one
 beach_state chunk and one recompute_updated stamp, so FLAG_RECOMPUTE_PAGE_SIZE must not
@@ -2766,8 +2888,10 @@ the completion log measures the shortfall.
    fetchAllActiveAlerts() call for the whole run, then each zone's Map entry =
    nwsAlertsForZone(nationalAlerts.alerts, zone) as { events, details, sourceUrl:
    alertsUrlForZone(zone) }, label "NWS Alerts". One subrequest regardless of zone count. A
-   failed, thrown or paginated national fetch (truncated true, logged as "index: nws alerts
-   feed paginated, features=N parsed=M; treating as no feed") maps every zone to null;
+   failed, thrown, paginated (truncated true, logged as "index: nws alerts feed paginated,
+   features=N parsed=M; treating as no feed") or malformed national fetch (the client
+   itself answers null for a body whose features are missing, not an array, or mostly
+   unreadable, section 5) maps every zone to null;
    alertsCheckable stays true and the seal's alertsResolved reads false, so the refresh
    re-selects the row. The three national fetches of steps 3 and 3b are one Promise.all,
    each promise carrying its own catch that logs and yields null and each skipped fetch a
@@ -2783,8 +2907,13 @@ the completion log measures the shortfall.
    authority's alerts as null this run.
 4. SRF: distinct WFOs via wfoFromGridUrl(beach.nws_grid_url); fetchLatestSrfText once per
    WFO through runPool at KV_WRITE_CONCURRENCY under SRF_GATHER_DEADLINE_MS = 120000
-   (anchored at the step's own start); parseRipCurrentRisk and parseSrfTides on each; Map
-   wfo -> { risk, sourceUrl, productId, issuanceTime, tidesByZone } | null. Every WFO is pre-seeded null, so a throw, a null fetch or a WFO the
+   (anchored at the step's own start); ripRiskByZone(text, nowIso) and parseSrfTides on
+   each; Map wfo -> { riskByZone, sourceUrl, productId, issuanceTime, tidesByZone } | null,
+   both tables keyed by UGC zone id. Step 7 resolves a beach's ripCurrentRisk through the
+   pure ripRiskForBeach(beach, srfEntry): riskByZone[beach.nws_zone] when that key is
+   present, else null, so an inland zone of a coastal office, a period that has ended, a
+   run instant no period covers and a product past SRF_MAX_AGE_MS all read as no rip
+   input. Every WFO is pre-seeded null, so a throw, a null fetch or a WFO the
    deadline leaves unreached all read as "no rip input" for that WFO's beaches alone. A
    sequential loop bounded only by the 45 s transport timeout would let a few hung WFOs
    spend the 900 s ceiling before any beach is written.
@@ -2846,7 +2975,9 @@ the completion log measures the shortfall.
    sources = array of { label, url } entries (section 1) for every source that returned
    data for this beach — alerts: "NWS Alerts" / "NWS Marine Alerts", or "Environment Canada
    Alerts" (ECCC_ALERTS_INFO_URL) / "Environment Canada Marine Alerts"
-   (ECCC_MARINE_INFO_URL) for Canadian beaches; SRF: "NWS Surf Zone Forecast"; waves:
+   (ECCC_MARINE_INFO_URL) for Canadian beaches; SRF: "NWS Surf Zone Forecast", only when
+   the product gave this beach a rip risk or a tides table, so an inland zone cites no
+   SRF; waves:
    waveSourceLabel(waveInput.model) with url waveSourceUrl(waveInput.model)
    (src/waveModels.js) — always a human-readable page, never a raw API request, and an
    unrecognised id degrades to "Wave Forecast" rather than throwing; wind: WIND_SOURCE,
@@ -4035,7 +4166,7 @@ Routing table (method GET only; anything else → 405):
 | GET /?ids=id1,id2,...     | handleIdsList  | The same list page rendered for exactly the listed beaches, in the order given. parseBeachIds validates and dedupes the comma-separated value and caps it at 10 BEFORE any SQL; the ids are bound as parameters (D1: the same joined chip SELECT WHERE b.id IN (?1, ?2, ...) AND [flag-worthy gate] — no ORDER BY, since SQLite returns an IN-set in its own order and the caller's order is restored in JS by id), resolved through liveChipState like handleHome. Ids that do not match the id format, that name no row, or that name a non-flag-worthy row are skipped silently; an empty result reads no D1 at all. q, near and request.cf are ignored on this route, which is what makes the response fully URL-determined and therefore CACHEABLE. It writes no last_viewed stamp — only the two single-beach routes carry the demand signal. This is what the browser-side "Your Beaches" section (section 9) fetches for a visitor's saved and recently viewed ids; nothing about those lists reaches the server beyond the bounded id list in the URL. | HTML renderListPage with idsMode: true, query "", hasMore false and no location, so the page renders unsorted, un-filtered rows and never asserts data-complete. idsMode also owns the empty-state copy: a page with no rows reads "No beaches match those ids.", since an unrecognized id list is neither a search miss nor an empty database |
 | GET /beach/:beachId       | handleDetail   | :beachId is the public id (src/publicId.js). A segment in the public form resolves to its storage id; one in the storage form answers 301 to /beach/<public id>, cache-control CACHE_CONTROL_CACHEABLE, reading nothing; anything else 404s before any read. Otherwise D1: one row by id joined to beach_state (estimate, official, wqfloor, reading, wave, each honoring its own expiry — the wave record through liveWaveRecord over WAVE_STATE_SELECT); KV watertemp: only, with cacheTtl 3600; stamps last_viewed (touchLastViewed, ≤1/h, ctx.waitUntil). Nearby: D1 SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.water_class, b.water_class_attempts, <CHIP_STATE_SELECT> FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] AND id <> ?1 AND lat BETWEEN ?2 AND ?3 [AND lon BETWEEN ?4 AND ?5] from nearbyBounds(lat, lon), ORDER BY proximityOrderByClause(beach) LIMIT 12 (NEARBY_FETCH_LIMIT). The window is a superset of the 50 mi cap and lets D1 seek idx_beaches_lon_lat, which leads with lon, so the lon predicate seeks and a lat-only query scans; the lon window is omitted when it would cross +-180 or the cap nears the pole. The rows are haversine-sorted in JS, rows beyond NEARBY_MAX_MI (50) dropped, sliced to NEARBY_LIMIT (3), each card's records resolved from the joined scalar columns by liveChipState and rendered through displayFlag exactly like a list row | HTML renderDetailPage (data gains waves: WaveSeries or null + waterTemp: WaterTemp or null + wqfloor: WqFloorAdvisory or null + nearby: [{ beach, estimate, official, distanceMi }] rendered as cards last in the detail stack, section omitted when empty); 404 HTML if the segment is malformed or no row |
 | GET /api/beaches.geojson  | handleBeachesGeojson | ONE D1 read, the scalar-column map SELECT of section 1 (id, name, park_name, lat, lon plus each record's color, updated and expires, gated by the flag-worthy predicate), resolved per row by mapFeatureFromRow(row, nowIso, nowMs) — which stamps displayFlag({ estimate, official }, nowIso).keyword (section 9) on the same liveChipState resolution the list surfaces use, on the two records the row carries. Each honors its own expiry, so an expired estimate resolves to unknown without dropping a live official beside it. No KV read at all on this path. There is no degraded branch and no per-beach fallback read: D1 is the source of truth here, so a D1 failure surfaces as the error boundary's 500 with no-store rather than as a silently all-unknown map, and two request-path code paths that must agree about color is the duplication the single-source-of-color invariant exists to prevent. Rows with non-finite lat/lon are skipped, so no NaN coordinate is emitted. No row cap: the columns are scalars and the whole flag-worthy set is one streaming pass. Location-independent (no request.cf, no bbox) and therefore fully cacheable. Scaling beyond ~5–10k features needs server clustering or paging (section 9, TODO). | GeoJSON { "type": "FeatureCollection", "builtAt": (the newest LIVE estimate_updated across the rows, or null when no row carries one), "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [lon, lat] rounded to 5 decimals }, "properties": { "id", "name" (park_name||name), "flag" (green|yellow|red|unknown) } } ...] }. builtAt is a top-level GeoJSON foreign member (RFC 7946 section 6.1), so how fresh the freshest color on the map is can be read from the endpoint itself. The 200 carries a strong SHA-256 ETag over the serialized bytes; a GET whose If-None-Match matches (etagMatches: weak comparison, comma list and * honored) answers 304 with the same ETag and cache-control and no body. There is no D1 shortcut before the hash, because no stored timestamp moves with every write that changes a marker: the body is the validator. No Vary, since Workers Cache compares Vary values verbatim and would fragment the entry per Accept-Encoding spelling. |
-| GET /api/flag/:beachId    | handleApiFlag  | :beachId is the public id (src/publicId.js). A segment in the public form resolves to its storage id; one in the storage form answers 301 to /api/flag/<public id>, cache-control CACHE_CONTROL_CACHEABLE, reading nothing; anything else 404s before any read. Otherwise D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": the public id, "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source" } } — the two record blobs are stored shapes, so their own nested beachId stays the storage id — with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none; the object is built field by field, so it never carries the keyword |
+| GET /api/flag/:beachId    | handleApiFlag  | :beachId is the public id (src/publicId.js). A segment in the public form resolves to its storage id; one in the storage form answers 301 to /api/flag/<public id>, cache-control CACHE_CONTROL_CACHEABLE, reading nothing; anything else 404s before any read. Otherwise D1: one row by id joined to beach_state (exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail | JSON { "beachId": the public id, "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source", "forecast" } } — the two record blobs are stored shapes, so their own nested beachId stays the storage id — with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none, and display.forecast true only when the credited official is a forecast for the day; the object is built field by field, so it never carries the keyword |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag plus the four security headers public/_headers declares. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -4643,7 +4774,15 @@ exporting a CSS string); render.js is the sole module the router imports.
   displayed color the official record supplied, and the filled chip on any such row or nearby
   card) must be visually distinct: a separate card with a heavy border, an "OFFICIAL" badge
   with a circle-check Font Awesome icon, the source hostname ("www." stripped) linking to the scraped page, and its own
-  updated time. The official card appears above the estimate card; when official is null no
+  updated time. A record of kind "forecast" (section 1) carries a brand-variant filled
+  "FORECAST" badge with a cloud-sun icon instead, on the card (class "official-card
+  forecast-card"; the class is a hook with no stylesheet rule) and on the hero when the
+  record supplied the displayed color (displayFlag's forecast), and its meta description reads
+  "forecast GREEN flag today" instead of "official GREEN flag right now". A list row or
+  nearby card crediting a forecast carries a brand-variant filled chip whose tooltip and
+  hidden prefix read "Official forecast", and /api/flag sets display.forecast; map markers
+  carry only the color keyword. The official card appears above
+  the estimate card; when official is null no
   official card renders. When the record carries reportedFor (section 1) with a non-empty
   name, the card body also carries a quiet caption line under the flag row reading
   "Reported for <name>", plus ", <formatMiles(distanceMi)> away" when distanceMi is finite
@@ -4708,16 +4847,21 @@ exporting a CSS string); render.js is the sole module the router imports.
   once and reads nothing else: list, ?ids= and Your Beaches rows, nearby cards, the detail
   hero (title icon, label, wash, badge, verdict branch), the share card and description,
   the map feature keyword and /api/flag's display field. displayFlag({ estimate, official },
-  nowIso) -> a frozen { color, keyword, source }: color is one of
+  nowIso) -> a frozen { color, keyword, source, forecast }: color is one of
   green|yellow|red|double-red|unknown, keyword is collapseFlagColor(color) (double-red ->
-  red), and source is official|estimate|none. It reads only each record's color and the
-  official's updated (a non-string updated reads as absent), so liveChipState pairs and
-  liveBeachState blobs resolve identically. First match wins:
+  red), source is official|estimate|none, and forecast is true only when source is official
+  and that record's kind is "forecast". It reads only each record's color and the
+  official's updated and kind (a non-string updated reads as absent), so liveChipState pairs
+  and liveBeachState blobs resolve identically. First match wins:
     1. An official whose color normalizes to unknown counts as absent.
-    2. Official not stale by the default 2 h STALE_MS (including no parseable updated or
-       nowIso) -> its color, source official, even below the estimate.
-    3. Official older than STALE_MS and strictly more severe than the estimate by rules.js
-       SEVERITY_RANK (unknown ranks 0) -> its color, source official.
+    2. A posted official (no kind) not stale by the default 2 h STALE_MS (including no
+       parseable updated or nowIso) -> its color, source official, even below the
+       estimate.
+    3. An official strictly more severe than the estimate by rules.js SEVERITY_RANK
+       (unknown ranks 0) -> its color, source official. This is the only way a posted
+       official older than STALE_MS, or a forecast at any age, decides: a forecast
+       predicts conditions nobody observed, so it may raise the flag but never lower
+       it or take a tie.
     4. Otherwise the estimate's color, source estimate; or unknown, source none, when that
        color is unknown or there is no estimate.
   color is always the named record's own normalized color, and source is none exactly when
@@ -4751,13 +4895,16 @@ exporting a CSS string); render.js is the sole module the router imports.
   red or the gray unknown — so no color literal reaches the markup and the wash follows the
   surface token into wa-dark. The hero is a heading, not a third flag card: the two cards
   below keep the full verdicts and are never merged into it.
-  - Verdict line: one sentence from verdictSentence(estimate, flag, waterClass) in
-    src/frontend/verdict.js — pure, plain text out, escaped by the caller. It takes the
+  - Verdict line: one sentence from verdictSentence(estimate, flag, waterClass)
+    in src/frontend/verdict.js — pure, plain text out, escaped by the caller. It takes the
     hero's displayFlag decision: source official returns the posted-flag sentence for
-    flag.color, source none reads no data, and source estimate explains the estimate, so
-    the sentence and the badge read one field. A sentence names a flag color only
-    alongside who decided it: the official branch always says the flag is posted ("Water
-    closed by the posted flag."), and the estimated branch names no color at all, only its
+    flag.color, or the forecast sentence when flag.forecast is true ("The NWS beach
+    forecast calls for green-flag conditions today.", double-red "The NWS beach forecast
+    closes the water today."), source none reads no data, and source estimate explains
+    the estimate, so the sentence and the badge read one field. A sentence names a flag
+    color only alongside who decided it: the official branch says the flag is posted
+    ("Water closed by the posted flag.") or forecast, and the estimated branch names no
+    color at all, only its
     signals ("Calm water, no alerts." / "Beach Hazards Statement in effect; high rip current
     risk."). The deciding trigger leads the sentence and the remaining echoed signals follow
     it; an estimated double-red closes with "stay out of the water". For an alert-decided
@@ -4773,8 +4920,9 @@ exporting a CSS string); render.js is the sole module the router imports.
     by SEVERITY_RANK: the wave grids model wind waves alone, so a sub-threshold height or a
     LOW rip risk beside a tsunami, hurricane or surge warning would read as reassurance
     against the hazard the sentence explains. "no alerts" is claimed only when alertDetails
-    is present and empty, the estimateInputs seal (section 1) reports alertsResolved true,
-    and the reason carries no ALERTS_UNAVAILABLE_CAVEAT — an empty echo alone cannot tell a
+    is present and empty, alertsChecked(estimate) (exported: the estimateInputs seal of
+    section 1 is an object with alertsResolved === true, read fail-closed) holds, and the
+    reason carries no ALERTS_UNAVAILABLE_CAVEAT — an empty echo alone cannot tell a
     clear check from a failed national fetch. A missing estimate, an unknown color and an
     unusable official color all read "No data yet for this beach."; a payload with no
     trigger and no echoed signals returns "" and the line is omitted entirely.
@@ -4804,7 +4952,9 @@ exporting a CSS string); render.js is the sole module the router imports.
     risk (estimate.ripCurrentRisk as HIGH/MODERATE/LOW, sourced "NWS surf zone forecast");
     active alerts (decidedAlertDetails(estimate).length with the first in-effect entry's
     event name; a checkable beach with only upcoming alerts shows the quiet "None active"
-    with the first upcoming event "not yet in effect" as its source line); the zone's tide
+    with the first upcoming event "not yet in effect" as its source line, and one whose
+    echo is empty shows it only when alertsChecked(estimate) holds, so a failed alert
+    fetch renders no alerts tile at all and the tile and the verdict agree); the zone's tide
     table (data.tides, the TideTable of section 1: icon water-arrow-up, each location's
     name in quiet caption text over its event strings verbatim in wa-body-m, captioned
     "Tides · <period in sentence case>" or "Tides", sourced "NWS Surf Zone Forecast" plus
@@ -4825,9 +4975,11 @@ exporting a CSS string); render.js is the sole module the router imports.
     night both yield no next event, so neither renders a sun tile. The tile is
     display-only: it never reaches src/rules.js, the estimate or the seal.
     "None active" renders in quiet text, since only a real reading earns the loud value
-    type. It is the alerts tile's answer only when the count is zero and
+    type. It is the alerts tile's answer only when the count is zero,
     alertsCheckable(beach) is true (src/alertsCheckable.js, the same predicate
-    buildEstimateInputs calls, which deliberately does not seal its answer); a beach whose
+    buildEstimateInputs calls, which deliberately does not seal its answer) and either the
+    echo is non-empty (its entries prove the fetch resolved) or the seal says the run's
+    fetch resolved; a beach whose
     alerts were never checkable renders no alerts tile, because "none active" would be a
     claim nobody made. The tiles are informational and estimated: outlined cards only,
     never the official card's treatment.
@@ -4931,9 +5083,10 @@ exporting a CSS string); render.js is the sole module the router imports.
     hours (floor start, ceil end, min 1 h; missing onset means already active, missing ends
     open-ended, both clamped to the window; exact (event, startHour, endHour) repeats
     deduped), plus a full-window band when ripRiskColor(estimate.ripCurrentRisk) is non-null
-    (kind "rip" — the SRF product has no parseable period, so its text names the source
-    instead of claiming one: "Rip current risk HIGH — from the latest NWS surf zone
-    forecast"). Band colors use the semantic danger/warning theme-assignment tokens, which
+    (kind "rip" — the estimate echoes only the risk level, not the forecast period the
+    parser resolved it from, so its text names the source instead of claiming a window:
+    "Rip current risk HIGH — from the latest NWS surf zone forecast"). Band colors use the
+    semantic danger/warning theme-assignment tokens, which
     adapt to light and dark where raw tints do not: fill-quiet background, on-quiet text,
     border-loud edge; red and double-red use danger-*, yellow warning-*, except that the
     yellow edge uses warning-border-normal, because warning-border-loud resolves to
@@ -5129,8 +5282,8 @@ Base inputs helper: all-null fields, sources: [], updated: "2026-07-04T12:00:00.
 23. waveHeightFt 5.0 + windSpeedMph 30 → red with the wave reason (wind is used only when wave is null).
 24. everything null → unknown, reason exact, color "unknown".
 25. alerts [] and everything else null → unknown (empty alert list is not usable data).
-26. ripCurrentRisk "LOW", everything else null → green, reason
-    "NWS surf zone forecast rip current risk: LOW; no wave or wind data available".
+26. ripCurrentRisk "LOW", everything else null → unknown, trigger "no-data", the no-data
+    reason, LOW echoed; no LOW case ever yields a "rip-current-low" trigger.
 27. Output contract: official === false, rules_version === RULES_VERSION, beachId echoed,
     sources array passed through by value, updated passed through.
 28. Determinism/purity: call twice with the same frozen input → deep-equal outputs; input
@@ -5157,8 +5310,11 @@ test uses symbolically.
 
 - test/eccc.test.js — pointInGeometry (interior/exterior/hole/MultiPolygon/malformed→false);
   fetchActiveEcccAlerts with stubbed fetch (mapping including alert_text_en/feature_name_en
-  as description/area with no instruction, drops ended/expired, limit=2000, no
-  bbox, ECCC_USER_AGENT header, null on failure); ecccAlertsForPoint (containment, dedupe,
+  as description/area with no instruction, a proper-noun name stored lowercased, drops
+  ended/expired, limit=2000, no
+  bbox, ECCC_USER_AGENT header, null on failure, the unreadable-feed verdict: missing or
+  non-array features and a majority of shape drops → null while a page of mostly
+  ended/expired features still succeeds); ecccAlertsForPoint (containment, dedupe,
   malformed→empty); fetchEcccForecastZones (one items request with geometry, limit=2000,
   ECCC_USER_AGENT, keeps only NAME+geometry features, null on failure); ecccZoneNameForPoint
   (point-in-polygon region name, the ECCC_ZONE_MAX_EDGE_KM nearest-edge fallback,
@@ -5172,11 +5328,26 @@ test uses symbolically.
   stub: one bulk fetchEcccForecastZones then local resolution; success stamps eccc_zone (no
   bump); an unresolved point bumps eccc_attempts; a failed bulk fetch parks the whole run
   (no attempt bumped); per-beach isolation preserved.
-- test/srfParser.test.js — parseRipCurrentRisk cases 1-9 (HIGH/MODERATE/LOW, lowercase prose,
-  "high risk of rip currents", first-occurrence-wins, no-mention→null, "LOW TO MODERATE"→LOW,
-  null/""→null), wfoFromGridUrl (case 10) and parseSrfTides (both event grammars, several
-  locations, leader-padded label, multi-zone/range/wrapped headers, period label as printed,
-  Great Lakes product → {}, non-string → {}, runaway range dropped). Fixtures built with +
+- test/srfParser.test.js — ripRiskByZone over the captured /latest bodies in
+  test/fixtures/srf/<WFO>.json at explicit instants: BOX (inline and sub-area forms, worst
+  sub-area wins, inland zones absent, nothing before TODAY or after it with no TONIGHT),
+  MHX (zone lines, not the legend), GYX (Monday afternoon product read Tuesday resolves
+  TUESDAY; Monday 10 PM resolves nothing), AKQ (Sunday-evening MONDAY is the next day, then
+  ends, then ages out), JAX (zone line, not the headline), BRO and MOB (TONIGHT in the
+  evening), LOX (a segment without a rip line yields no zone, the legend never matches),
+  CAR (no asterisk), TAE (segment CDT stamp over the EDT header, stampless segment takes
+  the header), SJU (AST), ILM, and the no-rip offices (HFO, EKA, MTR, PQR, MFR) → {};
+  synthetic cases for the Swim Risk variant, worst word of a range, value phrase only,
+  headline/legend/inline-extended-day never read, period windows, SRF_MAX_AGE_MS, header
+  stamp fallback, unknown zone abbreviation, 1200 PM and uppercase stamps, wrapped
+  multi-zone header with first segment winning, UGC_RANGE_CAP, non-string/empty/no-UGC/
+  unparseable instant → {}, label-only line with no values, a single-dot sub-area that
+  outranks its neighbor (ILM NCZ110 shape), a wrapped value, a headline UNTIL time carrying
+  the daytime period past 18:00, a heading-like label line ahead of the real value;
+  wfoFromGridUrl; parseSrfTides
+  (both event grammars, several locations, leader-padded label, multi-zone/range/wrapped
+  headers, period label as printed, Great Lakes product → {}, non-string → {}, runaway
+  range dropped, the BOX fixture's Nauset Beach table). Synthetic fixtures built with +
   and "\n" (no backticks).
 - test/parkContainment.test.js — mergeBeachRows (parkName attach, largest-unnamed-per-park,
   parkKey distinctness, id/osm_id derivation, a named park beach missed by the named pass,
@@ -5206,7 +5377,10 @@ test uses symbolically.
   most-severe rollup, piers ignored, unknown/HTML/empty→null, all-gray→[]);
   extractSouthHavenCsvUrl; southHaven.matches; findScraper; resolveSiteForBeach /
   scrapeOfficialFlagFromResult (name beats proximity, array-order, radius default, invalid
-  color→null, no site→null); the staleMs/readingNote contract; the reportedFor contract
+  color→null, no site→null); the staleMs/readingNote contract; the kind contract (copied
+  only when the scraper declares exactly "forecast", absent otherwise, a result-carried
+  value stripped on the single-color branch, and only nws-marine-beach-forecast declaring
+  it); the reportedFor contract
   (measured distance for a proximity-resolved beach, same-display-name, names[]-claimed and
   no-reportSiteName omission, park_name compared not name, single-color branch stripping a
   result-carried value, and reportedForSite called directly for the distanceMi: null guard
@@ -5214,7 +5388,9 @@ test uses symbolically.
   borrowed and a self-named beach.
 - test/renderOfficialCard.test.js — the official card's "Reported for ..." line via
   renderDetailPage: with and without a distance, absent and malformed records, escaping,
-  order under the flag row, and never on the estimate card.
+  order under the flag row, and never on the estimate card; the FORECAST badge and
+  forecast-card class for a kind "forecast" record, still linking the source hostname,
+  and OFFICIAL for a record without kind.
 - test/metroparks.test.js, test/chicagoParkDistrict.test.js — each exercises its scraper's
   pure parse functions against inline fixtures, including ambiguous and unknown-status rows
   being omitted, plus matches() with matching and non-matching BeachRow fixtures.
@@ -5230,7 +5406,8 @@ test uses symbolically.
 - test/beachState.test.js — the storage contract, against node:sqlite: WQFLOOR_TTL_SECONDS
   and both select fragments, liveChipState (the color/updated pair, per-column expiry on
   the same boundary, a missing row and a NULL color absent, a live record with a NULL
-  stamp), liveBeachState (every record parsed, expires === nowEpoch
+  stamp, kind carried only for a live forecast, official_kind extracted in SQL with a
+  malformed blob reading as posted), liveBeachState (every record parsed, expires === nowEpoch
   expired, per-column expiry, NULL blobs and unparseable JSON absent, a missing row
   all-null, extra b.* columns ignored, never throws), the upsert (COALESCE per column
   asserted as SQL text and bound values, absent fields binding NULL, color and updated
@@ -5273,7 +5450,9 @@ test uses symbolically.
   skipAuthority on a beach enriched for neither authority, skipStaleLower on a seal past
   STALE_MS that permits a raise and refuses a lowering, skipSuperseded on a row the hourly
   rewrote between the read and the write); the feed matrix — NWS down skips US rows and still
-  serves Canadian ones and the reverse, both down touches D1 zero times; the LOWERING
+  serves Canadian ones and the reverse, both down touches D1 zero times, and a malformed
+  200 body (no features, or every event renamed) reads as down and leaves a standing
+  alert red byte-identical; the LOWERING
   regression set, where a cleared warning must still land red from a sealed water-quality
   advisory, rip risk, wave height or wind fallback, never green; paging, where a short page
   does not end the walk and only an empty one does, writes flush per page, and a rejected
@@ -5332,8 +5511,10 @@ test uses symbolically.
   joining/counting/dedupe, the "no alerts" guards (caveat, unresolved fetch, sealless
   payload), the clauses an event-led red or double-red drops and the ones it keeps,
   estimated double-red, the posted-flag branch displayFlag's source selects for every color,
-  an unusable official color never reaching it, and the honest fallbacks for a null, unknown
-  or legacy estimate and a none or absent decision.
+  the forecast sentence per color when the decision credits a forecast and the
+  posted sentence when it does not, alertsChecked (true only for a seal object with
+  alertsResolved === true), an unusable official color never reaching it, and the honest
+  fallbacks for a null, unknown or legacy estimate and a none or absent decision.
 - test/detailVerdict.test.js — the same line and the flag legend through renderDetailPage:
   placement between the hero flag label and the coordinates line, crediting by
   displayFlag's source (a fresh official, an aged official that only agrees, an aged
@@ -5364,9 +5545,13 @@ test uses symbolically.
   and the empty string for absent, malformed and unknown-color records.
 - test/detailHero.test.js — the detail-page hero via renderDetailPage: the per-color wash
   keyword including the double-red collapse and the gray unknown, the ESTIMATE/OFFICIAL
-  badge by displayFlag's source across fresh and aged official records, no badge when the
-  color is unknown, an unusable official color neither deciding nor earning OFFICIAL, the
-  untouched flag cards below, the back
+  badge by displayFlag's source across fresh and aged official records, the FORECAST hero
+  badge, verdict, meta description and card note for a kind "forecast" record that
+  raises the flag, a more severe estimate kept over a fresh forecast, no
+  badge when the color is unknown, an unusable official color neither deciding nor earning
+  OFFICIAL, the alerts tile reading "None active" only when the echo is non-empty or the
+  seal says the fetch resolved (the real failed-fetch shape renders no tile and a verdict
+  with no "no alerts" clause), the untouched flag cards below, the back
   link and share controls, DETAIL_HERO_SCRIPT's referrer and navigator.share guards, the
   "at a glance" tiles with present, missing and never-checkable data — including the tile
   count when only some readings exist and the omitted section when none do — the shared
@@ -5390,7 +5575,11 @@ test uses symbolically.
   per-page beach_state read, degrading to unknown when the record is absent or past its
   wave_expires, rather than fetching or reading KV, and leaves a stored wave record
   untouched across its own upsert; the alertDetails/ripCurrentRisk
-  echoes land in beach_state.estimate; and the Canadian path (an eccc_zone beach inside a
+  echoes land in beach_state.estimate; the SRF wiring over the captured BOX product under
+  a frozen clock inside TODAY (a MAZ022 beach red on rip risk with the SRF source, a
+  MAZ020 beach wave-colored with LOW echoed, an inland MAZ005 beach with null and no SRF
+  source entry, one fetch per WFO); a malformed NWS body sealing alertsResolved false with
+  no NWS source like a failed fetch; and the Canadian path (an eccc_zone beach inside a
   stubbed GeoMet polygon → ECCC red plus "Environment Canada Alerts" source, no caveat;
   outside every polygon → checked-but-clear, no caveat; a failed ECCC fetch behaves like a
   transient NWS alerts failure). It pins the gather shape: the three national fetches in
@@ -5426,7 +5615,8 @@ test uses symbolically.
   wqfloor column, and /api/beaches.geojson in ONE D1 statement with parity against
   displayFlag's keyword, /api/flag's additive display field, and the cross-surface matrix:
   list, ?ids=, nearby card, hero, share meta, geojson and /api/flag showing one displayFlag
-  decision per fixture, plus builtAt as the newest live estimate_updated (null when none),
+  decision per fixture, a credited forecast labeled forecast on every one of them and an
+  outranked forecast on none, plus builtAt as the newest live estimate_updated (null when none),
   its cache-control, its ETag (shape, determinism, moving on a flag flip), the 304 on a
   matching If-None-Match (W/, comma list and *) and the 5-decimal rounding. It covers the
   shared CACHEABLE directives (max-age + stale-while-revalidate <= 120, finite
@@ -5438,8 +5628,9 @@ test uses symbolically.
   caller's order restored over SQLite's, unknown and malformed ids skipped, the 10-id cap,
   the CACHEABLE header, the absent data-complete, and the absent last_viewed stamp.
 - test/displayFlag.test.js — the decision table, the invariant sweep, chip/blob shape
-  parity, reads-only and purity checks, and the source-scan guard against a second copy of
-  the rule.
+  parity including a forecast row, the forecast mark set only on a credited forecast,
+  reads-only and purity checks (displayFlag reads only color, updated and kind), and the
+  source-scan guard against a second copy of the rule.
 - test/favorites.test.js — the favorites enhancement's rendered surfaces and script text:
   the hidden detail-page toggle (exact markup, escaped id, position in the hero share row),
   the empty hidden "Your Beaches" shell, idsMode dropping data-complete and owning its own

@@ -183,6 +183,26 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   discoverable unauthenticated API, and a dozen-plus county health pages just defer to it. The
   partnership gates 70+ beaches' worth of official data. A ready-to-send outreach email draft
   lives at `docs/swimsmart-outreach-draft.md`.
+- **SRF rip risk has an overnight gap by design.** Most offices forecast daytime periods only
+  (BOX, CAR, GYX, LOX, SGX, ILM, MFL, MHX, MLB, JAX, SJU, CHS print no TONIGHT), so from
+  18:00 to 06:00 local those beaches get no rip input and wave height decides, except where a
+  segment headline names a later end the same evening. An ended period must never decide a
+  color; carrying the day's risk through the night would be a product
+  choice. `SRF_MAX_AGE_MS` is 36 h; any value under 6 days works, and a shorter one trades
+  stale-risk tolerance for more null hours when an office skips an issuance. Period windows
+  use the stamp's fixed offset, so a window spanning a DST transition is off by one hour that
+  night. The Great Lakes "Swim Risk" grammar rides on one synthetic fixture, unverified until a
+  Great Lakes office issues an SRF (none is on file in October: 18 offices answer 500 on
+  `/latest` and an empty list route, which is seasonal, not breakage). The wave strip's rip
+  band could name the resolved period, since the parser now knows it; the estimate echoes only
+  the level.
+- **Alert names seen live and left unmapped.** NWS "Hazardous Seas Watch" and "Gale Watch" are
+  real marine event types pinned null in a test; whether they join `NWS_FLOOR_PRECEDENCE` as
+  yellow floors is a tier decision. "Coastal Flood Statement" is echoed on 169 beaches and maps
+  to nothing. On the ECCC side "hurricane warning", "tropical storm warning" and the marine
+  "hurricane force wind warning" are unmapped. "wreckhouse wind warning" is mapped on
+  inference from the Les Suêtes product; the exact GeoMet string is unverified until a
+  Wreckhouse product is live, and the case fold makes any capitalization of those words match.
 
 ## Scale-out
 
@@ -232,15 +252,15 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   the warning-to-flag gap from up to an hour to about ten minutes on three national fetches
   whose cost is flat in the beach table. Residue: a queue-based stale-refresh (request path
   enqueues, consumer fetches), only if flagless gaps show up in practice.
-- **No feed-completeness gate on the national alert fetches.** Both crons treat a 200 that
-  parsed to zero alerts as a quiet nation, so a schema drift that renamed `properties.event`
-  would clear alert-driven colors nationwide within an hour. If a gate is wanted, its home is
-  inside `fetchAllActiveAlerts` — returning `null` on a response it cannot vouch for, so the
-  hourly and the refresh inherit the same verdict and neither reimplements it. A count
-  cross-check against `api.weather.gov/alerts/active/count` plus a parse-drop bound is the
-  obvious shape; the ECCC collections have no count equivalent, so a Canadian gate needs a
-  different signal. The refresh's own `features` and `parsed` log fields are the current
-  detection: `features` high with `parsed` 0 is drift.
+- **The hourly still writes alert-free colors on a null or malformed national feed.** The
+  three alert clients now answer `null` for a body they cannot vouch for (features missing,
+  non-array, or more than half dropped for shape), which stops the refresh from clearing
+  alert colors six times an hour and seals the gap as `alertsResolved: false`. The hourly,
+  though, still maps every zone to null on that verdict and writes the resulting alert-free
+  color, so a sustained schema drift clears alert-driven colors at the next hourly.
+  Carrying the standing estimate's sealed alert inputs forward instead is a PLAN.md section 7
+  design change. The majority-drop bound has no minimum population, so a near-empty feed
+  with one zoneless feature reads as down for one cadence.
 - **Marine-zone `nws_zone` rows are requeued, not yet re-drained.** A row whose id carries a
   marine prefix has `nws_zone` NULL, and `runNwsEnrichment` rejects a marine `forecastZone`,
   re-probing 16 nudged points for the land zone; recovery needs a few probes each
@@ -250,10 +270,6 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   alerts-unavailable caveat, and skip SRF until `nws_grid_url` is restored. Watch
   `marineUnrecovered=` in the completion log: a beach whose 1 km ring finds no land zone parks
   at the attempts cap, and a large count means the rings need a third radius.
-- **`rules.js` step 3's else branch still has no finite check**, so any future caller passing a
-  non-finite `waveHeightFt` gets green with a nonsense reason. `buildEstimateInputs`
-  (`src/flagInputs.js`) closes the reachable route from a malformed stored wave record; fixing `rules.js`
-  itself is a color-decision change and needs its own `RULES_VERSION` bump.
 - **An ECCC bounding-box prefilter through `idx_beaches_lon_lat`** before exact
   point-in-polygon. Free at today's 354 Canadian rows (112 ms measured); about 6.4 s of CPU at
   20k against the 30 s sub-hour CPU allowance the refresh cron runs under.
@@ -371,12 +387,14 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   example by repurposing a status string, still needs a human to notice.
 - **Scraper health alerting is log-only.** `src/scraperHealth.js` logs a loud `ALERT:` line once
   a matched scraper has returned null for 24 consecutive hourly runs, but nothing pages a human.
-- **`winnetka-tower-beach` reports a clean page as a failure.** The contract (PLAN.md §6)
-  distinguishes "parsed cleanly, nothing to report" (an empty `sites: []` result, a health
-  success) from `null` (a genuine fetch or parse failure). Every other registered scraper
-  complies. Winnetka collapses a non-hazard closure, such as the seasonal "closed for the 2026
-  season" posting, to a `scrape()` null, so its health streak fails every hourly run through
-  the off-season.
+- **`winnetka-tower-beach` hides a seasonal closure.** A recognized "Closed" page whose reason
+  is season, maintenance or staffing is an empty result (nothing on the hazard axis), so a
+  beach "closed for the 2026 season, no swimming and no lifeguards" shows no official at all.
+  The registry's only closure color is red, which means dangerous conditions, so surfacing
+  "closed, unguarded" needs a new display-only field. Unchanged and now pinned by a test: a
+  hazard closure whose reason quotes an NWS "High Surf Advisory" also yields nothing, because
+  the water-quality "advisory" keyword runs first; narrowing it to "water quality advisory" is
+  a separate call.
 - **Deferred: tier-2 HTML entity-decoder consolidation.** `decodeCellText` lives in
   `src/officialSources/util.js`, with the two byte-identical copies folded into it. Five
   near-variants are deliberately left alone: `kenoshaBeachConditions.js` `htmlToText`,
@@ -436,6 +454,11 @@ gaps, not wrong-color risks.
   layer id silently yields no features, which is safe-fail. Candidate Day-1 layers: LOT 16,
   DTX 25, DLH 28, APX 34, GRR 37, GRB 40, MQT 67, MKX 79, IWX 94. Each needs curated
   `SITE_DEFS` and a wider `matches()` bbox.
+- **`nws-marine-beach-forecast` staleness assumes one issuance a day.** The 30 h `staleMs`
+  assumes one issuance a day; MFL issues twice daily and whether the CLE/BUF Day-1 layers
+  refresh with an afternoon update is unverified until spring. The new `forecast-card` class
+  has no rule in `src/frontend/styles.js`, so the card differs from a posted one only by its
+  badge.
 - **`pa-dcnr-presque-isle` hazard-keyword mapping is PROVISIONAL** — the live DCNR
   advisory feed is currently 100% off-axis boilerplate, so the swimming-hazard →
   red mapping is verified only against synthetic fixtures. Re-verify against a real
@@ -452,11 +475,20 @@ gaps, not wrong-color risks.
   an absolute expiry, which changes the rule that the cron path does all scraper fetching and
   needs a PLAN.md design change (probe first whether Azure runner IPs are also refused); relay
   through a non-Cloudflare egress; ask the operator to allowlist; or deregister for the season.
-- **`kenosha-beach-conditions` draws intermittent 403s** from the county's Cloudflare zone,
-  though Worker egress with and without a User-Agent gets 200 on a probe. The fetch sends
-  the project User-Agent, with no evidence yet that it helps. A single miss is ridden out by the
-  2 h wqfloor lease; consecutive misses let a live advisory lapse to no floor. If they persist
-  in season, consider a longer lease for this source or the offline fetch above.
+- **`kenosha-beach-conditions` is blocked by a deterministic Cloudflare WAF rule**, not an
+  intermittent one: a 1020 block page (`Server: cloudflare`, no `cf-mitigated` header, no JS
+  challenge) on the civicplus.io zone refused about 163 of 166 hourly fetches in the week to
+  2026-10-13. From three non-browser clients the project User-Agent alone is blocked on every
+  try, the same request plus `Upgrade-Insecure-Requests: 1` (or any `Sec-Fetch-*` header) is
+  served on every try, and an empty or curl User-Agent is blocked even with that header. A
+  local workerd probe with the project User-Agent alone was served, so Worker egress carries a
+  block factor only a production run can test. The scraper now sends
+  `Upgrade-Insecure-Requests: 1` (no `Sec-Fetch-*`, which are browser-reserved names) as a
+  production experiment: harmless if ignored, since the fetch then returns the same 403 null.
+  Verify over three hourlies after the deploy, looking for the absence of
+  "kenoshaBeachConditions: fetch failed: HTTP 403" and a `scraperhealth:kenosha-beach-conditions`
+  reset. If it still 403s, the block is egress-based and the route is the offline fetch
+  above, not a longer lease; sending `Sec-Fetch-*` is the one untried header step.
 - **`mn-beaches` collapses two stations onto one site.** "Lakewalk Beach" and "Lakewalk East /
   16th Avenue East Beach" both map to `lakewalk`, and the first Not Recommended row wins.
   Splitting them is a product decision.
@@ -504,8 +536,10 @@ downgrade a hazard flag. Caveats for the registered set:
   Safe Beach Day iframe, so every run reads the pinned `SOUTH_HAVEN_CSV_URL` and logs
   "flag page links no sheet". Gray means unmonitored, so no data; colored output is gated to the
   monitored season and hours (America/Detroit); same-named flag poles roll up to most severe.
-  Re-check when the season opens on 2027-05-15. The CSV carries no timestamp, so a sheet the
-  city abandons in season on a colored value would keep publishing that color. If the sheet
+  Re-check when the season opens on 2027-05-15. The CSV carries no timestamp, and neither
+  the CSV response headers, the 307 redirect target nor the published page carry a
+  modification time, so the record is stamped with the run and the season/hours gate is the
+  only protection against a sheet the city abandons in season on a colored value. If the sheet
   stays Gray while safebeachday.com/south-haven-beach shows colors, the feed has moved and
   `southHaven.js` needs a parser for that site's page data.
 - **Chicago Park District `/flag-status` JSON** (`chicago-park-district`) — the payload mixes in
