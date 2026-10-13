@@ -22,7 +22,7 @@ function estimateWith(alertDetails, extra) {
     color: "red",
     reason: "Active NWS alert: Beach Hazards Statement",
     trigger: "nws-alert",
-    rules_version: "1.8.0",
+    rules_version: "1.9.0",
     official: false,
     waveHeightFt: null,
     ripCurrentRisk: null,

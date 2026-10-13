@@ -18,6 +18,7 @@ import {
   estimateFlag
 } from "../src/rules.js";
 import { metersToFeet } from "../src/geo.js";
+import { readFileSync } from "node:fs";
 
 function baseInputs(overrides) {
   const merged = {
@@ -59,6 +60,7 @@ describe("ALERT_PRECEDENCE", function () {
       "Rip Current Statement",
       "High Wind Warning",
       "Gale Warning",
+      "Hazardous Seas Warning",
       "Special Marine Warning",
       "Lakeshore Flood Warning",
       "Coastal Flood Warning"
@@ -107,6 +109,7 @@ describe("NWS_FLOOR_PRECEDENCE", function () {
       "Lake Wind Advisory",
       "Hurricane Force Wind Watch",
       "Small Craft Advisory",
+      "Brisk Wind Advisory",
       "Lakeshore Flood Advisory",
       "Coastal Flood Advisory"
     ]);
@@ -640,8 +643,16 @@ describe("ECCC_ALERT_PRECEDENCE", function () {
       "waterspout warning",
       "severe thunderstorm warning",
       "gale warning",
-      "wind warning"
+      "wind warning",
+      "les su\u00eates wind warning",
+      "wreckhouse wind warning"
     ]);
+  });
+
+  it("writes the Les Su\u00eates key NFC, matching the GeoMet feed byte for byte", function () {
+    const key = ECCC_ALERT_PRECEDENCE[8];
+    expect(key.charCodeAt(6)).toBe(0x00ea);
+    expect(key.normalize("NFC")).toBe(key);
   });
 
   it("lists every double-red before every red", function () {
@@ -948,18 +959,20 @@ describe("estimateFlag - terminal fallbacks (step 5)", function () {
     );
   });
 
-  it("26. ripCurrentRisk LOW, everything else null -> green", function () {
+  it("26. ripCurrentRisk LOW, everything else null -> unknown (LOW never decides a color)", function () {
     const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW" }));
-    expect(result.color).toBe("green");
+    expect(result.color).toBe("unknown");
+    expect(result.trigger).toBe("no-data");
     expect(result.reason).toBe(
-      "NWS surf zone forecast rip current risk: LOW; no wave or wind data available"
+      "No wave or weather data is available for this beach yet"
     );
+    expect(result.ripCurrentRisk).toBe("LOW");
   });
 });
 
 describe("estimateFlag - alerts-not-checkable caveat (alertsCheckable)", function () {
-  it("bumped RULES_VERSION for the alert onset rule", function () {
-    expect(RULES_VERSION).toBe("1.8.0");
+  it("bumped RULES_VERSION for LOW-is-unknown, the ECCC proper-noun wind warnings, the Hazardous Seas / Brisk Wind products and non-finite wave intake", function () {
+    expect(RULES_VERSION).toBe("1.9.0");
   });
 
   it("pins the caveat wording, which every other caveat test uses symbolically", function () {
@@ -1056,6 +1069,7 @@ describe("alertColorForEvent / ripRiskColor", function () {
     expect(alertColorForEvent("Rip Current Statement")).toBe("red");
     expect(alertColorForEvent("High Wind Warning")).toBe("red");
     expect(alertColorForEvent("Gale Warning")).toBe("red");
+    expect(alertColorForEvent("Hazardous Seas Warning")).toBe("red");
     expect(alertColorForEvent("Special Marine Warning")).toBe("red");
     expect(alertColorForEvent("Lakeshore Flood Warning")).toBe("red");
     expect(alertColorForEvent("Coastal Flood Warning")).toBe("red");
@@ -1070,13 +1084,17 @@ describe("alertColorForEvent / ripRiskColor", function () {
     expect(alertColorForEvent("Wind Advisory")).toBe("yellow");
     expect(alertColorForEvent("Lake Wind Advisory")).toBe("yellow");
     expect(alertColorForEvent("Small Craft Advisory")).toBe("yellow");
+    expect(alertColorForEvent("Brisk Wind Advisory")).toBe("yellow");
     expect(alertColorForEvent("Lakeshore Flood Advisory")).toBe("yellow");
     expect(alertColorForEvent("Coastal Flood Advisory")).toBe("yellow");
     expect(alertColorForEvent("Winter Storm Warning")).toBeNull();
+    // Real marine event types left unmapped on purpose: watches are not floors here.
+    expect(alertColorForEvent("Hazardous Seas Watch")).toBeNull();
+    expect(alertColorForEvent("Gale Watch")).toBeNull();
     expect(alertColorForEvent("toString")).toBeNull(); // prototype key, not a mapping
   });
 
-  it("maps every ECCC_ALERT_PRECEDENCE event to its flag color (lowercase, exact match)", function () {
+  it("maps every ECCC_ALERT_PRECEDENCE event to its flag color (case-folded)", function () {
     expect(alertColorForEvent("tornado warning")).toBe("double-red");
     expect(alertColorForEvent("storm surge warning")).toBe("double-red");
     expect(alertColorForEvent("storm warning")).toBe("double-red");
@@ -1085,13 +1103,22 @@ describe("alertColorForEvent / ripRiskColor", function () {
     expect(alertColorForEvent("severe thunderstorm warning")).toBe("red");
     expect(alertColorForEvent("gale warning")).toBe("red");
     expect(alertColorForEvent("wind warning")).toBe("red");
+    expect(alertColorForEvent("les su\u00eates wind warning")).toBe("red");
+    expect(alertColorForEvent("Les Su\u00eates wind warning")).toBe("red");
+    expect(alertColorForEvent("wreckhouse wind warning")).toBe("red");
+    expect(alertColorForEvent("Wreckhouse wind warning")).toBe("red");
     expect(alertColorForEvent("strong wind warning")).toBe("yellow");
     expect(alertColorForEvent("marine weather advisory")).toBe("yellow");
-    // Watches and non-water ECCC products stay unmapped.
+    // Watches and non-water ECCC products stay unmapped, whatever the case.
     expect(alertColorForEvent("severe thunderstorm watch")).toBeNull();
     expect(alertColorForEvent("heat warning")).toBeNull();
-    // Title Case would be an NWS-style string, not what GeoMet serves.
-    expect(alertColorForEvent("Wind Warning")).toBeNull();
+    expect(alertColorForEvent("Heat Warning")).toBeNull();
+    // The ECCC lookup folds case, so Title Case lands on the ECCC key.
+    expect(alertColorForEvent("Wind Warning")).toBe("red");
+    // Non-strings never reach toLowerCase.
+    expect(alertColorForEvent(null)).toBeNull();
+    expect(alertColorForEvent(42)).toBeNull();
+    expect(alertColorForEvent(undefined)).toBeNull();
   });
 
   it("alertAuthorityForEvent attributes events to their issuing body", function () {
@@ -1101,8 +1128,17 @@ describe("alertColorForEvent / ripRiskColor", function () {
     expect(alertAuthorityForEvent("Gale Warning")).toBe("NWS");
     expect(alertAuthorityForEvent("Wind Advisory")).toBe("NWS");
     expect(alertAuthorityForEvent("wind warning")).toBe("Environment Canada");
+    expect(alertAuthorityForEvent("Les Su\u00eates wind warning")).toBe("Environment Canada");
+    expect(alertAuthorityForEvent("Wreckhouse wind warning")).toBe("Environment Canada");
+    expect(alertAuthorityForEvent("Hazardous Seas Warning")).toBe("NWS");
+    expect(alertAuthorityForEvent("Brisk Wind Advisory")).toBe("NWS");
+    // NWS names that fold onto an ECCC key are claimed by the exact NWS lookup first.
+    expect(alertAuthorityForEvent("Storm Warning")).toBe("NWS");
+    expect(alertAuthorityForEvent("Storm Surge Warning")).toBe("NWS");
     expect(alertAuthorityForEvent("heat warning")).toBeNull();
     expect(alertAuthorityForEvent("toString")).toBeNull();
+    expect(alertAuthorityForEvent(null)).toBeNull();
+    expect(alertAuthorityForEvent(42)).toBeNull();
   });
 
   it("maps HIGH -> red, MODERATE -> yellow, everything else -> null", function () {
@@ -1139,10 +1175,11 @@ describe("estimateFlag - output contract", function () {
     expect(estimateFlag(baseInputs({ waveHeightFt: 1.3 })).trigger).toBe("wave-height");
     expect(estimateFlag(baseInputs({ waveHeightFt: 5.0 })).trigger).toBe("wave-height");
     expect(estimateFlag(baseInputs({ windSpeedMph: 20 })).trigger).toBe("wind");
-    expect(estimateFlag(baseInputs({ ripCurrentRisk: "LOW" })).trigger).toBe("rip-current-low");
+    expect(estimateFlag(baseInputs({ ripCurrentRisk: "LOW" })).trigger).toBe("no-data");
     expect(estimateFlag(baseInputs({})).trigger).toBe("no-data");
-    // LOW rip risk with wave data present: wave rule decides, not the LOW fallback.
+    // LOW rip risk with wave or wind data present: that rule decides, never LOW.
     expect(estimateFlag(baseInputs({ ripCurrentRisk: "LOW", waveHeightFt: 1.0 })).trigger).toBe("wave-height");
+    expect(estimateFlag(baseInputs({ ripCurrentRisk: "LOW", windSpeedMph: 10 })).trigger).toBe("wind");
   });
 
   it("reason strings are always non-empty across representative branches", function () {
@@ -1426,5 +1463,307 @@ describe("alertInEffectAt / alertsInEffect / decidedAlertDetails", function () {
     expect(decidedAlertDetails({ alertDetails: all, alertsAt: null })).toEqual(all);
     expect(decidedAlertDetails({ alertDetails: "nope", alertsAt: AT })).toEqual([]);
     expect(decidedAlertDetails(null)).toEqual([]);
+  });
+});
+
+describe("estimateFlag - LOW rip risk never decides a color", function () {
+  it("LOW alone -> unknown, no-data, LOW still echoed", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW" }));
+    expect(result.color).toBe("unknown");
+    expect(result.trigger).toBe("no-data");
+    expect(result.reason).toBe("No wave or weather data is available for this beach yet");
+    expect(result.ripCurrentRisk).toBe("LOW");
+  });
+
+  it("LOW + alerts [] -> unknown (an empty alert list is still not usable)", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", alerts: [] }));
+    expect(result.color).toBe("unknown");
+    expect(result.trigger).toBe("no-data");
+  });
+
+  it("LOW + alertsCheckable false -> unknown with the caveat appended", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", alertsCheckable: false }));
+    expect(result.color).toBe("unknown");
+    expect(result.trigger).toBe("no-data");
+    expect(result.reason).toBe(
+      "No wave or weather data is available for this beach yet (" + ALERTS_UNAVAILABLE_CAVEAT + ")"
+    );
+  });
+
+  it("LOW + a wave reading -> the wave rule decides, with the wave reason", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", waveHeightFt: 1.0 }));
+    expect(result.color).toBe("green");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.reason).toBe("Estimated wave height 1.0 ft (below 2 ft)");
+    const ocean = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", waveHeightFt: 1.99, waterClass: "ocean" }));
+    expect(ocean.color).toBe("green");
+    expect(ocean.trigger).toBe("wave-height");
+  });
+
+  it("LOW + wind -> the wind fallback decides, with the wind reason", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", windSpeedMph: 10 }));
+    expect(result.color).toBe("green");
+    expect(result.trigger).toBe("wind");
+    expect(result.reason).toBe(
+      "No wave data; wind 10 mph sustained, n/a mph gusts (below advisory thresholds)"
+    );
+  });
+
+  it("LOW alone is still floorable: Small Craft Advisory -> yellow nws-floor", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", alerts: ["Small Craft Advisory"] }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Small Craft Advisory");
+  });
+
+  it("LOW alone + strong wind warning -> yellow eccc-floor", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", alerts: ["strong wind warning"] }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("eccc-floor");
+  });
+
+  it("LOW alone + a yellow water-quality advisory -> yellow wq-floor", function () {
+    const result = estimateFlag(baseInputs({
+      ripCurrentRisk: "LOW",
+      waterQualityAdvisory: { color: "yellow", reason: "E. coli exceedance", source: "Test Health Dept" }
+    }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("wq-floor");
+  });
+
+  it("LOW + a non-finite wave reading -> unknown", function () {
+    const result = estimateFlag(baseInputs({ ripCurrentRisk: "LOW", waveHeightFt: NaN }));
+    expect(result.color).toBe("unknown");
+    expect(result.trigger).toBe("no-data");
+    expect(result.waveHeightFt).toBeNull();
+  });
+
+  it("no LOW case ever yields the retired rip-current-low trigger", function () {
+    const cases = [
+      baseInputs({ ripCurrentRisk: "LOW" }),
+      baseInputs({ ripCurrentRisk: "LOW", alerts: [] }),
+      baseInputs({ ripCurrentRisk: "LOW", alertsCheckable: false }),
+      baseInputs({ ripCurrentRisk: "LOW", waveHeightFt: 1.0 }),
+      baseInputs({ ripCurrentRisk: "LOW", windSpeedMph: 10 }),
+      baseInputs({ ripCurrentRisk: "LOW", alerts: ["Small Craft Advisory"] }),
+      baseInputs({ ripCurrentRisk: "LOW", waveHeightFt: NaN })
+    ];
+    for (let i = 0; i < cases.length; i++) {
+      const result = estimateFlag(cases[i]);
+      expect(result.trigger).not.toBe("rip-current-low");
+      expect(result.color).not.toBe(null);
+    }
+  });
+});
+
+describe("estimateFlag - ECCC proper-noun wind warnings (Les Su\u00eates, Wreckhouse)", function () {
+  const feature = JSON.parse(
+    readFileSync(new URL("./fixtures/eccc-les-suetes-wind-warning-2026-10-13.json", import.meta.url), "utf8")
+  );
+  // The raw feed name, before the client's lowercase fold, so rules.js is
+  // exercised on its own fold.
+  const entry = {
+    event: feature.properties.alert_name_en,
+    onset: feature.properties.validity_datetime,
+    ends: feature.properties.event_end_datetime,
+    description: feature.properties.alert_text_en,
+    area: feature.properties.feature_name_en,
+    sender: null
+  };
+
+  it("the live GeoMet feature carries the proper noun capitalized, NFC", function () {
+    expect(entry.event).toBe("Les Su\u00eates wind warning");
+    expect(entry.event.charCodeAt(6)).toBe(0x00ea);
+    expect(entry.onset).toBe("2026-10-14T18:00:00.000Z");
+    expect(entry.ends).toBe("2026-10-15T01:00:00.000Z");
+  });
+
+  it("raw-case Les Su\u00eates wind warning -> red eccc-alert with the lowercase reason", function () {
+    const result = estimateFlag(baseInputs({ alerts: [entry.event] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("eccc-alert");
+    expect(result.reason).toBe("Active Environment Canada alert: les su\u00eates wind warning");
+  });
+
+  it("Wreckhouse wind warning -> red in either case (feed string unverified until a product is live)", function () {
+    expect(estimateFlag(baseInputs({ alerts: ["wreckhouse wind warning"] })).color).toBe("red");
+    const raw = estimateFlag(baseInputs({ alerts: ["Wreckhouse wind warning"] }));
+    expect(raw.color).toBe("red");
+    expect(raw.trigger).toBe("eccc-alert");
+    expect(raw.reason).toBe("Active Environment Canada alert: wreckhouse wind warning");
+  });
+
+  it("beats a calm wave reading, loses to a co-active double-red", function () {
+    const overWaves = estimateFlag(baseInputs({ alerts: [entry.event], waveHeightFt: 1.0 }));
+    expect(overWaves.color).toBe("red");
+    expect(overWaves.trigger).toBe("eccc-alert");
+    const surge = estimateFlag(baseInputs({ alerts: [entry.event, "storm surge warning"] }));
+    expect(surge.color).toBe("double-red");
+    expect(surge.reason).toBe("Active Environment Canada alert: storm surge warning");
+  });
+
+  it("the fixture entry decides nothing before its onset and red after it", function () {
+    const before = "2026-10-13T12:00:00.000Z";
+    const details = [entry];
+    const early = estimateFlag(baseInputs({
+      alerts: alertsInEffect(details, before),
+      alertDetails: details,
+      alertsAt: before,
+      waveHeightFt: 1.0
+    }));
+    expect(alertsInEffect(details, before)).toEqual([]);
+    expect(early.color).toBe("green");
+    expect(early.trigger).toBe("wave-height");
+    expect(early.alertDetails[0].event).toBe(entry.event);
+
+    const after = "2026-10-14T19:00:00.000Z";
+    expect(alertsInEffect(details, after)).toEqual([entry.event]);
+    const live = estimateFlag(baseInputs({
+      alerts: alertsInEffect(details, after),
+      alertDetails: details,
+      alertsAt: after,
+      waveHeightFt: 1.0
+    }));
+    expect(live.color).toBe("red");
+    expect(live.trigger).toBe("eccc-alert");
+  });
+
+  it("the ECCC floor folds case too", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Strong Wind Warning"], waveHeightFt: 1.0 }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("eccc-floor");
+    expect(result.reason).toBe("Active Environment Canada alert: strong wind warning");
+  });
+
+  it("NWS steps still match exactly: a lowercase NWS-only name decides nothing", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["high surf warning"], waveHeightFt: 1.0 }));
+    expect(result.color).toBe("green");
+    expect(result.trigger).toBe("wave-height");
+  });
+
+  it("non-string alert entries do not throw and the string beside them still decides", function () {
+    const result = estimateFlag(baseInputs({ alerts: [null, 42, undefined, "wind warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("eccc-alert");
+    expect(estimateFlag(baseInputs({ alerts: [null, 42] })).color).toBe("unknown");
+  });
+});
+
+describe("estimateFlag - Hazardous Seas Warning and Brisk Wind Advisory", function () {
+  const types = JSON.parse(
+    readFileSync(new URL("./fixtures/nws-alert-types-2026-10-13.json", import.meta.url), "utf8")
+  );
+
+  it("every mapped NWS name is a real api.weather.gov event type", function () {
+    expect(Array.isArray(types.eventTypes)).toBe(true);
+    ALERT_PRECEDENCE.concat(NWS_FLOOR_PRECEDENCE).forEach(function (e) {
+      expect(types.eventTypes).toContain(e);
+    });
+  });
+
+  it("Hazardous Seas Warning -> red nws-alert", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Hazardous Seas Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Hazardous Seas Warning");
+  });
+
+  it("Hazardous Seas Warning beats calm waves and is shadowed by a co-active Storm Warning", function () {
+    const overWaves = estimateFlag(baseInputs({ alerts: ["Hazardous Seas Warning"], waveHeightFt: 1.0 }));
+    expect(overWaves.color).toBe("red");
+    expect(overWaves.trigger).toBe("nws-alert");
+    const storm = estimateFlag(baseInputs({ alerts: ["Hazardous Seas Warning", "Storm Warning"] }));
+    expect(storm.color).toBe("double-red");
+    expect(storm.reason).toBe("Active NWS alert: Storm Warning");
+  });
+
+  it("Hazardous Seas Warning sits directly after Gale Warning, in the red block", function () {
+    const gale = ALERT_PRECEDENCE.indexOf("Gale Warning");
+    expect(ALERT_PRECEDENCE[gale + 1]).toBe("Hazardous Seas Warning");
+    expect(ALERT_PRECEDENCE.indexOf("Brisk Wind Advisory")).toBe(-1);
+  });
+
+  it("Brisk Wind Advisory sits directly after Small Craft Advisory in the floor list", function () {
+    const sca = NWS_FLOOR_PRECEDENCE.indexOf("Small Craft Advisory");
+    expect(NWS_FLOOR_PRECEDENCE[sca + 1]).toBe("Brisk Wind Advisory");
+    expect(NWS_FLOOR_PRECEDENCE.indexOf("Hazardous Seas Warning")).toBe(-1);
+  });
+
+  it("Brisk Wind Advisory raises a wave green to yellow", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Brisk Wind Advisory"], waveHeightFt: 1.0 }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+    expect(result.reason).toBe("Active NWS alert: Brisk Wind Advisory");
+  });
+
+  it("Brisk Wind Advisory raises an unknown to yellow", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Brisk Wind Advisory"] }));
+    expect(result.color).toBe("yellow");
+    expect(result.trigger).toBe("nws-floor");
+  });
+
+  it("Brisk Wind Advisory never downgrades a wave red or a rip red", function () {
+    const wave = estimateFlag(baseInputs({ alerts: ["Brisk Wind Advisory"], waveHeightFt: 5.0 }));
+    expect(wave.color).toBe("red");
+    expect(wave.trigger).toBe("wave-height");
+    const rip = estimateFlag(baseInputs({ alerts: ["Brisk Wind Advisory"], ripCurrentRisk: "HIGH" }));
+    expect(rip.color).toBe("red");
+    expect(rip.trigger).toBe("rip-current");
+  });
+
+  it("Brisk Wind Advisory loses outright to a co-active Gale Warning", function () {
+    const result = estimateFlag(baseInputs({ alerts: ["Brisk Wind Advisory", "Gale Warning"] }));
+    expect(result.color).toBe("red");
+    expect(result.trigger).toBe("nws-alert");
+    expect(result.reason).toBe("Active NWS alert: Gale Warning");
+  });
+});
+
+describe("estimateFlag - non-finite waveHeightFt is treated as null", function () {
+  const garbage = [NaN, Infinity, -Infinity, "3", "", {}, [], true];
+
+  it("decides nothing, echoes null and never throws", function () {
+    for (let i = 0; i < garbage.length; i++) {
+      let result = null;
+      expect(function () {
+        result = estimateFlag(baseInputs({ waveHeightFt: garbage[i] }));
+      }).not.toThrow();
+      expect(result.color).toBe("unknown");
+      expect(result.trigger).toBe("no-data");
+      expect(result.reason).toBe("No wave or weather data is available for this beach yet");
+      expect(result.waveHeightFt).toBeNull();
+    }
+  });
+
+  it("leaves the wind fallback open: NaN + 30 mph -> red, NaN + 10 mph -> green", function () {
+    const red = estimateFlag(baseInputs({ waveHeightFt: NaN, windSpeedMph: 30 }));
+    expect(red.color).toBe("red");
+    expect(red.trigger).toBe("wind");
+    expect(red.reason).toBe(
+      "No wave data; wind 30 mph sustained, n/a mph gusts (at or above 25 mph sustained or 35 mph gust threshold)"
+    );
+    const green = estimateFlag(baseInputs({ waveHeightFt: NaN, windSpeedMph: 10 }));
+    expect(green.color).toBe("green");
+    expect(green.trigger).toBe("wind");
+  });
+
+  it("is still floorable: Infinity + Small Craft Advisory -> yellow, Infinity + wq advisory -> yellow", function () {
+    const nws = estimateFlag(baseInputs({ waveHeightFt: Infinity, alerts: ["Small Craft Advisory"] }));
+    expect(nws.color).toBe("yellow");
+    expect(nws.trigger).toBe("nws-floor");
+    const wq = estimateFlag(baseInputs({
+      waveHeightFt: Infinity,
+      waterQualityAdvisory: { color: "yellow", reason: "E. coli exceedance", source: "Test Health Dept" }
+    }));
+    expect(wq.color).toBe("yellow");
+    expect(wq.trigger).toBe("wq-floor");
+  });
+
+  it("a finite zero is still a reading", function () {
+    const result = estimateFlag(baseInputs({ waveHeightFt: 0 }));
+    expect(result.color).toBe("green");
+    expect(result.trigger).toBe("wave-height");
+    expect(result.reason).toBe("Estimated wave height 0.0 ft (below 2 ft)");
+    expect(result.waveHeightFt).toBe(0);
   });
 });

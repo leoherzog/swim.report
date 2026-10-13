@@ -2,7 +2,7 @@
 // No fetch, no Date, no env, no client imports: structured inputs in, a complete
 // FlagEstimate out. This is the only place an estimated flag color is decided.
 
-export const RULES_VERSION = "1.8.0";
+export const RULES_VERSION = "1.9.0";
 
 // Flag color severity ordering. The raise-only water-quality floor (step 7)
 // compares an advisory's floor color against the already-decided color: it may
@@ -33,8 +33,9 @@ export const ALERTS_UNAVAILABLE_CAVEAT = "weather alerts are not checked here ye
 // NWS alerts that short-circuit the estimate at step 1, in precedence order:
 // tsunami and tropical-cyclone products, beach-hazard products, life-threatening
 // severe-weather warnings, high-wind and lakeshore/coastal-flood warnings, and
-// the marine warnings matched via a beach's marine_zone. All map to red or
-// double-red, so their top precedence can only raise the flag.
+// the marine warnings matched via a beach's marine_zone (Hurricane Force Wind,
+// Storm, Gale, Hazardous Seas, Special Marine). All map to red or double-red, so
+// their top precedence can only raise the flag.
 //
 // Order matters: the loop takes the first match regardless of color, so every
 // double-red must precede every red or a red would shadow it. NWS watches and
@@ -61,6 +62,7 @@ export const ALERT_PRECEDENCE = [
   "Rip Current Statement",
   "High Wind Warning",
   "Gale Warning",                 // marine, 34-47 kt
+  "Hazardous Seas Warning",       // marine, seas hazardous to small craft, same tier as Gale
   "Special Marine Warning",       // marine, short-fused severe
   "Lakeshore Flood Warning",
   "Coastal Flood Warning"
@@ -82,6 +84,7 @@ export const NWS_FLOOR_PRECEDENCE = [
   "Lake Wind Advisory",
   "Hurricane Force Wind Watch",   // marine
   "Small Craft Advisory",         // marine
+  "Brisk Wind Advisory",          // marine, the Small Craft Advisory equivalent on ice-covered Alaska waters
   "Lakeshore Flood Advisory",
   "Coastal Flood Advisory"
 ];
@@ -103,6 +106,7 @@ const ALERT_COLOR_MAP = {
   "Rip Current Statement": "red",
   "High Wind Warning": "red",
   "Gale Warning": "red",
+  "Hazardous Seas Warning": "red",
   "Special Marine Warning": "red",
   "Lakeshore Flood Warning": "red",
   "Coastal Flood Warning": "red",
@@ -117,6 +121,7 @@ const ALERT_COLOR_MAP = {
   "Lake Wind Advisory": "yellow",
   "Hurricane Force Wind Watch": "yellow",
   "Small Craft Advisory": "yellow",
+  "Brisk Wind Advisory": "yellow",
   "Lakeshore Flood Advisory": "yellow",
   "Coastal Flood Advisory": "yellow"
 };
@@ -130,8 +135,12 @@ const ALERT_COLOR_MAP = {
 // wind-fallback red thresholds.
 //
 // Watches are deliberately excluded: mapping a watch to yellow would let it mask
-// a wave-height red under the strict step precedence. Event names exact-match the
-// GeoMet alert_name_en strings, which ECCC serves lowercase.
+// a wave-height red under the strict step precedence. Keys are the GeoMet
+// alert_name_en strings in lowercase. ECCC lowercases its generic names but
+// capitalizes the proper nouns in its two location-based wind warnings ("Les
+// Suêtes wind warning", "Wreckhouse wind warning"), so every ECCC lookup folds
+// the event name with toLowerCase before matching. The ê is written as its
+// escape so the key stays NFC, which is what the feed serves.
 //
 // Marine warnings (src/clients/ecccMarine.js) fold into this same lowercase
 // namespace: "storm warning" (marine >= 48 kt, distinct from the land "storm
@@ -147,7 +156,9 @@ export const ECCC_ALERT_PRECEDENCE = [
   "waterspout warning",
   "severe thunderstorm warning",
   "gale warning",
-  "wind warning"
+  "wind warning",
+  "les su\u00eates wind warning",  // Cape Breton highlands, gusts to 100+ km/h
+  "wreckhouse wind warning"       // southwest Newfoundland; exact feed string unverified until a product is live
 ];
 
 // Marine yellow-floor events, raise-only like NWS_FLOOR_PRECEDENCE. Kept out of
@@ -167,20 +178,31 @@ const ECCC_ALERT_COLOR_MAP = {
   "severe thunderstorm warning": "red",
   "gale warning": "red",
   "wind warning": "red",
+  "les su\u00eates wind warning": "red",
+  "wreckhouse wind warning": "red",
   "strong wind warning": "yellow",
   "marine weather advisory": "yellow"
 };
 
+// The lowercase ECCC key an event name folds to, or null when it is not a
+// string. The exact NWS lookup always runs first, so an NWS name that folds onto
+// an ECCC key (Gale Warning, Storm Warning, Tornado Warning, Storm Surge Warning,
+// Severe Thunderstorm Warning) is attributed to NWS before this is consulted.
+function ecccKeyForEvent(eventName) {
+  return typeof eventName === "string" ? eventName.toLowerCase() : null;
+}
+
 // The flag color a recognized alert maps to, or null for any other event. NWS
-// events (Title Case) and ECCC events (lowercase) share one lookup, since the two
-// namespaces cannot collide. Exported so the frontend's hazard lane colors alert
-// bands from the same mapping the flag decision uses.
+// events match exactly (Title Case); ECCC events match case-folded. Exported so
+// the frontend's hazard lane colors alert bands from the same mapping the flag
+// decision uses.
 export function alertColorForEvent(eventName) {
   if (Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)) {
     return ALERT_COLOR_MAP[eventName];
   }
-  if (Object.prototype.hasOwnProperty.call(ECCC_ALERT_COLOR_MAP, eventName)) {
-    return ECCC_ALERT_COLOR_MAP[eventName];
+  const ecccKey = ecccKeyForEvent(eventName);
+  if (ecccKey !== null && Object.prototype.hasOwnProperty.call(ECCC_ALERT_COLOR_MAP, ecccKey)) {
+    return ECCC_ALERT_COLOR_MAP[ecccKey];
   }
   return null;
 }
@@ -192,7 +214,8 @@ export function alertAuthorityForEvent(eventName) {
   if (Object.prototype.hasOwnProperty.call(ALERT_COLOR_MAP, eventName)) {
     return "NWS";
   }
-  if (Object.prototype.hasOwnProperty.call(ECCC_ALERT_COLOR_MAP, eventName)) {
+  const ecccKey = ecccKeyForEvent(eventName);
+  if (ecccKey !== null && Object.prototype.hasOwnProperty.call(ECCC_ALERT_COLOR_MAP, ecccKey)) {
     return "Environment Canada";
   }
   return null;
@@ -266,8 +289,10 @@ export function decidedAlertDetails(estimate) {
 }
 
 // The flag color a rip-current risk level maps to: HIGH -> red, MODERATE ->
-// yellow, anything else (LOW, null, garbage) -> null. Single home of that
-// mapping — estimateFlag step 2 and the frontend's hazard lane both use it.
+// yellow, anything else (LOW, null, garbage) -> null. LOW never decides a color:
+// it falls through to the wave and wind steps and, with nothing else usable,
+// ends as unknown. Single home of that mapping — estimateFlag step 2 and the
+// frontend's hazard lane both use it.
 export function ripRiskColor(risk) {
   if (risk === "HIGH") {
     return "red";
@@ -331,7 +356,9 @@ export function estimateFlag(inputs) {
   const alertsAt = (typeof source.alertsAt === "string" && source.alertsAt.length > 0)
     ? source.alertsAt : null;
   const ripCurrentRisk = source.ripCurrentRisk !== undefined ? source.ripCurrentRisk : null;
-  const waveHeightFt = source.waveHeightFt !== undefined ? source.waveHeightFt : null;
+  // Finite or null from here on: a non-number or non-finite reading decides
+  // nothing, leaves the wind fallback open and echoes as null.
+  const waveHeightFt = Number.isFinite(source.waveHeightFt) ? source.waveHeightFt : null;
   // beaches.water_class, read from D1 by both crons; it selects the step 3
   // threshold set and is never sealed.
   const waterClass = source.waterClass !== undefined ? source.waterClass : null;
@@ -349,6 +376,15 @@ export function estimateFlag(inputs) {
   // reading can never mask a wave, rip or alert red. It lives inside the estimate
   // (official: false) and is never an official override.
   const waterQualityAdvisory = source.waterQualityAdvisory !== undefined ? source.waterQualityAdvisory : null;
+
+  // The ECCC steps (1b, 6b) match on this case-folded copy, since the feed
+  // capitalizes proper nouns; the NWS steps (1, 6) match the raw names exactly.
+  // Non-string entries pass through unchanged and match nothing.
+  const alertsFolded = alerts === null ? null : (Array.isArray(alerts)
+    ? alerts.map(function (name) {
+        return typeof name === "string" ? name.toLowerCase() : name;
+      })
+    : alerts);
 
   let color = null;
   let reason = null;
@@ -372,12 +408,12 @@ export function estimateFlag(inputs) {
 
   // Step 1b: active Environment Canada alerts, in ECCC_ALERT_PRECEDENCE order.
   // Same alerts input, which the cron fills from ECCC for Canadian beaches: a
-  // beach is enriched for exactly one authority and the two event-name namespaces
-  // cannot collide.
-  if (color === null && alerts !== null) {
+  // beach is enriched for exactly one authority, and step 1 has already claimed
+  // any name that folds onto an ECCC key.
+  if (color === null && alertsFolded !== null) {
     for (let i = 0; i < ECCC_ALERT_PRECEDENCE.length; i++) {
       const eventName = ECCC_ALERT_PRECEDENCE[i];
-      if (alerts.indexOf(eventName) !== -1) {
+      if (alertsFolded.indexOf(eventName) !== -1) {
         color = alertColorForEvent(eventName);
         reason = "Active Environment Canada alert: " + eventName;
         trigger = "eccc-alert";
@@ -396,25 +432,20 @@ export function estimateFlag(inputs) {
     }
   }
 
-  // Step 3: wave height from the NOAA wave grids, already in feet. Color comes
-  // from waveColorForHeight against the water class's thresholds; the per-branch
-  // reason strings are built here and quote the threshold that decided.
+  // Step 3: wave height from the NOAA wave grids, already in feet. waveHeightFt
+  // is finite or null here, so waveColorForHeight never returns null and the
+  // color is its answer; the reason quotes the threshold that decided.
   if (color === null && waveHeightFt !== null) {
     trigger = "wave-height";
     const thresholds = waveThresholdsForWaterClass(waterClass);
-    const waveColor = waveColorForHeight(waveHeightFt, waterClass);
-    if (waveColor === "red") {
-      color = "red";
-      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " +
-        String(thresholds.red) + " ft)";
-    } else if (waveColor === "yellow") {
-      color = "yellow";
-      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (at or above " +
-        String(thresholds.yellow) + " ft)";
+    color = waveColorForHeight(waveHeightFt, waterClass);
+    const heightStr = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft";
+    if (color === "red") {
+      reason = heightStr + " (at or above " + String(thresholds.red) + " ft)";
+    } else if (color === "yellow") {
+      reason = heightStr + " (at or above " + String(thresholds.yellow) + " ft)";
     } else {
-      color = "green";
-      reason = "Estimated wave height " + waveHeightFt.toFixed(1) + " ft (below " +
-        String(thresholds.yellow) + " ft)";
+      reason = heightStr + " (below " + String(thresholds.yellow) + " ft)";
     }
   }
 
@@ -445,17 +476,13 @@ export function estimateFlag(inputs) {
     }
   }
 
-  // Step 5: terminal fallbacks.
+  // Step 5: terminal fallback. Nothing usable decided a color, so the estimate
+  // is unknown. A LOW rip risk is not a green on its own: it says nothing about
+  // waves or wind, and it already rides in the echoed ripCurrentRisk.
   if (color === null) {
-    if (ripCurrentRisk === "LOW") {
-      color = "green";
-      reason = "NWS surf zone forecast rip current risk: LOW; no wave or wind data available";
-      trigger = "rip-current-low";
-    } else {
-      color = "unknown";
-      reason = "No wave or weather data is available for this beach yet";
-      trigger = "no-data";
-    }
+    color = "unknown";
+    reason = "No wave or weather data is available for this beach yet";
+    trigger = "no-data";
   }
 
   // Step 6: NWS yellow-alert floor. An active severe-weather watch or wind, flood
@@ -479,12 +506,12 @@ export function estimateFlag(inputs) {
   // Step 6b: Environment Canada marine yellow floor. A "strong wind warning" or
   // "marine weather advisory" raises a green or unknown estimate to yellow,
   // worst-of like the NWS floor, and never downgrades a decided higher color.
-  // Same lowercase namespace as the ECCC short-circuit warnings, kept separate so
-  // it can only lift.
-  if (alerts !== null && (color === "green" || color === "unknown")) {
+  // Same case-folded namespace as the ECCC short-circuit warnings, kept separate
+  // so it can only lift.
+  if (alertsFolded !== null && (color === "green" || color === "unknown")) {
     for (let i = 0; i < ECCC_FLOOR_PRECEDENCE.length; i++) {
       const eventName = ECCC_FLOOR_PRECEDENCE[i];
-      if (alerts.indexOf(eventName) !== -1) {
+      if (alertsFolded.indexOf(eventName) !== -1) {
         color = "yellow";
         reason = "Active Environment Canada alert: " + eventName;
         trigger = "eccc-floor";
@@ -519,11 +546,6 @@ export function estimateFlag(inputs) {
   if (alertsCheckable === false && trigger !== "nws-alert" && trigger !== "eccc-alert" && trigger !== "nws-floor" && trigger !== "eccc-floor") {
     reason = reason + " (" + ALERTS_UNAVAILABLE_CAVEAT + ")";
   }
-
-  // Echo the structured wave reading whichever branch decided the color, so the UI
-  // can show a "now" wave stat without parsing the reason string.
-  const echoedWaveHeightFt =
-    (typeof waveHeightFt === "number" && isFinite(waveHeightFt)) ? waveHeightFt : null;
 
   // Echo the structured alert details and the rip-current risk level whichever
   // branch decided the color, so the UI's hazard lane never parses the reason
@@ -565,7 +587,9 @@ export function estimateFlag(inputs) {
     official: false,
     sources: sources,
     updated: updated,
-    waveHeightFt: echoedWaveHeightFt,
+    // Already finite or null, so the UI can show a "now" wave stat without
+    // parsing the reason string.
+    waveHeightFt: waveHeightFt,
     alertDetails: echoedAlertDetails,
     alertsAt: alertsAt,
     ripCurrentRisk: echoedRipCurrentRisk

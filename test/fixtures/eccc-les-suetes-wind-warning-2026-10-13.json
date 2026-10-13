@@ -1,0 +1,105 @@
+{
+  "id": "717586901591517951202610130506_fea1-805",
+  "type": "Feature",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -61.04830132,
+          46.11529935
+        ],
+        [
+          -60.86130292,
+          46.35060154
+        ],
+        [
+          -60.74229663,
+          46.49879804
+        ],
+        [
+          -60.71269891,
+          46.58269853
+        ],
+        [
+          -60.7004311,
+          46.61718535
+        ],
+        [
+          -60.70038209,
+          46.61732302
+        ],
+        [
+          -60.6907013,
+          46.64450129
+        ],
+        [
+          -60.64780984,
+          46.76514112
+        ],
+        [
+          -60.64731661,
+          46.76652479
+        ],
+        [
+          -60.62630182,
+          46.82540195
+        ],
+        [
+          -60.55502107,
+          47.02377006
+        ],
+        [
+          -60.55408016,
+          47.02637719
+        ],
+        [
+          -60.4985153,
+          47.18504292
+        ],
+        [
+          -60.77331695,
+          47.11822016
+        ],
+        [
+          -61.62659137,
+          46.09939607
+        ],
+        [
+          -61.48295951,
+          46.0971497
+        ],
+        [
+          -61.04830132,
+          46.11529935
+        ]
+      ]
+    ]
+  },
+  "properties": {
+    "alert_code": "LWW",
+    "alert_type": "warning",
+    "alert_name_en": "Les Suêtes wind warning",
+    "alert_name_fr": "avertissement de vent Les Suêtes",
+    "alert_short_name_en": "Les Suêtes wind",
+    "alert_short_name_fr": "Vent Les Suêtes",
+    "publication_datetime": "2026-10-13T07:54:58.591Z",
+    "expiration_datetime": "2026-10-13T23:54:58.591Z",
+    "validity_datetime": "2026-10-14T18:00:00.000Z",
+    "event_end_datetime": "2026-10-15T01:00:00.000Z",
+    "alert_text_en": "Damaging winds are expected.\n\nA period of strong southeasterly winds is expected.\n\nTime span: Wednesday afternoon until Wednesday evening.\n\nMaximum wind gusts: southeasterly up to 100 km/h.\n\nLocations: Margaree Harbour to Bay St. Lawrence.\n\nHigh-sided vehicles will be pushed around by the wind.\n\nBe prepared to adapt your driving for changing conditions.\n\nWind warnings are issued when there is a significant risk of damaging winds.\n\nPlease continue to monitor alerts and forecasts issued by Environment Canada. To report severe weather, send an email to NSstorm@ec.gc.ca or post reports on social media using #NSStorm.",
+    "alert_text_fr": "Des vents destructeurs sont prévus.\n\nOn prévoit un épisode de vents forts du sud-est.\n\nPériode : mercredi après-midi et mercredi soir.\n\nRafales maximales : du sud-est jusqu'à 100 km/h.\n\nRégion : de Margaree Harbour à Bay St. Lawrence.\n\nLes véhicules à profil élevé seront bousculés par le vent.\n\nSoyez prêts à adapter votre conduite aux conditions changeantes.\n\nUn avertissement de vent est émis lorsqu'il y a un risque important que des vents destructeurs soufflent.\n\nVeuillez continuer à surveiller les alertes et les prévisions émises par Environnement Canada. Pour signaler du temps violent, envoyez un courriel à meteoNS@ec.gc.ca ou publiez un message sur les réseaux sociaux en utilisant #NSMeteo.",
+    "risk_colour_en": "yellow",
+    "risk_colour_fr": "jaune",
+    "confidence_en": "High",
+    "confidence_fr": "élevée",
+    "impact_en": "Moderate",
+    "impact_fr": "modéré",
+    "feature_name_en": "Inverness County - Mabou and north",
+    "feature_name_fr": "comté d'Inverness - Mabou et au nord",
+    "province": "NS",
+    "status_en": "issued",
+    "status_fr": "émis",
+    "feature_id": "fea1-805"
+  }
+}

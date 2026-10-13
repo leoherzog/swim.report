@@ -786,9 +786,9 @@ async function runFlagRecompute(env) {
         // (or absent when there is no live data for this beach).
         const waveInput = waveInputs.get(beach.id);
 
-        // Number.isFinite, not typeof "number": rules.js step 3's else branch has
-        // no finite guard, so a non-finite reading would decide green with a
-        // nonsense reason. Caller-side input validation, not a rule change.
+        // Number.isFinite, not typeof "number": rules.js nulls a non-finite
+        // height itself, but the finite read here keeps one from reaching the
+        // input seal or crediting a wave source label.
         let waveHeightFt = null;
         if (waveInput && Number.isFinite(waveInput.waveHeightFt)) {
           waveHeightFt = waveInput.waveHeightFt;

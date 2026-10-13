@@ -120,10 +120,9 @@ export function buildAlertInputs(beach, alertCtx, nowIso) {
 // updated }), and alertsCheckable recomputed from the beach row.
 //
 // Three normalizations are applied before the values reach rules.js. They are
-// caller-side input validation, not rules: rules.js step 3's else branch has no
-// finite guard, so a non-finite wave height would decide green with a nonsense
-// reason, and JSON.stringify emits null for NaN and Infinity alike, so an
-// unguarded non-finite value would also read back differently than it was
+// caller-side input validation, not rules: rules.js nulls a non-finite wave
+// height itself, but JSON.stringify emits null for NaN and Infinity alike, so
+// an unguarded non-finite value would read back differently than it was
 // written and the two crons would decide different colors from one beach.
 export function buildEstimateInputs(beach, alertPart, signals) {
   const alertHalf = alertPart || { alerts: null, alertDetails: null, alertSources: [], alertsAt: null };

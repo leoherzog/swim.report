@@ -170,17 +170,6 @@ describe("verdictSentence: rip current and wind", function () {
       .toBe("Waves 2 to 4 ft, moderate rip current risk, no alerts.");
   });
 
-  it("leads with a low rip risk when it is the terminal fallback", function () {
-    const estimate = estimateWith({
-      trigger: "rip-current-low",
-      reason: "NWS surf zone forecast rip current risk: LOW; no wave or wind data available",
-      waveHeightFt: null,
-      ripCurrentRisk: "LOW"
-    });
-    expect(verdictFor(estimate, null, null))
-      .toBe("Low rip current risk, no alerts.");
-  });
-
   it("says so when wind is the only signal", function () {
     const estimate = estimateWith({
       color: "yellow",

@@ -226,7 +226,7 @@ export function verdictSentence(estimate, flag, waterClass) {
   } else if (ALERT_TRIGGERS.indexOf(trigger) !== -1) {
     lead = alerts ? alerts : "a weather alert is in effect";
     leadIsEvent = true;
-  } else if (trigger === "rip-current" || trigger === "rip-current-low") {
+  } else if (trigger === "rip-current") {
     lead = rip;
   } else if (trigger === "wave-height") {
     lead = waves;
