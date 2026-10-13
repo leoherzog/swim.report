@@ -42,14 +42,19 @@ const ECCC_ZONES_FETCH_LIMIT = 2000;
 // once per run and matches beaches locally with ecccAlertsForPoint. nowIso drives
 // the expiry filter, so there is no Date.now() inside. Success ->
 //   { alerts: [{ event, onset, ends, description, area, geometry }], sourceUrl }
-// where event = properties.alert_name_en (ECCC serves lowercase names, e.g.
-// "severe thunderstorm warning"), onset = validity_datetime falling back to
+// where event = properties.alert_name_en lowercased (ECCC capitalizes proper
+// nouns, "Les Suêtes wind warning", and rules.js keys on lowercase names),
+// onset = validity_datetime falling back to
 // publication_datetime, ends = event_end_datetime falling back to
 // expiration_datetime, geometry = the alert-region Polygon/MultiPolygon.
 // The collection also returns recently-ended alerts and keeps rows briefly past
 // expiry, so both are dropped here: a status_en of "ended", and a parseable
 // expiration_datetime earlier than nowIso. Features without a usable event name or
-// geometry are skipped. Failure -> null.
+// geometry are skipped. Failure -> null, and so is an unreadable feed: a body
+// whose features is missing or not an array, or one where more than half the
+// features were skipped for shape (no alert_name_en, or no geometry object).
+// Ended and expired features are not shape drops and never trigger that
+// verdict, so a page of recently-ended alerts still succeeds.
 export async function fetchActiveEcccAlerts(nowIso) {
   const url = ECCC_API_BASE + "/collections/weather-alerts/items?f=json" +
     "&limit=" + String(ECCC_ALERTS_FETCH_LIMIT);
@@ -62,7 +67,11 @@ export async function fetchActiveEcccAlerts(nowIso) {
     return null;
   }
   const nowMs = Date.parse(nowIso);
-  const features = Array.isArray(json.features) ? json.features : [];
+  const features = Array.isArray(json.features) ? json.features : null;
+  if (features === null) {
+    console.log("eccc: alerts feed unreadable: features=none");
+    return null;
+  }
   if (features.length >= ECCC_ALERTS_FETCH_LIMIT) {
     console.log(
       "eccc: alerts fetch returned " + String(features.length) +
@@ -71,11 +80,15 @@ export async function fetchActiveEcccAlerts(nowIso) {
     );
   }
   const alerts = [];
+  let dropped = 0;
   for (const feature of features) {
     const props = feature && feature.properties ? feature.properties : null;
-    if (!props || typeof props.alert_name_en !== "string" || props.alert_name_en.length === 0) {
+    if (!props) {
+      dropped = dropped + 1;
       continue;
     }
+    // Ended and expired rows leave before the shape check, so they never count
+    // toward the unreadable verdict.
     if (props.status_en === "ended") {
       continue;
     }
@@ -85,12 +98,16 @@ export async function fetchActiveEcccAlerts(nowIso) {
     if (!Number.isNaN(nowMs) && !Number.isNaN(expiryMs) && expiryMs < nowMs) {
       continue;
     }
-    const geometry = feature.geometry;
-    if (geometry === null || typeof geometry !== "object") {
+    const geometry = feature.geometry ? feature.geometry : null;
+    if (typeof props.alert_name_en !== "string" || props.alert_name_en.length === 0 ||
+        geometry === null || typeof geometry !== "object") {
+      dropped = dropped + 1;
       continue;
     }
     alerts.push({
-      event: props.alert_name_en,
+      // Folded once here so the stored echo and the verdict's ranking share
+      // the lowercase namespace rules.js keys on.
+      event: props.alert_name_en.toLowerCase(),
       onset: pickIsoString(props.validity_datetime, props.publication_datetime),
       ends: pickIsoString(props.event_end_datetime, props.expiration_datetime),
       // Free text for the detail page's alert card, capped by matchedAlerts.
@@ -100,6 +117,13 @@ export async function fetchActiveEcccAlerts(nowIso) {
       area: props.feature_name_en,
       geometry: geometry
     });
+  }
+  if (dropped * 2 > features.length) {
+    console.log(
+      "eccc: alerts feed unreadable: features=" + String(features.length) +
+      " dropped=" + String(dropped)
+    );
+    return null;
   }
   return { alerts: alerts, sourceUrl: url };
 }

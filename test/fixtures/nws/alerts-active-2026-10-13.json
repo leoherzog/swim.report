@@ -1,0 +1,683 @@
+{
+ "@context": [
+  "https://geojson.org/geojson-ld/geojson-context.jsonld",
+  {
+   "@version": "1.1",
+   "wx": "https://api.weather.gov/ontology#",
+   "@vocab": "https://api.weather.gov/ontology#"
+  }
+ ],
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0-KEEPALIVE-30457",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0-KEEPALIVE-30457",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0-KEEPALIVE-30457",
+    "areaDesc": "Montgomery",
+    "geocode": {
+     "SAME": [
+      "024031"
+     ],
+     "UGC": [
+      "MDC031"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/county/MDC031"
+    ],
+    "references": [],
+    "sent": "2026-10-13T13:23:32+00:00",
+    "effective": "2026-10-13T13:23:32+00:00",
+    "onset": null,
+    "expires": "2026-10-13T13:33:32+00:00",
+    "ends": null,
+    "status": "Test",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Unknown",
+    "certainty": "Unknown",
+    "urgency": "Unknown",
+    "event": "Test Message",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS",
+    "headline": null,
+    "description": "Monitoring message only. Please disregard.",
+    "instruction": "Monitoring message only. Please disregard.",
+    "response": "None",
+    "note": "This is only a test for monitoring of vital dissemination systems.",
+    "parameters": {
+     "AWIPSidentifier": [
+      "KEPWBC"
+     ],
+     "WMOidentifier": [
+      "NZUS91 KWBC 131323"
+     ],
+     "BLOCKCHANNEL": [
+      "CMAS",
+      "EAS",
+      "NWEM"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "TST"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.3b338cae3982982689d34ebab1b02e5cd577e6d5.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.3b338cae3982982689d34ebab1b02e5cd577e6d5.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.3b338cae3982982689d34ebab1b02e5cd577e6d5.001.1",
+    "areaDesc": "Mississippi Sound",
+    "geocode": {
+     "SAME": [
+      "077632"
+     ],
+     "UGC": [
+      "GMZ632"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/GMZ632"
+    ],
+    "references": [],
+    "sent": "2026-10-13T07:56:00-05:00",
+    "effective": "2026-10-13T07:56:00-05:00",
+    "onset": "2026-10-13T07:56:00-05:00",
+    "expires": "2026-10-13T10:00:00-05:00",
+    "ends": "2026-10-13T10:00:00-05:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Dense Fog Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Mobile AL",
+    "headline": "Dense Fog Advisory issued October 13 at 7:56AM CDT until October 13 at 10:00AM CDT by NWS Mobile AL",
+    "description": "* WHAT...Dense fog will reduce visibility to 1 NM or less.\n\n* WHERE...Mississippi Sound.\n\n* WHEN...Until 10 AM CDT this morning.\n\n* IMPACTS...Low visibility will make navigation difficult.",
+    "instruction": "If you must navigate, proceed with caution. Use proper fog\nsignals. Make sure all running lights are on. Remember to use\nyour radar and compass.",
+    "response": "Prepare",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "MWWMOB"
+     ],
+     "WMOidentifier": [
+      "WHUS74 KMOB 131256"
+     ],
+     "NWSheadline": [
+      "DENSE FOG ADVISORY IN EFFECT UNTIL 10 AM CDT THIS MORNING"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.NEW.KMOB.MF.Y.0023.261013T1256Z-261013T1500Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-13T10:00:00-05:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "MFY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.abf797a006566fbeccb7cbcaa8cebdd1498d0a82.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.abf797a006566fbeccb7cbcaa8cebdd1498d0a82.002.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.abf797a006566fbeccb7cbcaa8cebdd1498d0a82.002.1",
+    "areaDesc": "Eastern Toole and Liberty; Hill County; Northern Blaine County; Bears Paw Mountains and Southern Blaine; Fergus County below 4500ft; Helena Valley; Meagher County Valleys; Canyon Ferry Area; Missouri Headwaters; Madison River Valley; Gallatin Valley",
+    "geocode": {
+     "SAME": [
+      "030101",
+      "030051",
+      "030041",
+      "030005",
+      "030015",
+      "030027",
+      "030049",
+      "030059",
+      "030007",
+      "030043",
+      "030057",
+      "030031"
+     ],
+     "UGC": [
+      "MTZ304",
+      "MTZ305",
+      "MTZ306",
+      "MTZ311",
+      "MTZ314",
+      "MTZ319",
+      "MTZ321",
+      "MTZ323",
+      "MTZ324",
+      "MTZ325",
+      "MTZ326"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/MTZ304",
+     "https://api.weather.gov/zones/forecast/MTZ305",
+     "https://api.weather.gov/zones/forecast/MTZ306",
+     "https://api.weather.gov/zones/forecast/MTZ311",
+     "https://api.weather.gov/zones/forecast/MTZ314",
+     "https://api.weather.gov/zones/forecast/MTZ319",
+     "https://api.weather.gov/zones/forecast/MTZ321",
+     "https://api.weather.gov/zones/forecast/MTZ323",
+     "https://api.weather.gov/zones/forecast/MTZ324",
+     "https://api.weather.gov/zones/forecast/MTZ325",
+     "https://api.weather.gov/zones/forecast/MTZ326"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.d3288c450cabcfd8f152fc7fd0dd493c6093f5a8.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.d3288c450cabcfd8f152fc7fd0dd493c6093f5a8.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T00:39:00-06:00"
+     }
+    ],
+    "sent": "2026-10-13T06:55:00-06:00",
+    "effective": "2026-10-13T06:55:00-06:00",
+    "onset": "2026-10-13T06:55:00-06:00",
+    "expires": "2026-10-13T12:00:00-06:00",
+    "ends": "2026-10-13T12:00:00-06:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Dense Fog Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Great Falls MT",
+    "headline": "Dense Fog Advisory issued October 13 at 6:55AM MDT until October 13 at 12:00PM MDT by NWS Great Falls MT",
+    "description": "* WHAT...Highly variable visibility as low as one quarter of a mile\nin dense fog.\n\n* WHERE...Portions of central, north central, and southwest Montana.\n\n* WHEN...Until noon MDT today.\n\n* IMPACTS...Low visibility could make driving conditions hazardous.\n\n* ADDITIONAL DETAILS...Below freezing temperatures may lead to a\nglaze of ice on surfaces, most notably on bridges and overpasses.",
+    "instruction": "If driving, slow down, use your headlights, and leave plenty of\ndistance ahead of you.",
+    "response": "Execute",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "NPWTFX"
+     ],
+     "WMOidentifier": [
+      "WWUS75 KTFX 131255"
+     ],
+     "NWSheadline": [
+      "DENSE FOG ADVISORY REMAINS IN EFFECT UNTIL NOON MDT TODAY"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.KTFX.FG.Y.0002.000000T0000Z-261013T1800Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-13T12:00:00-06:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.6500907c0c193c6ae1b8ac9ff9ac424e7011f73c.001.1,2026-10-12T12:25:00-06:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "FGY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9dcf8bf748124b06721ba0884518bcc09b560901.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9dcf8bf748124b06721ba0884518bcc09b560901.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.9dcf8bf748124b06721ba0884518bcc09b560901.001.1",
+    "areaDesc": "Del Norte Vicinity/Northern San Luis Valley Below 8500 Ft; Alamosa  Vicinity/Central San Luis Valley Below 8500 Ft; Southern San Luis Valley",
+    "geocode": {
+     "SAME": [
+      "008105",
+      "008109",
+      "008003",
+      "008021",
+      "008023"
+     ],
+     "UGC": [
+      "COZ069",
+      "COZ070",
+      "COZ071"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/COZ069",
+     "https://api.weather.gov/zones/forecast/COZ070",
+     "https://api.weather.gov/zones/forecast/COZ071"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.2df3509fdf99779a99fa51b73a77d3e9cb9fdc8c.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.2df3509fdf99779a99fa51b73a77d3e9cb9fdc8c.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T01:06:00-06:00"
+     }
+    ],
+    "sent": "2026-10-13T06:46:00-06:00",
+    "effective": "2026-10-13T06:46:00-06:00",
+    "onset": "2026-10-15T00:00:00-06:00",
+    "expires": "2026-10-13T16:00:00-06:00",
+    "ends": "2026-10-15T08:00:00-06:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Possible",
+    "urgency": "Future",
+    "event": "Freeze Watch",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Pueblo CO",
+    "headline": "Freeze Watch issued October 13 at 6:46AM MDT until October 15 at 8:00AM MDT by NWS Pueblo CO",
+    "description": "* WHAT...Sub-freezing temperatures as low as 27 possible.\n\n* WHERE...The San Luis Valley.\n\n* WHEN...From late Wednesday night through Thursday morning.\n\n* IMPACTS...Frost and freeze conditions could kill crops, other\nsensitive vegetation and possibly damage unprotected outdoor\nplumbing.\n\n* ADDITIONAL DETAILS...A killing freeze will be possible which could\nbring an end to the growing season across the San Luis Valley.",
+    "instruction": "Take steps now to protect tender plants from the cold.",
+    "response": "Prepare",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "NPWPUB"
+     ],
+     "WMOidentifier": [
+      "WWUS75 KPUB 131246"
+     ],
+     "NWSheadline": [
+      "FREEZE WATCH REMAINS IN EFFECT FROM LATE WEDNESDAY NIGHT THROUGH THURSDAY MORNING"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.KPUB.FZ.A.0005.261015T0600Z-261015T1400Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-15T08:00:00-06:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "FZA"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.fc22def3cd51f7cfd4a75a5097573d97334b7ae3.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.fc22def3cd51f7cfd4a75a5097573d97334b7ae3.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.fc22def3cd51f7cfd4a75a5097573d97334b7ae3.001.1",
+    "areaDesc": "Admiralty Island",
+    "geocode": {
+     "SAME": [
+      "002105"
+     ],
+     "UGC": [
+      "AKZ324"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/AKZ324"
+    ],
+    "references": [],
+    "sent": "2026-10-13T04:26:00-08:00",
+    "effective": "2026-10-13T04:26:00-08:00",
+    "onset": "2026-10-15T04:00:00-08:00",
+    "expires": "2026-10-13T12:30:00-08:00",
+    "ends": "2026-10-15T09:00:00-08:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Dense Fog Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Juneau AK",
+    "headline": "Dense Fog Advisory issued October 13 at 4:26AM AKDT until October 15 at 9:00AM AKDT by NWS Juneau AK",
+    "description": "* WHAT...Visibility down to 1/4 mile in dense fog.\n\n* WHERE...Admiralty Island.\n\n* WHEN...From 4 AM to 9 AM AKDT Thursday.\n\n* IMPACTS...Low visibility could make travel conditions hazardous.",
+    "instruction": null,
+    "response": "Execute",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "NPWAJK"
+     ],
+     "WMOidentifier": [
+      "WWAK77 PAJK 131226"
+     ],
+     "NWSheadline": [
+      "DENSE FOG ADVISORY IN EFFECT FROM 4 AM TO 9 AM AKDT THURSDAY"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.NEW.PAJK.FG.Y.0039.261015T1200Z-261015T1700Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-15T09:00:00-08:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "FGY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.fc22def3cd51f7cfd4a75a5097573d97334b7ae3.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.fc22def3cd51f7cfd4a75a5097573d97334b7ae3.002.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.fc22def3cd51f7cfd4a75a5097573d97334b7ae3.002.1",
+    "areaDesc": "Petersburg Borough",
+    "geocode": {
+     "SAME": [
+      "002195"
+     ],
+     "UGC": [
+      "AKZ326"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/AKZ326"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.6ff27f1f10f8c0bd14c05e0cce9bd57e3c4aa52b.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.6ff27f1f10f8c0bd14c05e0cce9bd57e3c4aa52b.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-12T20:33:00-08:00"
+     }
+    ],
+    "sent": "2026-10-13T04:26:00-08:00",
+    "effective": "2026-10-13T04:26:00-08:00",
+    "onset": "2026-10-13T04:26:00-08:00",
+    "expires": "2026-10-13T11:00:00-08:00",
+    "ends": "2026-10-13T11:00:00-08:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Dense Fog Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Juneau AK",
+    "headline": "Dense Fog Advisory issued October 13 at 4:26AM AKDT until October 13 at 11:00AM AKDT by NWS Juneau AK",
+    "description": "* WHAT...Visibility down to 1/4 mile in dense fog.\n\n* WHERE...Petersburg Borough.\n\n* WHEN...Until 11 AM AKDT this morning.\n\n* IMPACTS...Low visibility could make travel conditions hazardous.",
+    "instruction": "If driving, slow down, use your headlights, and leave plenty of\ndistance ahead of you.",
+    "response": "Execute",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "NPWAJK"
+     ],
+     "WMOidentifier": [
+      "WWAK77 PAJK 131226"
+     ],
+     "NWSheadline": [
+      "DENSE FOG ADVISORY REMAINS IN EFFECT UNTIL 11 AM AKDT THIS MORNING"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.PAJK.FG.Y.0038.000000T0000Z-261013T1900Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-13T11:00:00-08:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "FGY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.6977c3c617e626ae29ac52f644e1d60bb4e42b3d.001.3",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.6977c3c617e626ae29ac52f644e1d60bb4e42b3d.001.3",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.6977c3c617e626ae29ac52f644e1d60bb4e42b3d.001.3",
+    "areaDesc": "Icy Cape to Cape Suckling out to 15 NM",
+    "geocode": {
+     "SAME": [
+      "058652"
+     ],
+     "UGC": [
+      "PKZ652"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/PKZ652"
+    ],
+    "references": [],
+    "sent": "2026-10-13T04:15:00-08:00",
+    "effective": "2026-10-13T04:15:00-08:00",
+    "onset": "2026-10-14T22:00:00-08:00",
+    "expires": "2026-10-13T12:15:00-08:00",
+    "ends": "2026-10-15T04:00:00-08:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Gale Warning",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Juneau AK",
+    "headline": "Gale Warning issued October 13 at 4:15AM AKDT until October 15 at 4:00AM AKDT by NWS Juneau AK",
+    "description": "* WHAT...For the first Small Craft Advisory, east winds 15 to 25\nkt expected. For the second Small Craft Advisory, east winds\n20 to 30 kt with gusts up to 35 kt and seas 6 to 9 ft\nexpected. For the first Gale Warning, east winds 25 to 35 kt\nwith gusts up to 50 kt and seas 9 to 14 ft expected. For the\nthird Small Craft Advisory, east winds 25 to 35 kt with gusts\nup to 45 kt and seas 13 to 18 ft expected. For the second Gale\nWarning, east winds 25 to 35 kt with gusts up to 40 kt and\nseas 14 to 19 ft expected. For the additional Small Craft\nAdvisory, southeast winds 20 to 30 kt with gusts up to 40 kt\nand seas 12 to 17 ft expected.\n\n* WHERE...Icy Cape to Cape Suckling out to 15 NM.\n\n* WHEN...For the first Small Craft Advisory, from 10 AM this\nmorning to 6 PM AKDT this evening. For the second Small Craft\nAdvisory, from 4 PM to 10 PM AKDT Wednesday. For the first\nGale Warning, from 10 PM Wednesday to 4 AM AKDT Thursday. For\nthe third Small Craft Advisory, from 4 AM to 10 AM AKDT\nThursday. For the second Gale Warning, from 10 AM to 4 PM AKDT\nThursday. For the additional Small Craft Advisory, from 4 PM\nThursday to 4 AM AKDT Friday.\n\n* IMPACTS...Strong winds will cause hazardous seas which could\ncapsize or damage vessels and reduce visibility.",
+    "instruction": "Mariners should alter plans to avoid these hazardous conditions.\nRemain in port, seek safe harbor, alter course, and/or secure the\nvessel for hazardous conditions.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "MWWAJK"
+     ],
+     "WMOidentifier": [
+      "WHAK77 PAJK 131215"
+     ],
+     "NWSheadline": [
+      "SMALL CRAFT ADVISORY REMAINS IN EFFECT FROM 10 AM THIS MORNING TO 6 PM AKDT THIS EVENING... ...SMALL CRAFT ADVISORY IN EFFECT FROM 4 PM TO 10 PM AKDT WEDNESDAY... ...GALE WARNING IN EFFECT FROM 10 PM WEDNESDAY TO 4 AM AKDT THURSDAY... ...SMALL CRAFT ADVISORY IN EFFECT FROM 4 AM TO 10 AM AKDT THURSDAY... ...GALE WARNING IN EFFECT FROM 10 AM TO 4 PM AKDT THURSDAY... ...SMALL CRAFT ADVISORY IN EFFECT FROM 4 PM THURSDAY TO 4 AM AKDT FRIDAY"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.NEW.PAJK.GL.W.0111.261015T0600Z-261015T1200Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-15T04:00:00-08:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "GLW"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.6977c3c617e626ae29ac52f644e1d60bb4e42b3d.003.3",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.6977c3c617e626ae29ac52f644e1d60bb4e42b3d.003.3",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.6977c3c617e626ae29ac52f644e1d60bb4e42b3d.003.3",
+    "areaDesc": "Dixon Entrance to Cape Decision from 15 to 90 NM; Cape Decision to Cape Edgecumbe from 15 to 80 NM; Cape Edgecumbe to Cape Spencer from 15 to 80 NM",
+    "geocode": {
+     "SAME": [
+      "058661",
+      "058662",
+      "058663"
+     ],
+     "UGC": [
+      "PKZ661",
+      "PKZ662",
+      "PKZ663"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/PKZ661",
+     "https://api.weather.gov/zones/forecast/PKZ662",
+     "https://api.weather.gov/zones/forecast/PKZ663"
+    ],
+    "references": [],
+    "sent": "2026-10-13T04:15:00-08:00",
+    "effective": "2026-10-13T04:15:00-08:00",
+    "onset": "2026-10-15T10:00:00-08:00",
+    "expires": "2026-10-13T12:15:00-08:00",
+    "ends": "2026-10-16T04:00:00-08:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Small Craft Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Juneau AK",
+    "headline": "Small Craft Advisory issued October 13 at 4:15AM AKDT until October 16 at 4:00AM AKDT by NWS Juneau AK",
+    "description": "* WHAT...For the first Small Craft Advisory, southeast winds 25\nto 35 kt and seas 7 to 12 ft expected. For the Gale Warning,\nsoutheast winds 30 to 40 kt with gusts up to 45 kt and seas 13\nto 18 ft expected. For the second Small Craft Advisory, south\nwinds 25 to 35 kt with gusts up to 40 kt and seas 12 to 17 ft\nexpected.\n\n* WHERE...Dixon Entrance to Cape Decision from 15 to 90 NM, Cape\nDecision to Cape Edgecumbe from 15 to 80 NM and Cape Edgecumbe\nto Cape Spencer from 15 to 80 NM.\n\n* WHEN...For the first Small Craft Advisory, from 7 PM Wednesday\nto 1 AM AKDT Thursday. For the Gale Warning, from 1 AM to 10\nAM AKDT Thursday. For the second Small Craft Advisory, from 10\nAM Thursday to 4 AM AKDT Friday.\n\n* IMPACTS...Strong winds will cause hazardous seas which could\ncapsize or damage vessels and reduce visibility.",
+    "instruction": "Mariners should alter plans to avoid these hazardous conditions.\nRemain in port, seek safe harbor, alter course, and/or secure the\nvessel for hazardous conditions.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "MWWAJK"
+     ],
+     "WMOidentifier": [
+      "WHAK77 PAJK 131215"
+     ],
+     "NWSheadline": [
+      "SMALL CRAFT ADVISORY IN EFFECT FROM 7 PM WEDNESDAY TO 1 AM AKDT THURSDAY... ...GALE WARNING IN EFFECT FROM 1 AM TO 10 AM AKDT THURSDAY... ...SMALL CRAFT ADVISORY IN EFFECT FROM 10 AM THURSDAY TO 4 AM AKDT FRIDAY"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.NEW.PAJK.SC.Y.0328.261015T1800Z-261016T1200Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-16T04:00:00-08:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "SCY"
+     ]
+    }
+   }
+  }
+ ],
+ "title": "Current watches, warnings, and advisories",
+ "updated": "2026-10-13T13:23:37+00:00"
+}

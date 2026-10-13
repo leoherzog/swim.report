@@ -46,8 +46,8 @@ const NO_DATA_SENTENCE = "No data yet for this beach.";
 
 // Every alert rules.js can act on, concatenated in the order estimateFlag
 // consults the lists: the two short-circuit precedences first, then the two
-// yellow floors. NWS names are Title Case and ECCC names lowercase, so the two
-// namespaces cannot collide in one flat list.
+// yellow floors. NWS echoes are Title Case and both ECCC clients store their
+// echoes lowercase, the case each list uses, so an exact match ranks them.
 const EVENT_PRECEDENCE = ALERT_PRECEDENCE
   .concat(ECCC_ALERT_PRECEDENCE)
   .concat(NWS_FLOOR_PRECEDENCE)
@@ -150,17 +150,28 @@ function waveClause(band, waterClass) {
   return "waves " + lowerFirst(bandLabelsForWaterClass(waterClass)[band]).replace("–", " to ");
 }
 
-// "no alerts" is a claim about what was checked, and an echoed empty
-// alertDetails cannot carry it: a failed national fetch leaves a zone-enriched
-// beach with an empty list and no caveat either. The estimateInputs seal's
-// alertsResolved is the fact about that run's fetch, read fail-closed so a
-// legacy or reshaped seal drops the claim rather than guessing.
+/**
+ * Whether the run that wrote this estimate resolved its alert fetch. An echoed
+ * empty alertDetails cannot say so: a failed national fetch leaves a
+ * zone-enriched beach with an empty list and no caveat either. Read fail-closed
+ * off the estimateInputs seal, so a legacy or reshaped seal answers false.
+ * @param {?Object} estimate the live estimate blob
+ * @returns {boolean} true only when the seal carries alertsResolved === true
+ */
+export function alertsChecked(estimate) {
+  if (!estimate || typeof estimate !== "object") {
+    return false;
+  }
+  const seal = estimate.estimateInputs;
+  return !!seal && typeof seal === "object" && seal.alertsResolved === true;
+}
+
+// "no alerts" is a claim about what was checked, so the seal decides it.
 function noAlertsClause(estimate) {
   if (!Array.isArray(estimate.alertDetails) || estimate.alertDetails.length > 0) {
     return "";
   }
-  const seal = estimate.estimateInputs;
-  if (!seal || typeof seal !== "object" || seal.alertsResolved !== true) {
+  if (!alertsChecked(estimate)) {
     return "";
   }
   const reason = typeof estimate.reason === "string" ? estimate.reason : "";

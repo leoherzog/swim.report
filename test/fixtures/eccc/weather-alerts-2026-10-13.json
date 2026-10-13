@@ -1,0 +1,440 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "id": "421012701539556581202610120504_fea1-1068",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -72.48554095,
+       45.00458012
+      ],
+      [
+       -72.48580081,
+       45.00871555
+      ],
+      [
+       -72.47978164,
+       45.15791006
+      ],
+      [
+       -72.47908737,
+       45.23267042
+      ],
+      [
+       -72.51644522,
+       45.23320023
+      ],
+      [
+       -73.05627134,
+       45.23323434
+      ],
+      [
+       -73.06368409,
+       45.23321228
+      ],
+      [
+       -73.06419487,
+       45.23109048
+      ],
+      [
+       -73.0888238,
+       45.12856333
+      ],
+      [
+       -73.10267234,
+       45.07099647
+      ],
+      [
+       -73.11702908,
+       45.01189416
+      ],
+      [
+       -72.74817562,
+       45.01562126
+      ],
+      [
+       -72.51607889,
+       45.00458987
+      ],
+      [
+       -72.48554095,
+       45.00458012
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "alert_code": "SPS",
+    "alert_type": "statement",
+    "alert_name_en": "special weather statement",
+    "alert_name_fr": "bulletin météorologique spécial",
+    "alert_short_name_en": "Special weather",
+    "alert_short_name_fr": "Météorologique spécial",
+    "publication_datetime": "2026-10-13T09:11:32.275Z",
+    "expiration_datetime": "2026-10-14T01:11:32.275Z",
+    "validity_datetime": "2026-10-13T12:00:00.000Z",
+    "event_end_datetime": "2026-10-14T12:00:00.000Z",
+    "alert_text_en": "A rainy day on Tuesday\n\nWhat: Rainfall amounts reaching 30 to 50 millimetres and causing water pooling on roads and in low-lying areas.\n\nWhen: From this morning through overnight tomorrow night\n\nWhere: the Bois-Francs and Eastern Townships.\n\nAdditional information:\nA nearly stationary warm front associated with a low pressure system sliding south of the border will give conditions favorable for the passage of bands of heavy rain over these areas.\n\nPlease continue to monitor alerts and forecasts issued by Environment Canada. To report severe weather, send an email to QCstorm@ec.gc.ca or post reports on social media using #QCStorm.",
+    "alert_text_fr": "Journée pluvieuse mardi\n\nQuoi : des quantités de pluie pouvant atteindre de 30 à 50 millimètres et causer des accumulations d’eau sur les routes et dans les basses terres.\n\nQuand : à partir de ce matin jusqu'à la nuit prochaine\n\nOù : Dans les Bois-Francs et l'Estrie\n\nInformations supplémentaires :\nUn front chaud quasi-stationnaire associé à une dépression glissant au sud de la frontière favorisera le passage des bandes de pluie forte sur nos régions.\n\nVeuillez continuer à surveiller les alertes et les prévisions émises par Environnement Canada. Pour signaler du temps violent, envoyez un courriel à meteoQC@ec.gc.ca ou publiez un message sur les réseaux sociaux en utilisant #meteoqc.",
+    "risk_colour_en": null,
+    "risk_colour_fr": null,
+    "confidence_en": null,
+    "confidence_fr": null,
+    "impact_en": null,
+    "impact_fr": null,
+    "feature_name_en": "Brome-Missisquoi area",
+    "feature_name_fr": "secteur de Brome-Missisquoi",
+    "province": "QC",
+    "status_en": "continued",
+    "status_fr": "maintenu",
+    "feature_id": "fea1-1068"
+   }
+  },
+  {
+   "id": "421012701539556581202610120504_fea1-1062",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -71.84898741,
+       46.36700589
+      ],
+      [
+       -71.99969203,
+       46.5328836
+      ],
+      [
+       -72.0003998,
+       46.54656761
+      ],
+      [
+       -72.00057846,
+       46.55002063
+      ],
+      [
+       -72.00175592,
+       46.57276538
+      ],
+      [
+       -72.00276643,
+       46.59765831
+      ],
+      [
+       -72.00530522,
+       46.59577833
+      ],
+      [
+       -72.03181307,
+       46.57613619
+      ],
+      [
+       -72.10113914,
+       46.57295361
+      ],
+      [
+       -72.20440086,
+       46.53824586
+      ],
+      [
+       -72.26692747,
+       46.43022758
+      ],
+      [
+       -72.34796386,
+       46.42112294
+      ],
+      [
+       -72.50393968,
+       46.35326023
+      ],
+      [
+       -72.49770512,
+       46.34783553
+      ],
+      [
+       -72.48644159,
+       46.33664006
+      ],
+      [
+       -72.47571622,
+       46.32597343
+      ],
+      [
+       -72.24976136,
+       46.09987094
+      ],
+      [
+       -71.84974756,
+       46.36653491
+      ],
+      [
+       -71.84898741,
+       46.36700589
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "alert_code": "SPS",
+    "alert_type": "statement",
+    "alert_name_en": "special weather statement",
+    "alert_name_fr": "bulletin météorologique spécial",
+    "alert_short_name_en": "Special weather",
+    "alert_short_name_fr": "Météorologique spécial",
+    "publication_datetime": "2026-10-13T09:11:32.275Z",
+    "expiration_datetime": "2026-10-14T01:11:32.275Z",
+    "validity_datetime": "2026-10-13T12:00:00.000Z",
+    "event_end_datetime": "2026-10-14T12:00:00.000Z",
+    "alert_text_en": "A rainy day on Tuesday\n\nWhat: Rainfall amounts reaching 30 to 50 millimetres and causing water pooling on roads and in low-lying areas.\n\nWhen: From this morning through overnight tomorrow night\n\nWhere: the Bois-Francs and Eastern Townships.\n\nAdditional information:\nA nearly stationary warm front associated with a low pressure system sliding south of the border will give conditions favorable for the passage of bands of heavy rain over these areas.\n\nPlease continue to monitor alerts and forecasts issued by Environment Canada. To report severe weather, send an email to QCstorm@ec.gc.ca or post reports on social media using #QCStorm.",
+    "alert_text_fr": "Journée pluvieuse mardi\n\nQuoi : des quantités de pluie pouvant atteindre de 30 à 50 millimètres et causer des accumulations d’eau sur les routes et dans les basses terres.\n\nQuand : à partir de ce matin jusqu'à la nuit prochaine\n\nOù : Dans les Bois-Francs et l'Estrie\n\nInformations supplémentaires :\nUn front chaud quasi-stationnaire associé à une dépression glissant au sud de la frontière favorisera le passage des bandes de pluie forte sur nos régions.\n\nVeuillez continuer à surveiller les alertes et les prévisions émises par Environnement Canada. Pour signaler du temps violent, envoyez un courriel à meteoQC@ec.gc.ca ou publiez un message sur les réseaux sociaux en utilisant #meteoqc.",
+    "risk_colour_en": null,
+    "risk_colour_fr": null,
+    "confidence_en": null,
+    "confidence_fr": null,
+    "impact_en": null,
+    "impact_fr": null,
+    "feature_name_en": "Bécancour - Villeroy area",
+    "feature_name_fr": "secteur de Bécancour - Villeroy",
+    "province": "QC",
+    "status_en": "continued",
+    "status_fr": "maintenu",
+    "feature_id": "fea1-1062"
+   }
+  },
+  {
+   "id": "421012701539556581202610120504_fea1-1074",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -71.2936216,
+       45.29890291
+      ],
+      [
+       -71.29372635,
+       45.29906764
+      ],
+      [
+       -71.29437522,
+       45.29901925
+      ],
+      [
+       -71.29547329,
+       45.29893735
+      ],
+      [
+       -71.71644081,
+       45.26653157
+      ],
+      [
+       -72.08244815,
+       45.24989671
+      ],
+      [
+       -72.08310389,
+       45.24986556
+      ],
+      [
+       -72.08310905,
+       45.01653644
+      ],
+      [
+       -72.08200171,
+       45.00648033
+      ],
+      [
+       -72.08193891,
+       45.00590992
+      ],
+      [
+       -72.08171705,
+       45.00389465
+      ],
+      [
+       -71.5269871,
+       45.01310688
+      ],
+      [
+       -71.49745776,
+       45.01356744
+      ],
+      [
+       -71.48959897,
+       45.04445903
+      ],
+      [
+       -71.49945964,
+       45.04930459
+      ],
+      [
+       -71.49395371,
+       45.06734367
+      ],
+      [
+       -71.47012301,
+       45.08104744
+      ],
+      [
+       -71.42481414,
+       45.12549926
+      ],
+      [
+       -71.42476897,
+       45.12557675
+      ],
+      [
+       -71.43035809,
+       45.14194995
+      ],
+      [
+       -71.39190266,
+       45.2106783
+      ],
+      [
+       -71.42399956,
+       45.23006909
+      ],
+      [
+       -71.38580992,
+       45.23071824
+      ],
+      [
+       -71.35397623,
+       45.25279945
+      ],
+      [
+       -71.35359949,
+       45.26447148
+      ],
+      [
+       -71.30819868,
+       45.28259074
+      ],
+      [
+       -71.2936216,
+       45.29890291
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "alert_code": "SPS",
+    "alert_type": "statement",
+    "alert_name_en": "special weather statement",
+    "alert_name_fr": "bulletin météorologique spécial",
+    "alert_short_name_en": "Special weather",
+    "alert_short_name_fr": "Météorologique spécial",
+    "publication_datetime": "2026-10-13T09:11:32.275Z",
+    "expiration_datetime": "2026-10-14T01:11:32.275Z",
+    "validity_datetime": "2026-10-13T12:00:00.000Z",
+    "event_end_datetime": "2026-10-14T12:00:00.000Z",
+    "alert_text_en": "A rainy day on Tuesday\n\nWhat: Rainfall amounts reaching 30 to 50 millimetres and causing water pooling on roads and in low-lying areas.\n\nWhen: From this morning through overnight tomorrow night\n\nWhere: the Bois-Francs and Eastern Townships.\n\nAdditional information:\nA nearly stationary warm front associated with a low pressure system sliding south of the border will give conditions favorable for the passage of bands of heavy rain over these areas.\n\nPlease continue to monitor alerts and forecasts issued by Environment Canada. To report severe weather, send an email to QCstorm@ec.gc.ca or post reports on social media using #QCStorm.",
+    "alert_text_fr": "Journée pluvieuse mardi\n\nQuoi : des quantités de pluie pouvant atteindre de 30 à 50 millimètres et causer des accumulations d’eau sur les routes et dans les basses terres.\n\nQuand : à partir de ce matin jusqu'à la nuit prochaine\n\nOù : Dans les Bois-Francs et l'Estrie\n\nInformations supplémentaires :\nUn front chaud quasi-stationnaire associé à une dépression glissant au sud de la frontière favorisera le passage des bandes de pluie forte sur nos régions.\n\nVeuillez continuer à surveiller les alertes et les prévisions émises par Environnement Canada. Pour signaler du temps violent, envoyez un courriel à meteoQC@ec.gc.ca ou publiez un message sur les réseaux sociaux en utilisant #meteoqc.",
+    "risk_colour_en": null,
+    "risk_colour_fr": null,
+    "confidence_en": null,
+    "confidence_fr": null,
+    "impact_en": null,
+    "impact_fr": null,
+    "feature_name_en": "Coaticook area",
+    "feature_name_fr": "secteur de Coaticook",
+    "province": "QC",
+    "status_en": "continued",
+    "status_fr": "maintenu",
+    "feature_id": "fea1-1074"
+   }
+  },
+  {
+   "id": "421012701539556581202610120504_fea1-1076",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -71.2828494,
+       45.29923943
+      ],
+      [
+       -71.28313357,
+       45.30039293
+      ],
+      [
+       -71.29976979,
+       45.54985834
+      ],
+      [
+       -71.71643593,
+       45.4998627
+      ],
+      [
+       -71.71644067,
+       45.27358708
+      ],
+      [
+       -71.71644081,
+       45.26653157
+      ],
+      [
+       -71.29547329,
+       45.29893735
+      ],
+      [
+       -71.29437522,
+       45.29901925
+      ],
+      [
+       -71.29372635,
+       45.29906764
+      ],
+      [
+       -71.2936216,
+       45.29890291
+      ],
+      [
+       -71.2828494,
+       45.29923943
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "alert_code": "SPS",
+    "alert_type": "statement",
+    "alert_name_en": "special weather statement",
+    "alert_name_fr": "bulletin météorologique spécial",
+    "alert_short_name_en": "Special weather",
+    "alert_short_name_fr": "Météorologique spécial",
+    "publication_datetime": "2026-10-13T09:11:32.275Z",
+    "expiration_datetime": "2026-10-14T01:11:32.275Z",
+    "validity_datetime": "2026-10-13T12:00:00.000Z",
+    "event_end_datetime": "2026-10-14T12:00:00.000Z",
+    "alert_text_en": "A rainy day on Tuesday\n\nWhat: Rainfall amounts reaching 30 to 50 millimetres and causing water pooling on roads and in low-lying areas.\n\nWhen: From this morning through overnight tomorrow night\n\nWhere: the Bois-Francs and Eastern Townships.\n\nAdditional information:\nA nearly stationary warm front associated with a low pressure system sliding south of the border will give conditions favorable for the passage of bands of heavy rain over these areas.\n\nPlease continue to monitor alerts and forecasts issued by Environment Canada. To report severe weather, send an email to QCstorm@ec.gc.ca or post reports on social media using #QCStorm.",
+    "alert_text_fr": "Journée pluvieuse mardi\n\nQuoi : des quantités de pluie pouvant atteindre de 30 à 50 millimètres et causer des accumulations d’eau sur les routes et dans les basses terres.\n\nQuand : à partir de ce matin jusqu'à la nuit prochaine\n\nOù : Dans les Bois-Francs et l'Estrie\n\nInformations supplémentaires :\nUn front chaud quasi-stationnaire associé à une dépression glissant au sud de la frontière favorisera le passage des bandes de pluie forte sur nos régions.\n\nVeuillez continuer à surveiller les alertes et les prévisions émises par Environnement Canada. Pour signaler du temps violent, envoyez un courriel à meteoQC@ec.gc.ca ou publiez un message sur les réseaux sociaux en utilisant #meteoqc.",
+    "risk_colour_en": null,
+    "risk_colour_fr": null,
+    "confidence_en": null,
+    "confidence_fr": null,
+    "impact_en": null,
+    "impact_fr": null,
+    "feature_name_en": "Cookshire area",
+    "feature_name_fr": "secteur de Cookshire",
+    "province": "QC",
+    "status_en": "continued",
+    "status_fr": "maintenu",
+    "feature_id": "fea1-1076"
+   }
+  }
+ ],
+ "numberMatched": 4,
+ "numberReturned": 4,
+ "timeStamp": "2026-10-13T13:28:09.004037Z"
+}

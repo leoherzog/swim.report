@@ -35,8 +35,8 @@
 //     marine weather advisory  -> yellow  (floor)
 //     everything else (all watches, "special ice warning", unknown) -> null,
 //                                                unmapped and a safe-fail no-op
-// ECCC serves land alert names lowercase while marine name.en arrives
-// Title-cased, so every event name is lowercased here to match the keys rules.js
+// Marine name.en arrives Title-cased and land names carry capitalized proper
+// nouns, so both clients lowercase every event name to match the keys rules.js
 // keys on; an unknown string maps to null, never a wrong color.
 //
 // This collection is disjoint from src/clients/eccc.js fetchActiveEcccAlerts —
@@ -106,8 +106,11 @@ function localizedEn(obj) {
 //
 // Only features with an area object and an areal geometry are considered, and
 // only marine-category events with an active status are kept. A feature or event
-// that cannot be understood is skipped, never guessed. Returns null only when the
-// top-level payload is unusable; an all-clear collection returns [].
+// that cannot be understood is skipped, never guessed. Returns null when the
+// top-level payload is unusable, and when more than half the features lack a
+// properties object, an area object or a geometry object, since a schema drift
+// reshapes every feature while a healthy collection drops almost none; an
+// all-clear collection returns [].
 export function parseEcccMarineAlerts(json, nowIso) {
   if (json === null || typeof json !== "object") {
     return null;
@@ -125,23 +128,16 @@ export function parseEcccMarineAlerts(json, nowIso) {
   }
   const fallbackOnset = nonEmptyString(nowIso);
   const alerts = [];
+  let dropped = 0;
   for (const feature of features) {
-    if (feature === null || typeof feature !== "object") {
-      continue;
-    }
-    const props = feature.properties;
-    if (props === null || typeof props !== "object") {
-      continue;
-    }
-    const area = props.area;
-    if (area === null || typeof area !== "object") {
+    const props = feature !== null && typeof feature === "object" ? feature.properties : null;
+    const area = props !== null && typeof props === "object" ? props.area : null;
+    const geometry = feature !== null && typeof feature === "object" ? feature.geometry : null;
+    if (area === null || typeof area !== "object" || geometry === null || typeof geometry !== "object") {
+      dropped = dropped + 1;
       continue;
     }
     const region = localizedEn(area.region);
-    const geometry = feature.geometry;
-    if (geometry === null || typeof geometry !== "object") {
-      continue;
-    }
     const value = localizedEn(area.value);
     const onset = nonEmptyString(props.lastUpdated) !== null
       ? props.lastUpdated
@@ -183,6 +179,13 @@ export function parseEcccMarineAlerts(json, nowIso) {
         });
       }
     }
+  }
+  if (dropped * 2 > features.length) {
+    console.log(
+      "ecccMarine: feed unreadable: features=" + String(features.length) +
+      " dropped=" + String(dropped)
+    );
+    return null;
   }
   return alerts;
 }

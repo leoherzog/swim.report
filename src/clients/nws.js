@@ -83,23 +83,34 @@ function alertZoneIds(props) {
 // the feed omits both), the four text fields are raw properties passed to
 // matchedAlerts to cap, and zones comes from alertZoneIds. Features without an
 // event name or with zero resolvable zone ids are skipped (a zoneless alert
-// could never match a beach). Failure -> null.
+// could never match a beach). Failure -> null, and so is an unreadable feed:
+// a body whose features is missing or not an array, or one where more than
+// half the features were skipped for shape, since a schema drift renames a
+// property on every feature while a healthy feed drops almost none. A quiet
+// nation is features: [] and stays a success.
 export async function fetchAllActiveAlerts() {
   const json = await fetchNwsJson(NWS_ACTIVE_ALERTS_URL, "all active alerts");
   if (json === null) {
     return null;
   }
-  const features = Array.isArray(json.features) ? json.features : [];
+  const features = Array.isArray(json.features) ? json.features : null;
+  if (features === null) {
+    console.log("nws: alerts feed unreadable: features=none");
+    return null;
+  }
   const alerts = [];
+  let dropped = 0;
   for (let i = 0; i < features.length; i++) {
     const feature = features[i];
     const props = feature && feature.properties ? feature.properties : null;
     const event = props ? props.event : null;
     if (!event) {
+      dropped = dropped + 1;
       continue;
     }
     const zones = alertZoneIds(props);
     if (zones.length === 0) {
+      dropped = dropped + 1;
       continue;
     }
     alerts.push({
@@ -116,6 +127,13 @@ export async function fetchAllActiveAlerts() {
       sender: props.senderName,
       zones: zones
     });
+  }
+  if (dropped * 2 > features.length) {
+    console.log(
+      "nws: alerts feed unreadable: features=" + String(features.length) +
+      " dropped=" + String(dropped)
+    );
+    return null;
   }
   return {
     alerts: alerts,

@@ -291,6 +291,37 @@ describe("runFlagRecompute input assembly - alertsCheckable", function () {
     logSpy.mockRestore();
   });
 
+  it("treats a national body with no features key as no feed and seals alertsResolved false", async function () {
+    // The client's own null verdict for a malformed body, read exactly as the
+    // failed-fetch and paginated cases are.
+    vi.stubGlobal("fetch", function (url) {
+      const target = typeof url === "string" ? url : (url && url.url) || "";
+      if (target.indexOf("api.weather.gov/alerts/active") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: function () { return Promise.resolve({}); }
+        });
+      }
+      return Promise.reject(new Error("network disabled in test"));
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+
+    const made = makeEnv([
+      makeBeachRow({ id: "osm-node-malformed", nws_zone: "MIZ071", nws_grid_url: null })
+    ]);
+    await runHourlyCron(made.env);
+
+    const estimate = estimateOf(made, "osm-node-malformed");
+    expect(estimate.color).toBe("unknown");
+    expect(estimate.reason).toBe("No wave or weather data is available for this beach yet");
+    expect(estimate.alertDetails).toEqual([]);
+    expect(estimate.sources.map(function (s) { return s.label; })).not.toContain("NWS Alerts");
+    expect(estimate.estimateInputs.alertsResolved).toBe(false);
+    expect(loggedLines(logSpy)).toContain("nws: alerts feed unreadable: features=none");
+    logSpy.mockRestore();
+  });
+
   it("issues the NWS and both ECCC national fetches concurrently", async function () {
     let inFlight = 0;
     let peakInFlight = 0;

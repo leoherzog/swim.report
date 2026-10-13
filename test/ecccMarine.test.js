@@ -7,6 +7,7 @@
 // ISO). No network — the pure parser + point matcher are exercised against
 // inline fixtures; the fetch wrapper is exercised via a stubbed globalThis.fetch.
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   parseEcccMarineAlerts,
   ecccMarineAlertsForPoint,
@@ -235,7 +236,47 @@ describe("parseEcccMarineAlerts", function () {
       events: [marineEvent("Gale warning", "IN EFFECT")]
     });
     noArea.properties.area = null;
-    expect(parseEcccMarineAlerts(collection([noGeometry, noArea]), NOW_ISO)).toEqual([]);
+    const quiet = [
+      marineFeature({ value: "Lake Superior", events: [] }),
+      marineFeature({ value: "Lake Huron", events: [] }),
+      marineFeature({ value: "Lake Ontario", events: [] })
+    ];
+    expect(parseEcccMarineAlerts(collection([noGeometry, noArea].concat(quiet)), NOW_ISO)).toEqual([]);
+  });
+
+  // The feed-integrity gate: a collection the parser cannot read as the national
+  // population is null, as a failed fetch is, so a schema drift can never
+  // recompute every Canadian beach against an all-clear sea.
+  it("a majority of features lacking an area object reads as no feed", function () {
+    const good = marineFeature({ events: [marineEvent("Gale warning", "IN EFFECT")] });
+    const stripped = [1, 2, 3].map(function () {
+      const feat = marineFeature({ events: [marineEvent("Gale warning", "IN EFFECT")] });
+      feat.properties.zone = feat.properties.area;
+      delete feat.properties.area;
+      return feat;
+    });
+    expect(parseEcccMarineAlerts(collection(stripped.concat([good, good])), NOW_ISO)).toBe(null);
+  });
+
+  it("one feature lacking an area among many is a success", function () {
+    const noArea = marineFeature({ events: [marineEvent("Gale warning", "IN EFFECT")] });
+    delete noArea.properties.area;
+    const good = marineFeature({ events: [marineEvent("Strong wind warning", "IN EFFECT")] });
+    const alerts = parseEcccMarineAlerts(collection([noArea, good, good, good]), NOW_ISO);
+    expect(alerts.length).toBe(3);
+    expect(alerts[0].event).toBe("strong wind warning");
+  });
+
+  it("a trimmed real marineweather-realtime capture parses, its one area-less feature dropped", function () {
+    const raw = readFileSync(new URL("./fixtures/eccc/marine-realtime-2026-10-13.json", import.meta.url), "utf8");
+    const body = JSON.parse(raw);
+    const alerts = parseEcccMarineAlerts(body, "2026-10-13T13:30:00Z");
+    expect(alerts).not.toBeNull();
+    expect(alerts.map(function (a) { return a.event + " @ " + a.area; })).toEqual([
+      "gale warning @ East Brevoort",
+      "strong wind warning @ North Channel",
+      "freezing spray warning @ Prince Alfred"
+    ]);
   });
 
   it("uses nowIso as an onset fallback when lastUpdated is absent", function () {
@@ -262,13 +303,15 @@ describe("parseEcccMarineAlerts", function () {
 
   it("skips malformed features/events without throwing, keeping the good ones", function () {
     const good = marineFeature({ events: [marineEvent("Gale warning", "IN EFFECT")] });
+    const quiet = marineFeature({ value: "Lake Superior", events: [] });
     const json = collection([
       null,
       { type: "Feature" },
       { type: "Feature", properties: null },
       { type: "Feature", properties: { area: null } },
       { type: "Feature", properties: { area: { region: { en: "Great Lakes" } } } },
-      good
+      good,
+      quiet, quiet, quiet, quiet, quiet
     ]);
     const alerts = parseEcccMarineAlerts(json, NOW_ISO);
     expect(alerts.length).toBe(1);

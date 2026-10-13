@@ -560,10 +560,12 @@ async function runFlagRecompute(env) {
 
     // Step 3: alerts — one national fetch, matched to the run's distinct zone ids
     // locally. Costs a single subrequest regardless of zone count, so nationwide
-    // scale-out never multiplies alert calls. A failed, thrown or paginated fetch
-    // maps every zone to null, leaving per-beach alertsCheckable true and sealing
-    // alertsResolved false so the refresh re-selects the row. Each zone's entry
-    // keeps the zone-scoped provenance URL for its beaches' source entries.
+    // scale-out never multiplies alert calls. A failed, thrown, paginated or
+    // malformed fetch (the client answers null for a body whose features are
+    // missing, not an array, or mostly unreadable) maps every zone to null,
+    // leaving per-beach alertsCheckable true and sealing alertsResolved false so
+    // the refresh re-selects the row. Each zone's entry keeps the zone-scoped
+    // provenance URL for its beaches' source entries.
     //
     // A beach's land forecast zone (nws_zone, "MIZ056") and its adjacent marine
     // zone (marine_zone, "LMZ874") go through the same map: marine warnings and

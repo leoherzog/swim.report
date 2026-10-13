@@ -268,6 +268,9 @@ function stubFetch(opts) {
       if (o.nwsFail) {
         return Promise.resolve({ ok: false, status: 500 });
       }
+      if (o.nwsBody !== undefined) {
+        return okJson(o.nwsBody);
+      }
       const body = { features: o.features || [] };
       if (o.nwsPaginated) {
         body.pagination = { next: "https://api.weather.gov/alerts/active?cursor=next" };
@@ -277,6 +280,9 @@ function stubFetch(opts) {
     if (target.indexOf("weather-alerts") !== -1) {
       if (o.ecccFail) {
         return Promise.resolve({ ok: false, status: 500 });
+      }
+      if (o.ecccBody !== undefined) {
+        return okJson(o.ecccBody);
       }
       return okJson({ features: o.ecccFeatures || [] });
     }
@@ -794,6 +800,67 @@ describe("runAlertRefresh degraded feeds", function () {
     // wave-height green every ten minutes.
     expect(rewrote(made, "osm-node-ca")).toBe(false);
     expect(writtenFlag(made, "osm-node-us").color).toBe("double-red");
+  });
+
+  // A malformed 200 body is the client's own null verdict, so the refresh reads
+  // it as nws=down rather than as an alert-free nation that lowers every
+  // standing alert color in one cadence.
+  it("keeps a standing NWS-alert red when the national body has no features key", async function () {
+    freezeClock();
+    const logs = captureLogs();
+    const us = beachRow({ id: "osm-node-us" });
+    const made = makeEnv([us], {
+      "osm-node-us": standingFlag(us, ["Beach Hazards Statement"], { waveHeightFt: 0.5 }, minutesAgo(10))
+    });
+    stubFetch({ nwsBody: {} });
+    await runAlertCron(made.env);
+
+    expect(rewrote(made, "osm-node-us")).toBe(false);
+    expect(storedEstimate(made, "osm-node-us").color).toBe("red");
+    const line = completionLine(logs);
+    expect(line.indexOf(" nws=down ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" skipAuthority=1 ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" lowered=0 ")).toBeGreaterThan(-1);
+  });
+
+  it("keeps a standing NWS-alert red when every feature's event property is renamed", async function () {
+    freezeClock();
+    const logs = captureLogs();
+    const us = beachRow({ id: "osm-node-us" });
+    const made = makeEnv([us], {
+      "osm-node-us": standingFlag(us, ["Beach Hazards Statement"], { waveHeightFt: 0.5 }, minutesAgo(10))
+    });
+    const renamed = [nwsFeature("High Surf Warning", ["MIZ049"]), nwsFeature("Gale Warning", ["LHZ441"])]
+      .map(function (feature) {
+        feature.properties.eventName = feature.properties.event;
+        delete feature.properties.event;
+        return feature;
+      });
+    stubFetch({ nwsBody: { features: renamed } });
+    await runAlertCron(made.env);
+
+    expect(rewrote(made, "osm-node-us")).toBe(false);
+    expect(storedEstimate(made, "osm-node-us").color).toBe("red");
+    const line = completionLine(logs);
+    expect(line.indexOf(" nws=down ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" skipAuthority=1 ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" features=none parsed=none ")).toBeGreaterThan(-1);
+  });
+
+  it("keeps a standing ECCC-alert red when the land body has no features key", async function () {
+    freezeClock();
+    const logs = captureLogs();
+    const made = makeEnv([caBeach], {
+      "osm-node-ca": standingFlag(caBeach, ["gale warning"], { waveHeightFt: 0.5 }, minutesAgo(10))
+    });
+    stubFetch({ features: [], ecccBody: {}, ecccMarineFeatures: [] });
+    await runAlertCron(made.env);
+
+    expect(rewrote(made, "osm-node-ca")).toBe(false);
+    expect(storedEstimate(made, "osm-node-ca").color).toBe("red");
+    const line = completionLine(logs);
+    expect(line.indexOf(" nws=ok eccc=down ")).toBeGreaterThan(-1);
+    expect(line.indexOf(" skipAuthority=1 ")).toBeGreaterThan(-1);
   });
 
   it("touches D1 zero times when neither authority answered", async function () {

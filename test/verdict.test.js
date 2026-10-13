@@ -4,7 +4,7 @@
 // honest fallbacks for unknown, absent and legacy estimates.
 
 import { describe, it, expect } from "vitest";
-import { verdictSentence } from "../src/frontend/verdict.js";
+import { verdictSentence, alertsChecked } from "../src/frontend/verdict.js";
 import { displayFlag } from "../src/displayFlag.js";
 import { ALERTS_UNAVAILABLE_CAVEAT } from "../src/rules.js";
 
@@ -246,6 +246,18 @@ describe("verdictSentence: alerts and floors", function () {
     });
     expect(verdictFor(estimate, null, null))
       .toBe("Severe thunderstorm warning and wind warning in effect.");
+  });
+
+  it("ranks a folded ECCC proper-noun warning ahead of a co-active floor alert", function () {
+    const estimate = estimateWith({
+      color: "red",
+      trigger: "eccc-alert",
+      reason: "Active Environment Canada alert: les suêtes wind warning",
+      waveHeightFt: null,
+      alertDetails: [alert("strong wind warning"), alert("les suêtes wind warning")]
+    });
+    expect(verdictFor(estimate, null, null))
+      .toBe("Les suêtes wind warning and strong wind warning in effect.");
   });
 
   it("counts the remainder past two alerts and dedupes repeats", function () {
@@ -497,6 +509,32 @@ describe("verdictSentence: the posted flag", function () {
     expect(verdictFor(estimateWith({}),
       { color: "green", updated: "2026-07-05T08:00:00.000Z" }, null))
       .toBe("Calm water, no alerts.");
+  });
+});
+
+describe("alertsChecked", function () {
+  it("is true only for a seal object carrying alertsResolved === true", function () {
+    expect(alertsChecked(estimateWith({}))).toBe(true);
+    expect(alertsChecked({ estimateInputs: { alertsResolved: true } })).toBe(true);
+  });
+
+  it("is false for a missing, null, non-object or string-valued seal", function () {
+    expect(alertsChecked({ color: "green" })).toBe(false);
+    expect(alertsChecked({ estimateInputs: null })).toBe(false);
+    expect(alertsChecked({ estimateInputs: true })).toBe(false);
+    expect(alertsChecked({ estimateInputs: "resolved" })).toBe(false);
+    expect(alertsChecked({ estimateInputs: { alertsResolved: "true" } })).toBe(false);
+    expect(alertsChecked({ estimateInputs: { alertsResolved: false } })).toBe(false);
+    expect(alertsChecked(null)).toBe(false);
+    expect(alertsChecked(undefined)).toBe(false);
+  });
+
+  it("is what the no-alerts clause reads", function () {
+    const failed = estimateWith({
+      estimateInputs: { v: 1, alertsResolved: false, windSpeedMph: null, windGustMph: null,
+        waterQualityAdvisory: null, signalSources: [] }
+    });
+    expect(verdictFor(failed, null, null)).toBe("Calm water.");
   });
 });
 

@@ -4,6 +4,7 @@
 // real api.weather.gov/alerts/active GeoJSON features (properties.event,
 // onset/effective, ends/expires, geocode.UGC codes, affectedZones URLs).
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   NWS_ACTIVE_ALERTS_URL,
   NWS_USER_AGENT,
@@ -127,14 +128,16 @@ describe("fetchAllActiveAlerts", function () {
               affectedZones: []
             }
           }),
-          alertFeature({ props: { event: "Small Craft Advisory" } })
+          alertFeature({ props: { event: "Small Craft Advisory" } }),
+          alertFeature({ props: { event: "Rip Current Statement" } }),
+          alertFeature({ props: { event: "High Surf Advisory" } })
         ]
       });
     });
 
     const result = await fetchAllActiveAlerts();
     expect(result.alerts.map(function (a) { return a.event; }))
-      .toEqual(["Small Craft Advisory"]);
+      .toEqual(["Small Craft Advisory", "Rip Current Statement", "High Surf Advisory"]);
   });
 
   it("returns null on HTTP failure and on a rejected fetch, never throws", async function () {
@@ -161,15 +164,17 @@ describe("fetchAllActiveAlerts feed-integrity fields", function () {
         features: [
           alertFeature({ props: { event: null } }),
           alertFeature({ props: { event: "Gale Warning", geocode: null, affectedZones: [] } }),
-          alertFeature({ props: { event: "Small Craft Advisory" } })
+          alertFeature({ props: { event: "Small Craft Advisory" } }),
+          alertFeature({ props: { event: "Rip Current Statement" } }),
+          alertFeature({ props: { event: "High Surf Advisory" } })
         ]
       });
     });
     const result = await fetchAllActiveAlerts();
-    // featureCount is raw: the parse legitimately drops two of these three
-    // features, so featureCount far above alerts.length is the drift signal.
-    expect(result.alerts.length).toBe(1);
-    expect(result.featureCount).toBe(3);
+    // featureCount is raw: the parse legitimately drops two of these five
+    // features, so featureCount above alerts.length is the visible drop count.
+    expect(result.alerts.length).toBe(3);
+    expect(result.featureCount).toBe(5);
     expect(result.truncated).toBe(false);
   });
 
@@ -324,31 +329,103 @@ describe("alertsUrlForZone", function () {
   });
 });
 
+// The feed-integrity gate: a body the client cannot read as the national
+// population resolves to null, so both crons inherit one "no feed" verdict and a
+// schema drift can never clear every alert color as an alert-free nation.
 describe("fetchAllActiveAlerts with missing or malformed features", function () {
   afterEach(function () {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  it("treats a 200 body with no features key as an empty success, not a failure", async function () {
+  function realFeatures() {
+    const raw = readFileSync(new URL("./fixtures/nws/alerts-active-2026-10-13.json", import.meta.url), "utf8");
+    return JSON.parse(raw).features;
+  }
+
+  it("treats a 200 body with no features key as no feed", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
     vi.stubGlobal("fetch", function () {
       return okJson({});
     });
-    // The hourly cron treats null as a fetch failure; an alert-free body must
-    // instead resolve to an empty alerts list with the source URL intact.
-    const result = await fetchAllActiveAlerts();
-    expect(result).toEqual({
+    expect(await fetchAllActiveAlerts()).toBeNull();
+    expect(logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n"))
+      .toContain("nws: alerts feed unreadable: features=none");
+  });
+
+  it("treats a non-array features value as no feed, never throws", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: "nope" });
+    });
+    expect(await fetchAllActiveAlerts()).toBeNull();
+  });
+
+  it("a quiet nation (features: []) is a success with featureCount 0", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: [] });
+    });
+    expect(await fetchAllActiveAlerts()).toEqual({
       alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount: 0, truncated: false
     });
   });
 
-  it("treats a non-array features value as an empty success, never throws", async function () {
+  it("a trimmed real /alerts/active capture parses every feature", async function () {
+    const features = realFeatures();
     vi.stubGlobal("fetch", function () {
-      return okJson({ features: "nope" });
+      return okJson({ features: features });
     });
     const result = await fetchAllActiveAlerts();
-    expect(result).toEqual({
-      alerts: [], sourceUrl: NWS_ACTIVE_ALERTS_URL, featureCount: 0, truncated: false
+    expect(result.featureCount).toBe(features.length);
+    expect(result.alerts.length).toBe(result.featureCount);
+    expect(result.truncated).toBe(false);
+    expect(result.alerts.map(function (a) { return a.event; })).toContain("Gale Warning");
+  });
+
+  it("real features with properties.event renamed read as no feed", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    const features = realFeatures().map(function (feature) {
+      const props = Object.assign({}, feature.properties, { eventName: feature.properties.event });
+      delete props.event;
+      return Object.assign({}, feature, { properties: props });
     });
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: features });
+    });
+    expect(await fetchAllActiveAlerts()).toBeNull();
+    expect(logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n"))
+      .toContain("nws: alerts feed unreadable: features=" + String(features.length) +
+        " dropped=" + String(features.length));
+  });
+
+  it("a majority of zoneless features reads as no feed; a minority is a success", async function () {
+    const zoneless = { geocode: null, affectedZones: [] };
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [
+          alertFeature({ props: zoneless }),
+          alertFeature({ props: zoneless }),
+          alertFeature({ props: zoneless }),
+          alertFeature({}),
+          alertFeature({})
+        ]
+      });
+    });
+    expect(await fetchAllActiveAlerts()).toBeNull();
+
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [
+          alertFeature({ props: zoneless }),
+          alertFeature({}),
+          alertFeature({}),
+          alertFeature({}),
+          alertFeature({})
+        ]
+      });
+    });
+    const result = await fetchAllActiveAlerts();
+    expect(result.featureCount).toBe(5);
+    expect(result.alerts.length).toBe(4);
   });
 });
 

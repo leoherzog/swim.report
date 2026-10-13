@@ -20,7 +20,7 @@ import { STALE_MS, isStale, collapseFlagColor, displayFlag } from "../displayFla
 import { alertsCheckable } from "../alertsCheckable.js";
 import { toPublicId } from "../publicId.js";
 import { READING_MAX_AGE_MS } from "../officialReading.js";
-import { verdictSentence } from "./verdict.js";
+import { verdictSentence, alertsChecked } from "./verdict.js";
 import { nextSunEvent, utcClockLabel } from "./sun.js";
 import {
   trimWaveSeries,
@@ -1787,7 +1787,9 @@ function renderAtAGlance(beach, estimate, waterTemp, reading, tides, nowIso) {
 
   // Counts only the alerts the color was decided against. An alert echoed
   // ahead of its onset is named on the quiet tile instead, so the count never
-  // contradicts the flag it sits under.
+  // contradicts the flag it sits under. An empty echo cannot tell a clear check
+  // from a failed fetch, so the seal decides "None active", fail closed: a
+  // non-empty echo proves the fetch resolved, an empty one needs alertsChecked.
   const details = (estimate && Array.isArray(estimate.alertDetails)) ? estimate.alertDetails : null;
   const active = decidedAlertDetails(estimate);
   if (active.length > 0) {
@@ -1800,7 +1802,8 @@ function renderAtAGlance(beach, estimate, waterTemp, reading, tides, nowIso) {
       caption: "Active alerts",
       sourceHtml: escapeHtml(alertSource)
     }));
-  } else if (details && alertsCheckable(beach)) {
+  } else if (details && alertsCheckable(beach) &&
+      (details.length > 0 || alertsChecked(estimate))) {
     let upcoming = null;
     for (let i = 0; i < details.length && upcoming === null; i++) {
       const entry = details[i];

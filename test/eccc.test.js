@@ -4,6 +4,7 @@
 // mirror real api.weather.gc.ca responses (pygeoapi GeoJSON: alert_name_en
 // lowercase, status_en issued/continued/ended, region Polygon geometry).
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   fetchActiveEcccAlerts,
   ecccAlertsForPoint,
@@ -163,12 +164,16 @@ describe("fetchActiveEcccAlerts", function () {
           { type: "Feature", properties: null, geometry: squareAround(42, -82.9) },
           alertFeature({ alert_name_en: "" }),
           noGeometry,
-          alertFeature({ alert_name_en: "squall warning" })
+          alertFeature({ alert_name_en: "squall warning" }),
+          alertFeature({ alert_name_en: "gale warning" }),
+          alertFeature({ alert_name_en: "rainfall warning" }),
+          alertFeature({ alert_name_en: "fog advisory" })
         ]
       });
     });
     const result = await fetchActiveEcccAlerts(NOW_ISO);
-    expect(result.alerts.map(function (a) { return a.event; })).toEqual(["squall warning"]);
+    expect(result.alerts.map(function (a) { return a.event; }))
+      .toEqual(["squall warning", "gale warning", "rainfall warning", "fog advisory"]);
   });
 
   it("carries alert_text_en and feature_name_en as the alert's text and area", async function () {
@@ -187,6 +192,18 @@ describe("fetchActiveEcccAlerts", function () {
     expect(alert.instruction).toBeUndefined();
   });
 
+  it("lowercases a proper-noun event name so the echo matches the rules.js lists", async function () {
+    const feature = JSON.parse(readFileSync(
+      new URL("./fixtures/eccc-les-suetes-wind-warning-2026-10-13.json", import.meta.url), "utf8"
+    ));
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: [feature] });
+    });
+    const alert = (await fetchActiveEcccAlerts("2026-10-13T15:00:00Z")).alerts[0];
+    expect(feature.properties.alert_name_en).toBe("Les Suêtes wind warning");
+    expect(alert.event).toBe("les suêtes wind warning");
+  });
+
   it("returns null on HTTP failure and on a thrown fetch, never throws", async function () {
     vi.stubGlobal("fetch", function () {
       return Promise.resolve({ ok: false, status: 500 });
@@ -197,6 +214,85 @@ describe("fetchActiveEcccAlerts", function () {
       return Promise.reject(new Error("network down"));
     });
     expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
+  });
+});
+
+// The feed-integrity gate: a body the client cannot read as the national
+// population resolves to null, exactly as a failed fetch does, so neither cron
+// recomputes Canadian beaches against a schema drift read as an alert-free day.
+describe("fetchActiveEcccAlerts with missing or malformed features", function () {
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("treats a body with no features key, or a non-array one, as no feed", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    vi.stubGlobal("fetch", function () {
+      return okJson({});
+    });
+    expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: "nope" });
+    });
+    expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
+    expect(logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n"))
+      .toContain("eccc: alerts feed unreadable: features=none");
+  });
+
+  it("a quiet day (features: []) is a success with no alerts", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({ features: [] });
+    });
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
+    expect(result.alerts).toEqual([]);
+    expect(result.sourceUrl).toContain("collections/weather-alerts/items");
+  });
+
+  it("a majority of features without alert_name_en reads as no feed", async function () {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(function () {});
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [
+          alertFeature({ alert_name_en: null }),
+          alertFeature({ alert_name_en: "" }),
+          { type: "Feature", properties: { alert_name: "wind warning" }, geometry: squareAround(42, -82.9) },
+          alertFeature({ alert_name_en: "squall warning" }),
+          alertFeature({ alert_name_en: "gale warning" })
+        ]
+      });
+    });
+    expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
+    expect(logSpy.mock.calls.map(function (c) { return String(c[0]); }).join("\n"))
+      .toContain("eccc: alerts feed unreadable: features=5 dropped=3");
+  });
+
+  it("a page where most features are ended or expired still succeeds with those dropped", async function () {
+    vi.stubGlobal("fetch", function () {
+      return okJson({
+        features: [
+          alertFeature({ alert_name_en: "wind warning", status_en: "ended" }),
+          alertFeature({ alert_name_en: "rainfall warning", status_en: "ended" }),
+          alertFeature({ alert_name_en: "fog advisory", expiration_datetime: "2026-07-18T09:00:00.000Z" }),
+          alertFeature({ alert_name_en: "frost advisory", expiration_datetime: "2026-07-18T08:00:00.000Z" }),
+          alertFeature({ alert_name_en: "squall warning" })
+        ]
+      });
+    });
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
+    expect(result.alerts.map(function (a) { return a.event; })).toEqual(["squall warning"]);
+  });
+
+  it("a trimmed real weather-alerts capture parses every feature", async function () {
+    const raw = readFileSync(new URL("./fixtures/eccc/weather-alerts-2026-10-13.json", import.meta.url), "utf8");
+    const body = JSON.parse(raw);
+    vi.stubGlobal("fetch", function () {
+      return okJson(body);
+    });
+    const result = await fetchActiveEcccAlerts("2026-10-13T13:30:00Z");
+    expect(result.alerts.length).toBe(body.features.length);
+    expect(result.alerts[0].event).toBe("special weather statement");
+    expect(result.alerts[0].geometry.type).toBe("Polygon");
   });
 });
 

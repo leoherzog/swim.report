@@ -324,13 +324,77 @@ describe("at a glance tiles", () => {
     expect(tileSource(onlyUpcoming, "triangle-exclamation")).toBe("Beach Hazards Statement not yet in effect");
   });
 
-  it("says None active for a checkable beach with an empty alert list", () => {
+  it("says None active for a checkable beach with an empty alert list the run resolved", () => {
     const html = render({
       beach: beachWith({ eccc_zone: "Grand Bend" }),
-      estimate: estimateWith({ alertDetails: [] })
+      estimate: estimateWith({ alertDetails: [], estimateInputs: { v: 1, alertsResolved: true } })
     });
     expect(tileValue(html, "triangle-exclamation")).toEqual({ text: "None active", quiet: true });
     expect(tileSource(html, "triangle-exclamation")).toBe("NWS and ECCC alerts");
+  });
+
+  // The hourly cron's own shape for a checkable beach whose national alert
+  // fetch failed: an empty echo, a seal saying so, and no caveat in the reason.
+  const FAILED_FETCH = {
+    reason: "Estimated wave height 1.0 ft (below 2 ft)",
+    trigger: "wave-height",
+    waveHeightFt: 1.0,
+    alertDetails: [],
+    estimateInputs: {
+      v: 1,
+      alertsResolved: false,
+      windSpeedMph: null,
+      windGustMph: null,
+      waterQualityAdvisory: null,
+      signalSources: []
+    }
+  };
+
+  it("renders no alerts tile after a failed alert fetch, even for a checkable beach", () => {
+    const html = render({
+      beach: beachWith({ nws_zone: "MIZ037" }),
+      estimate: estimateWith(FAILED_FETCH)
+    });
+    expect(tile(html, "triangle-exclamation")).toBe(null);
+    expect(html.indexOf("None active")).toBe(-1);
+  });
+
+  it("agrees with the hero verdict on one page after a failed alert fetch", () => {
+    const html = render({
+      beach: beachWith({ nws_zone: "MIZ037" }),
+      estimate: estimateWith(FAILED_FETCH)
+    });
+    expect(hero(html)).toContain("<p class=\"wa-body-l\" data-refresh=\"verdict\">Calm water.</p>");
+    expect(html.indexOf("no alerts")).toBe(-1);
+    expect(html.indexOf("None active")).toBe(-1);
+  });
+
+  it("renders no alerts tile for an empty echo whose seal cannot vouch for the fetch", () => {
+    const shapes = [
+      { alertDetails: [] },
+      { alertDetails: [], estimateInputs: null },
+      { alertDetails: [], estimateInputs: { alertsResolved: "true" } },
+      { alertDetails: [], estimateInputs: "resolved" }
+    ];
+    for (const shape of shapes) {
+      const html = render({
+        beach: beachWith({ nws_zone: "MIZ037" }),
+        estimate: estimateWith(shape)
+      });
+      expect(tile(html, "triangle-exclamation"), JSON.stringify(shape)).toBe(null);
+      expect(html.indexOf("None active"), JSON.stringify(shape)).toBe(-1);
+    }
+  });
+
+  it("keeps the quiet None active for an upcoming-only echo with no seal", () => {
+    // A non-empty echo came from the fetch, so it proves the fetch resolved.
+    const upcoming = { event: "Beach Hazards Statement", onset: "2026-07-06T11:00:00.000Z", ends: null };
+    const html = render({
+      beach: beachWith({ nws_zone: "MIZ037" }),
+      estimate: estimateWith({ alertDetails: [upcoming], alertsAt: FRESH })
+    });
+    expect(tileValue(html, "triangle-exclamation")).toEqual({ text: "None active", quiet: true });
+    expect(tileSource(html, "triangle-exclamation")).toBe("Beach Hazards Statement not yet in effect");
   });
 
   it("never says None active for a beach whose alerts were never checkable", () => {

@@ -1,0 +1,1723 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "lastUpdated": "2026-10-13T08:52:57Z",
+    "area": {
+     "countryCode": {
+      "en": "CA",
+      "fr": "CA"
+     },
+     "region": {
+      "en": "Arctic",
+      "fr": "Arctique"
+     },
+     "subRegion": {
+      "en": "Eastern Arctic",
+      "fr": "Arctique de l'Est"
+     },
+     "value": {
+      "en": "East Brevoort",
+      "fr": "Brevoort Est"
+     }
+    },
+    "regularForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "weatherVisibility": {
+         "en": "Periods of snow this afternoon. Showers or flurries Wednesday afternoon. Visibility 1 mile or less in snow.",
+         "fr": "Neige intermittente cet après-midi. Averses ou averses de neige mercredi après-midi. Visibilité 1 mille ou moins dans la neige."
+        },
+        "wind": {
+         "en": "Wind northwest 35 knots diminishing to northwest 30 near noon and to northwest 20 early this evening. Wind diminishing to northwest 15 near midnight and to light Wednesday morning.",
+         "fr": "Vent du nord-ouest à 35 noeuds diminuant du nord-ouest à 30 vers midi et du nord-ouest à 20 tôt ce soir. Vent diminuant du nord-ouest à 15 vers minuit et à léger mercredi matin."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:00:00-04:00"
+    },
+    "extendedForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "forecastPeriods": [
+         {
+          "name": {
+           "en": "Thursday",
+           "fr": "Jeudi"
+          },
+          "value": {
+           "en": "Wind southwest 15 knots backing to south 20  in the morning.",
+           "fr": "Vent du sud-ouest à 15 noeuds revenant au sud à  20 le matin."
+          }
+         },
+         {
+          "name": {
+           "en": "Friday",
+           "fr": "Vendredi"
+          },
+          "value": {
+           "en": "Wind light increasing to north 25 knots late in  the day.",
+           "fr": "Vent léger augmentant du nord à 25 noeuds en  fin de journée."
+          }
+         },
+         {
+          "name": {
+           "en": "Saturday",
+           "fr": "Samedi"
+          },
+          "value": {
+           "en": "Wind north 25 knots backing to northwest  30.",
+           "fr": "Vent du nord à 25 noeuds revenant au nord-ouest  à 30."
+          }
+         }
+        ]
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:00:00-04:00"
+    },
+    "waveForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "textSummary": {
+         "en": "Seas 5 metres subsiding to 3 early this afternoon and to 2 near midnight.",
+         "fr": "Mer de 5 mètres diminuant à 3 tôt cet après-midi et à 2 vers minuit."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:00:00-04:00"
+    },
+    "warnings": {
+     "locations": [
+      {
+       "name": {
+        "en": "East Brevoort",
+        "fr": "Brevoort Est"
+       },
+       "events": [
+        {
+         "name": {
+          "en": "Gale warning",
+          "fr": "Avertissement de coups de vent"
+         },
+         "type": {
+          "en": "warning",
+          "fr": "avertissement"
+         },
+         "category": {
+          "en": "marine",
+          "fr": "maritime"
+         },
+         "status": {
+          "en": "IN EFFECT",
+          "fr": "EN VIGUEUR"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -53.07764784095495,
+       61.999783774537576
+      ],
+      [
+       -55.36980896907015,
+       61.99982212934009
+      ],
+      [
+       -55.371126814708205,
+       61.99982215097753
+      ],
+      [
+       -56.53376696481202,
+       61.999841605341075
+      ],
+      [
+       -57.360733207556244,
+       63.507095618220795
+      ],
+      [
+       -57.360746485810864,
+       63.50711981776364
+      ],
+      [
+       -58.17982641572449,
+       64.99999999970575
+      ],
+      [
+       -54.96636963833639,
+       65.00490057589893
+      ],
+      [
+       -53.97303641807256,
+       63.5085383955118
+      ],
+      [
+       -53.88788152675564,
+       63.372142494118414
+      ],
+      [
+       -53.88811001490577,
+       63.372216071239954
+      ],
+      [
+       -53.07764784095495,
+       61.999783774537576
+      ]
+     ]
+    ]
+   },
+   "id": "m0000146"
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "lastUpdated": "2026-10-13T08:59:35Z",
+    "area": {
+     "countryCode": {
+      "en": "CA",
+      "fr": "CA"
+     },
+     "region": {
+      "en": "Great Lakes",
+      "fr": "Grand Lacs"
+     },
+     "subRegion": {
+      "en": "Lake Huron (Lake Nipissing and Lake Simcoe)",
+      "fr": "Lac Huron (Lac Nipissing et Lac Simcoe)"
+     },
+     "value": {
+      "en": "North Channel",
+      "fr": "chenal du Nord"
+     }
+    },
+    "regularForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "weatherVisibility": {
+         "en": "Scattered showers ending Wednesday morning. Risk of thunderstorms today.",
+         "fr": "Averses éparses cessant mercredi matin. Risque d'orages aujourd'hui."
+        },
+        "wind": {
+         "en": "Wind east 20 knots diminishing to northeast 15 this morning and to north 10 this afternoon. Wind increasing to northwest 20 this evening then diminishing to northwest 15 late overnight. Wind diminishing to north 10 Wednesday evening.",
+         "fr": "Vent d'est à 20 noeuds diminuant du nord-est à 15 ce matin et du nord à 10 cet après-midi. Vent augmentant du nord-ouest à 20 ce soir puis diminuant du nord-ouest à 15 en fin de nuit. Vent diminuant du nord à 10 mercredi soir."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:00:00-04:00"
+    },
+    "extendedForecast": {
+     "locations": []
+    },
+    "warnings": {
+     "locations": [
+      {
+       "name": {
+        "en": "North Channel",
+        "fr": "chenal du Nord"
+       },
+       "events": [
+        {
+         "name": {
+          "en": "Strong wind warning",
+          "fr": "Avertissement de vent fort"
+         },
+         "type": {
+          "en": "warning",
+          "fr": "avertissement"
+         },
+         "category": {
+          "en": "marine",
+          "fr": "maritime"
+         },
+         "status": {
+          "en": "IN EFFECT",
+          "fr": "EN VIGUEUR"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.76255120250936,
+       45.719978048909745
+      ],
+      [
+       -81.85685329950502,
+       45.69579802389326
+      ],
+      [
+       -81.96509735274574,
+       45.644697424693184
+      ],
+      [
+       -83.23026559867314,
+       45.90145327479411
+      ],
+      [
+       -83.26115369121138,
+       45.9069532668738
+      ],
+      [
+       -83.27300011730726,
+       45.90853043738628
+      ],
+      [
+       -83.47017133493537,
+       45.93481811856378
+      ],
+      [
+       -83.4704734792159,
+       45.934906603249836
+      ],
+      [
+       -83.48705303253017,
+       45.94051327111419
+      ],
+      [
+       -83.43380560123147,
+       45.998164994574374
+      ],
+      [
+       -83.57196711827403,
+       46.10578501919702
+      ],
+      [
+       -83.6550198107326,
+       46.12168500318329
+      ],
+      [
+       -83.75989244727567,
+       46.102733526413665
+      ],
+      [
+       -83.82634842109513,
+       46.11884866011971
+      ],
+      [
+       -83.90355263743271,
+       46.06045889941501
+      ],
+      [
+       -83.92187918892682,
+       46.05915579568857
+      ],
+      [
+       -84.00767129221056,
+       46.304421728996445
+      ],
+      [
+       -83.98530254659133,
+       46.37714627667613
+      ],
+      [
+       -83.88434982310339,
+       46.378841414437474
+      ],
+      [
+       -83.72113465576439,
+       46.33773537231746
+      ],
+      [
+       -83.04574095301152,
+       46.25907819084767
+      ],
+      [
+       -82.4664619089909,
+       46.2674582582955
+      ],
+      [
+       -82.17224175563855,
+       46.202500561675606
+      ],
+      [
+       -81.58882654302184,
+       46.14697677909721
+      ],
+      [
+       -81.42098433440528,
+       46.06956431742876
+      ],
+      [
+       -81.55347767425991,
+       45.99266608584436
+      ],
+      [
+       -81.6711061968237,
+       45.934261226326896
+      ],
+      [
+       -81.67111132368217,
+       45.927517485744644
+      ],
+      [
+       -81.67111507327365,
+       45.922584614948235
+      ],
+      [
+       -81.67113122502094,
+       45.901322626657304
+      ],
+      [
+       -81.67113134511474,
+       45.90131479182648
+      ],
+      [
+       -81.74747712932798,
+       45.79219557615861
+      ],
+      [
+       -81.76255120250936,
+       45.719978048909745
+      ]
+     ]
+    ]
+   },
+   "id": "m0000006"
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "lastUpdated": "2026-10-13T09:22:34Z",
+    "area": {
+     "countryCode": {
+      "en": "CA",
+      "fr": "CA"
+     },
+     "region": {
+      "en": "Arctic",
+      "fr": "Arctique"
+     },
+     "subRegion": {
+      "en": "Western Arctic",
+      "fr": "Arctique de l'Ouest"
+     },
+     "value": {
+      "en": "Prince Alfred",
+      "fr": "Prince Alfred"
+     }
+    },
+    "regularForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "weatherVisibility": {
+         "en": "Scattered flurries tonight and Wednesday.",
+         "fr": "Averses de neige éparses ce soir cette nuit et mercredi."
+        },
+        "airTemperature": {
+         "en": "Temperatures minus 7 falling to minus 12 Wednesday morning.",
+         "fr": "Température moins 7 à la baisse pour atteindre moins 12 mercredi matin."
+        },
+        "freezingSpray": {
+         "en": "Outside the ice edge freezing spray beginning overnight and ending Wednesday evening.",
+         "fr": "Embruns verglaçants à l'extérieur de la lisière des glaces débutant au cours de la nuit et prenant fin mercredi soir."
+        },
+        "wind": {
+         "en": "Wind light increasing to northwest 20 knots late this evening then diminishing to light Wednesday evening.",
+         "fr": "Vent léger augmentant du nord-ouest à 20 noeuds tard ce soir puis diminuant à léger mercredi soir."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:30:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:30:00-04:00"
+    },
+    "extendedForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "forecastPeriods": [
+         {
+          "name": {
+           "en": "Thursday",
+           "fr": "Jeudi"
+          },
+          "value": {
+           "en": "Wind light becoming west 15 knots in the  morning.",
+           "fr": "Vent léger devenant d'ouest à 15 noeuds le  matin."
+          }
+         },
+         {
+          "name": {
+           "en": "Friday",
+           "fr": "Vendredi"
+          },
+          "value": {
+           "en": "Wind light increasing to southeast 20 knots  late in the day.",
+           "fr": "Vent léger augmentant du sud-est à 20 noeuds  en fin de journée."
+          }
+         },
+         {
+          "name": {
+           "en": "Saturday",
+           "fr": "Samedi"
+          },
+          "value": {
+           "en": "Wind southeast 20 knots diminishing to  light.",
+           "fr": "Vent du sud-est à 20 noeuds diminuant à  léger."
+          }
+         }
+        ]
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:30:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:30:00-04:00"
+    },
+    "waveForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "textSummary": {
+         "en": "Outside the ice edge seas 1 metre or less.",
+         "fr": "Mer de 1 mètre ou moins à l'extérieur de la lisière des glaces."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T09:30:00Z",
+     "issuedDatetimeLocal": "2026-10-13T05:30:00-04:00"
+    },
+    "warnings": {
+     "locations": [
+      {
+       "name": {
+        "en": "Prince Alfred",
+        "fr": "Prince Alfred"
+       },
+       "events": [
+        {
+         "name": {
+          "en": "Freezing spray warning",
+          "fr": "Avertissement d'embruns verglaçants"
+         },
+         "type": {
+          "en": "warning",
+          "fr": "avertissement"
+         },
+         "category": {
+          "en": "marine",
+          "fr": "maritime"
+         },
+         "status": {
+          "en": "IN EFFECT",
+          "fr": "EN VIGUEUR"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -123.80058376516573,
+       75.00000000040367
+      ],
+      [
+       -124.57552521095802,
+       74.3651705530083
+      ],
+      [
+       -124.57643852207217,
+       74.36438096367084
+      ],
+      [
+       -124.57746132749536,
+       74.36352627143556
+      ],
+      [
+       -124.583328295268,
+       74.33583536932518
+      ],
+      [
+       -124.4977942240257,
+       74.30433246380201
+      ],
+      [
+       -123.97867050932838,
+       73.90154164223513
+      ],
+      [
+       -123.68687861553788,
+       73.86902582678292
+      ],
+      [
+       -123.50350837774252,
+       73.68787452837032
+      ],
+      [
+       -123.98787885881376,
+       73.46883232070135
+      ],
+      [
+       -124.45121275977488,
+       73.18025531830473
+      ],
+      [
+       -124.30028062732694,
+       72.86911213964892
+      ],
+      [
+       -124.8250750113063,
+       72.82228225899543
+      ],
+      [
+       -124.84719106727009,
+       72.55521144756104
+      ],
+      [
+       -125.10736741159177,
+       72.48721306848415
+      ],
+      [
+       -125.2429065541842,
+       72.50095555832802
+      ],
+      [
+       -125.25737722501368,
+       72.50094845977506
+      ],
+      [
+       -125.31474888851231,
+       72.50102043494562
+      ],
+      [
+       -125.32402273855598,
+       72.50103171842676
+      ],
+      [
+       -125.32793033613643,
+       72.5010366309566
+      ],
+      [
+       -125.37379190178459,
+       72.50124061256884
+      ],
+      [
+       -126.71684604517904,
+       72.50280192995517
+      ],
+      [
+       -130.0000000004975,
+       72.50000000035512
+      ],
+      [
+       -129.99999999913544,
+       73.0000000003702
+      ],
+      [
+       -130.00000000021174,
+       73.67666903165374
+      ],
+      [
+       -130.00000000152596,
+       75.00000000002996
+      ],
+      [
+       -127.00000000145612,
+       75.00000000000658
+      ],
+      [
+       -123.99999999989932,
+       74.9999999996021
+      ],
+      [
+       -123.80058376516573,
+       75.00000000040367
+      ]
+     ]
+    ]
+   },
+   "id": "m0000029"
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "lastUpdated": "2026-10-13T07:00:21Z",
+    "area": {
+     "countryCode": {
+      "en": "CA",
+      "fr": "CA"
+     },
+     "region": {
+      "en": "Great Lakes",
+      "fr": "Grand Lacs"
+     },
+     "subRegion": {
+      "en": "Lake Erie and Lake Ontario (Lake St. Clair and St. Lawrence River)",
+      "fr": "Lac Érié et Lac Ontario (Lac Sainte-Claire et Fleuve Saint-Laurent)"
+     },
+     "value": {
+      "en": "Kingston to Cornwall",
+      "fr": "Kingston à Cornwall"
+     }
+    },
+    "regularForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "weatherVisibility": {
+         "en": "Showers ending near noon Wednesday. Risk of thunderstorms today and this evening. Fog patches dissipating this evening.",
+         "fr": "Averses cessant vers midi mercredi. Risque d'orages aujourd'hui et ce soir. Nappes de brouillard se dissipant ce soir."
+        },
+        "wind": {
+         "en": "Wind northeast 10 knots becoming light near noon then becoming west 10 Wednesday morning. Wind veering to northwest 10 Wednesday evening.",
+         "fr": "Vent du nord-est à 10 noeuds devenant léger vers midi puis devenant d'ouest à 10 mercredi matin. Vent virant au nord-ouest à 10 mercredi soir."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T07:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T03:00:00-04:00"
+    },
+    "extendedForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "forecastPeriods": [
+         {
+          "name": {
+           "en": "Thursday",
+           "fr": "Jeudi"
+          },
+          "value": {
+           "en": "Wind light.",
+           "fr": "Vent léger."
+          }
+         },
+         {
+          "name": {
+           "en": "Friday",
+           "fr": "Vendredi"
+          },
+          "value": {
+           "en": "Wind light becoming northwest 15  knots.",
+           "fr": "Vent léger devenant du nord-ouest à 15  noeuds."
+          }
+         },
+         {
+          "name": {
+           "en": "Saturday",
+           "fr": "Samedi"
+          },
+          "value": {
+           "en": "Wind northwest 20 knots diminishing to light  late in the day.",
+           "fr": "Vent du nord-ouest à 20 noeuds diminuant à  léger en fin de journée."
+          }
+         }
+        ]
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T07:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T03:00:00-04:00"
+    },
+    "warnings": {
+     "locations": []
+    }
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -76.45509460385908,
+       44.073139740174106
+      ],
+      [
+       -76.51597875358054,
+       44.09633940960519
+      ],
+      [
+       -76.57969295842483,
+       44.162088895734215
+      ],
+      [
+       -76.5882487741671,
+       44.18168959357947
+      ],
+      [
+       -76.60375618724176,
+       44.213129009625646
+      ],
+      [
+       -76.59197356459688,
+       44.25586321430272
+      ],
+      [
+       -76.43792775701081,
+       44.274785257872196
+      ],
+      [
+       -76.28627366308031,
+       44.33871119917256
+      ],
+      [
+       -76.19922557432407,
+       44.34576685461947
+      ],
+      [
+       -76.07719673353098,
+       44.382872802956896
+      ],
+      [
+       -75.95159756142719,
+       44.40340221141776
+      ],
+      [
+       -75.90484321538409,
+       44.466223049148844
+      ],
+      [
+       -75.67587178197077,
+       44.611275748044726
+      ],
+      [
+       -75.58217270939775,
+       44.69662987795493
+      ],
+      [
+       -75.43298384547967,
+       44.79733236133444
+      ],
+      [
+       -75.36927613421183,
+       44.82535907630702
+      ],
+      [
+       -75.30192596852783,
+       44.889266420861205
+      ],
+      [
+       -75.11963980952167,
+       44.950782919171246
+      ],
+      [
+       -74.95563123522119,
+       45.04344152977605
+      ],
+      [
+       -74.83015957457569,
+       45.06188824499804
+      ],
+      [
+       -74.78310770152217,
+       45.05117724893927
+      ],
+      [
+       -74.70564288349466,
+       45.06141047319722
+      ],
+      [
+       -74.68698420243746,
+       45.02433343243556
+      ],
+      [
+       -74.67052736870919,
+       45.00629468938521
+      ],
+      [
+       -74.67327354781406,
+       45.000850444882836
+      ],
+      [
+       -74.68354804069494,
+       44.9995034270763
+      ],
+      [
+       -74.70227732843718,
+       45.00332145849191
+      ],
+      [
+       -74.7217912491771,
+       44.99845182092952
+      ],
+      [
+       -74.73094912800872,
+       44.990474641200194
+      ],
+      [
+       -74.7444993527532,
+       44.990669803605904
+      ],
+      [
+       -74.76034206703102,
+       44.99500743862515
+      ],
+      [
+       -74.76312613756488,
+       45.00574095361129
+      ],
+      [
+       -74.792872796949,
+       45.00442947388384
+      ],
+      [
+       -74.7998339588927,
+       45.01082242487988
+      ],
+      [
+       -74.80147926058643,
+       45.014568757242905
+      ],
+      [
+       -74.81324630643168,
+       45.01355987363889
+      ],
+      [
+       -74.81708070316758,
+       45.011589896398775
+      ],
+      [
+       -74.82653943054316,
+       45.01587953900204
+      ],
+      [
+       -74.83476948614498,
+       45.01465063622039
+      ],
+      [
+       -74.84188770195918,
+       45.011296488437324
+      ],
+      [
+       -74.84610300713334,
+       45.01032537089556
+      ],
+      [
+       -74.85617582135926,
+       45.00449788483365
+      ],
+      [
+       -74.86260384324109,
+       45.00456504568786
+      ],
+      [
+       -74.86636288886474,
+       45.00047172738072
+      ],
+      [
+       -74.87719824367801,
+       45.001446347964624
+      ],
+      [
+       -74.88845770814699,
+       44.99997738183927
+      ],
+      [
+       -74.90104338362264,
+       44.99256988431786
+      ],
+      [
+       -74.90805662117529,
+       44.983524414280986
+      ],
+      [
+       -74.94724294756365,
+       44.98487560567468
+      ],
+      [
+       -74.97255068101862,
+       44.98349173136507
+      ],
+      [
+       -74.99281734168503,
+       44.977517754193606
+      ],
+      [
+       -74.999342669686,
+       44.971760321309205
+      ],
+      [
+       -74.99943584458177,
+       44.966141840829984
+      ],
+      [
+       -75.00290448390875,
+       44.96245390941543
+      ],
+      [
+       -75.00502944383358,
+       44.95841069913144
+      ],
+      [
+       -75.02670186753315,
+       44.946639048354285
+      ],
+      [
+       -75.05993887815035,
+       44.93448336875043
+      ],
+      [
+       -75.06468029745979,
+       44.92950187027967
+      ],
+      [
+       -75.09642834371631,
+       44.92706924087083
+      ],
+      [
+       -75.10477061721065,
+       44.91965614663199
+      ],
+      [
+       -75.11758140796066,
+       44.92109958762883
+      ],
+      [
+       -75.13465820508249,
+       44.91506379839494
+      ],
+      [
+       -75.1399900299348,
+       44.896955908688454
+      ],
+      [
+       -75.16497554991145,
+       44.89355739624146
+      ],
+      [
+       -75.18888032524062,
+       44.883195971682746
+      ],
+      [
+       -75.19416467120823,
+       44.88268633162469
+      ],
+      [
+       -75.20289738118537,
+       44.877857684819276
+      ],
+      [
+       -75.21838269778182,
+       44.87778046982445
+      ],
+      [
+       -75.22824090872327,
+       44.86833899889848
+      ],
+      [
+       -75.24103381242284,
+       44.86716243500842
+      ],
+      [
+       -75.25607772370665,
+       44.85735134010809
+      ],
+      [
+       -75.26830355148628,
+       44.85491679614163
+      ],
+      [
+       -75.28486594466935,
+       44.84832523685639
+      ],
+      [
+       -75.30742165057454,
+       44.83664196871002
+      ],
+      [
+       -75.30635017877556,
+       44.834679916533794
+      ],
+      [
+       -75.30634999164717,
+       44.83467991855887
+      ],
+      [
+       -75.30187872529136,
+       44.82649189736831
+      ],
+      [
+       -75.33354436005635,
+       44.80627492868407
+      ],
+      [
+       -75.34440607917688,
+       44.809051177300304
+      ],
+      [
+       -75.35249890360136,
+       44.80221384371411
+      ],
+      [
+       -75.36958088166524,
+       44.78777342036301
+      ],
+      [
+       -75.3699444504384,
+       44.78298631738984
+      ],
+      [
+       -75.38787413125259,
+       44.77959218459416
+      ],
+      [
+       -75.39653418228743,
+       44.77351019520196
+      ],
+      [
+       -75.41373657591141,
+       44.772185977285
+      ],
+      [
+       -75.42365255058002,
+       44.75610563837044
+      ],
+      [
+       -75.47612028191563,
+       44.72078090509352
+      ],
+      [
+       -75.50493012769954,
+       44.70536426474809
+      ],
+      [
+       -75.62002232616834,
+       44.61872542263378
+      ],
+      [
+       -75.6613402455941,
+       44.59273700297787
+      ],
+      [
+       -75.69935251277913,
+       44.56572506300278
+      ],
+      [
+       -75.72028937414261,
+       44.54799399297749
+      ],
+      [
+       -75.72331252382827,
+       44.54619339763707
+      ],
+      [
+       -75.72587868979996,
+       44.54385057781623
+      ],
+      [
+       -75.76693637783917,
+       44.51528093459173
+      ],
+      [
+       -75.80758597681861,
+       44.47171617482177
+      ],
+      [
+       -75.82138273246603,
+       44.4320508961193
+      ],
+      [
+       -75.86993074080239,
+       44.39618435560073
+      ],
+      [
+       -75.91283203536798,
+       44.36781294479139
+      ],
+      [
+       -75.92165895789974,
+       44.368765023977936
+      ],
+      [
+       -75.92951701382243,
+       44.35929928605928
+      ],
+      [
+       -75.9408472357618,
+       44.35467793991012
+      ],
+      [
+       -75.94972068039537,
+       44.34898802645294
+      ],
+      [
+       -75.97018086942808,
+       44.34254152464026
+      ],
+      [
+       -75.97292790226444,
+       44.34304370234267
+      ],
+      [
+       -75.9750342018129,
+       44.345999505550374
+      ],
+      [
+       -75.97845402947274,
+       44.34649611522862
+      ],
+      [
+       -75.98021460666357,
+       44.3460185825564
+      ],
+      [
+       -75.98193082475125,
+       44.34746799897297
+      ],
+      [
+       -75.98608535498084,
+       44.34689821817849
+      ],
+      [
+       -75.98807820412544,
+       44.347211799725706
+      ],
+      [
+       -75.99030992747021,
+       44.347134548911335
+      ],
+      [
+       -75.99241665958473,
+       44.34733785273066
+      ],
+      [
+       -76.00110773641775,
+       44.347875245840996
+      ],
+      [
+       -76.00800320685573,
+       44.34421047235662
+      ],
+      [
+       -76.0455088974776,
+       44.331796208637314
+      ],
+      [
+       -76.09696780964813,
+       44.29971494320463
+      ],
+      [
+       -76.11182814782846,
+       44.2980821283015
+      ],
+      [
+       -76.11818331286186,
+       44.29493211604398
+      ],
+      [
+       -76.12944873284246,
+       44.29513626859882
+      ],
+      [
+       -76.13117048878857,
+       44.29638071441151
+      ],
+      [
+       -76.16180769822415,
+       44.280724838352185
+      ],
+      [
+       -76.16429966697213,
+       44.23982442981459
+      ],
+      [
+       -76.19171241280539,
+       44.221431338312016
+      ],
+      [
+       -76.20681579263093,
+       44.21499395361803
+      ],
+      [
+       -76.24545859969766,
+       44.20386385837178
+      ],
+      [
+       -76.28666532461493,
+       44.20381262231631
+      ],
+      [
+       -76.31270567038369,
+       44.19905217167733
+      ],
+      [
+       -76.34833834750417,
+       44.14159518127852
+      ],
+      [
+       -76.352838622149,
+       44.13433857927993
+      ],
+      [
+       -76.43893517383165,
+       44.09407314438
+      ],
+      [
+       -76.45509460385908,
+       44.073139740174106
+      ]
+     ]
+    ]
+   },
+   "id": "m0000145"
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "lastUpdated": "2026-10-13T07:00:19Z",
+    "area": {
+     "countryCode": {
+      "en": "CA",
+      "fr": "CA"
+     },
+     "region": {
+      "en": "Great Lakes",
+      "fr": "Grand Lacs"
+     },
+     "subRegion": {
+      "en": "Lake Erie and Lake Ontario (Lake St. Clair and St. Lawrence River)",
+      "fr": "Lac Érié et Lac Ontario (Lac Sainte-Claire et Fleuve Saint-Laurent)"
+     },
+     "value": {
+      "en": "Lake St. Clair",
+      "fr": "lac Sainte-Claire"
+     }
+    },
+    "regularForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "weatherVisibility": {
+         "en": "Scattered showers ending this morning with a risk of thunderstorms. Scattered showers overnight and Wednesday morning with a risk of thunderstorms.",
+         "fr": "Averses éparses cessant ce matin avec risque d'orages. Averses éparses cette nuit et mercredi matin avec risque d'orages."
+        },
+        "wind": {
+         "en": "Wind southwest 15 knots diminishing to west 10 early this evening then becoming light overnight. Wind becoming north 10 Wednesday morning then veering to northeast 10 Wednesday evening.",
+         "fr": "Vent du sud-ouest à 15 noeuds diminuant d'ouest à 10 tôt ce soir puis devenant léger au cours de la nuit. Vent devenant du nord à 10 mercredi matin puis virant au nord-est à 10 mercredi soir."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T07:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T03:00:00-04:00"
+    },
+    "extendedForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "forecastPeriods": [
+         {
+          "name": {
+           "en": "Thursday",
+           "fr": "Jeudi"
+          },
+          "value": {
+           "en": "Wind northeast 15 knots.",
+           "fr": "Vent du nord-est à 15 noeuds."
+          }
+         },
+         {
+          "name": {
+           "en": "Friday",
+           "fr": "Vendredi"
+          },
+          "value": {
+           "en": "Wind light increasing to northwest 30 knots  late in the day.",
+           "fr": "Vent léger augmentant du nord-ouest à 30  noeuds en fin de journée."
+          }
+         },
+         {
+          "name": {
+           "en": "Saturday",
+           "fr": "Samedi"
+          },
+          "value": {
+           "en": "Wind northwest 20 knots backing to southwest  15 late in the day.",
+           "fr": "Vent du nord-ouest à 20 noeuds revenant au  sud-ouest à 15 en fin de journée."
+          }
+         }
+        ]
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T07:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T03:00:00-04:00"
+    },
+    "waveForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "textSummary": {
+         "en": "Waves 0.5 metres.",
+         "fr": "Vagues 0,5 mètre."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T07:00:00Z",
+     "issuedDatetimeLocal": "2026-10-13T03:00:00-04:00"
+    },
+    "warnings": {
+     "locations": []
+    }
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -82.59092996143869,
+       42.55002769861086
+      ],
+      [
+       -82.58387143769777,
+       42.55393763568122
+      ],
+      [
+       -82.58025475654104,
+       42.56415656782002
+      ],
+      [
+       -82.56855834662261,
+       42.57423525419584
+      ],
+      [
+       -82.56018844876822,
+       42.57927881962828
+      ],
+      [
+       -82.55340780552464,
+       42.58512461466225
+      ],
+      [
+       -82.54922420720081,
+       42.59121623530052
+      ],
+      [
+       -82.53700359383583,
+       42.59867031109068
+      ],
+      [
+       -82.52343801993435,
+       42.607352173348204
+      ],
+      [
+       -82.51991979432457,
+       42.61235137103653
+      ],
+      [
+       -82.51546111030062,
+       42.60952032545672
+      ],
+      [
+       -82.5505588508488,
+       42.56283373407284
+      ],
+      [
+       -82.5347988816086,
+       42.54661170785207
+      ],
+      [
+       -82.53076513302005,
+       42.54245764788981
+      ],
+      [
+       -82.51500901600953,
+       42.526223593210474
+      ],
+      [
+       -82.46343245302667,
+       42.53588517221693
+      ],
+      [
+       -82.39542613301516,
+       42.51888359233428
+      ],
+      [
+       -82.36958373225943,
+       42.39375196284649
+      ],
+      [
+       -82.41378783966303,
+       42.2795013459695
+      ],
+      [
+       -82.54912041641835,
+       42.28494185066104
+      ],
+      [
+       -82.71641596338799,
+       42.26794027131808
+      ],
+      [
+       -82.90978357536281,
+       42.32540523880459
+      ],
+      [
+       -82.9189987161252,
+       42.337776950315686
+      ],
+      [
+       -82.9211338947736,
+       42.34228847254225
+      ],
+      [
+       -82.92498311822662,
+       42.34850853959324
+      ],
+      [
+       -82.92636140648067,
+       42.35123734621214
+      ],
+      [
+       -82.82818842629891,
+       42.373417256273946
+      ],
+      [
+       -82.78165700624209,
+       42.41983827566751
+      ],
+      [
+       -82.75758574026678,
+       42.4437933068604
+      ],
+      [
+       -82.71046642829417,
+       42.49124902538248
+      ],
+      [
+       -82.67750425886707,
+       42.52373415788407
+      ],
+      [
+       -82.66780834419434,
+       42.53340344288735
+      ],
+      [
+       -82.66217777214887,
+       42.541464740059396
+      ],
+      [
+       -82.65434897206981,
+       42.54703301132775
+      ],
+      [
+       -82.64113168058584,
+       42.55493485897188
+      ],
+      [
+       -82.6329933600528,
+       42.55711205058282
+      ],
+      [
+       -82.62385968035315,
+       42.5570589931621
+      ],
+      [
+       -82.61668380145935,
+       42.554475970149866
+      ],
+      [
+       -82.6107548776224,
+       42.55000214386076
+      ],
+      [
+       -82.60555465034012,
+       42.54854994079157
+      ],
+      [
+       -82.59092996143869,
+       42.55002769861086
+      ]
+     ]
+    ]
+   },
+   "id": "m0000025"
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "lastUpdated": "2026-10-13T13:12:22Z",
+    "regularForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "weatherVisibility": {
+         "en": "Flurries. Fog patches dissipating early this evening.",
+         "fr": "Averses de neige. Nappes de brouillard se dissipant tôt ce soir."
+        },
+        "airTemperature": {
+         "en": "Temperatures minus 3 falling to minus 9 Wednesday afternoon.",
+         "fr": "Température moins 3 à la baisse pour atteindre moins 9 mercredi après-midi."
+        },
+        "freezingSpray": {
+         "en": "Freezing spray beginning Wednesday morning.",
+         "fr": "Embruns verglaçants débutant mercredi matin."
+        },
+        "wind": {
+         "en": "Wind northwest 15 knots diminishing to light this morning then increasing to west 15 early this evening. Wind veering to northwest 20 late overnight. Wind northwest 20 Wednesday.",
+         "fr": "Vent du nord-ouest à 15 noeuds diminuant à léger ce matin puis augmentant d'ouest à 15 tôt ce soir. Vent virant au nord-ouest à 20 en fin de nuit. Vent du nord-ouest à 20 mercredi."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T13:05:00Z",
+     "issuedDatetimeLocal": "2026-10-13T07:05:00-06:00"
+    },
+    "extendedForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "forecastPeriods": [
+         {
+          "name": {
+           "en": "Thursday",
+           "fr": "Jeudi"
+          },
+          "value": {
+           "en": "Wind northwest 20 knots diminishing to light  in the morning then becoming southeast 15 late in the day.",
+           "fr": "Vent du nord-ouest à 20 noeuds diminuant à léger  le matin puis devenant du sud-est à 15 en fin de journée."
+          }
+         },
+         {
+          "name": {
+           "en": "Friday",
+           "fr": "Vendredi"
+          },
+          "value": {
+           "en": "Wind southeast 25 knots increasing to southeast  30 late in the day.",
+           "fr": "Vent du sud-est à 25 noeuds augmentant du  sud-est à 30 en fin de journée."
+          }
+         },
+         {
+          "name": {
+           "en": "Saturday",
+           "fr": "Samedi"
+          },
+          "value": {
+           "en": "Wind east 25 knots diminishing to light late  in the day.",
+           "fr": "Vent d'est à 25 noeuds diminuant à léger en fin  de journée."
+          }
+         }
+        ]
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T13:06:00Z",
+     "issuedDatetimeLocal": "2026-10-13T07:06:00-06:00"
+    },
+    "waveForecast": {
+     "locations": [
+      {
+       "weatherCondition": {
+        "periodOfCoverage": {
+         "en": "Today Tonight and Wednesday.",
+         "fr": "aujourd'hui cette nuit et mercredi."
+        },
+        "textSummary": {
+         "en": "Seas 1 metre or less building to 1 to 2 near noon Wednesday.",
+         "fr": "Mer de 1 mètre ou moins augmentant à 1 à 2 vers midi mercredi."
+        }
+       }
+      }
+     ],
+     "issuedDatetimeUTC": "2026-10-13T13:05:00Z",
+     "issuedDatetimeLocal": "2026-10-13T07:05:00-06:00"
+    },
+    "warnings": {
+     "locations": [
+      {
+       "name": {
+        "en": "Ulukhaktok",
+        "fr": "Ulukhaktok"
+       },
+       "events": [
+        {
+         "name": {
+          "en": "Freezing spray warning",
+          "fr": "Avertissement d'embruns verglaçants"
+         },
+         "type": {
+          "en": "warning",
+          "fr": "avertissement"
+         },
+         "category": {
+          "en": "marine",
+          "fr": "maritime"
+         },
+         "status": {
+          "en": "IN EFFECT",
+          "fr": "EN VIGUEUR"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "id": "m0000031",
+   "geometry": null
+  }
+ ],
+ "numberMatched": 6,
+ "numberReturned": 6,
+ "timeStamp": "2026-10-13T13:28:09.356573Z"
+}
