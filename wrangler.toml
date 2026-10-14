@@ -1,6 +1,6 @@
 name = "swim-report"
 main = "src/index.js"
-compatibility_date = "2026-09-08"
+compatibility_date = "2026-10-06"
 routes = [
   { pattern = "swim.report", custom_domain = true }
 ]

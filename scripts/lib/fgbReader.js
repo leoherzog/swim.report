@@ -10,16 +10,11 @@
 // and on the JS-serialized in-memory fixtures the tests build (indexNodeSize 0,
 // which cannot serve a bbox read at all).
 //
-// Never call deserialize(stream, rect). The library's dispatcher is
-//   deserialize(input, rect, headerMetaFn) =>
-//     input instanceof Uint8Array ? deserialize(input, rect, headerMetaFn)
-//     : input instanceof ReadableStream ? deserializeStream(input, headerMetaFn)
-//     : deserializeFiltered(...)
-// so for a stream the second positional argument is read as headerMetaFn and a
-// rect passed there is discarded with no error, yielding the whole file instead
-// of the filtered subset. Here that would set coastlinePresent for every beach
-// and reclassify the whole table. Both call sites below pass the rect slot as an
-// explicit undefined and never anything else.
+// deserialize(input, options) takes the header callback as options.headerMetaFn;
+// a callback passed any other way is dropped with no error and silently disables
+// the truncation trip-wire below. Never pass options.rect: the stream branch
+// ignores it and yields the whole file instead of the filtered subset, which
+// here would set coastlinePresent for every beach and reclassify the whole table.
 //
 // A corrupt layer must never read as an empty one, because an empty layer is
 // indistinguishable from "the world has no beaches here" and feeds the only
@@ -261,10 +256,9 @@ export async function readFgb(bytes) {
   const onHeader = function (meta) { header = meta; };
   const features = [];
   try {
-    // The second argument is the rect slot and stays undefined. This is the
-    // Uint8Array branch, which does honour a rect, but honouring it would mean
-    // trusting the packed R-tree that JS-serialized fixtures lack.
-    for await (const feature of deserialize(bytes, undefined, onHeader)) {
+    // No rect: this Uint8Array branch would honour one, but only by trusting the
+    // packed R-tree that JS-serialized fixtures lack.
+    for await (const feature of deserialize(bytes, { headerMetaFn: onHeader })) {
       features.push({
         geometry: feature && feature.geometry !== undefined ? feature.geometry : null,
         properties: feature && feature.properties !== undefined ? feature.properties : {}
@@ -322,9 +316,8 @@ export async function* readFgbStream(path, layerName) {
   let iterator = null;
   try {
     // readableWebStream() is a web ReadableStream, so this takes the library's
-    // stream branch, where the dispatcher discards the second argument and reads
-    // the third as headerMetaFn. The rect slot stays an explicit undefined.
-    const source = deserialize(file.readableWebStream(), undefined, onHeader);
+    // stream branch, which ignores any rect.
+    const source = deserialize(file.readableWebStream(), { headerMetaFn: onHeader });
     iterator = source[Symbol.asyncIterator]();
     while (true) {
       let step;

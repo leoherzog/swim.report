@@ -100,8 +100,8 @@ describe("renderListPage home map", () => {
     const html = renderListPage({ entries: [] });
     // MapLibre 6 is ESM-only — the pinned bundle is the .mjs module, pulled in
     // by the inline script's dynamic import, and both pins share one version.
-    expect(html).toContain("maplibre-gl@6.8.0/dist/maplibre-gl.mjs");
-    expect(html).toContain("maplibre-gl@6.8.0/dist/maplibre-gl.css");
+    expect(html).toContain("maplibre-gl@6.14.0/dist/maplibre-gl.mjs");
+    expect(html).toContain("maplibre-gl@6.14.0/dist/maplibre-gl.css");
     expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap)");
     // MapLibre 6 ships ESM-only with no UMD bundle published: a <script src> to
     // that path would 404 and the map would never load.

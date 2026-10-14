@@ -55,7 +55,7 @@ const SITE_ORIGIN = "https://swim.report";
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
 // The matching wa-theme-matter / wa-palette-mild classes go on <html>.
-const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.12.0";
+const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome@3.14.0";
 
 // MapLibre GL JS (pinned) + the OpenFreeMap positron style: browser-only assets
 // for the home-page map (src/frontend/mapScript.js). Loaded from renderListPage,
@@ -64,8 +64,8 @@ const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome
 //
 // MapLibre 6 ships ES modules only, so the inline map script pulls the .mjs in
 // with a dynamic import(). Keep both pins on the same version.
-const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.8.0/dist/maplibre-gl.mjs";
-const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.8.0/dist/maplibre-gl.css";
+const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.14.0/dist/maplibre-gl.mjs";
+const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.14.0/dist/maplibre-gl.css";
 
 // Kit theme overrides, minus the kit's webfont downloads: each family leads
 // with genuine system fonts so the pinned matter.css @font-face rules (served

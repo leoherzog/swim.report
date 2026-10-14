@@ -4246,7 +4246,7 @@ Routing table (method GET only; anything else → 405):
 
     name = "swim-report"
     main = "src/index.js"
-    compatibility_date = "2026-09-08"
+    compatibility_date = "2026-10-06"
     routes = [
       { pattern = "swim.report", custom_domain = true }
     ]
@@ -4427,7 +4427,7 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // aria-label advertising a hidden map. data-center is the router's resolved
       // location (the same {lat,lon} that sorts the list, 3 dp); data-center-precise is
       // "1" for a browser fix, "0" for the IP estimate.
-      // Home-page-only, never in renderDocument's shared head: MapLibre GL JS 6.8.0 plus
+      // Home-page-only, never in renderDocument's shared head: MapLibre GL JS 6.14.0 plus
       // its CSS (pinned) and the browser-side map script (buildListMapScript(MAPLIBRE_JS)
       // from src/frontend/mapScript.js — the pinned .mjs URL is injected as
       // MAPLIBRE_MODULE_URL so render.js holds both CDN pins and they cannot drift

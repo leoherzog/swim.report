@@ -116,12 +116,12 @@ jobs:
       # floor asserted below covers both stages: Actions commits only 14 GB and
       # anything above it is best effort, so this step buys the margin rather than
       # betting on an observation.
-      # tool-cache is deliberately not reclaimed: it holds the Node the later steps
-      # need.
+      # preinstalled-runtimes is deliberately not reclaimed: it holds the Node the
+      # later steps need.
       - name: Reclaim disk
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@v2.0.0
         with:
-          tool-cache: false
+          preinstalled-runtimes: false
           android: true
           dotnet: true
           haskell: true
