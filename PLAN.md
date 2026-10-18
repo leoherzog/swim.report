@@ -4173,6 +4173,30 @@ URL names or in what order; D1 reads only, no fetch, no KV, no writes):
       // WHERE id IN (?1, ...) AND [flag-worthy gate] read; unknown and non-flag-worthy
       // ids are skipped; an empty list reads nothing.
 
+src/apiExamples.js (the documented example payloads, shared so the /api/ page and the
+OpenAPI document can never show different samples):
+
+    export const EXAMPLE_LIST_RESPONSE, EXAMPLE_IDS_RESPONSE, EXAMPLE_BEACH_RESPONSE,
+      EXAMPLE_OFFICIAL_BEACH_RESPONSE, EXAMPLE_GEOJSON_RESPONSE
+      // Plain objects in the exact public shapes; rules_version is RULES_VERSION.
+
+src/openapi.js (GET /api/openapi.json):
+
+    export const API_VERSION      // "1.0.0": the API contract's version, not the site's.
+                                  // Minor for additive changes, major for breaking ones.
+    export const OPENAPI_PATH     // "/api/openapi.json"
+    export function buildOpenApiDocument()
+      // -> the OpenAPI 3.2.0 document as a plain object. Pure. Every path the API serves
+      // (/api/beaches, /api/beaches/{beachId}, /api/flag/{beachId} marked deprecated as
+      // the alias, /api/beaches.geojson, /api/openapi.json, /health), component schemas
+      // in JSON Schema 2020-12 with nullable fields as anyOf [schema, {type: null}], root
+      // security [] (no authentication), and limits read from HOME_LIST_LIMIT,
+      // IDS_LIST_LIMIT, CACHE_CONTROL_CACHEABLE and RULES_VERSION. Examples come from
+      // src/apiExamples.js.
+    export async function handleOpenApi(ifNoneMatch)
+      // -> the 200 or 304 through etaggedResponse. The bytes and their ETag are computed
+      // once per isolate, since they change only with a deploy.
+
 src/apiBeaches.js (GET /api/beaches plus the pure helpers the router shares with it):
 
     export function beachDisplayName(beach)
@@ -4295,8 +4319,9 @@ Routing table (GET, and HEAD as GET without the body; anything else → 405):
 | GET /api/beaches/:beachId and GET /api/flag/:beachId | handleApiBeach (one handler, routed by routeApiBeach for each prefix) | :beachId is the public id (src/publicId.js). A segment in the public form resolves to its storage id; one in the storage form answers 301 to the same prefix + <public id> (/api/beaches/<pub> or /api/flag/<pub>), cache-control CACHE_CONTROL_CACHEABLE, reading nothing; a segment that is empty, contains "/" or is neither form 404s before any read. Otherwise D1: one row by id joined to beach_state (b.id, name, park_name, lat, lon, last_viewed, water_class, water_class_attempts plus BEACH_STATE_SELECT: exists check, the flag-worthy gate, the stamp throttle, the estimate and the official); stamps last_viewed like handleDetail. /api/flag/:beachId is the documented alias of /api/beaches/:beachId and returns the identical body | JSON (etaggedResponse, "application/json; charset=utf-8", strong SHA-256 ETag over the body, If-None-Match → 304 — no field is the request instant) { "beachId": the public id, "name": beachDisplayName, "lat", "lon" (apiCoord), "estimate": FlagEstimate or null, "official": OfficialFlag or null, "display": { "color", "source", "forecast" }, "links": { "page", "api" } }. The two record blobs are stored shapes, so their own nested beachId stays the storage id — with display computed by displayFlag over the same records at the same instant. display.color is one of green, yellow, red, double-red, unknown and display.source one of official, estimate, none, and display.forecast true only when the credited official is a forecast for the day; the object is built field by field, so it never carries the keyword |
 | GET /beach/:beachId.json  | inline         | nothing. The segment before ".json" in either id form (parseAnyBeachId) | 301 to /api/beaches/<public id>, CACHE_CONTROL_CACHEABLE, with the CORS headers (a cross-origin fetch checks every redirect hop); a malformed segment answers the /api/flag JSON 404 { "error": "beach not found" } with CORS. Existence is decided by the API it redirects to. A permanent redirect, never a second representation of the page |
 | GET /api                  | inline         | nothing                                      | 301 to /api/, CACHE_CONTROL_CACHEABLE |
-| GET /api/                 | renderApiDocsPage (src/frontend/apiDocs.js) | nothing | HTML API documentation page (section 9), CACHE_CONTROL_CACHEABLE, CORS headers included like every /api/* response |
+| GET /api/                 | renderApiDocsPage (src/frontend/apiDocs.js) | nothing | HTML API documentation page (section 9), CACHE_CONTROL_CACHEABLE, CORS headers included like every /api/* response, plus Link: </api/openapi.json>; rel="service-desc"; type="application/json" (RFC 8631) |
 | OPTIONS /api/*            | apiPreflightResponse (src/apiCors.js) | nothing | 204, no body, the preflight headers of src/apiCors.js, no-store |
+| GET /api/openapi.json     | handleOpenApi (src/openapi.js) | nothing | The OpenAPI 3.2 document from buildOpenApiDocument(), serialized and hashed once per isolate; "application/json; charset=utf-8", CACHE_CONTROL_CACHEABLE, strong SHA-256 ETag, If-None-Match → 304 (etaggedResponse); CORS like every /api/* response |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag plus the four security headers public/_headers declares. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -4764,15 +4789,21 @@ src/frontend/apiDocs.js:
       // renderBrandHeader / renderFooter, so it carries the footer disclaimer; meta
       // { title, description, path: "/api/", flagColor: "unknown" } gives it a canonical
       // URL and the gray card. One <article class="wa-prose api-docs"> with an on-page
-      // table of contents, then sections for the overview (estimated vs official,
-      // display.source / forecast, unknown is gray), quick start, each endpoint
-      // (/api/beaches with q, near, ids; /api/beaches/:beachId; the /api/flag alias;
-      // /api/beaches.geojson; /health) with parameter tables, curl examples and example
-      // bodies, display semantics, ids, discovery (.json redirect and rel=alternate),
-      // caching, CORS, errors, units, freshness and fair use. Code blocks carry
-      // <wa-copy-button>. Every number it states that the code owns is imported, not
-      // typed: HOME_LIST_LIMIT (src/beachQueries.js), IDS_LIST_LIMIT, FLAG_TTL_SECONDS,
-      // STALE_MS and CACHE_CONTROL_CACHEABLE. No script of its own beyond the shared
+      // table of contents. Its REFERENCE half is rendered from buildOpenApiDocument()
+      // (src/openapi.js), the single source of truth for the API's shape: one section per
+      // operation (summary, description, a parameter table, a status table naming each
+      // body's schema, a curl request with path examples substituted, and the 2xx
+      // examples; a deprecated operation gets a badge and no examples of its own), then a
+      // Schemas section with one field table per component schema (type links between
+      // schemas, always/optional presence, description). Spec descriptions are plain
+      // text, escaped, never Markdown. Its GUIDE half is hand-written: overview
+      // (estimated vs official, display.source / forecast, unknown is gray), quick start,
+      // the OpenAPI pointer, display semantics (the per-value color and source tables
+      // JSON Schema enums cannot carry), ids, discovery (.json redirect and
+      // rel=alternate), caching, CORS, the cross-route errors (other /api/* 404, 405,
+      // 500), units, freshness and fair use. Code blocks carry <wa-copy-button>. Every
+      // number the guide states that the code owns is imported, not typed:
+      // FLAG_TTL_SECONDS, STALE_MS and CACHE_CONTROL_CACHEABLE. No script of its own beyond the shared
       // head. Its layout rules live in styles.js, scoped to main.api-docs-main and
       // .api-docs (section spacing, tables with a 36rem min-width that scroll inside
       // their own box at phone width, unbroken table code).
@@ -5805,9 +5836,18 @@ test uses symbolically.
   /beach/:id.json and /api redirects, no Accept negotiation, the /api/ page and the other
   /api/* JSON 404, and CORS: the OPTIONS 204, the headers on the GeoJSON and its 304 and on
   the /api/* 405, and none on the HTML pages.
+- test/openapi.test.js — the OpenAPI document against the implementation, through a
+  validator for the JSON Schema subset src/openapi.js uses (self-tested to reject bad
+  values): OpenAPI 3.2 with every public path and unique operationIds, the imported limits,
+  every $ref resolving, every example valid against its schema, and real handleRequest
+  responses (every list mode, the 400, the single-beach route and its alias with an
+  estimate, an official and neither, the 404, the GeoJSON, /health) valid against the
+  schema of the operation that served them; /api/openapi.json served with ETag, 304 and
+  CORS, and advertised from /api/ as its service-desc.
 - test/apiDocs.test.js — renderApiDocsPage: a complete themed document with the canonical
-  /api/ URL, one h1 and the footer disclaimer, purity, every endpoint and list parameter
-  documented, the ids cap from the imported constant, base URL / CORS / caching named,
+  /api/ URL, one h1 and the footer disclaimer, purity, every OpenAPI path, operation and
+  component schema rendered with parameter text taken from the document, the deprecated
+  alias badged with no examples, the ids cap from the imported constant, base URL / CORS / caching named,
   unknown stated as gray, a labelled table of contents whose anchors all resolve and unique
   ids, no extra external script, a copy button per code block, escaped samples, every JSON
   response sample parsing in its documented shape, and no self-closed custom element.

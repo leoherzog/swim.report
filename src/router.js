@@ -8,6 +8,7 @@ import { strongEtag, etaggedResponse } from "./etag.js";
 import { toPublicId, fromPublicId, fromLegacyId, parseAnyBeachId } from "./publicId.js";
 import { CACHE_CONTROL_CACHEABLE, CACHE_CONTROL_NO_STORE } from "./cacheControl.js";
 import { isApiPath, withApiCors, apiPreflightResponse } from "./apiCors.js";
+import { OPENAPI_PATH, handleOpenApi } from "./openapi.js";
 import {
   escapeLike,
   parseBeachIds,
@@ -493,7 +494,13 @@ async function routeApi(request, method, env, ctx, url) {
   }
   if (path === "/api/") {
     const html = renderApiDocsPage({ nowIso: new Date().toISOString() });
-    return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+    const docs = htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+    // RFC 8631: the machine-readable description of the API this page documents.
+    docs.headers.set("link", "<" + OPENAPI_PATH + ">; rel=\"service-desc\"; type=\"application/json\"");
+    return docs;
+  }
+  if (path === OPENAPI_PATH) {
+    return handleOpenApi(ifNoneMatchOf(request));
   }
   if (path === "/api/beaches") {
     return handleApiBeaches(env, url.searchParams, ifNoneMatchOf(request));

@@ -8,11 +8,12 @@
 // is an in-page nav at the top of main rather than a sidebar, which also keeps
 // it readable at phone width.
 //
-// Every example payload is built as a JS object and serialized with
-// JSON.stringify, so each sample is valid JSON by construction, and every code
-// block goes through escapeHtml, so a "<" in a Link header example can never
-// open a tag. The numbers the prose quotes (the ids cap, the estimate lease, the
-// stale threshold, the list cap, the cache policy) are imported from the modules that enforce them.
+// The reference half (endpoints, parameters, responses, schemas, examples) is
+// rendered from buildOpenApiDocument(), so the page and /api/openapi.json are one
+// source of truth; the guide half is hand-written. Every code block goes through
+// escapeHtml, so a "<" in a Link header example can never open a tag, and the
+// numbers the guide prose quotes (the estimate lease, the stale threshold, the
+// cache policy) are imported from the modules that enforce them.
 import {
   escapeHtml,
   renderDocument,
@@ -20,17 +21,12 @@ import {
   renderBrandHeader,
   renderFooter
 } from "./render.js";
-import { IDS_LIST_LIMIT } from "../idsListLimit.js";
 import { FLAG_TTL_SECONDS } from "../flagTtl.js";
 import { STALE_MS } from "../displayFlag.js";
-import { HOME_LIST_LIMIT } from "../beachQueries.js";
 import { CACHE_CONTROL_CACHEABLE } from "../cacheControl.js";
+import { OPENAPI_PATH, buildOpenApiDocument } from "../openapi.js";
 
 const SITE_ORIGIN = "https://swim.report";
-
-// The list cap and the cache policy come from the modules the router and the
-// API handlers read them from, so the prose cannot drift from the behavior.
-const LIST_LIMIT = HOME_LIST_LIMIT;
 
 const LEASE_HOURS = FLAG_TTL_SECONDS / 3600;
 const STALE_HOURS = STALE_MS / 3600000;
@@ -66,141 +62,31 @@ const PAGE_TITLE = "Swim Report API";
 const PAGE_DESCRIPTION = "Read-only JSON API for swim.report's estimated and " +
   "official beach hazard flags: search, nearby, saved lists, one beach, GeoJSON.";
 
-// The on-page table of contents, in page order. Every id here is rendered as a
-// section heading below; test/apiDocs.test.js checks each anchor resolves.
-const TOC = [
-  { id: "overview", label: "Overview" },
-  { id: "quick-start", label: "Quick start" },
-  { id: "list-beaches", label: "GET /api/beaches" },
-  { id: "one-beach", label: "GET /api/beaches/:beachId" },
-  { id: "flag-alias", label: "GET /api/flag/:beachId" },
-  { id: "geojson", label: "GET /api/beaches.geojson" },
-  { id: "health", label: "GET /health" },
-  { id: "display", label: "Reading a flag" },
-  { id: "beach-ids", label: "Beach ids" },
-  { id: "discovery", label: "Finding the JSON for a page" },
-  { id: "caching", label: "Caching and ETags" },
-  { id: "cors", label: "CORS" },
-  { id: "errors", label: "Errors" },
-  { id: "units", label: "Units and coordinates" },
-  { id: "freshness", label: "Freshness" },
-  { id: "fair-use", label: "Attribution and fair use" }
-];
-
-// --- Example data -----------------------------------------------------------
-// Plausible, mutually consistent records: Holland State Park is an estimate-
-// driven yellow, Tunnel Park carries a posted red official flag.
-
-const HOLLAND_LINKS = { page: "/beach/n123456", api: "/api/beaches/n123456" };
-const TUNNEL_LINKS = { page: "/beach/w98765432", api: "/api/beaches/w98765432" };
-
-const EXAMPLE_LIST_RESPONSE = {
-  builtAt: "2026-07-04T15:00:03.000Z",
-  sort: "distance",
-  query: { q: null, near: { lat: 42.7712, lon: -86.2125 }, ids: null },
-  hasMore: true,
-  beaches: [
-    {
-      id: "n123456",
-      name: "Holland State Park",
-      lat: 42.77271,
-      lon: -86.21245,
-      display: { color: "yellow", source: "estimate", forecast: false },
-      distanceMi: 0.1,
-      links: HOLLAND_LINKS
-    },
-    {
-      id: "w98765432",
-      name: "Tunnel Park",
-      lat: 42.82641,
-      lon: -86.21533,
-      display: { color: "red", source: "official", forecast: false },
-      distanceMi: 3.8,
-      links: TUNNEL_LINKS
-    }
-  ]
-};
-
-const EXAMPLE_IDS_RESPONSE = {
-  builtAt: "2026-07-04T15:00:03.000Z",
-  sort: "ids",
-  query: { q: null, near: null, ids: ["w98765432", "n123456"] },
-  hasMore: false,
-  beaches: [
-    {
-      id: "w98765432",
-      name: "Tunnel Park",
-      lat: 42.82641,
-      lon: -86.21533,
-      display: { color: "red", source: "official", forecast: false },
-      distanceMi: null,
-      links: TUNNEL_LINKS
-    },
-    {
-      id: "n123456",
-      name: "Holland State Park",
-      lat: 42.77271,
-      lon: -86.21245,
-      display: { color: "yellow", source: "estimate", forecast: false },
-      distanceMi: null,
-      links: HOLLAND_LINKS
-    }
-  ]
-};
-
-const EXAMPLE_BEACH_RESPONSE = {
-  beachId: "n123456",
-  name: "Holland State Park",
-  lat: 42.77271,
-  lon: -86.21245,
-  estimate: {
-    beachId: "osm-node-123456",
-    color: "yellow",
-    reason: "Estimated wave height 2.6 ft (at or above 2 ft)",
-    trigger: "wave-height",
-    rules_version: "1.9.0",
-    official: false,
-    waveHeightFt: 2.62,
-    alertDetails: [],
-    alertsAt: "2026-07-04T15:00:03.000Z",
-    ripCurrentRisk: null,
-    sources: [
-      { label: "NWS Alerts", url: "https://api.weather.gov/alerts/active?zone=MIZ056" },
-      { label: "NOAA Great Lakes Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }
-    ],
-    updated: "2026-07-04T15:00:03.000Z",
-    estimateInputs: {
-      v: 1,
-      alertsResolved: true,
-      windSpeedMph: 14.3,
-      windGustMph: null,
-      waterQualityAdvisory: null,
-      signalSources: [
-        { label: "NOAA Great Lakes Wave Model", url: "https://polar.ncep.noaa.gov/waves/" }
-      ]
-    }
-  },
-  official: null,
-  display: { color: "yellow", source: "estimate", forecast: false },
-  links: HOLLAND_LINKS
-};
-
-const EXAMPLE_GEOJSON_RESPONSE = {
-  type: "FeatureCollection",
-  builtAt: "2026-07-04T15:00:03.000Z",
-  features: [
-    {
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [-86.21245, 42.77271] },
-      properties: { id: "n123456", name: "Holland State Park", flag: "yellow" }
-    },
-    {
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [-86.21533, 42.82641] },
-      properties: { id: "w98765432", name: "Tunnel Park", flag: "red" }
-    }
-  ]
-};
+// The on-page table of contents, in page order: the hand-written guide sections
+// around the endpoints and schemas generated from the OpenAPI document. Every id
+// here is rendered as a section heading; test/apiDocs.test.js checks each anchor
+// resolves.
+function tocEntries(spec) {
+  const endpoints = operationsOf(spec).map(function (entry) {
+    return { id: entry.op.operationId, label: entry.method + " " + entry.path };
+  });
+  return [
+    { id: "overview", label: "Overview" },
+    { id: "quick-start", label: "Quick start" }
+  ].concat(endpoints).concat([
+    { id: "schemas", label: "Schemas" },
+    { id: "openapi", label: "OpenAPI" },
+    { id: "display", label: "Reading a flag" },
+    { id: "beach-ids", label: "Beach ids" },
+    { id: "discovery", label: "Finding the JSON for a page" },
+    { id: "caching", label: "Caching and ETags" },
+    { id: "cors", label: "CORS" },
+    { id: "errors", label: "Errors" },
+    { id: "units", label: "Units and coordinates" },
+    { id: "freshness", label: "Freshness" },
+    { id: "fair-use", label: "Attribution and fair use" }
+  ]);
+}
 
 function json(value) {
   return JSON.stringify(value, null, 2);
@@ -259,8 +145,8 @@ function endpointHeading(id, method, path) {
     code(path) + "</span>");
 }
 
-function renderToc() {
-  const items = TOC.map(function (entry) {
+function renderToc(spec) {
+  const items = tocEntries(spec).map(function (entry) {
     return "<li><a href=\"#" + entry.id + "\">" + escapeHtml(entry.label) + "</a></li>";
   }).join("");
   return "<wa-card appearance=\"outlined\">" +
@@ -281,7 +167,7 @@ function renderOverview(nowIso) {
     sectionHeading(2, "overview", "Overview") +
     "<p>The Swim Report API serves the same beach hazard flags the site shows, as JSON. " +
     "It is <strong>read-only</strong> and <strong>unauthenticated</strong>: no key, no " +
-    "account, only " + code("GET") + " requests. Base URL: " + code(SITE_ORIGIN) + ".</p>" +
+    "account, only " + code("GET") + " (and " + code("HEAD") + ") requests. Base URL: " + code(SITE_ORIGIN) + ".</p>" +
     "<wa-callout variant=\"warning\">" +
     "<wa-icon slot=\"icon\" name=\"triangle-exclamation\"></wa-icon>" +
     "<strong>Most flags here are estimates, not the official flag status.</strong> " +
@@ -309,147 +195,245 @@ function renderQuickStart() {
     "</section>";
 }
 
-function renderListEndpoint() {
-  const params = table("Query parameters for GET /api/beaches",
-    ["Parameter", "Format", "Meaning"],
-    [
-      [code("q"), "text",
-        "Case-insensitive substring match on the beach name or its park name. A blank " +
-        code("q") + " counts as absent. Combines with " + code("near") + "."],
-      [code("near"), code("lat,lon"),
-        "Decimal degrees, latitude first, for example " + code("42.7712,-86.2125") +
-        ". Sorts the results by distance from that point. Latitude must lie in -90 to 90 " +
-        "and longitude in -180 to 180; anything else is a 400."],
-      [code("ids"), "comma list",
-        "Up to " + escapeHtml(String(IDS_LIST_LIMIT)) + " beach ids, in either id form. " +
-        "Duplicates are dropped, ids past the cap are ignored, unknown or non-swimming " +
-        "ids are skipped silently, and your order is kept. Cannot be combined with " +
-        code("q") + " or " + code("near") + " (400)."]
-    ]);
+// --- Reference sections, generated from the OpenAPI document ---------------
+// Every endpoint, parameter, response, field and example below is read from
+// buildOpenApiDocument(), the document test/openapi.test.js holds to the real
+// responses, so the reference half of this page cannot drift from the API. The
+// guide sections further down stay hand-written.
 
-  const modes = table("How GET /api/beaches sorts", ["Request", "sort", "Rows"],
-    [
-      ["no parameters", code("\"name\""),
-        "The first " + LIST_LIMIT + " beaches alphabetically, by park name then beach name."],
-      [code("q"), code("\"name\""), "Matches alphabetically, at most " + LIST_LIMIT + "."],
-      [code("near"), code("\"distance\""),
-        "The nearest " + LIST_LIMIT + " (filtered by " + code("q") + " when given), " +
-        "nearest first, each with " + code("distanceMi") + "."],
-      [code("ids"), code("\"ids\""),
-        "The named beaches in your order, at most " + escapeHtml(String(IDS_LIST_LIMIT)) + "."]
-    ]);
+const SCHEMA_PREFIX = "#/components/schemas/";
 
-  const fields = table("Fields of each beach in a list response", ["Field", "Type", "Meaning"],
-    [
-      [code("id"), "string", "Public beach id (see <a href=\"#beach-ids\">Beach ids</a>)."],
-      [code("name"), "string",
-        "Display name: the containing park's name when the beach sits inside a named park, " +
-        "otherwise the beach's own name."],
-      [code("lat") + ", " + code("lon"), "number", "Decimal degrees (WGS 84)."],
-      [code("display"), "object",
-        code("color") + ", " + code("source") + ", " + code("forecast") +
-        " (see <a href=\"#display\">Reading a flag</a>)."],
-      [code("distanceMi"), "number or null",
-        "Miles from " + code("near") + ", rounded to 0.1. " + code("null") +
-        " unless " + code("sort") + " is " + code("\"distance\"") + "."],
-      [code("links"), "object",
-        code("page") + " is the beach's HTML page, " + code("api") + " its JSON record."]
-    ]);
+function schemaAnchor(name) {
+  return "schema-" + name;
+}
 
-  return "<section aria-labelledby=\"list-beaches\">" +
-    endpointHeading("list-beaches", "GET", "/api/beaches") +
-    "<p>A list of beaches with the flag swim.report shows for each: the API form of the " +
-    "home page. Results are capped at " + LIST_LIMIT + "; " + code("hasMore") + " is " +
-    code("true") + " when more beaches matched than were returned, so narrow the search " +
-    "rather than paging. The response depends only on the URL: it never guesses your " +
-    "location, so pass " + code("near") + " explicitly.</p>" +
-    params +
-    modes +
-    "<p>Top-level fields: " + code("builtAt") + " (when the freshest live estimate among " +
-    "the returned beaches was computed, or " + code("null") + " when none is live), " + code("sort") +
-    ", " + code("query") + " (the parameters as understood, with " + code("ids") +
-    " normalized to public ids), " + code("hasMore") + " and " + code("beaches") + ".</p>" +
-    fields +
-    codeBlock("list-request", "Request",
-      "curl -s 'https://swim.report/api/beaches?near=42.7712,-86.2125'", "Copy list request") +
-    codeBlock("list-response", "Response", json(EXAMPLE_LIST_RESPONSE),
-      "Copy list response") +
-    codeBlock("ids-request", "Request",
-      "curl -s 'https://swim.report/api/beaches?ids=w98765432,n123456'", "Copy ids request") +
-    codeBlock("ids-response", "Response", json(EXAMPLE_IDS_RESPONSE),
-      "Copy ids response") +
-    "<p>An " + code("ids") + " list that names no valid beach is not an error: it answers " +
-    "200 with an empty " + code("beaches") + " array.</p>" +
+// A component schema or response named by a $ref, or the value itself.
+function deref(spec, value) {
+  if (!value || typeof value.$ref !== "string") {
+    return value;
+  }
+  const parts = value.$ref.slice(2).split("/");
+  let node = spec;
+  for (const part of parts) {
+    node = node ? node[part] : undefined;
+  }
+  return node || {};
+}
+
+// The type of a schema as HTML: component names link to their table below,
+// nullable fields read "X or null", arrays "array of X".
+function typeHtml(schema) {
+  if (!schema) {
+    return "";
+  }
+  if (typeof schema.$ref === "string") {
+    const name = schema.$ref.slice(SCHEMA_PREFIX.length);
+    return "<a href=\"#" + schemaAnchor(name) + "\">" + code(name) + "</a>";
+  }
+  if (Array.isArray(schema.anyOf)) {
+    return schema.anyOf.map(typeHtml).join(" or ");
+  }
+  if ("const" in schema) {
+    return code(JSON.stringify(schema.const));
+  }
+  if (Array.isArray(schema.enum)) {
+    return "one of " + schema.enum.map(function (v) { return code(String(v)); }).join(", ");
+  }
+  if (schema.type === "array") {
+    return "array of " + (schema.items ? typeHtml(schema.items) : "values");
+  }
+  if (schema.type === "null") {
+    return code("null");
+  }
+  const type = schema.type ? escapeHtml(String(schema.type)) : "any";
+  return schema.format ? type + " (" + escapeHtml(schema.format) + ")" : type;
+}
+
+// A field's description: its own, else the first nullable branch's.
+function descriptionOf(schema) {
+  if (!schema) {
+    return "";
+  }
+  if (typeof schema.description === "string") {
+    return schema.description;
+  }
+  if (Array.isArray(schema.anyOf)) {
+    for (const branch of schema.anyOf) {
+      if (branch && typeof branch.description === "string") {
+        return branch.description;
+      }
+    }
+  }
+  return "";
+}
+
+// The path as the heading shows it, and the path with every parameter replaced
+// by its example, for the sample request.
+function samplePath(path, parameters) {
+  let out = path;
+  for (const param of parameters) {
+    if (param.in === "path" && param.example !== undefined) {
+      out = out.split("{" + param.name + "}").join(String(param.example));
+    }
+  }
+  return out;
+}
+
+function operationsOf(spec) {
+  const ops = [];
+  for (const path of Object.keys(spec.paths)) {
+    const item = spec.paths[path];
+    for (const method of ["get"]) {
+      if (item[method]) {
+        ops.push({ path: path, method: method.toUpperCase(), op: item[method] });
+      }
+    }
+  }
+  return ops;
+}
+
+function renderParameters(spec, entry, parameters) {
+  if (parameters.length === 0) {
+    return "";
+  }
+  const rows = parameters.map(function (param) {
+    const schema = param.schema || {};
+    // Where the parameter goes rides under its name rather than in its own
+    // column, so the meaning stays in view at phone width.
+    return [
+      code(param.name) + "<br><span class=\"wa-caption-s wa-color-text-quiet\">" +
+        escapeHtml(param.in) + (param.required ? ", required" : "") + "</span>",
+      typeHtml(schema),
+      escapeHtml(param.description || "") +
+        (param.example !== undefined ? " Example: " + code(String(param.example)) + "." : "")
+    ];
+  });
+  return table("Parameters for " + entry.method + " " + entry.path,
+    ["Name", "Type", "Meaning"], rows);
+}
+
+function renderResponses(spec, entry) {
+  const responses = entry.op.responses || {};
+  const rows = Object.keys(responses).map(function (status) {
+    const response = deref(spec, responses[status]);
+    const content = response.content || {};
+    const bodies = Object.keys(content).map(function (media) {
+      return typeHtml(content[media].schema) + " (" + code(media) + ")";
+    });
+    return [
+      escapeHtml(status),
+      escapeHtml(response.description || ""),
+      bodies.length > 0 ? bodies.join("<br>") : "None."
+    ];
+  });
+  return table("Responses of " + entry.method + " " + entry.path,
+    ["Status", "When", "Body"], rows);
+}
+
+// The 2xx examples as copyable code blocks. A deprecated alias shows none, since
+// its examples are the operation it aliases.
+function renderExamples(spec, entry) {
+  if (entry.op.deprecated) {
+    return "";
+  }
+  let out = "";
+  const responses = entry.op.responses || {};
+  for (const status of Object.keys(responses)) {
+    if (status.charAt(0) !== "2") {
+      continue;
+    }
+    const content = deref(spec, responses[status]).content || {};
+    for (const media of Object.keys(content)) {
+      const examples = content[media].examples || {};
+      for (const name of Object.keys(examples)) {
+        const example = examples[name];
+        const title = example.summary || name;
+        out = out + codeBlock(entry.op.operationId + "-" + status + "-" + name,
+          "Response " + status + ": " + title, json(example.value),
+          "Copy " + title + " example for " + entry.path);
+      }
+    }
+  }
+  return out;
+}
+
+function renderOperation(spec, entry) {
+  const op = entry.op;
+  const parameters = (op.parameters || []).map(function (param) { return deref(spec, param); });
+  const origin = (spec.servers && spec.servers[0] && spec.servers[0].url) || SITE_ORIGIN;
+  const sample = "curl -s '" + origin + samplePath(entry.path, parameters) + "'";
+  return "<section aria-labelledby=\"" + op.operationId + "\">" +
+    endpointHeading(op.operationId, entry.method, entry.path) +
+    (op.deprecated
+      ? "<p><wa-badge variant=\"warning\" appearance=\"outlined\">Deprecated</wa-badge></p>"
+      : "") +
+    "<p><strong>" + escapeHtml(op.summary || "") + ".</strong> " +
+    escapeHtml(op.description || "") + "</p>" +
+    renderParameters(spec, entry, parameters) +
+    renderResponses(spec, entry) +
+    codeBlock(op.operationId + "-request", "Request", sample,
+      "Copy request for " + entry.path) +
+    renderExamples(spec, entry) +
     "</section>";
 }
 
-function renderBeachEndpoint() {
-  const fields = table("Fields of a single-beach response", ["Field", "Type", "Meaning"],
-    [
-      [code("beachId"), "string", "Public beach id."],
-      [code("name") + ", " + code("lat") + ", " + code("lon"), "string, number",
-        "Display name and position, as in the list."],
-      [code("estimate"), "object or null",
-        "The live estimated flag: " + code("color") + ", " + code("reason") + ", " +
-        code("rules_version") + ", " + code("sources") + ", " + code("updated") +
-        " and the inputs it was decided from. " + code("official") + " is always " +
-        code("false") + " here. " + code("null") + " when no live estimate exists. " +
-        "Its " + code("estimateInputs") + " object is the internal record of the " +
-        "non-alert inputs the estimate was decided from; its shape is versioned by " +
-        code("estimateInputs.v") + " and may change without notice, so do not depend on it."],
-      [code("official"), "object or null",
-        "The live flag scraped from the beach operator, with " + code("official: true") +
-        ", its " + code("source") + " and " + code("updated") + ". " + code("null") +
-        " for most beaches."],
-      [code("display"), "object", "The flag swim.report shows; see <a href=\"#display\">Reading a flag</a>."],
-      [code("links"), "object", code("page") + " and " + code("api") + " URLs."]
-    ]);
-  return "<section aria-labelledby=\"one-beach\">" +
-    endpointHeading("one-beach", "GET", "/api/beaches/:beachId") +
-    "<p>One beach, with both of its stored records in full. The nested " +
-    code("estimate.beachId") + " is the internal storage id; use the top-level " +
-    code("beachId") + ".</p>" +
-    fields +
-    codeBlock("beach-request", "Request", "curl -s 'https://swim.report/api/beaches/n123456'",
-      "Copy single-beach request") +
-    codeBlock("beach-response", "Response", json(EXAMPLE_BEACH_RESPONSE),
-      "Copy single-beach response") +
-    "<p>An unknown id, a malformed one, or a beach that is not on swimmable open water " +
-    "answers 404 with " + code("{\"error\":\"beach not found\"}") + ".</p>" +
+function renderEndpoints(spec) {
+  return "<section aria-labelledby=\"endpoints-heading\">" +
+    "<h2 id=\"endpoints-heading\">Endpoints</h2>" +
+    operationsOf(spec).map(function (entry) { return renderOperation(spec, entry); }).join("") +
     "</section>";
 }
 
-function renderFlagAlias() {
-  return "<section aria-labelledby=\"flag-alias\">" +
-    endpointHeading("flag-alias", "GET", "/api/flag/:beachId") +
-    "<p>The original single-beach endpoint, kept as an alias. It returns exactly the same " +
-    "body as " + code("/api/beaches/:beachId") + " and will keep working; new code should " +
-    "use " + code("/api/beaches/:beachId") + ".</p>" +
+// One table per object schema, one line per value schema. Field types link to
+// each other, so a reader can walk from a response down to any nested record.
+function renderSchema(name, schema) {
+  const heading = sectionHeading(3, schemaAnchor(name), code(name));
+  const description = descriptionOf(schema);
+  const intro = description ? "<p>" + escapeHtml(description) + "</p>" : "";
+  const props = schema.properties || {};
+  const keys = Object.keys(props);
+  if (keys.length === 0) {
+    return "<section aria-labelledby=\"" + schemaAnchor(name) + "\">" + heading + intro +
+      "<p>Type: " + typeHtml(schema) + ".</p></section>";
+  }
+  const required = schema.required || [];
+  const rows = keys.map(function (key) {
+    return [
+      code(key),
+      typeHtml(props[key]),
+      required.indexOf(key) !== -1 ? "always" : "optional",
+      escapeHtml(descriptionOf(props[key]))
+    ];
+  });
+  const open = schema.additionalProperties === false
+    ? ""
+    : "<p>Other fields may appear; do not depend on fields not listed here.</p>";
+  return "<section aria-labelledby=\"" + schemaAnchor(name) + "\">" + heading + intro +
+    table("Fields of " + name, ["Field", "Type", "Present", "Meaning"], rows) +
+    open + "</section>";
+}
+
+function renderSchemas(spec) {
+  const schemas = (spec.components && spec.components.schemas) || {};
+  return "<section aria-labelledby=\"schemas\">" +
+    sectionHeading(2, "schemas", "Schemas") +
+    "<p>Every object the endpoints return, field by field. \"Present\" says whether a " +
+    "field is always in the object; a present field may still be " + code("null") +
+    " where its type says so.</p>" +
+    Object.keys(schemas).map(function (name) { return renderSchema(name, schemas[name]); }).join("") +
     "</section>";
 }
 
-function renderGeojsonEndpoint() {
-  return "<section aria-labelledby=\"geojson\">" +
-    endpointHeading("geojson", "GET", "/api/beaches.geojson") +
-    "<p>Every beach as one RFC 7946 " + code("FeatureCollection") + " (" +
-    code("application/geo+json") + "), the data behind the home page map. Each feature's " +
-    code("properties") + " carry " + code("id") + ", " + code("name") + " and " +
-    code("flag") + ", a map keyword: " + code("green") + ", " + code("yellow") + ", " +
-    code("red") + " or " + code("unknown") + ", with double red folded into " +
-    code("red") + ". Fetch a beach's own record when you need the distinction. The " +
-    "top-level " + code("builtAt") + " is the newest live estimate on the map, so a stalled " +
-    "update is visible at a glance.</p>" +
-    "<p>The body is large; send " + code("If-None-Match") + " (see " +
-    "<a href=\"#caching\">Caching</a>) rather than downloading it again.</p>" +
-    codeBlock("geojson-response", "Response (two features shown)",
-      json(EXAMPLE_GEOJSON_RESPONSE), "Copy GeoJSON response") +
-    "</section>";
-}
-
-function renderHealthEndpoint() {
-  return "<section aria-labelledby=\"health\">" +
-    endpointHeading("health", "GET", "/health") +
-    "<p>A liveness check that touches no data: " + code("{\"ok\":true}") + ", never cached.</p>" +
+function renderOpenApiSection() {
+  return "<section aria-labelledby=\"openapi\">" +
+    sectionHeading(2, "openapi", "OpenAPI") +
+    "<p>A machine-readable description of every endpoint above, its parameters, response " +
+    "schemas and examples, is at <a href=\"" + OPENAPI_PATH + "\">" + code(OPENAPI_PATH) +
+    "</a> (OpenAPI 3.2). Load it into a client generator, an API explorer or a test " +
+    "suite. This page also points to it with a " +
+    code("Link: <" + OPENAPI_PATH + ">; rel=\"service-desc\"") + " header.</p>" +
+    codeBlock("openapi", "Shell", "curl -s '" + SITE_ORIGIN + OPENAPI_PATH + "'",
+      "Copy OpenAPI command") +
     "</section>";
 }
 
@@ -559,17 +543,9 @@ function renderCorsSection() {
 }
 
 function renderErrorsSection() {
-  const errors = table("Error responses", ["Status", "When", "Body"],
+  const errors = table("Errors any route can answer", ["Status", "When", "Body"],
     [
-      ["301", "A storage-form id, or a " + code(".json") + " page URL.",
-        "None; follow " + code("Location") + "."],
-      ["304", "Your " + code("If-None-Match") + " matches.", "None."],
-      ["400", "Invalid " + code("near") + ", or " + code("ids") + " combined with " +
-        code("q") + " or " + code("near") + ".",
-        code("{\"error\":\"<message>\"}") + ", not cached."],
-      ["404", "Unknown, malformed or non-swimming beach id.",
-        code("{\"error\":\"beach not found\"}") + ", cached 60 s."],
-      ["404", "Any other path under " + code("/api/") + ".",
+      ["404", "Any path under " + code("/api/") + " that is not an endpoint above.",
         code("{\"error\":\"not found\"}") + ", not cached."],
       ["405", "A method other than " + code("GET") + " or " + code("HEAD") + " (or " +
         code("OPTIONS") + " on " + code("/api/") + ").", "Plain text."],
@@ -578,7 +554,8 @@ function renderErrorsSection() {
   return "<section aria-labelledby=\"errors\">" +
     sectionHeading(2, "errors", "Errors") +
     "<p>Errors are JSON with a single human-readable " + code("error") + " string. Match " +
-    "on the status code, not the message text.</p>" +
+    "on the status code, not the message text. Each endpoint above lists the statuses it " +
+    "answers; these apply everywhere.</p>" +
     errors +
     "</section>";
 }
@@ -637,21 +614,17 @@ function renderFairUseSection() {
  */
 export function renderApiDocsPage(data) {
   const nowIso = data && typeof data.nowIso === "string" ? data.nowIso : null;
+  const spec = buildOpenApiDocument();
   const mainHtml = "<article class=\"wa-prose api-docs\">" +
     "<h1>Swim Report API</h1>" +
-    "<p class=\"wa-body-l wa-color-text-quiet\">Estimated and official beach hazard flags " +
-    "for Great Lakes and ocean-coast beaches in the United States and Canada, as JSON.</p>" +
-    renderToc() +
+    "<p class=\"wa-body-l wa-color-text-quiet\">Estimated and official hazard flags " +
+    "for North American beaches</p>" +
+    renderToc(spec) +
     renderOverview(nowIso) +
     renderQuickStart() +
-    "<section aria-labelledby=\"endpoints-heading\">" +
-    "<h2 id=\"endpoints-heading\">Endpoints</h2>" +
-    renderListEndpoint() +
-    renderBeachEndpoint() +
-    renderFlagAlias() +
-    renderGeojsonEndpoint() +
-    renderHealthEndpoint() +
-    "</section>" +
+    renderEndpoints(spec) +
+    renderSchemas(spec) +
+    renderOpenApiSection() +
     renderDisplaySection() +
     renderIdsSection() +
     renderDiscoverySection() +

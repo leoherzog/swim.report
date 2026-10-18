@@ -8,8 +8,11 @@
 import { describe, it, expect } from "vitest";
 import { renderApiDocsPage } from "../src/frontend/apiDocs.js";
 import { distanceMi } from "../src/geo.js";
-import { renderErrorPage } from "../src/frontend/render.js";
+import { renderErrorPage, escapeHtml } from "../src/frontend/render.js";
 import { IDS_LIST_LIMIT } from "../src/idsListLimit.js";
+import { buildOpenApiDocument } from "../src/openapi.js";
+
+const SPEC = buildOpenApiDocument();
 
 const NOW = "2026-07-04T15:20:00.000Z";
 const html = renderApiDocsPage({ nowIso: NOW });
@@ -84,18 +87,31 @@ describe("renderApiDocsPage — document", () => {
 });
 
 describe("renderApiDocsPage — content", () => {
-  it("documents every endpoint path", () => {
-    const paths = [
-      "/api/beaches",
-      "/api/beaches/:beachId",
-      "/api/flag/:beachId",
-      "/api/beaches.geojson",
-      "/health",
-      "/beach/n123456.json"
-    ];
-    for (const p of paths) {
-      expect(html).toContain("<code>" + p + "</code>");
+  it("renders every path, operation and schema of the OpenAPI document", () => {
+    for (const path of Object.keys(SPEC.paths)) {
+      const op = SPEC.paths[path].get;
+      expect(html).toContain("<code>" + path + "</code>");
+      expect(html).toContain("id=\"" + op.operationId + "\"");
+      expect(html).toContain(escapeHtml(op.summary));
     }
+    for (const name of Object.keys(SPEC.components.schemas)) {
+      expect(html).toContain("id=\"schema-" + name + "\"");
+    }
+    expect(html).toContain("<code>/beach/n123456.json</code>");
+  });
+
+  it("takes parameter text from the document, not a second copy", () => {
+    const near = SPEC.paths["/api/beaches"].get.parameters.filter(function (p) {
+      return p.name === "near";
+    })[0];
+    expect(html).toContain(escapeHtml(near.description));
+  });
+
+  it("marks the deprecated alias and shows it no examples of its own", () => {
+    const start = html.indexOf("id=\"getBeachFlag\"");
+    const section = html.slice(start, html.indexOf("</section>", start));
+    expect(section).toContain("Deprecated");
+    expect(section).not.toContain("Response 200");
   });
 
   it("documents the three list parameters", () => {
@@ -105,8 +121,7 @@ describe("renderApiDocsPage — content", () => {
   });
 
   it("states the ids cap from the imported constant", () => {
-    expect(html).toContain("Up to " + String(IDS_LIST_LIMIT) + " beach ids");
-    expect(html).toContain("at most " + String(IDS_LIST_LIMIT) + ".");
+    expect(html).toContain("Up to " + String(IDS_LIST_LIMIT) + " comma-separated beach ids");
   });
 
   it("names the base URL, CORS and caching headers", () => {
@@ -215,14 +230,15 @@ describe("renderApiDocsPage — scripts and code samples", () => {
 
   it("every Response sample is valid JSON in the documented shapes", () => {
     const blocks = preBodies(html).filter(function (b) {
-      return /-response$/.test(b.id);
+      return /-200-/.test(b.id);
     });
-    expect(blocks.length).toBe(4);
+    // listBeaches near and ids, getBeach estimate and official, the GeoJSON and /health.
+    expect(blocks.length).toBe(6);
     const byId = {};
     for (const b of blocks) {
       byId[b.id] = JSON.parse(unescapeHtml(b.body));
     }
-    const list = byId["sample-list-response"];
+    const list = byId["sample-listBeaches-200-near"];
     expect(list.sort).toBe("distance");
     expect(Object.keys(list.query)).toEqual(["q", "near", "ids"]);
     expect(typeof list.hasMore).toBe("boolean");
@@ -237,19 +253,19 @@ describe("renderApiDocsPage — scripts and code samples", () => {
       const d = distanceMi(list.query.near.lat, list.query.near.lon, beach.lat, beach.lon);
       expect(beach.distanceMi).toBe(Math.round(d * 10) / 10);
     }
-    const ids = byId["sample-ids-response"];
+    const ids = byId["sample-listBeaches-200-ids"];
     expect(ids.sort).toBe("ids");
     expect(ids.beaches.map(function (b) { return b.id; })).toEqual(ids.query.ids);
     for (const beach of ids.beaches) {
       expect(beach.distanceMi).toBeNull();
     }
-    const one = byId["sample-beach-response"];
+    const one = byId["sample-getBeach-200-estimate"];
     expect(one.beachId).toBe("n123456");
     expect(one.estimate.official).toBe(false);
     expect(one.estimate.estimateInputs.v).toBe(1);
     expect(one.display.source).toBe("estimate");
     expect(one.links.api).toBe("/api/beaches/n123456");
-    const geo = byId["sample-geojson-response"];
+    const geo = byId["sample-getBeachesGeojson-200-twoBeaches"];
     expect(geo.type).toBe("FeatureCollection");
     // GeoJSON is [lon, lat]; the list sample is the same beach as named fields.
     expect(geo.features[0].geometry.coordinates).toEqual([list.beaches[0].lon, list.beaches[0].lat]);

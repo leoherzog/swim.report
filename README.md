@@ -263,6 +263,21 @@ running out, an official going stale past 2 h, an alert refresh rewriting an est
 while keeping its `updated` — so an `If-Modified-Since` date would answer `304` for a changed
 flag. The body-hash `ETag` moves exactly when the bytes do.
 
+### `GET /api/openapi.json`
+
+An [OpenAPI 3.2](https://spec.openapis.org/oas/v3.2.0.html) description of every endpoint
+above: parameters, response schemas and examples, for client generators, API explorers and
+test suites. It is built by `buildOpenApiDocument()` in `src/openapi.js` from the same
+constants the handlers enforce (the list cap, the ids cap, the cache policy) and from the
+example payloads in `src/apiExamples.js`. The `/api/` page renders its whole reference
+half (endpoints, parameters, statuses, examples and a field table per schema) from this
+same document, so the page, the spec and the tests share one source; only the guide
+prose around it is hand-written. Served
+cacheable with a body-hash `ETag`; the `/api/` page points to it with
+`Link: </api/openapi.json>; rel="service-desc"` (RFC 8631). `test/openapi.test.js` validates
+every example against its schema and real responses from every route against the schema of
+the operation that served them, so the document fails CI the moment it drifts from the code.
+
 ### `GET /health`
 
 Liveness check, no upstream/DB access:
