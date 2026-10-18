@@ -35,6 +35,74 @@ The HTTP request path never calls any upstream API. It reads only pre-computed d
 forecast series beside it in `beach_state`) and KV (buoy water temperatures),
 kept fresh by the scheduled crons and the offline NOAA wave cycle.
 
+The API is public, unauthenticated and read-only: every route is a `GET`, and the base URL
+is `https://swim.report`. A human-readable reference with copyable `curl` examples lives at
+[`/api/`](https://swim.report/api/), a server-rendered page linked from every page's footer
+(`GET /api` redirects there with a `301`).
+
+### `GET /api/beaches`
+
+The JSON twin of the beach list page, in the same three modes and read through the same
+queries, so a URL names the same beaches in the same order in either representation:
+
+- `?q=term` — case-insensitive substring search over the whole directory, matching the
+  display name and the beach's own name, wildcards matched literally. Alphabetical by display
+  name, at most 100 rows. A blank or whitespace-only `q` is ignored.
+- `?near=lat,lon` — the 100 beaches nearest that point, in exact great-circle order, each
+  with its distance. Combines with `q` (filter first, then sort).
+- `?ids=n1,w2` — exactly those beaches, in the order given, at most 10 ids, either id form,
+  duplicates dropped; malformed, unknown and not flag-worthy ids are skipped silently, and a
+  list naming none of them returns an empty `beaches` array with a `200`.
+- no parameters — the first 100 beaches alphabetically.
+
+Unlike the home page, the API never uses the visitor's IP location: `near` is explicit or
+absent, so every response is determined by its URL and cacheable. It never records a view
+either.
+
+Example request:
+
+    GET /api/beaches?near=42.40,-86.28&q=state
+
+Example response:
+
+    {
+      "builtAt": "2026-07-04T15:00:03.000Z",
+      "sort": "distance",
+      "query": { "q": "state", "near": { "lat": 42.4, "lon": -86.28 }, "ids": null },
+      "hasMore": false,
+      "beaches": [
+        {
+          "id": "n123456",
+          "name": "Holland State Park",
+          "lat": 42.401,
+          "lon": -86.288,
+          "display": { "color": "yellow", "source": "estimate", "forecast": false },
+          "distanceMi": 0.4,
+          "links": { "page": "/beach/n123456", "api": "/api/beaches/n123456" }
+        }
+      ]
+    }
+
+`builtAt` is the `updated` instant of the freshest live estimate among the returned beaches,
+or `null` when none is live, the same rule as the GeoJSON's `builtAt`. `sort` is `name`,
+`distance` or `ids`, and `query` echoes what was applied: the trimmed `q`,
+the parsed `near`, and the accepted ids in public form. `hasMore` is `true` when more
+beaches matched than the 100 returned (always `false` in ids mode). `name` follows the
+display-name rule of the map below, coordinates are rounded to 5 decimals, and `distanceMi`
+is rounded to a tenth of a mile and is `null` unless `sort` is `distance`. `display` is the
+same object `/api/beaches/:beachId` returns, so `double-red` stays `double-red`.
+
+A bad request answers `400` with `cache-control: no-store`:
+
+    { "error": "ids cannot be combined with q or near" }
+
+for `ids` together with `q` or `near`, and `near must be lat,lon in decimal degrees, latitude
+-90 to 90 and longitude -180 to 180` for any `near` that is not two finite numbers in range.
+
+The `200` carries a strong SHA-256 `ETag` over the exact body and answers a matching
+`If-None-Match` with `304`. No field is the request instant, so the tag moves only when the
+listed beaches or their flags do.
+
 ### `GET /api/beaches.geojson`
 
 Returns a GeoJSON `FeatureCollection` of **every** flag-worthy beach in the D1 directory (no
@@ -83,10 +151,13 @@ lower it. List rows, nearby cards and the detail page show the identical color, 
 official only when the scraped record supplied it. Beaches with non-finite coordinates
 are omitted.
 
-### `GET /api/flag/:beachId`
+### `GET /api/beaches/:beachId`
 
-Returns the stored estimate and official reading (if any) for one beach, read straight from
-D1. Either field may be `null` if there is no live record (a missing or expired one just
+Also served, with an identical body, at `GET /api/flag/:beachId`, the original route,
+kept as a documented alias.
+
+Returns one beach's name, coordinates and links beside its stored estimate and official
+reading (if any), read straight from D1. Either field may be `null` if there is no live record (a missing or expired one just
 means "no data").
 
 The response also carries `display`, the flag swim.report shows for the beach:
@@ -99,16 +170,20 @@ strictly more severe than the estimate; on a tie `display.source` is `estimate`.
 (`kind: "forecast"`) rather than a posted flag.
 
 `:beachId` is the public id — `n`, `w` or `r` followed by the OSM id. The storage form
-`osm-<node|way|relation>-<id>` redirects to it with a `301`.
+`osm-<node|way|relation>-<id>` redirects to it with a `301`, under the same prefix it was
+asked for (`/api/beaches/` or `/api/flag/`).
 
 Example request:
 
-    GET /api/flag/n123456
+    GET /api/beaches/n123456
 
 Example response:
 
     {
       "beachId": "n123456",
+      "name": "Holland State Park",
+      "lat": 42.401,
+      "lon": -86.288,
       "estimate": {
         "beachId": "osm-node-123456",
         "color": "yellow",
@@ -137,7 +212,8 @@ Example response:
         "updated": "2026-07-04T15:00:03.000Z"
       },
       "official": null,
-      "display": { "color": "yellow", "source": "estimate", "forecast": false }
+      "display": { "color": "yellow", "source": "estimate", "forecast": false },
+      "links": { "page": "/beach/n123456", "api": "/api/beaches/n123456" }
     }
 
 The statement's onset is still ahead of `alertsAt`, so it is echoed for the detail
@@ -151,6 +227,41 @@ well-formed id in either form, without a D1 read. A confirmed-inland beach
 returns `404` too — it is not flag-worthy, so it is treated as not found:
 
     { "error": "beach not found" }
+
+Like the list, this route sends a strong body-hash `ETag` and answers a matching `If-None-Match` with `304`.
+
+### `GET /beach/:beachId.json`
+
+A permanent redirect, never a second representation of the page: either id form before
+the `.json` answers `301` to `/api/beaches/<public id>`, and that route decides whether
+the beach exists. Nothing on the site is content-negotiated on `Accept`. Cloudflare's edge
+cache ignores `Vary`, and a browser's back/forward cache can show a `fetch()`'s JSON for a
+page URL, so a page and its JSON always live at different URLs.
+
+### Discovery, CORS and other `/api/*` paths
+
+The list page (every mode) and the detail page advertise their JSON twin twice: a
+`<link rel="alternate" type="application/json" href="…">` in the head and the same URL in
+an HTTP `Link: <…>; rel="alternate"; type="application/json"` header. A list page links
+`/api/beaches` plus whichever of `q`, `near` and `ids` its own URL carried; a page sorted
+by IP location links the un-`near`'d list, since the API never reads that location. A
+detail page links `/api/beaches/<id>`.
+
+Every `/api/*` response, errors (the `500` included), redirects and the `/api/` page included, carries
+`Access-Control-Allow-Origin: *` and `Access-Control-Expose-Headers: ETag, Link`, and so does
+the `/beach/:beachId.json` redirect. An `OPTIONS` preflight on any `/api/*` path answers
+`204` with `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`, `Access-Control-Allow-Headers:
+If-None-Match, Accept` and `Access-Control-Max-Age: 86400`. There are no credentials and
+no per-origin rules. The HTML pages send no CORS headers. Any other `/api/*` path answers
+`404` with `{ "error": "not found" }`, and a method other than `GET` or `HEAD` answers `405`.
+
+Every route on the site answers `HEAD` with the status and headers its `GET` would send,
+`ETag` and `304` included, and no body. A `HEAD` is not a view: the single-beach API routes
+and the detail page write no `last_viewed` stamp for it. There is deliberately no
+`Last-Modified`. The body can change with no stored timestamp moving — a record's lease
+running out, an official going stale past 2 h, an alert refresh rewriting an estimate's color
+while keeping its `updated` — so an `If-Modified-Since` date would answer `304` for a changed
+flag. The body-hash `ETag` moves exactly when the bytes do.
 
 ### `GET /health`
 
@@ -337,21 +448,24 @@ never rebuilt, and the copy, Share and Save controls are untouched. A block you 
 with focus or a text selection inside it, waits for the next pass, and an expander you
 opened stays open. With JavaScript off the page is exactly as served.
 
-All `/api/*` responses set `content-type: application/json`, except
-`GET /api/beaches.geojson`, which sends the RFC 7946 GeoJSON media type
-`application/geo+json; charset=utf-8`; HTML responses set `text/html; charset=utf-8`.
+All `/api/*` JSON responses set `content-type: application/json`, with `GET /api/beaches`,
+its `400` and the single-beach `200` adding `; charset=utf-8`, except `GET /api/beaches.geojson`, which sends the
+RFC 7946 GeoJSON media type `application/geo+json; charset=utf-8`; HTML responses, the
+`/api/` documentation page included, set `text/html; charset=utf-8`.
 Every response also carries `strict-transport-security: max-age=31536000`,
 `x-content-type-options: nosniff`, `referrer-policy: strict-origin-when-cross-origin` and
 `content-security-policy: frame-ancestors 'none'; base-uri 'none'; object-src 'none';
 form-action 'self'`.
 Responses are cached at Cloudflare's edge (Workers Cache, `[cache]` in `wrangler.toml`) under
-an explicit per-route policy: successful API, beach-detail, `?ids=` and `/api/beaches.geojson`
-responses send `cache-control: public, max-age=60, stale-while-revalidate=60,
-stale-if-error=600`, so a cached flag is at most two minutes old; `/api/beaches.geojson` also
-carries a strong SHA-256 `ETag` (Cloudflare presents it weak, `W/`, after compression) and
-answers a matching `If-None-Match` with `304`; the
-`/api/flag` 404 sends plain `public, max-age=60`; the home page, `/health` and error
-responses send `no-store`, because the home page is personalized by IP-derived location and
+an explicit per-route policy: successful API, beach-detail, `?ids=`, `?near=`, `/api/` and
+`/api/beaches.geojson` responses and every `301` send `cache-control: public, max-age=60,
+stale-while-revalidate=60, stale-if-error=600`, so a cached flag is normally at most two
+minutes old, and up to about eleven while the origin is failing (`stale-if-error`);
+`/api/beaches` and `/api/beaches.geojson` also carry a strong SHA-256 `ETag` (Cloudflare
+presents it weak, `W/`, after compression) and answer a matching `If-None-Match` with `304`;
+the single-beach 404 (`/api/beaches/:beachId`, `/api/flag/:beachId` and a malformed
+`/beach/:beachId.json`) sends plain `public, max-age=60`; the home page, `/health`, the
+`/api/beaches` 400, the `OPTIONS` 204 and error responses send `no-store`, because the home page is personalized by IP-derived location and
 must never be shared across visitors. The `near=` and `ids=` modes are the exceptions: neither
 reads that location, so both are fully determined by the URL.
 
@@ -1084,7 +1198,7 @@ nothing to report must never return null, or it would raise a false alert.
    estimate, since a forecast predicts conditions nobody observed, and marks the decision
    `forecast: true`. Stamp `updated` with the product's issuance so the card's age is honest.
    List chips and nearby cards
-   label it "Official forecast" in the brand color, `/api/flag` sets `display.forecast`, and
+   label it "Official forecast" in the brand color, `/api/beaches/:beachId` sets `display.forecast`, and
    map markers carry only the color keyword.
 
 2. Register it in the `scrapers` array in `src/officialSources/index.js`, most-specific

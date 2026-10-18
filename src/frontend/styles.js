@@ -202,6 +202,29 @@ const RULES = [
   "  --content-measure: 64rem;",
   "}",
 
+  // The API docs: a reading column a little wider than the list, so the
+  // reference tables and JSON samples fit beside the prose on a laptop.
+  "main.api-docs-main {",
+  "  --content-measure: 52rem;",
+  "}",
+
+  // Each docs section opens with clear space, which wa-prose leaves out between
+  // sibling sections since their margins belong to the headings inside them.
+  ".api-docs section {",
+  "  margin-block-start: var(--wa-space-2xl);",
+  "}",
+
+  // Field names and values in the reference tables never break mid-token. The
+  // table keeps a readable minimum width and scrolls inside its wa-scroller on
+  // a phone instead of squeezing every column to a word per line.
+  ".api-docs table {",
+  "  min-width: 36rem;",
+  "}",
+
+  ".api-docs table code {",
+  "  white-space: nowrap;",
+  "}",
+
   ".beach-row-link {",
   "  padding: var(--wa-space-m);",
   "  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);",

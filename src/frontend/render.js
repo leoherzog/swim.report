@@ -670,7 +670,7 @@ function renderOfficialCard(official, nowIso) {
   });
 }
 
-function renderBrandHeader() {
+export function renderBrandHeader() {
   return "<a class=\"icon-link wa-gap-xs wa-color-text-normal wa-heading-l\" href=\"/\">" +
     "<wa-icon name=\"person-swimming\"></wa-icon>Swim Report</a>";
 }
@@ -681,11 +681,12 @@ function renderBrandHeader() {
 // wa-page makes the slotted <footer> a flex row (::slotted([slot='footer']) is
 // display:flex; justify-content:space-between; flex-wrap:wrap), so sibling
 // paragraphs would spread across it as wrapping flex items. The footer therefore
-// carries one child: a centered <p> of three <small> lines. Line 1 is the
+// carries one child: a centered <p> of four <small> lines. Line 1 is the
 // disclaimer, line 2 the site-wide data-source attribution including the only
-// Windy credit on the page, and line 3 the homepage map's basemap credit, which
-// lives here as static text because mapScript.js disables attributionControl.
-function renderFooter() {
+// Windy credit on the page, line 3 the homepage map's basemap credit, which
+// lives here as static text because mapScript.js disables attributionControl,
+// and line 4 the link to the public JSON API's documentation.
+export function renderFooter() {
   return "<p class=\"footer-lines wa-text-center\">" +
     "<small>Estimated — not the official flag status. " +
     "Always obey posted flags and lifeguards.</small><br>" +
@@ -702,7 +703,8 @@ function renderFooter() {
     "(data © " +
     "<a href=\"https://www.openstreetmap.org/copyright\" rel=\"noopener noreferrer\">OpenStreetMap</a> " +
     "contributors), rendered with " +
-    "<a href=\"https://maplibre.org\" rel=\"noopener noreferrer\">MapLibre</a>.</small>" +
+    "<a href=\"https://maplibre.org\" rel=\"noopener noreferrer\">MapLibre</a>.</small><br>" +
+    "<small><a href=\"/api/\">API</a></small>" +
     "</p>";
 }
 
@@ -729,7 +731,7 @@ function renderWaveBackground() {
 
 // mainClass is an optional extra class on <main>, the hook a page widens its
 // own measure with.
-function renderPageShell(headerHtml, mainHtml, footerHtml, mainClass) {
+export function renderPageShell(headerHtml, mainHtml, footerHtml, mainClass) {
   const lines = [];
   const extraClass = (typeof mainClass === "string" && mainClass.length > 0)
     ? (" " + mainClass) : "";
@@ -771,8 +773,8 @@ const HEAD_IDENTITY_TAGS = [
 ];
 
 // Description, canonical URL and share cards for one page, from a meta object of
-// { title, description, path, flagColor, iconColor }; iconColor is read only by
-// renderIconTag. Returns no lines at all when meta is
+// { title, description, path, flagColor, iconColor, alternateHref }; iconColor
+// is read only by renderIconTag and alternateHref only by renderDocument. Returns no lines at all when meta is
 // absent, which is how the error page opts out: a 404 must never claim a
 // canonical URL or offer itself as a share card.
 function renderShareMeta(meta) {
@@ -805,7 +807,7 @@ function renderShareMeta(meta) {
 
 // meta is optional: a page that passes none still gets the site identity tags,
 // and no description, canonical or share card.
-function renderDocument(title, bodyHtml, meta) {
+export function renderDocument(title, bodyHtml, meta) {
   const lines = [];
   lines.push("<!doctype html>");
   lines.push("<html lang=\"en\" class=\"wa-theme-matter wa-palette-mild wa-cloak\" data-fa-kit-code=\"ddd41b2d81\">");
@@ -817,6 +819,12 @@ function renderDocument(title, bodyHtml, meta) {
   lines.push("<script>" + COLOR_SCHEME_SCRIPT + "</script>");
   lines.push("<title>" + escapeHtml(title) + "</title>");
   const metaLines = renderShareMeta(meta);
+  // The page's JSON twin, when the router named one: the /api/ URL serving the
+  // same beaches, advertised beside the HTTP Link header the router sends.
+  if (meta && typeof meta.alternateHref === "string" && meta.alternateHref.length > 0) {
+    metaLines.push("<link rel=\"alternate\" type=\"application/json\" href=\"" +
+      escapeHtml(meta.alternateHref) + "\">");
+  }
   for (let i = 0; i < metaLines.length; i = i + 1) {
     lines.push(metaLines[i]);
   }
@@ -1246,7 +1254,8 @@ export function renderListPage(data) {
     title: "Swim Report",
     description: SITE_DESCRIPTION,
     path: "/",
-    flagColor: "unknown"
+    flagColor: "unknown",
+    alternateHref: data && typeof data.alternateHref === "string" ? data.alternateHref : null
   });
 }
 
@@ -2080,7 +2089,8 @@ export function renderDetailPage(data) {
     description: detailMetaDescription(beach, estimate, flag),
     path: "/beach/" + encodeURIComponent(publicId),
     flagColor: flag.color,
-    iconColor: flag.color
+    iconColor: flag.color,
+    alternateHref: typeof data.alternateHref === "string" ? data.alternateHref : null
   });
 }
 

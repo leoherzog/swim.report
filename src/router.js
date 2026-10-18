@@ -1,11 +1,31 @@
 import { renderListPage, renderDetailPage, renderErrorPage } from "./frontend/render.js";
+import { renderApiDocsPage } from "./frontend/apiDocs.js";
 import { distanceMi } from "./geo.js";
 import { FLAG_WORTHY_WATER_SQL, isFlagWorthyWater } from "./waterClass.js";
-import { IDS_LIST_LIMIT } from "./idsListLimit.js";
 import { mapFeatureFromRow } from "./mapFeatures.js";
 import { displayFlag } from "./displayFlag.js";
-import { strongEtag, etagMatches } from "./etag.js";
+import { strongEtag, etaggedResponse } from "./etag.js";
 import { toPublicId, fromPublicId, fromLegacyId, parseAnyBeachId } from "./publicId.js";
+import { CACHE_CONTROL_CACHEABLE, CACHE_CONTROL_NO_STORE } from "./cacheControl.js";
+import { isApiPath, withApiCors, apiPreflightResponse } from "./apiCors.js";
+import {
+  escapeLike,
+  parseBeachIds,
+  parseNearParam,
+  proximityOrderByClause,
+  queryBeachList,
+  queryBeachesByIds
+} from "./beachQueries.js";
+import {
+  handleApiBeaches,
+  beachDisplayName,
+  beachLinks,
+  apiCoord,
+  listAlternateHref,
+  alternateLinkHeader,
+  newestLiveEstimateUpdated,
+  JSON_CONTENT_TYPE
+} from "./apiBeaches.js";
 import {
   BEACH_STATE_SELECT,
   CHIP_STATE_SELECT,
@@ -17,28 +37,7 @@ import {
 } from "./beachState.js";
 
 // Re-exported so existing importers keep working.
-export { distanceMi };
-
-const HOME_LIST_LIMIT = 100;
-// When sorting by proximity the fetch bound is wider than the display bound:
-// SQL orders by an approximate planar distance and this cap keeps the nearest
-// 500 of those, then the JS haversine re-sorts them and slices to
-// HOME_LIST_LIMIT. Purely a safety cap on an already-ordered read.
-const HOME_GEO_FETCH_LIMIT = 500;
-
-// Cache-control policy for the Workers Cache layer ([cache] in wrangler.toml).
-// Every cacheable route is location-independent and its origin is one or two D1
-// statements, so the stale-while-revalidate window is 60 s: Workers Cache serves
-// stale asynchronously, which makes max-age + stale-while-revalidate (120 s) the
-// bound on how old a served flag can be and so on flip latency. stale-if-error
-// is set explicitly because Cloudflare's default on Worker error is to serve
-// stale indefinitely, which would freeze the pages' embedded staleness warnings
-// — nowIso is baked into the HTML — with no bound. The home page without near
-// must never be cached: it is personalized by request.cf geolocation, which is
-// not part of the cache key and not expressible via Vary.
-const CACHE_CONTROL_CACHEABLE =
-  "public, max-age=60, stale-while-revalidate=60, stale-if-error=600";
-const CACHE_CONTROL_NO_STORE = "no-store";
+export { distanceMi, escapeLike, parseBeachIds };
 
 // Per-location KV cache for the watertemp: read. The key has one 6-hourly
 // writer, is display-only, and the tile gates on observedIso, so an hour of
@@ -53,42 +52,6 @@ const WATERTEMP_KV_CACHE_TTL_SECONDS = 3600;
 // hourly stamp is finer than any of them need.
 const LAST_VIEWED_MIN_INTERVAL_MS = 3600000;
 
-// Escapes the LIKE wildcards (% and _) plus the escape character itself so a
-// user's search term is matched literally, not as a pattern. The result is
-// meant to be wrapped in "%" ... "%" and bound to a "LIKE ?n ESCAPE '\'"
-// clause. Pure; exported for tests.
-export function escapeLike(term) {
-  return String(term)
-    .split("\\").join("\\\\")
-    .split("%").join("\\%")
-    .split("_").join("\\_");
-}
-
-// The storage ids a comma-separated ?ids= value names, deduped, in the order
-// given and capped at IDS_LIST_LIMIT — the cap counts accepted ids. Pure;
-// exported for tests. Each part is read in either the public or the storage
-// form, and anything else is dropped, so the caller's list can never reach SQL
-// as anything but a bound parameter. The storage form is accepted without a
-// redirect because a returning visitor's localStorage holds ids in it.
-export function parseBeachIds(raw) {
-  if (typeof raw !== "string" || raw.length === 0) {
-    return [];
-  }
-  const parts = raw.split(",");
-  const ids = [];
-  for (let i = 0; i < parts.length; i = i + 1) {
-    const id = parseAnyBeachId(parts[i].trim());
-    if (id === null || ids.indexOf(id) !== -1) {
-      continue;
-    }
-    ids.push(id);
-    if (ids.length === IDS_LIST_LIMIT) {
-      break;
-    }
-  }
-  return ids;
-}
-
 // User location for proximity sorting: the "near" query param (lat,lon —
 // deterministic override for dev and tests) wins over Cloudflare's IP-derived
 // request.cf.latitude/longitude (strings; absent in local dev and behind some
@@ -96,16 +59,7 @@ export function parseBeachIds(raw) {
 export function resolveUserLocation(request, url) {
   const nearParam = url.searchParams.get("near");
   if (nearParam !== null) {
-    const parts = nearParam.split(",");
-    if (parts.length === 2) {
-      const lat = Number(parts[0]);
-      const lon = Number(parts[1]);
-      if (Number.isFinite(lat) && Number.isFinite(lon) &&
-          lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
-        return { lat: lat, lon: lon };
-      }
-    }
-    return null;
+    return parseNearParam(nearParam);
   }
   const cf = request.cf || {};
   const lat = Number(cf.latitude);
@@ -116,10 +70,15 @@ export function resolveUserLocation(request, url) {
   return null;
 }
 
-function htmlResponse(html, status, cacheControl) {
+// linkHeader is an optional HTTP Link value, the header twin of the page's
+// rel="alternate" <link>.
+function htmlResponse(html, status, cacheControl, linkHeader) {
   const headers = { "content-type": "text/html; charset=utf-8" };
   if (cacheControl) {
     headers["cache-control"] = cacheControl;
+  }
+  if (linkHeader) {
+    headers["link"] = linkHeader;
   }
   return new Response(html, { status: status, headers: headers });
 }
@@ -150,121 +109,29 @@ function touchLastViewed(env, ctx, beach) {
   );
 }
 
-// Optional ?q= search covers the entire beaches table, not just the rendered
-// rows: a case-insensitive LIKE against both the display name
-// (COALESCE(park_name, name)) and the beach's own name, with user wildcards
-// escaped. When a user location resolves, the filter runs first and the matches
-// are then distance-sorted, so proximity ordering holds for searches too.
-const LIKE_WHERE =
-  " WHERE (COALESCE(park_name, name) LIKE ?1 ESCAPE '\\' OR name LIKE ?1 ESCAPE '\\')";
-
 // The beach row plus its derived state in one read. beach_state's column names
-// are all distinct from beaches', so every WHERE, ORDER BY and LIKE clause below
-// stays unqualified; only the splat needs the alias.
+// are all distinct from beaches', so the WHERE clause stays unqualified; only
+// the splat needs the alias.
 //
 // The detail route is one of the two readers of the wave record, so it carries
-// WAVE_STATE_SELECT on top: the 24 h series it draws rides the same read.
+// WAVE_STATE_SELECT on top: the 24 h series it draws rides the same read. The
+// list surfaces read through src/beachQueries.js instead, which the JSON API
+// shares.
 const BEACH_WITH_STATE_FROM =
   "SELECT b.*, " + BEACH_STATE_SELECT + ", " + WAVE_STATE_SELECT +
   " FROM beaches b" + BEACH_STATE_JOIN;
 
-// The same read for the list surfaces, which render one displayFlag decision per
-// row from the scalar mirror columns instead of the four JSON blobs.
-// The proximity branch ranks HOME_GEO_FETCH_LIMIT rows to render
-// HOME_LIST_LIMIT of them, so a blob here would cross the binding five times for
-// every row a visitor sees.
-const BEACH_WITH_CHIP_FROM =
-  "SELECT b.*, " + CHIP_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN;
-
-// Builds the beach-plus-state statement shared by both home-page branches: an
-// optional LIKE_WHERE clause, an optional ORDER BY clause, and a caller-supplied
-// LIMIT.
-function buildHomeStatement(env, hasQuery, pattern, orderByClause, limit) {
-  // Every home-page branch hides confirmed-inland (and parked-unresolved)
-  // beaches via the canonical flag-worthy gate: AND it after the LIKE clause
-  // when a query is present, use it as the WHERE otherwise.
-  const where = hasQuery
-    ? LIKE_WHERE + " AND " + FLAG_WORTHY_WATER_SQL
-    : " WHERE " + FLAG_WORTHY_WATER_SQL;
-  const order = orderByClause ? " ORDER BY " + orderByClause : "";
-  const stmt = env.DB.prepare(
-    BEACH_WITH_CHIP_FROM + where + order + " LIMIT " + String(limit)
-  );
-  return hasQuery ? stmt.bind(pattern) : stmt;
-}
-
-// ORDER BY expression that puts the geographically nearest rows first, so the
-// HOME_GEO_FETCH_LIMIT cap slices by distance rather than by table scan order;
-// without it a visitor at the far end of the table gets a "nearest beaches" list
-// with no nearby beach in it. Planar squared distance in degrees with the
-// longitude axis scaled by cos(lat): monotonic in true distance at this scale and
-// cheap for SQLite per row, while the JS haversine still decides the rendered
-// top-100 ordering.
-//
-// The three interpolated values are always finite Numbers rendered via String()
-// and never raw request text, which is what keeps this injection-safe.
-// resolveUserLocation only returns Number.isFinite coordinates, and the guard
-// below re-checks before building the clause. Returns null for an unusable
-// location, keeping the unordered shape rather than emitting anything unsafe.
-function proximityOrderByClause(location) {
-  const lat = Number(location.lat);
-  const lon = Number(location.lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    return null;
-  }
-  const cosLat = Math.cos(lat * Math.PI / 180);
-  const lonScale = cosLat * cosLat;
-  if (!Number.isFinite(lonScale)) {
-    return null;
-  }
-  const dLat = "(lat - (" + String(lat) + "))";
-  const dLon = "(lon - (" + String(lon) + "))";
-  return dLat + " * " + dLat + " + " +
-    dLon + " * " + dLon + " * " + String(lonScale);
-}
-
-async function handleHome(env, location, rawQuery, nearParam) {
+// alternateHref is the /api/beaches URL this page's own URL corresponds to,
+// advertised as a <link rel="alternate"> and the matching Link header.
+async function handleHome(env, location, rawQuery, nearParam, alternateHref) {
   const query = (typeof rawQuery === "string") ? rawQuery.trim() : "";
   const hasQuery = query.length > 0;
-  const pattern = hasQuery ? "%" + escapeLike(query) + "%" : null;
-  let rows;
-  let hasMore = false;
-  if (location) {
-    // LIMIT stays a pure safety cap: with the proximity ORDER BY in front of it
-    // the 500 rows it keeps are the 500 NEAREST candidates, so the JS haversine
-    // below re-sorts an already-relevant set.
-    const stmt = buildHomeStatement(
-      env, hasQuery, pattern, proximityOrderByClause(location), HOME_GEO_FETCH_LIMIT
-    );
-    const result = await stmt.all();
-    rows = result.results || [];
-    for (const beach of rows) {
-      beach.distance_mi = distanceMi(location.lat, location.lon, beach.lat, beach.lon);
-    }
-    rows.sort(function (a, b) { return a.distance_mi - b.distance_mi; });
-    hasMore = rows.length > HOME_LIST_LIMIT;
-    rows = rows.slice(0, HOME_LIST_LIMIT);
-  } else {
-    // Alphabetical by DISPLAY name: rows inside a park render under the park
-    // name, so they must sort under it too (COALESCE matches the frontend's
-    // displayName()). Fetch one extra row to detect whether more beaches exist
-    // beyond the cap (drives the "search all beaches" empty-state affordance).
-    const detectLimit = HOME_LIST_LIMIT + 1;
-    const stmt = buildHomeStatement(
-      env, hasQuery, pattern, "COALESCE(park_name, name), name", detectLimit
-    );
-    const result = await stmt.all();
-    rows = result.results || [];
-    hasMore = rows.length > HOME_LIST_LIMIT;
-    if (hasMore) {
-      rows = rows.slice(0, HOME_LIST_LIMIT);
-    }
-  }
-  // Resolved after the slice above: the proximity branch ranks five times what
-  // it renders, and only the rendered rows need a chip.
+  const list = await queryBeachList(env, location, query);
+  // Resolved after the slice: the proximity branch ranks five times what it
+  // renders, and only the rendered rows need a chip.
   const nowMs = Date.now();
   const entries = [];
-  for (const beach of rows) {
+  for (const beach of list.rows) {
     const state = liveChipState(beach, nowMs);
     entries.push({
       beach: beach,
@@ -283,8 +150,9 @@ async function handleHome(env, location, rawQuery, nearParam) {
     // browser geolocation still opens on the visitor's area, not a fixed region.
     location: location,
     query: hasQuery ? query : "",
-    hasMore: hasMore,
-    near: (typeof nearParam === "string") ? nearParam : ""
+    hasMore: list.hasMore,
+    near: (typeof nearParam === "string") ? nearParam : "",
+    alternateHref: alternateHref
   });
   // A home URL carrying an explicit "near" is fully URL-determined:
   // resolveUserLocation short-circuits on it and never reads request.cf, so the
@@ -296,7 +164,7 @@ async function handleHome(env, location, rawQuery, nearParam) {
   const cacheControl = (nearParam !== null && nearParam !== undefined)
     ? CACHE_CONTROL_CACHEABLE
     : CACHE_CONTROL_NO_STORE;
-  return htmlResponse(html, 200, cacheControl);
+  return htmlResponse(html, 200, cacheControl, alternateLinkHeader(alternateHref));
 }
 
 // GET /?ids=a,b,c — the same list page rendered for exactly those beaches, in
@@ -307,30 +175,8 @@ async function handleHome(env, location, rawQuery, nearParam) {
 // the URL already carries. Unknown and non-flag-worthy ids are skipped
 // silently, and no last_viewed stamp is written — only the two single-beach
 // routes carry the demand signal.
-async function handleIdsList(env, idsParam) {
-  const ids = parseBeachIds(idsParam);
-  const ordered = [];
-  if (ids.length > 0) {
-    const placeholders = ids.map(function (id, index) { return "?" + String(index + 1); });
-    const stmt = env.DB.prepare(
-      BEACH_WITH_CHIP_FROM + " WHERE id IN (" + placeholders.join(", ") + ") AND " +
-      FLAG_WORTHY_WATER_SQL
-    );
-    const result = await stmt.bind.apply(stmt, ids).all();
-    const rows = (result && result.results) || [];
-    // SQLite returns an IN-set in whatever order it likes, so the caller's
-    // order is restored here rather than asked of the database.
-    const byId = new Map();
-    for (const row of rows) {
-      byId.set(row.id, row);
-    }
-    for (const id of ids) {
-      const row = byId.get(id);
-      if (row) {
-        ordered.push(row);
-      }
-    }
-  }
+async function handleIdsList(env, idsParam, alternateHref) {
+  const ordered = await queryBeachesByIds(env, parseBeachIds(idsParam));
   const nowMs = Date.now();
   const entries = [];
   for (const beach of ordered) {
@@ -350,9 +196,10 @@ async function handleIdsList(env, idsParam) {
     query: "",
     hasMore: false,
     near: "",
-    idsMode: true
+    idsMode: true,
+    alternateHref: alternateHref
   });
-  return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+  return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE, alternateLinkHeader(alternateHref));
 }
 
 // Nearby cards on the detail page. A lat/lon window derived from NEARBY_MAX_MI
@@ -461,6 +308,7 @@ async function handleDetail(env, ctx, beachId) {
     nearbyBeaches(env, beach, nowMs)
   ]);
   const state = liveBeachState(beach, nowMs);
+  const alternateHref = beachLinks(beachId).api;
   const html = renderDetailPage({
     beach: beach,
     estimate: state.estimate,
@@ -471,9 +319,10 @@ async function handleDetail(env, ctx, beachId) {
     wqfloor: state.wqfloor,
     tides: state.tides,
     nearby: results[1],
-    nowIso: new Date(nowMs).toISOString()
+    nowIso: new Date(nowMs).toISOString(),
+    alternateHref: alternateHref
   });
-  return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+  return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE, alternateLinkHeader(alternateHref));
 }
 
 function detailNotFound() {
@@ -505,12 +354,10 @@ const MAP_FEATURE_SQL =
 async function handleBeachesGeojson(env, ifNoneMatch) {
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
-  const nowEpoch = Math.floor(nowMs / 1000);
   const result = await env.DB.prepare(MAP_FEATURE_SQL).all();
   const rows = (result && result.results) || [];
   const features = [];
-  let builtAt = null;
-  let builtAtMs = -Infinity;
+  const mapped = [];
   for (let i = 0; i < rows.length; i = i + 1) {
     const row = rows[i];
     const feature = mapFeatureFromRow(row, nowIso, nowMs);
@@ -518,51 +365,32 @@ async function handleBeachesGeojson(env, ifNoneMatch) {
       continue;
     }
     features.push(feature);
-    // Only an unexpired estimate dates the collection: an expired one resolved
-    // to unknown above and says nothing about how fresh the map is.
-    const expires = row.estimate_expires;
-    const updatedMs = Date.parse(row.estimate_updated);
-    if (typeof expires === "number" && expires > nowEpoch &&
-        Number.isFinite(updatedMs) && updatedMs > builtAtMs) {
-      builtAtMs = updatedMs;
-      builtAt = row.estimate_updated;
-    }
+    mapped.push(row);
   }
-  const payload = { type: "FeatureCollection", builtAt: builtAt, features: features };
+  const payload = {
+    type: "FeatureCollection",
+    builtAt: newestLiveEstimateUpdated(mapped, nowMs),
+    features: features
+  };
   // Hashed and sent as the same bytes, so the tag is byte-exact for the body.
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   const etag = await strongEtag(bytes);
-  return geojsonResponse(bytes, etag, CACHE_CONTROL_CACHEABLE, ifNoneMatch);
+  // application/geo+json is the RFC 7946 media type (the client sends a
+  // matching Accept).
+  return etaggedResponse(bytes, etag, "application/geo+json; charset=utf-8",
+    CACHE_CONTROL_CACHEABLE, ifNoneMatch);
 }
 
-// application/geo+json is the RFC 7946 media type (the client sends a matching
-// Accept). Built by hand so the media type is set alongside the shared cacheable
-// policy. The 200 carries the strong SHA-256 ETag over the body; an If-None-Match
-// naming it (weak comparison, comma list and * honored) answers 304 with the same
-// ETag and cache-control and no body. Cloudflare weakens the tag when it
-// compresses the body, which is why the comparison ignores W/. No Vary: Workers
-// Cache compares Vary values verbatim and would fragment the entry per
-// Accept-Encoding spelling.
-function geojsonResponse(bytes, etag, cacheControl, ifNoneMatch) {
-  if (etagMatches(ifNoneMatch, etag)) {
-    return new Response(null, {
-      status: 304,
-      headers: { "etag": etag, "cache-control": cacheControl }
-    });
-  }
-  return new Response(bytes, {
-    status: 200,
-    headers: {
-      "content-type": "application/geo+json; charset=utf-8",
-      "cache-control": cacheControl,
-      "etag": etag
-    }
-  });
-}
-
-async function handleApiFlag(env, ctx, beachId) {
+// GET /api/beaches/:beachId and its alias /api/flag/:beachId: one handler, so
+// the two answer identical bodies.
+// The body is its own validator, as on the list: no field in it is the request
+// instant, so the strong ETag moves exactly when the bytes do — a lease running
+// out or an official going stale included, which a Last-Modified built from the
+// records' updated stamps would miss.
+async function handleApiBeach(env, ctx, beachId, ifNoneMatch) {
   const beach = await env.DB.prepare(
-    "SELECT b.id, b.last_viewed, b.water_class, b.water_class_attempts, " +
+    "SELECT b.id, b.name, b.park_name, b.lat, b.lon, b.last_viewed, b.water_class, " +
+    "b.water_class_attempts, " +
     BEACH_STATE_SELECT + " FROM beaches b" + BEACH_STATE_JOIN + " WHERE b.id = ?1"
   ).bind(beachId).first();
   // A confirmed-inland (or parked-unresolved) beach 404s like a missing row,
@@ -574,18 +402,22 @@ async function handleApiFlag(env, ctx, beachId) {
   const nowMs = Date.now();
   const state = liveBeachState(beach, nowMs);
   const flag = displayFlag(state, new Date(nowMs).toISOString());
-  return Response.json(
-    {
+  const payload = {
       // The public id. The estimate and official blobs are stored records, so
       // their own nested beachId stays the storage id.
       beachId: toPublicId(beachId),
+      name: beachDisplayName(beach),
+      lat: apiCoord(beach.lat),
+      lon: apiCoord(beach.lon),
       estimate: state.estimate,
       official: state.official,
       // Built field by field so no internal decision field reaches the public shape.
-      display: { color: flag.color, source: flag.source, forecast: flag.forecast }
-    },
-    { status: 200, headers: { "cache-control": CACHE_CONTROL_CACHEABLE } }
-  );
+      display: { color: flag.color, source: flag.source, forecast: flag.forecast },
+      links: beachLinks(beachId)
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  const etag = await strongEtag(bytes);
+  return etaggedResponse(bytes, etag, JSON_CONTENT_TYPE, CACHE_CONTROL_CACHEABLE, ifNoneMatch);
 }
 
 // Plain max-age (no stale-while-revalidate): a just-discovered beach should
@@ -611,18 +443,111 @@ function canonicalRedirect(location) {
   });
 }
 
+// The request's If-None-Match, tolerating a request object with no headers.
+function ifNoneMatchOf(request) {
+  return (request.headers && typeof request.headers.get === "function")
+    ? request.headers.get("if-none-match")
+    : null;
+}
+
+function apiNotFound() {
+  return Response.json(
+    { error: "not found" },
+    { status: 404, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
+  );
+}
+
+// The single-beach API routes, /api/beaches/:id and its alias /api/flag/:id,
+// matched on the segment after prefix. A public-form segment is served, a
+// storage-form one is redirected to the canonical URL under the same prefix.
+// Returns null when the path is not under prefix.
+function routeApiBeach(path, prefix, env, ctx, ifNoneMatch) {
+  if (path.indexOf(prefix) !== 0) {
+    return null;
+  }
+  const segment = path.slice(prefix.length);
+  if (segment.length === 0 || segment.indexOf("/") !== -1) {
+    return null;
+  }
+  const publicId = fromPublicId(segment);
+  if (publicId !== null) {
+    return handleApiBeach(env, ctx, publicId, ifNoneMatch);
+  }
+  const legacyId = fromLegacyId(segment);
+  if (legacyId !== null) {
+    return canonicalRedirect(prefix + toPublicId(legacyId));
+  }
+  return apiFlagNotFound();
+}
+
+async function routeApi(request, method, env, ctx, url) {
+  const path = url.pathname;
+  if (method === "OPTIONS") {
+    return apiPreflightResponse();
+  }
+  if (method !== "GET") {
+    return methodNotAllowed();
+  }
+  if (path === "/api") {
+    return canonicalRedirect("/api/");
+  }
+  if (path === "/api/") {
+    const html = renderApiDocsPage({ nowIso: new Date().toISOString() });
+    return htmlResponse(html, 200, CACHE_CONTROL_CACHEABLE);
+  }
+  if (path === "/api/beaches") {
+    return handleApiBeaches(env, url.searchParams, ifNoneMatchOf(request));
+  }
+  if (path === "/api/beaches.geojson") {
+    return handleBeachesGeojson(env, ifNoneMatchOf(request));
+  }
+  // The segment is matched raw. Neither id form has anything
+  // encodeURIComponent changes, so a segment that needs decoding is not an id,
+  // and decodeURIComponent would throw URIError on a bad escape (/beach/%FF)
+  // and turn into the boundary's 500. A segment in the public form resolves to
+  // its storage id and is served; one in the storage form is redirected to the
+  // canonical URL, so one beach is never served under two.
+  const beachRoute = routeApiBeach(path, "/api/beaches/", env, ctx, ifNoneMatchOf(request)) ||
+    routeApiBeach(path, "/api/flag/", env, ctx, ifNoneMatchOf(request));
+  if (beachRoute !== null) {
+    return beachRoute;
+  }
+  return apiNotFound();
+}
+
+function methodNotAllowed() {
+  return new Response("Method not allowed", {
+    status: 405,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": CACHE_CONTROL_NO_STORE
+    }
+  });
+}
+
+// HEAD is GET without the body (RFC 9110 section 9.3.2): the same status and
+// headers, ETag and 304 included, from the same handlers. It is not a view, so
+// it runs without ctx and the single-beach routes write no last_viewed stamp.
 export async function handleRequest(request, env, ctx) {
+  if (request.method === "HEAD") {
+    const response = await dispatchRequest(request, "GET", env, null);
+    return new Response(null, { status: response.status, headers: response.headers });
+  }
+  return dispatchRequest(request, request.method, env, ctx);
+}
+
+async function dispatchRequest(request, method, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  if (request.method !== "GET") {
-    return new Response("Method not allowed", {
-      status: 405,
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        "cache-control": CACHE_CONTROL_NO_STORE
-      }
-    });
+  // Every /api/* response, whatever its status, carries the CORS headers, and
+  // an OPTIONS preflight there answers 204; nothing outside /api/ answers one.
+  if (isApiPath(path)) {
+    return withApiCors(await routeApi(request, method, env, ctx, url));
+  }
+
+  if (method !== "GET") {
+    return methodNotAllowed();
   }
 
   if (path === "/health") {
@@ -633,39 +558,33 @@ export async function handleRequest(request, env, ctx) {
   }
 
   if (path === "/") {
+    const alternateHref = listAlternateHref(url.searchParams);
     const idsParam = url.searchParams.get("ids");
     if (idsParam !== null) {
-      return handleIdsList(env, idsParam);
+      return handleIdsList(env, idsParam, alternateHref);
     }
     return handleHome(
       env,
       resolveUserLocation(request, url),
       url.searchParams.get("q"),
-      url.searchParams.get("near")
+      url.searchParams.get("near"),
+      alternateHref
     );
   }
 
-  if (path === "/api/beaches.geojson") {
-    return handleBeachesGeojson(env, request.headers.get("if-none-match"));
-  }
-
-  // The segment is matched raw. Neither id form has anything
-  // encodeURIComponent changes, so a segment that needs decoding is not an id,
-  // and decodeURIComponent would throw URIError on a bad escape (/beach/%FF)
-  // and turn into the boundary's 500. A segment in the public form resolves to
-  // its storage id and is served; one in the storage form is redirected to the
-  // canonical URL, so one beach is never served under two.
-  const flagMatch = path.match(/^\/api\/flag\/([^/]+)$/);
-  if (flagMatch) {
-    const flagId = fromPublicId(flagMatch[1]);
-    if (flagId !== null) {
-      return handleApiFlag(env, ctx, flagId);
+  // /beach/<id>.json is a permanent redirect into the API, never a second
+  // representation of the page: nothing is content-negotiated on Accept,
+  // because the edge cache ignores Vary and a browser's back/forward cache can
+  // show a fetch()'s JSON for a page URL. Either id form is accepted before the
+  // .json; the API decides whether the beach exists. It carries the CORS
+  // headers too, since a cross-origin fetch checks every redirect hop.
+  const jsonMatch = path.match(/^\/beach\/([^/]+)\.json$/);
+  if (jsonMatch) {
+    const jsonId = parseAnyBeachId(jsonMatch[1]);
+    if (jsonId !== null) {
+      return withApiCors(canonicalRedirect(beachLinks(jsonId).api));
     }
-    const legacyFlagId = fromLegacyId(flagMatch[1]);
-    if (legacyFlagId !== null) {
-      return canonicalRedirect("/api/flag/" + toPublicId(legacyFlagId));
-    }
-    return apiFlagNotFound();
+    return withApiCors(apiFlagNotFound());
   }
 
   const detailMatch = path.match(/^\/beach\/([^/]+)$/);
@@ -679,13 +598,6 @@ export async function handleRequest(request, env, ctx) {
       return canonicalRedirect("/beach/" + toPublicId(legacyDetailId));
     }
     return detailNotFound();
-  }
-
-  if (path.indexOf("/api/") === 0) {
-    return Response.json(
-      { error: "not found" },
-      { status: 404, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
-    );
   }
 
   const html = renderErrorPage({ status: 404, message: "Not found" });

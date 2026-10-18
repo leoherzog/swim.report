@@ -235,7 +235,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
     the top of this file (ways-only water evidence) can be closed by consulting the
     lakes-polygon layer directly, a local lookup rather than a new upstream probe.
 - **Demand-priority cron ordering — mechanism landed.** The
-  request path stamps `beaches.last_viewed` (migration 0007; detail page and `/api/flag`,
+  request path stamps `beaches.last_viewed` (migration 0007; detail page and `/api/beaches/:beachId` with its `/api/flag` alias,
   throttled to 1/h per beach, `ctx.waitUntil`). `runFlagRecompute` and `runWaterTempRefresh`
   order their queue hot tier first (`last_viewed` within `HOT_VIEW_WINDOW_MS`), then oldest
   cursor first; the enrichment and webcam crons add `last_viewed DESC NULLS LAST` as a queue
@@ -680,6 +680,15 @@ remains partnership-gated.
   `<wa-format-date>` names UTC and only the component's upgrade shows a local time. A
   timezone column on `beaches`, stamped by the offline batch from a boundary layer, would let
   the server render the beach's own clock and would fix the wave ticks in the same move.
+
+## Public API
+
+- **Content-type charset is inconsistent across the JSON routes.** `/api/beaches`, its 400 and
+  the single-beach 200 send `application/json; charset=utf-8`; the JSON 404s go through
+  `Response.json` and send bare `application/json`. Harmless (JSON
+  is UTF-8 by definition) but worth unifying.
+- **No pagination past 100 rows.** `/api/beaches` inherits the list page's cap (see List-page
+  pagination above); a client that wants every beach uses `/api/beaches.geojson`.
 
 ## Explicitly deferred by PLAN.md (not gaps, just out of scope for this pass)
 

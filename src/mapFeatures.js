@@ -16,7 +16,7 @@ import { toPublicId } from "./publicId.js";
 
 // 5 decimals is about 1.1 m; dividing by a power of ten yields the shortest
 // repr, so float noise never bloats the body or churns its ETag.
-function roundCoord(v) {
+export function roundCoord(v) {
   return Math.round(v * 1e5) / 1e5;
 }
 

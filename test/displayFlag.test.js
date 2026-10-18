@@ -530,10 +530,11 @@ describe("no second copy of the display decision", function () {
     expect(text).not.toContain("normalizeColor(");
   });
 
-  it("has mapFeatures.js and router.js take one decision each and derive nothing", function () {
+  it("has mapFeatures.js, router.js and apiBeaches.js take one decision each and derive nothing", function () {
     const calls = {
       "src/mapFeatures.js": "flag: displayFlag(state, nowIso).keyword",
-      "src/router.js": "const flag = displayFlag(state, new Date(nowMs).toISOString());"
+      "src/router.js": "const flag = displayFlag(state, new Date(nowMs).toISOString());",
+      "src/apiBeaches.js": "const flag = displayFlag(state, nowIso);"
     };
     for (const rel of Object.keys(calls)) {
       const text = read(rel);

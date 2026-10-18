@@ -1,5 +1,6 @@
-// src/etag.js — the strong ETag over a response body and the If-None-Match
-// comparison /api/beaches.geojson answers 304 from. Pure: no fetch, no Date.
+// src/etag.js — the strong ETag over a response body, the If-None-Match
+// comparison and the 200-or-304 response the JSON API routes answer with.
+// No fetch, no Date.
 
 const HEX = "0123456789abcdef";
 
@@ -36,4 +37,27 @@ export function etagMatches(ifNoneMatch, etag) {
     }
   }
   return false;
+}
+
+// The response for a body whose validator is its own bytes: an If-None-Match
+// naming etag (weak comparison, comma list and * honored) answers 304 with the
+// same ETag and cache-control and no body, and anything else gets the 200 with
+// contentType. Cloudflare weakens the tag when it compresses the body, which is
+// why the comparison ignores W/. No Vary: Workers Cache compares Vary values
+// verbatim and would fragment the entry per Accept-Encoding spelling.
+export function etaggedResponse(bytes, etag, contentType, cacheControl, ifNoneMatch) {
+  if (etagMatches(ifNoneMatch, etag)) {
+    return new Response(null, {
+      status: 304,
+      headers: { "etag": etag, "cache-control": cacheControl }
+    });
+  }
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "content-type": contentType,
+      "cache-control": cacheControl,
+      "etag": etag
+    }
+  });
 }

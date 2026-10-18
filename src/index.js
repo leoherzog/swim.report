@@ -56,6 +56,7 @@ import {
 } from "./beachState.js";
 import { makeDeadline, runPool } from "./pool.js";
 import { withSecurityHeaders } from "./securityHeaders.js";
+import { withApiCors } from "./apiCors.js";
 
 // The hourly walks its whole queue in pages. A page is one wave read, one
 // beach_state chunk and one recompute_updated stamp, so the page size must not
@@ -2188,7 +2189,9 @@ export default {
     // Cloudflare's generic error page instead of the project's own. Renders a 500
     // in the same shape as the route's success case — a JSON body for /api/
     // routes, renderErrorPage HTML otherwise — always no-store so a transient
-    // error is never cached. The security headers are applied after the
+    // error is never cached. The /api/ 500 carries the API's CORS headers, so
+    // a cross-origin caller reads the documented JSON error instead of a
+    // browser network error. The security headers are applied after the
     // boundary, so the 500s carry them too.
     let response;
     try {
@@ -2197,10 +2200,10 @@ export default {
       console.log("index: request handler threw: " + err.message);
       const path = new URL(request.url).pathname;
       if (path.indexOf("/api/") === 0) {
-        response = Response.json(
+        response = withApiCors(Response.json(
           { error: "internal error" },
           { status: 500, headers: { "cache-control": "no-store" } }
-        );
+        ));
       } else {
         const html = renderErrorPage({ status: 500, message: "Something went wrong." });
         response = new Response(html, {

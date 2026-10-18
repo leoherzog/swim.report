@@ -1541,6 +1541,8 @@ describe("default fetch export: request-path error boundary", () => {
       expect(res.headers.get("cache-control")).toBe("no-store");
       const body = await res.json();
       expect(body).toEqual({ error: "internal error" });
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
+      expect(res.headers.get("access-control-expose-headers")).toBe("ETag, Link");
     } finally {
       logSpy.mockRestore();
     }
@@ -2011,11 +2013,22 @@ describe("every surface shows the one displayFlag decision", () => {
       const res = await handleRequest(getRequest("/api/flag/" + shortId), envFor(fixture, id), makeCtx());
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(Object.keys(body)).toEqual(["beachId", "estimate", "official", "display"]);
+      expect(Object.keys(body)).toEqual(
+        ["beachId", "name", "lat", "lon", "estimate", "official", "display", "links"]
+      );
       expect(body.beachId).toBe(shortId);
       expect(body.display).toEqual({ color: d.color, source: d.source, forecast: d.forecast });
       expect(body.estimate).toEqual(fixture.estimate);
       expect(body.official).toEqual(fixture.official);
+    });
+
+    it(fixture.name + ": /api/beaches list display field", async () => {
+      const res = await handleRequest(getRequest("/api/beaches?ids=" + shortId), envFor(fixture, id));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.beaches.length).toBe(1);
+      expect(body.beaches[0].id).toBe(shortId);
+      expect(body.beaches[0].display).toEqual({ color: d.color, source: d.source, forecast: d.forecast });
     });
   });
 });
