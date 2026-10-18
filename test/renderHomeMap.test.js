@@ -1,5 +1,5 @@
 // Coverage for the homepage map mount: the #home-map container, its
-// accessibility attributes (aria-hidden, tabindex, no advertising aria-label),
+// accessibility split (hidden canvas, reachable controls, no advertising label),
 // the data-center attribute, section ordering (intro -> map -> search), and the
 // client script wiring (one-shot /api/beaches.geojson fetch feeding one
 // unclustered GeoJSON source, the zoomed-out coast highlight and its handoff to
@@ -32,24 +32,26 @@ describe("renderListPage home map", () => {
     expect(html).toContain("class=\"home-map framed-embed wa-border-radius-m\"");
   });
 
-  it("marks the visual-only map hidden and out of the tab order", () => {
+  it("hides the canvas from assistive tech and leaves the controls reachable", () => {
     const html = renderListPage({ entries: [{ beach: makeBeach(), estimate: null, official: null, distanceMi: null }] });
-    // The map is a purely visual supplement (search + list is the accessible
-    // path), so the mount is aria-hidden and not keyboard-focusable.
-    expect(html).toContain("aria-hidden=\"true\"");
-    expect(html).toContain("tabindex=\"-1\"");
-    // A section aria-label would advertise a map that is hidden from assistive
-    // tech, so there must not be one.
+    // The mount holds the fullscreen and attribution controls, so it is not
+    // aria-hidden itself; the script hides only the canvas container.
+    const mount = html.match(/<div id="home-map"[^>]*>/)[0];
+    expect(mount).not.toContain("aria-hidden");
+    expect(mount).not.toContain("tabindex");
+    expect(html).toContain("map.getCanvasContainer().setAttribute('aria-hidden', 'true');");
+    expect(html).toContain("map.getCanvas().setAttribute('tabindex', '-1');");
+    // The search box plus list is the accessible path, so no aria-label
+    // advertises the map.
     expect(html).not.toContain("aria-label=\"Map of nearby beaches");
   });
 
   it("fills the mount with a skeleton until the map loads", () => {
     const html = renderListPage({ entries: [{ beach: makeBeach(), estimate: null, official: null, distanceMi: null }] });
-    expect(html).toContain("<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton>");
-    // Inside the mount, so it inherits the aria-hidden subtree and needs no
-    // label of its own; MapLibre appends its canvas alongside it.
-    expect(html).toContain("tabindex=\"-1\">" +
-      "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton></div>");
+    // Inside the mount and hidden on its own, since the mount is not; MapLibre
+    // appends its canvas alongside it.
+    expect(html).toContain("\">" +
+      "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\" aria-hidden=\"true\"></wa-skeleton></div>");
     // The indicator's default pill radius is squared off to the mount's, and
     // its always-on sheen stops for a reduced-motion visitor.
     expect(PAGE_STYLES).toContain(".home-map-skeleton::part(indicator) {");
@@ -100,8 +102,8 @@ describe("renderListPage home map", () => {
     const html = renderListPage({ entries: [] });
     // MapLibre 6 is ESM-only — the pinned bundle is the .mjs module, pulled in
     // by the inline script's dynamic import, and both pins share one version.
-    expect(html).toContain("maplibre-gl@6.14.0/dist/maplibre-gl.mjs");
-    expect(html).toContain("maplibre-gl@6.14.0/dist/maplibre-gl.css");
+    expect(html).toContain("maplibre-gl@6.15.0/dist/maplibre-gl.mjs");
+    expect(html).toContain("maplibre-gl@6.15.0/dist/maplibre-gl.css");
     expect(html).toContain("import(MAPLIBRE_MODULE_URL).then(startMap)");
     // MapLibre 6 ships ESM-only with no UMD bundle published: a <script src> to
     // that path would 404 and the map would never load.
@@ -293,12 +295,39 @@ describe("renderListPage home map", () => {
     expect(html).toContain("}, beforeId);");
   });
 
-  it("disables MapLibre keyboard handling and adds no focusable NavigationControl", () => {
+  it("disables MapLibre keyboard handling and adds no NavigationControl", () => {
     const html = renderListPage({ entries: [] });
     expect(html).toContain("keyboard: false");
-    // NavigationControl's zoom buttons would be focusable inside the aria-hidden
-    // container, so the map adds none.
     expect(html).not.toContain("NavigationControl");
+  });
+
+  it("adds a labeled fullscreen control", () => {
+    const html = renderListPage({ entries: [] });
+    expect(html).toContain("map.addControl(new maplibre.FullscreenControl());");
+    // The canvas the button enlarges is hidden from assistive tech, so the
+    // label has to name the map itself.
+    expect(html).toContain("'FullscreenControl.Enter': 'View map fullscreen'");
+    expect(html).toContain("'FullscreenControl.Exit': 'Exit fullscreen map'");
+  });
+
+  it("keeps MapLibre's default attribution, collapsed at construction", () => {
+    const html = renderListPage({ entries: [] });
+    // Omitting the option keeps the default compact control and its MapLibre
+    // credit; passing compact alone would drop that credit.
+    expect(html).not.toContain("attributionControl");
+    expect(html).toContain("attribution.classList.remove('maplibregl-compact-show');");
+    // Collapsed, the control shows only its (i) button, so the footer keeps the
+    // basemap credit visible.
+    expect(html).toContain("Map tiles by <a href=\"https://openfreemap.org\"");
+  });
+
+  it("undoes Web Awesome's native styling of the MapLibre controls", () => {
+    // The kit's native styles reach the controls' details, summary and button
+    // elements wherever MapLibre's own stylesheet leaves a property unset.
+    expect(PAGE_STYLES).toContain(".home-map .maplibregl-ctrl-attrib {\n  border: 0;\n}");
+    expect(PAGE_STYLES).toContain(".home-map .maplibregl-ctrl-attrib-button::after {\n  content: none;\n}");
+    expect(PAGE_STYLES).toContain(".home-map .maplibregl-ctrl-group button {\n  border-radius: inherit;\n}");
+    expect(PAGE_STYLES).toContain(".home-map:fullscreen,\n.home-map.maplibregl-pseudo-fullscreen {");
   });
 
   it("splits one click handler on the zoom where a disc stands alone", () => {

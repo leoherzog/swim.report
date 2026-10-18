@@ -64,8 +64,8 @@ const WA_KIT_BASE = "https://ka-p.webawesome.com/kit/aa896405367b46f6/webawesome
 //
 // MapLibre 6 ships ES modules only, so the inline map script pulls the .mjs in
 // with a dynamic import(). Keep both pins on the same version.
-const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.14.0/dist/maplibre-gl.mjs";
-const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.14.0/dist/maplibre-gl.css";
+const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@6.15.0/dist/maplibre-gl.mjs";
+const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@6.15.0/dist/maplibre-gl.css";
 
 // Kit theme overrides, minus the kit's webfont downloads: each family leads
 // with genuine system fonts so the pinned matter.css @font-face rules (served
@@ -683,9 +683,9 @@ export function renderBrandHeader() {
 // paragraphs would spread across it as wrapping flex items. The footer therefore
 // carries one child: a centered <p> of four <small> lines. Line 1 is the
 // disclaimer, line 2 the site-wide data-source attribution including the only
-// Windy credit on the page, line 3 the homepage map's basemap credit, which
-// lives here as static text because mapScript.js disables attributionControl,
-// and line 4 the link to the public JSON API's documentation.
+// Windy credit on the page, line 3 the homepage map's basemap credit, kept as
+// static text because the map's own attribution control starts collapsed, and
+// line 4 the link to the public JSON API's documentation.
 export function renderFooter() {
   return "<p class=\"footer-lines wa-text-center\">" +
     "<small>Estimated — not the official flag status. " +
@@ -1051,8 +1051,9 @@ function renderBeachRow(entry, nowIso) {
 // renderer emits only the mount and the map center.
 //
 // The map is a visual supplement; the search box plus results list is the
-// complete accessible path. The mount is therefore aria-hidden and out of the
-// tab order, and it carries no landmark aria-label advertising a hidden map.
+// complete accessible path. mapScript.js hides the canvas from assistive tech
+// and leaves only its fullscreen and attribution controls reachable, so the
+// mount carries no landmark aria-label advertising a map.
 function renderHomeMap(near, location) {
   // Map center: the resolved user location that also sorts the list.
   // data-center-precise ("1" for a browser fix, "0" for the coarser IP estimate)
@@ -1065,13 +1066,13 @@ function renderHomeMap(near, location) {
     ? (" data-center=\"" + centerLat.toFixed(3) + "," + centerLon.toFixed(3) + "\"" +
        " data-center-precise=\"" + (near ? "1" : "0") + "\"")
     : "";
-  // aria-hidden plus tabindex="-1" keep the visual-only map out of
-  // assistive-tech and the keyboard tab order. The skeleton stands in until
-  // mapScript.js removes it on the map's load event; MapLibre appends its canvas
-  // to the mount rather than clearing it, so the two never collide.
-  return "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\" " +
-    "aria-hidden=\"true\" tabindex=\"-1\"" + centerAttrs + ">" +
-    "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\"></wa-skeleton>" +
+  // The mount itself is not aria-hidden: the map's controls render inside it.
+  // The skeleton stands in until mapScript.js removes it on the map's load
+  // event; MapLibre appends its canvas to the mount rather than clearing it, so
+  // the two never collide.
+  return "<div id=\"home-map\" class=\"home-map framed-embed wa-border-radius-m\"" +
+    centerAttrs + ">" +
+    "<wa-skeleton class=\"home-map-skeleton\" effect=\"sheen\" aria-hidden=\"true\"></wa-skeleton>" +
     "</div>";
 }
 

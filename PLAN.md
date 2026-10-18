@@ -4591,31 +4591,48 @@ Pure string-returning functions. No fetch, no Date — "now" is passed in. HTML 
       // Between the intro and the search form the page embeds a home-page map mount
       // (no per-beach data — that ships from /api/beaches.geojson):
       // <div id="home-map"
-      // class="home-map framed-embed wa-border-radius-m" aria-hidden="true"
-      // tabindex="-1" data-center="lat,lon"? data-center-precise="1|0"?>
-      // <wa-skeleton class="home-map-skeleton" effect="sheen"></wa-skeleton></div>,
+      // class="home-map framed-embed wa-border-radius-m"
+      // data-center="lat,lon"? data-center-precise="1|0"?>
+      // <wa-skeleton class="home-map-skeleton" effect="sheen" aria-hidden="true">
+      // </wa-skeleton></div>,
       // reusing the shared .framed-embed border and wa-border-radius-m
       // utility. The skeleton fills the mount so the map area is a shaped surface
-      // rather than a blank framed box while tiles arrive; it sits inside the
-      // aria-hidden subtree, so it carries no label, and the map script removes it.
+      // rather than a blank framed box while tiles arrive; it is aria-hidden on its
+      // own, carries no label, and the map script removes it.
       // styles.js squares its ::part(indicator) off to wa-border-radius-m, since the
       // component's own default is a pill.
-      // The map is a purely visual supplement — the search box plus results list
-      // is the complete accessible path, covering the full flag-worthy table server-side
-      // — so the mount is aria-hidden and out of the tab order, with no landmark
-      // aria-label advertising a hidden map. data-center is the router's resolved
+      // The map is a visual supplement — the search box plus results list is the
+      // complete accessible path, covering the full flag-worthy table server-side —
+      // so the canvas is hidden from assistive tech and out of the tab order, with no
+      // landmark aria-label advertising a map. The mount itself is not aria-hidden,
+      // because the map's two controls render inside it. data-center is the router's resolved
       // location (the same {lat,lon} that sorts the list, 3 dp); data-center-precise is
       // "1" for a browser fix, "0" for the IP estimate.
-      // Home-page-only, never in renderDocument's shared head: MapLibre GL JS 6.14.0 plus
+      // Home-page-only, never in renderDocument's shared head: MapLibre GL JS 6.15.0 plus
       // its CSS (pinned) and the browser-side map script (buildListMapScript(MAPLIBRE_JS)
       // from src/frontend/mapScript.js — the pinned .mjs URL is injected as
       // MAPLIBRE_MODULE_URL so render.js holds both CDN pins and they cannot drift
       // apart) render an OpenFreeMap positron map
       // (https://tiles.openfreemap.org/styles/positron) with keyboard:false and no
-      // NavigationControl. The canvas and controls are swept to tabindex -1
-      // synchronously right after construction, not on the load event, so the
-      // aria-hidden subtree never holds a focusable node even before tiles load or if
-      // they never do. The mount's <wa-skeleton> is removed on the map's load event and
+      // NavigationControl. Synchronously right after construction, not on the load
+      // event, the script sets aria-hidden="true" on map.getCanvasContainer() and
+      // tabindex -1 on the canvas, so the hidden subtree never holds a focusable node
+      // even before tiles load or if they never do. Two controls sit outside it, in
+      // MapLibre's sibling control container, as ordinary reachable buttons and links:
+      // a FullscreenControl top right, labeled through the map's locale option
+      // ("View map fullscreen" / "Exit fullscreen map") because the default label
+      // names no subject, which falls back to MapLibre's CSS pseudo-fullscreen where
+      // the Fullscreen API is missing (iPhone Safari); and MapLibre's default compact
+      // AttributionControl bottom right, the attributionControl option left unset so
+      // its MapLibre credit stays. That control opens expanded and collapses on the
+      // first drag; the script removes its maplibregl-compact-show class at
+      // construction, the same collapse, so it starts as its (i) button. Collapsed,
+      // the credit is not visible, so the footer keeps it as static text. Web
+      // Awesome's native styles dress every details, summary and button, so styles.js
+      // undoes what MapLibre's stylesheet leaves unset on the controls (the panel
+      // border, the summary padding, margin and chevron, the button corner radius),
+      // and drops the mount's border and radius under :fullscreen and the
+      // maplibregl-pseudo-fullscreen class. The mount's <wa-skeleton> is removed on the map's load event and
       // on every path that ends with no map — the construction catch, the 'error'
       // event, and a failed module import — so a sheening placeholder never stands in
       // for a map that is not coming. It fetches /api/beaches.geojson once, started at
@@ -4961,8 +4978,9 @@ imports.
   OpenStreetMap (openstreetmap.org) for beach locations, NOAA/NWS (weather.gov) + ECCC
   (weather.gc.ca) for marine and weather data, and Windy.com (windy.com/webcams) for
   webcams." That once-per-page Windy credit satisfies the free tier's attribution
-  expectation on every page. The third line is the map's basemap credit, and the fourth a
-  plain <a href="/api/">API</a> link to the API documentation page.
+  expectation on every page. The third line is the map's basemap credit, kept visible
+  because the map's own attribution control starts collapsed, and the fourth a plain
+  <a href="/api/">API</a> link to the API documentation page.
 
 ### Flag rendering rules
 

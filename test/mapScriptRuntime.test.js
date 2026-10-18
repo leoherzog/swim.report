@@ -65,7 +65,7 @@ function expectedRadiusKm(lat, lon) {
 // dispatching a nearupdate the way geoScript.js does.
 function makeStubs(propertyValue, attrs) {
   const mapAttrs = attrs || {};
-  const added = { sources: {}, layers: [], before: [], images: [], fits: [] };
+  const added = { sources: {}, layers: [], before: [], images: [], fits: [], controls: [] };
   const handlers = [];
   const docHandlers = [];
   const logs = [];
@@ -76,6 +76,18 @@ function makeStubs(propertyValue, attrs) {
     getImageData: () => ({ width: 1, height: 1, data: new Uint8Array(4) })
   };
   const style = { layers: [{ id: "water", type: "fill" }, { id: "labels", type: "symbol" }] };
+  const attrsOf = (el) => ({ setAttribute(name, value) { el.attrs[name] = value; } });
+  const canvas = { attrs: {}, style: {} };
+  Object.assign(canvas, attrsOf(canvas));
+  const canvasContainer = { attrs: {} };
+  Object.assign(canvasContainer, attrsOf(canvasContainer));
+  // MapLibre's compact attribution as its constructor leaves it: expanded.
+  const attribution = {
+    classes: ["maplibregl-ctrl", "maplibregl-ctrl-attrib", "maplibregl-compact", "maplibregl-compact-show"]
+  };
+  attribution.classList = {
+    remove(name) { attribution.classes = attribution.classes.filter((c) => c !== name); }
+  };
 
   const map = {
     addSource(id, spec) {
@@ -84,7 +96,9 @@ function makeStubs(propertyValue, attrs) {
     addLayer(spec, beforeId) { added.layers.push(spec); added.before.push(beforeId); },
     getStyle: () => style,
     on(type, a, b) { handlers.push({ type: type, layer: b ? a : null, fn: b || a }); },
-    getCanvas: () => ({ setAttribute() {}, style: {} }),
+    getCanvas: () => canvas,
+    getCanvasContainer: () => canvasContainer,
+    addControl(control) { added.controls.push(control); },
     hasImage: () => false,
     addImage(id) { added.images.push(id); },
     setMissingStyleImageResolver() {},
@@ -96,8 +110,9 @@ function makeStubs(propertyValue, attrs) {
   added.zoom = 5;
 
   globalThis.__maplibre = {
-    Map: function () { return map; },
-    LngLatBounds: function () { this.extend = function () {}; }
+    Map: function (options) { added.options = options; return map; },
+    LngLatBounds: function () { this.extend = function () {}; },
+    FullscreenControl: function () { this.kind = "fullscreen"; }
   };
   globalThis.window = { devicePixelRatio: 2, location: nav };
   globalThis.getComputedStyle = () => ({ getPropertyValue: () => propertyValue });
@@ -109,7 +124,7 @@ function makeStubs(propertyValue, attrs) {
     getElementById: (id) => (id === "home-map"
       ? {
         getAttribute: (name) => (Object.prototype.hasOwnProperty.call(mapAttrs, name) ? mapAttrs[name] : null),
-        querySelector: () => null
+        querySelector: (sel) => (sel === ".maplibregl-ctrl-attrib" ? attribution : null)
       }
       : null),
     createElement: () => ({ getContext: () => ctx, set width(_w) {}, set height(_h) {} }),
@@ -119,7 +134,10 @@ function makeStubs(propertyValue, attrs) {
     log: (m) => { logs.push(String(m)); }
   });
 
-  return { added: added, handlers: handlers, docHandlers: docHandlers, logs: logs, nav: nav, attrs: mapAttrs };
+  return {
+    added: added, handlers: handlers, docHandlers: docHandlers, logs: logs, nav: nav, attrs: mapAttrs,
+    canvas: canvas, canvasContainer: canvasContainer, attribution: attribution
+  };
 }
 
 // Runs the script and drives it to the point where the layers exist: the map's
@@ -159,6 +177,16 @@ describe("map script runtime", () => {
     expect(s.added.before.slice(0, 4)).toEqual(["labels", "labels", "labels", "labels"]);
     expect(s.added.before[4]).toBeUndefined();
     expect(s.added.images).toEqual(["flag-green", "flag-yellow", "flag-red", "flag-unknown"]);
+  });
+
+  it("hides the canvas, collapses the attribution and adds a fullscreen control", async () => {
+    const s = await runScript("#4f8051");
+    expect(s.canvasContainer.attrs["aria-hidden"]).toBe("true");
+    expect(s.canvas.attrs.tabindex).toBe("-1");
+    // MapLibre's default attribution stays on: the option is never passed.
+    expect(s.added.options).not.toHaveProperty("attributionControl");
+    expect(s.attribution.classes).toEqual(["maplibregl-ctrl", "maplibregl-ctrl-attrib", "maplibregl-compact"]);
+    expect(s.added.controls.map((c) => c.kind)).toEqual(["fullscreen"]);
   });
 
   it("survives a custom property that comes back as an unresolved var()", async () => {

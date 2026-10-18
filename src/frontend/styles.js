@@ -564,6 +564,35 @@ const RULES = [
   "  overflow: hidden;",
   "}",
 
+  // Fullscreen, native or MapLibre's pseudo-fullscreen class where the API is
+  // missing, drops the frame so the map meets the screen edges.
+  ".home-map:fullscreen,",
+  ".home-map.maplibregl-pseudo-fullscreen {",
+  "  border: 0;",
+  "  border-radius: 0;",
+  "}",
+
+  // Web Awesome's native styles dress every details, summary and button, and
+  // the MapLibre controls are built from those elements. These undo what the
+  // MapLibre stylesheet leaves unset: the panel border, the summary padding,
+  // open-state margin and chevron, and the form-control corner radius.
+  ".home-map .maplibregl-ctrl-attrib {",
+  "  border: 0;",
+  "}",
+
+  ".home-map .maplibregl-ctrl-attrib-button {",
+  "  margin: 0;",
+  "  padding: 0;",
+  "}",
+
+  ".home-map .maplibregl-ctrl-attrib-button::after {",
+  "  content: none;",
+  "}",
+
+  ".home-map .maplibregl-ctrl-group button {",
+  "  border-radius: inherit;",
+  "}",
+
   // Placeholder inside the mount until MapLibre's load event removes it, so the
   // map area is a shaped surface rather than a blank framed box while tiles
   // arrive. The host already fills its parent, so only the indicator's default

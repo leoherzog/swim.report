@@ -36,13 +36,14 @@
 // that same source through setData, so the discs and flags take their current
 // colors with no layer rebuild and no view change.
 //
-// The map is a purely visual supplement: the search box plus results list is the
+// The map is a visual supplement: the search box plus results list is the
 // complete accessible path, covering the full flag-worthy table server-side. So
-// MapLibre keyboard handling is disabled, the container is aria-hidden (set
-// server-side in render.js) and kept out of the tab order, and the canvas is set
-// to tabindex -1 at construction. No focusable control chrome is ever added, so
-// the aria-hidden subtree holds no focusable node at any lifecycle point, tile
-// load or not.
+// MapLibre keyboard handling is disabled, the canvas container is aria-hidden
+// and the canvas is set to tabindex -1 at construction. The two controls, a
+// fullscreen button top right and MapLibre's default compact attribution bottom
+// right, live in a sibling container outside that subtree and stay reachable as
+// ordinary buttons and links. The attribution starts collapsed to its (i)
+// button, so render.js keeps the basemap credit visible in the footer too.
 //
 // Everything degrades to the server-rendered beach list: a failed module import,
 // a missing container, a GPU/WebGL2 failure or init throw, or a missing, failed
@@ -441,12 +442,12 @@ const SCRIPT_LINES = [
   // keyboard: false disables MapLibre's KeyboardHandler so the visual-only map
   // never captures arrow/+/- keys; it is not in the tab order to begin with.
   "        keyboard: false,",
-  // The compact attribution control's <a href> links are populated
-  // asynchronously, on styledata after construction, so they would become
-  // focusable descendants of the aria-hidden mount at a lifecycle point no
-  // synchronous sweep could reach. OpenFreeMap's required OpenStreetMap credit is
-  // rendered as static footer text instead (renderFooter in render.js).
-  "        attributionControl: false",
+  // The default fullscreen label names no subject, and the canvas it enlarges
+  // is hidden from assistive tech, so the label says what goes fullscreen.
+  "        locale: {",
+  "          'FullscreenControl.Enter': 'View map fullscreen',",
+  "          'FullscreenControl.Exit': 'Exit fullscreen map'",
+  "        }",
   "      });",
   "    } catch (e) {",
   "      clearSkeleton();",
@@ -461,9 +462,21 @@ const SCRIPT_LINES = [
   "      clearSkeleton();",
   "      console.log('map error: ' + ((e && e.error && e.error.message) || 'unknown'));",
   "    });",
-  // The canvas is the only always-present focusable-ish node; keep it out of the
-  // tab order.
-  "    try { map.getCanvas().setAttribute('tabindex', '-1'); } catch (e) {}",
+  // The canvas carries nothing assistive tech can use, so its container is
+  // hidden and the canvas kept out of the tab order. The controls sit in a
+  // sibling container and are unaffected.
+  "    try {",
+  "      map.getCanvasContainer().setAttribute('aria-hidden', 'true');",
+  "      map.getCanvas().setAttribute('tabindex', '-1');",
+  "    } catch (e) {}",
+  // The compact attribution opens expanded and collapses on the first drag.
+  // Dropping its show class now is that same collapse, so it starts as the (i)
+  // button and a click on it expands it as usual.
+  "    const attribution = container.querySelector('.maplibregl-ctrl-attrib');",
+  "    if (attribution) { attribution.classList.remove('maplibregl-compact-show'); }",
+  // The control falls back to CSS pseudo-fullscreen where the Fullscreen API
+  // is missing, as on iPhone Safari.
+  "    try { map.addControl(new maplibre.FullscreenControl()); } catch (e) {}",
   // Safety net for the basemap style's own sprite icons, the only icon-images
   // left on this map: an unregistered one gets a 1px transparent placeholder, so
   // MapLibre neither throws nor spams the console.
@@ -482,8 +495,7 @@ const SCRIPT_LINES = [
   "    if (directory) { fitView(false); }",
   "    map.on('load', function () {",
   // This handler only removes the placeholder and adds the beach directory once
-  // the style is ready; the focusable sweep already ran synchronously at
-  // construction, and the directory fetch has been in flight since parse time.
+  // the style is ready; the directory fetch has been in flight since parse time.
   "      clearSkeleton();",
   "      addFlagImages().then(function () {",
   "        return directoryRequest;",
