@@ -10,6 +10,7 @@ import {
   ecccAlertsForPoint,
   fetchEcccForecastZones,
   ecccZoneNameForPoint,
+  fetchEcccJson,
   ECCC_USER_AGENT
 } from "../src/clients/eccc.js";
 import { pointInGeometry } from "../src/geo.js";
@@ -215,6 +216,20 @@ describe("fetchActiveEcccAlerts", function () {
     });
     expect(await fetchActiveEcccAlerts(NOW_ISO)).toBeNull();
   });
+
+  it("recovers from a single HTTP 522 through the retry", async function () {
+    let calls = 0;
+    vi.stubGlobal("fetch", function () {
+      calls++;
+      if (calls === 1) {
+        return Promise.resolve({ ok: false, status: 522 });
+      }
+      return okJson({ features: [alertFeature({})] });
+    });
+    const result = await fetchActiveEcccAlerts(NOW_ISO);
+    expect(calls).toBe(2);
+    expect(result.alerts.length).toBe(1);
+  });
 });
 
 // The feed-integrity gate: a body the client cannot read as the national
@@ -391,6 +406,67 @@ describe("fetchEcccForecastZones", function () {
       return Promise.reject(new Error("network down"));
     });
     expect(await fetchEcccForecastZones()).toBeNull();
+  });
+});
+
+// A 522 is the one status the GeoMet fetches retry, because Cloudflare never
+// reached the origin; every other failure is final on the first attempt.
+describe("fetchEcccJson", function () {
+  const URL = "https://api.weather.gc.ca/collections/weather-alerts/items?f=json";
+
+  afterEach(function () {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Answers call n with statuses[n], repeating the last; a 200 carries body.
+  function stubStatuses(statuses, body, seen) {
+    vi.stubGlobal("fetch", function (url, init) {
+      seen.push({ url: url, init: init });
+      const status = statuses[Math.min(seen.length, statuses.length) - 1];
+      if (status === 200) {
+        return okJson(body);
+      }
+      return Promise.resolve({ ok: false, status: status });
+    });
+  }
+
+  it("retries a 522 once with the same URL and UA and returns the retried body", async function () {
+    const seen = [];
+    stubStatuses([522, 200], { features: [] }, seen);
+    expect(await fetchEcccJson(URL, "eccc: test")).toEqual({ features: [] });
+    expect(seen.length).toBe(2);
+    expect(seen[1].url).toBe(URL);
+    expect(seen[1].init.headers["User-Agent"]).toBe(ECCC_USER_AGENT);
+  });
+
+  it("gives up after one retry and logs the retry under its own label", async function () {
+    const log = vi.spyOn(console, "log").mockImplementation(function () {});
+    const seen = [];
+    stubStatuses([522, 522, 200], { features: [] }, seen);
+    expect(await fetchEcccJson(URL, "eccc: test")).toBeNull();
+    expect(seen.length).toBe(2);
+    const lines = log.mock.calls.map(function (c) { return c[0]; });
+    expect(lines).toEqual([
+      "eccc: test fetch failed: HTTP 522",
+      "eccc: test retry fetch failed: HTTP 522"
+    ]);
+  });
+
+  it("does not retry another HTTP failure or a thrown fetch", async function () {
+    for (const status of [500, 503, 524]) {
+      const seen = [];
+      stubStatuses([status, 200], { features: [] }, seen);
+      expect(await fetchEcccJson(URL, "eccc: test")).toBeNull();
+      expect(seen.length).toBe(1);
+    }
+    let calls = 0;
+    vi.stubGlobal("fetch", function () {
+      calls++;
+      return Promise.reject(new Error("network down"));
+    });
+    expect(await fetchEcccJson(URL, "eccc: test")).toBeNull();
+    expect(calls).toBe(1);
   });
 });
 

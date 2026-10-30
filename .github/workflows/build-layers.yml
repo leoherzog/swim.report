@@ -242,13 +242,30 @@ jobs:
             # -f fails the step on an HTTP error instead of writing an HTML error
             # page into a .pbf. -L is mandatory: download.geofabrik.de 302-redirects
             # to mirrors and a request without it returns no body.
-            # --speed-limit/--speed-time detect a stalled stream, which --retry
-            # cannot, since --retry acts on completed transfers that errored; without
-            # them a hung socket burns the whole job timeout. -C - resumes rather
-            # than restarting a multi-gigabyte transfer from zero.
-            curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -C - \
-              --speed-limit 102400 --speed-time 120 --max-time 5400 \
-              -o "$f" "$BASE/$c-$DATE.osm.pbf"
+            # --speed-limit/--speed-time turn a stalled stream into an error; without
+            # them a hung socket burns the whole job timeout. The retry loop is in
+            # the shell because the runner's curl --retry rewinds the file to where
+            # that invocation began, restarting a multi-gigabyte transfer from zero,
+            # while each fresh invocation's -C - resumes from the bytes on disk.
+            # --max-time is per attempt, so a slow mirror is traded for a new
+            # connection without losing progress. A resume may land on another
+            # mirror, which is safe because the dated snapshot is immutable and
+            # md5sum -c checks the joined file. timeout-minutes bounds the total;
+            # the attempt cap bounds a mirror that fails fast.
+            got=""
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if curl -fSL -C - --speed-limit 102400 --speed-time 120 --max-time 1800 \
+                  -o "$f" "$BASE/$c-$DATE.osm.pbf"; then
+                got=1
+                break
+              fi
+              echo "::warning::$c download attempt $attempt stopped at $(stat -c '%s' "$f" 2>/dev/null || echo 0) bytes, resuming"
+              sleep 5
+            done
+            if [ -z "$got" ]; then
+              echo "::error::$c download did not complete in 10 attempts"
+              exit 1
+            fi
             curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f.md5" "$BASE/$c-$DATE.osm.pbf.md5"
             # The sidecar carries a bare basename, hence the cd above.
             md5sum -c "$f.md5"

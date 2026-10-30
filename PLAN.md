@@ -1549,6 +1549,12 @@ fetch and matches beaches locally via pointInGeometry.
     export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
       // human-readable alerts page for source { url } entries
 
+    export async function fetchEcccJson(url, label)
+      // The one GeoMet GET behind all three fetches, ecccMarine.js's included:
+      // ECCC_USER_AGENT, ECCC_TIMEOUT_MS, parsed JSON or null, never throws. An HTTP 522
+      // means Cloudflare never connected to GeoMet, so it is retried once, logged under
+      // label + " retry"; every other failure is final. No other client retries.
+
     export async function fetchActiveEcccAlerts(nowIso)
       // nowIso drives the expiry filter — no Date.now() inside. No bbox: the whole
       // national active set is fetched once per run and matched locally.
@@ -1633,8 +1639,8 @@ in the same alerts[] input, exactly as the US branch concats marine onto land (s
       // dropped=<d>"); an all-clear collection returns [].
 
     export async function fetchActiveEcccMarineAlerts(nowIso)
-      // Cron-side only. One GET of the marineweather-realtime collection
-      // (ECCC_USER_AGENT), parsed via parseEcccMarineAlerts. Null on any failure.
+      // Cron-side only. One fetchEcccJson GET of the marineweather-realtime collection,
+      // parsed via parseEcccMarineAlerts. Null on any failure.
 
     export function ecccMarineAlertsForPoint(alerts, lat, lon)
       // Pure. -> { events: string[], details: [{ event, onset, ends, description,
@@ -3202,8 +3208,8 @@ alert means.
 
 1. Three national fetches, issued concurrently with Promise.all over individually caught
    promises, each bounded by its client's timeoutMs (NWS_TIMEOUT_MS 45000, ECCC_TIMEOUT_MS
-   45000): fetchAllActiveAlerts(), fetchActiveEcccAlerts(nowIso),
-   fetchActiveEcccMarineAlerts(nowIso).
+   45000, per attempt for an ECCC fetch retrying a 522): fetchAllActiveAlerts(),
+   fetchActiveEcccAlerts(nowIso), fetchActiveEcccMarineAlerts(nowIso).
 
        nwsOk  = nationalAlerts !== null && nationalAlerts.truncated !== true
        ecccOk = ecccAlerts !== null && ecccMarineAlerts !== null

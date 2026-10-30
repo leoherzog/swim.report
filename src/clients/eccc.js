@@ -14,7 +14,7 @@
 // so every request carries ECCC_USER_AGENT. Every fetching function is async,
 // returns data or null, and never throws across the module boundary.
 
-import { fetchJson } from "./http.js";
+import { fetchJsonWithStatus } from "./http.js";
 import { matchedAlerts, pickIsoString } from "./alertMatch.js";
 import { pointInGeometry, minEdgeDistanceKm } from "../geo.js";
 
@@ -27,6 +27,29 @@ export const ECCC_USER_AGENT = "swim.report (https://swim.report)";
 // constant are bulk national collections, so the budget is generous: it bounds
 // the invocation, it does not police latency.
 export const ECCC_TIMEOUT_MS = 45000;
+
+// One GeoMet GET carrying ECCC_USER_AGENT under ECCC_TIMEOUT_MS: parsed JSON or
+// null, never throws. An HTTP 522 means Cloudflare never connected to GeoMet, so
+// the request never reached the origin and is retried once, logged under
+// label + " retry"; every other failure is final.
+export async function fetchEcccJson(url, label) {
+  const headers = { "User-Agent": ECCC_USER_AGENT };
+  const first = await fetchJsonWithStatus(url, {
+    headers: headers,
+    label: label,
+    timeoutMs: ECCC_TIMEOUT_MS
+  });
+  if (first.status !== 522) {
+    return first.json;
+  }
+  const retry = await fetchJsonWithStatus(url, {
+    headers: headers,
+    label: label + " retry",
+    timeoutMs: ECCC_TIMEOUT_MS
+  });
+  return retry.json;
+}
+
 // Human-readable alerts page for source { url } entries shown to visitors.
 export const ECCC_ALERTS_INFO_URL = "https://weather.gc.ca/warnings/index_e.html";
 // weather-alerts features per fetch, sized so one page always suffices even in a
@@ -58,11 +81,7 @@ const ECCC_ZONES_FETCH_LIMIT = 2000;
 export async function fetchActiveEcccAlerts(nowIso) {
   const url = ECCC_API_BASE + "/collections/weather-alerts/items?f=json" +
     "&limit=" + String(ECCC_ALERTS_FETCH_LIMIT);
-  const json = await fetchJson(url, {
-    headers: { "User-Agent": ECCC_USER_AGENT },
-    label: "eccc: active alerts",
-    timeoutMs: ECCC_TIMEOUT_MS
-  });
+  const json = await fetchEcccJson(url, "eccc: active alerts");
   if (json === null) {
     return null;
   }
@@ -153,11 +172,7 @@ export function ecccAlertsForPoint(alerts, lat, lon) {
 export async function fetchEcccForecastZones() {
   const url = ECCC_API_BASE + "/collections/public-standard-forecast-zones/items?f=json" +
     "&limit=" + String(ECCC_ZONES_FETCH_LIMIT);
-  const json = await fetchJson(url, {
-    headers: { "User-Agent": ECCC_USER_AGENT },
-    label: "eccc: forecast zones",
-    timeoutMs: ECCC_TIMEOUT_MS
-  });
+  const json = await fetchEcccJson(url, "eccc: forecast zones");
   if (json === null) {
     return null;
   }

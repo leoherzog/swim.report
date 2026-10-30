@@ -48,10 +48,9 @@
 // this module. Every function returns data-or-null and never throws across the
 // module boundary.
 
-import { fetchJson } from "./http.js";
 import { matchedAlerts } from "./alertMatch.js";
 import { pointInGeometry, minEdgeDistanceKm } from "../geo.js";
-import { ECCC_API_BASE, ECCC_USER_AGENT, ECCC_TIMEOUT_MS } from "./eccc.js";
+import { ECCC_API_BASE, fetchEcccJson } from "./eccc.js";
 
 // The marine-realtime collection carrying per-zone Gale/Storm/Strong-wind
 // warning Polygons.
@@ -198,11 +197,7 @@ export function parseEcccMarineAlerts(json, nowIso) {
 export async function fetchActiveEcccMarineAlerts(nowIso) {
   const url = ECCC_API_BASE + "/collections/" + ECCC_MARINE_COLLECTION +
     "/items?f=json&limit=" + String(ECCC_MARINE_FETCH_LIMIT);
-  const json = await fetchJson(url, {
-    headers: { "User-Agent": ECCC_USER_AGENT },
-    label: "ecccMarine: active marine alerts",
-    timeoutMs: ECCC_TIMEOUT_MS
-  });
+  const json = await fetchEcccJson(url, "ecccMarine: active marine alerts");
   if (json === null) {
     return null;
   }

@@ -427,6 +427,22 @@ describe("fetchActiveEcccMarineAlerts", function () {
     expect(await fetchActiveEcccMarineAlerts(NOW_ISO)).toBe(null);
   });
 
+  it("recovers from a single HTTP 522 through the retry", async function () {
+    let calls = 0;
+    vi.stubGlobal("fetch", function () {
+      calls++;
+      if (calls === 1) {
+        return Promise.resolve({ ok: false, status: 522 });
+      }
+      return okJson(collection([
+        marineFeature({ value: "Lake Erie", events: [marineEvent("Gale warning", "IN EFFECT")] })
+      ]));
+    });
+    const result = await fetchActiveEcccMarineAlerts(NOW_ISO);
+    expect(calls).toBe(2);
+    expect(result.alerts[0].event).toBe("gale warning");
+  });
+
   it("returns null on a network throw (never propagates)", async function () {
     vi.stubGlobal("fetch", function () { return Promise.reject(new Error("boom")); });
     expect(await fetchActiveEcccMarineAlerts(NOW_ISO)).toBe(null);
