@@ -3409,7 +3409,7 @@ upstream call and a bug. This is the machine-enforced form of the claim that the
 this repo that can delete production rows cannot talk to the network.
 
 Layer build (`.github/workflows/build-layers.yml`, twice weekly `41 6 * * 0` and
-`41 6 * * 3`, concurrency group `build-layers`, job timeout 180 min). Plain shell on a
+`41 6 * * 3`, concurrency group `build-layers`, job timeout 300 min). Plain shell on a
 GitHub runner and not delete-bearing:
 - Reclaim runner disk and assert a 40 GB floor. Then, per country (us, canada, mexico)
   sequentially: download the Geofabrik extract, verify its published `.md5`, assert every

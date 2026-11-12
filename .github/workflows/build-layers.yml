@@ -54,10 +54,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # A realistic run is 60-120 minutes, dominated by the extract download and the
-    # osmium/ogr2ogr passes. 180 leaves margin under the 6 h job cap without letting
-    # a hung download burn hours.
-    timeout-minutes: 180
+    # A realistic run is 80-180 minutes, dominated by the extract download, whose
+    # speed varies with the Geofabrik mirror. A stalled stream fails through curl's
+    # --speed-limit, so this bounds a slow mirror, not a hung one, and stays under
+    # the 6 h job cap.
+    timeout-minutes: 300
     env:
       # The bucket is swim-report with a hyphen. The zone is swim.report with a dot
       # and the public R2 domain is map.swim.report, so the dotted form reads

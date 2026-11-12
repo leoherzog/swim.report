@@ -31,7 +31,7 @@ cannot reach the bucket even by accident.
 ### The layer build
 
 **`.github/workflows/build-layers.yml`** — twice weekly (`41 6 * * 0` and `41 6 * * 3`, plus
-`workflow_dispatch`), concurrency group `build-layers`, `timeout-minutes: 180`. Plain shell on
+`workflow_dispatch`), concurrency group `build-layers`, `timeout-minutes: 300`. Plain shell on
 a GitHub runner, and not delete-bearing. It reclaims runner disk against a
 40 GB floor, then per country (us, canada, mexico) **sequentially** downloads the Geofabrik
 extract, verifies its `.md5`, runs `osmium tags-filter` against `.github/build/expressions.txt`

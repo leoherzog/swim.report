@@ -318,7 +318,7 @@ PLAN.md. Nothing below blocks the pilot; all of it is scoped for follow-up work.
   `src/regions.js` carries 26 coastal boxes (US and Canadian Pacific, Gulf, Atlantic, Alaska
   east of 180°, Hawaii, Puerto Rico + USVI) beside the nine Great Lakes boxes; the floors for
   digest `sha256:6e29be94…` are seeded. The table holds 9,070 flag-worthy rows (7,395 ocean,
-  1,675 great_lake). The layer build (`build-layers.yml`, 180-minute timeout) stays well
+  1,675 great_lake). The layer build (`build-layers.yml`, 300-minute timeout) stays well
   inside a 145 GB runner's disk, peaking near 47 GB; the discovery batch (`discovery.yml`,
   45-minute timeout) stays under its 6000 MB early-warning line and 12 GB heap ceiling. What
   is still open, in order:
