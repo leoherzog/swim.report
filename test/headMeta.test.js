@@ -1,8 +1,8 @@
 // test/headMeta.test.js
 // Covers the shared document head's identity and share tags
 // (src/frontend/render.js renderDocument / renderShareMeta): favicon, manifest,
-// the two theme colors, and the per-page description, canonical link and
-// Open Graph / Twitter card. The description is the one place a shared link
+// the two theme colors, and the per-page description, robots directive,
+// canonical link and Open Graph / Twitter card. The description is the one place a shared link
 // states a color, so it must always say estimated or official, and must read
 // "unknown" honestly rather than defaulting to a color.
 
@@ -162,18 +162,33 @@ describe("list page description, canonical and share card", () => {
       "A gray beach flag flying over a wave");
   });
 
+  // A result shows the title alone, so it says estimated.
+  it("titles the page with the site name and what it estimates", () => {
+    expect(html).toContain("<title>Swim Report — Estimated Beach Hazard Flags</title>");
+  });
+
   it("carries the full Open Graph and Twitter card set", () => {
     expect(metaContent(html, "property", "og:type")).toBe("website");
     expect(metaContent(html, "property", "og:site_name")).toBe("Swim Report");
-    expect(metaContent(html, "property", "og:title")).toBe("Swim Report");
+    expect(metaContent(html, "property", "og:locale")).toBe("en_US");
+    expect(metaContent(html, "property", "og:title")).toBe(
+      "Swim Report — Estimated Beach Hazard Flags");
     expect(metaContent(html, "property", "og:description")).toBe(
       metaContent(html, "name", "description"));
+    expect(metaContent(html, "property", "og:image:type")).toBe("image/png");
     expect(metaContent(html, "property", "og:image:width")).toBe("1200");
     expect(metaContent(html, "property", "og:image:height")).toBe("630");
     expect(metaContent(html, "name", "twitter:card")).toBe("summary_large_image");
-    expect(metaContent(html, "name", "twitter:title")).toBe("Swim Report");
+    expect(metaContent(html, "name", "twitter:title")).toBe(
+      "Swim Report — Estimated Beach Hazard Flags");
     expect(metaContent(html, "name", "twitter:description")).toBe(
       metaContent(html, "name", "description"));
+    expect(metaContent(html, "name", "twitter:image:alt")).toBe(
+      metaContent(html, "property", "og:image:alt"));
+  });
+
+  it("lets search engines show the card at full width", () => {
+    expect(metaContent(html, "name", "robots")).toBe("max-image-preview:large");
   });
 });
 
@@ -285,8 +300,14 @@ describe("detail page canonical and share card", () => {
       expect(metaContent(html, "property", "og:image")).toBe(image);
       expect(metaContent(html, "name", "twitter:image")).toBe(image);
       expect(metaContent(html, "property", "og:image:alt")).toBe(alt);
+      expect(metaContent(html, "name", "twitter:image:alt")).toBe(alt);
     });
   }
+
+  it("is indexable with a full-width card", () => {
+    const html = detailHtml(estimateWith(), null);
+    expect(metaContent(html, "name", "robots")).toBe("max-image-preview:large");
+  });
 
   it("shares the unknown card when there is no flag data", () => {
     const html = detailHtml(null, null);
@@ -310,5 +331,10 @@ describe("error page share meta", () => {
     expect(html).not.toContain("property=\"og:");
     expect(html).not.toContain("name=\"twitter:");
     expect(html).not.toContain("<meta name=\"description\"");
+    expect(html).not.toContain("application/ld+json");
+  });
+
+  it("asks not to be indexed", () => {
+    expect(metaContent(html, "name", "robots")).toBe("noindex");
   });
 });

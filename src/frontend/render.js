@@ -20,6 +20,12 @@ import { STALE_MS, isStale, collapseFlagColor, displayFlag } from "../displayFla
 import { alertsCheckable } from "../alertsCheckable.js";
 import { toPublicId } from "../publicId.js";
 import { READING_MAX_AGE_MS } from "../officialReading.js";
+import { SITE_ORIGIN, SITE_NAME, SITE_DESCRIPTION } from "../site.js";
+import {
+  renderJsonLdScript,
+  homeStructuredData,
+  beachStructuredData
+} from "./structuredData.js";
 import { verdictSentence, alertsChecked } from "./verdict.js";
 import { nextSunEvent, utcClockLabel } from "./sun.js";
 import {
@@ -46,11 +52,6 @@ const WATER_TEMP_STALE_MS = 43200000; // 12 h — matches the parser window; wat
 // FLAG_TTL_SECONDS * 1000, or the record expires to UNKNOWN before the warning
 // can render.
 const ESTIMATE_STALE_MS = 18000000;
-
-// The canonical origin, so the canonical link, the share meta and the detail
-// page's share controls can hand out an absolute URL without the renderer
-// reading the request.
-const SITE_ORIGIN = "https://swim.report";
 
 // Web Awesome Pro CDN kit: version-pinned theme (matter), color palette
 // (mild), native styles/reset, CSS utilities, and the component autoloader.
@@ -91,9 +92,9 @@ const OG_IMAGE_HEIGHT = "630";
 const THEME_COLOR_LIGHT = "#ffffff";
 const THEME_COLOR_DARK = "#121214";
 
-// The list page's own description; the detail pages build theirs per beach.
-const SITE_DESCRIPTION = "Estimated beach hazard flags for Great Lakes and " +
-  "ocean-coast beaches across the United States and Canada.";
+// The list page's title, which also names the site in results. It says
+// estimated, because a search result shows the title without the page around it.
+const HOME_TITLE = SITE_NAME + " — Estimated Beach Hazard Flags";
 
 // One label per color normalizeColor coerces to.
 const FLAG_LABELS = {
@@ -772,37 +773,49 @@ const HEAD_IDENTITY_TAGS = [
     THEME_COLOR_DARK + "\">"
 ];
 
-// Description, canonical URL and share cards for one page, from a meta object of
-// { title, description, path, flagColor, iconColor, alternateHref }; iconColor
-// is read only by renderIconTag and alternateHref only by renderDocument. Returns no lines at all when meta is
-// absent, which is how the error page opts out: a 404 must never claim a
-// canonical URL or offer itself as a share card.
+// Description, canonical URL, share cards and structured data for one page, from
+// a meta object of { title, description, path, flagColor, iconColor,
+// alternateHref, structuredData }; iconColor is read only by renderIconTag and
+// alternateHref only by renderDocument, and structuredData is an optional array
+// of schema.org nodes. With meta absent it returns only a noindex, which is how
+// the error page opts out: a 404 must never claim a canonical URL or offer
+// itself as a share card.
 function renderShareMeta(meta) {
   if (!meta) {
-    return [];
+    return ["<meta name=\"robots\" content=\"noindex\">"];
   }
   const title = escapeHtml(meta.title);
   const description = escapeHtml(meta.description);
   const canonical = escapeHtml(SITE_ORIGIN + meta.path);
   const color = normalizeColor(meta.flagColor);
   const image = escapeHtml(OG_IMAGE_BASE + color + ".png");
-  return [
+  const imageAlt = escapeHtml(OG_IMAGE_ALT[color]);
+  const lines = [
     "<meta name=\"description\" content=\"" + description + "\">",
+    // Lets a search engine show the share card at full width.
+    "<meta name=\"robots\" content=\"max-image-preview:large\">",
     "<link rel=\"canonical\" href=\"" + canonical + "\">",
     "<meta property=\"og:type\" content=\"website\">",
-    "<meta property=\"og:site_name\" content=\"Swim Report\">",
+    "<meta property=\"og:site_name\" content=\"" + escapeHtml(SITE_NAME) + "\">",
+    "<meta property=\"og:locale\" content=\"en_US\">",
     "<meta property=\"og:title\" content=\"" + title + "\">",
     "<meta property=\"og:description\" content=\"" + description + "\">",
     "<meta property=\"og:url\" content=\"" + canonical + "\">",
     "<meta property=\"og:image\" content=\"" + image + "\">",
+    "<meta property=\"og:image:type\" content=\"image/png\">",
     "<meta property=\"og:image:width\" content=\"" + OG_IMAGE_WIDTH + "\">",
     "<meta property=\"og:image:height\" content=\"" + OG_IMAGE_HEIGHT + "\">",
-    "<meta property=\"og:image:alt\" content=\"" + escapeHtml(OG_IMAGE_ALT[color]) + "\">",
+    "<meta property=\"og:image:alt\" content=\"" + imageAlt + "\">",
     "<meta name=\"twitter:card\" content=\"summary_large_image\">",
     "<meta name=\"twitter:title\" content=\"" + title + "\">",
     "<meta name=\"twitter:description\" content=\"" + description + "\">",
-    "<meta name=\"twitter:image\" content=\"" + image + "\">"
+    "<meta name=\"twitter:image\" content=\"" + image + "\">",
+    "<meta name=\"twitter:image:alt\" content=\"" + imageAlt + "\">"
   ];
+  if (Array.isArray(meta.structuredData) && meta.structuredData.length > 0) {
+    lines.push(renderJsonLdScript(meta.structuredData));
+  }
+  return lines;
 }
 
 // meta is optional: a page that passes none still gets the site identity tags,
@@ -1251,12 +1264,13 @@ export function renderListPage(data) {
   // filtered or geolocated view of the same page, not pages of their own. The
   // share card is the gray unknown flag, because the index reports no one
   // beach's color and must not imply one.
-  return renderDocument("Swim Report", bodyHtml, {
-    title: "Swim Report",
+  return renderDocument(HOME_TITLE, bodyHtml, {
+    title: HOME_TITLE,
     description: SITE_DESCRIPTION,
     path: "/",
     flagColor: "unknown",
-    alternateHref: data && typeof data.alternateHref === "string" ? data.alternateHref : null
+    alternateHref: data && typeof data.alternateHref === "string" ? data.alternateHref : null,
+    structuredData: homeStructuredData()
   });
 }
 
@@ -2085,13 +2099,27 @@ export function renderDetailPage(data) {
     "<script>" + DETAIL_REFRESH_SCRIPT + "</script>" + ticksScriptHtml +
     "<script>" + LIVE_REFRESH_SCRIPT + "</script>";
   // The share card, title, hero, rows and map marker are one displayFlag decision.
+  const path = "/beach/" + encodeURIComponent(publicId);
   return renderDocument(title, bodyHtml, {
     title: title,
     description: detailMetaDescription(beach, estimate, flag),
-    path: "/beach/" + encodeURIComponent(publicId),
+    path: path,
     flagColor: flag.color,
     iconColor: flag.color,
-    alternateHref: typeof data.alternateHref === "string" ? data.alternateHref : null
+    alternateHref: typeof data.alternateHref === "string" ? data.alternateHref : null,
+    // With a subtitle the heading is the park, and the place itself is the
+    // beach inside it.
+    structuredData: beachStructuredData({
+      path: path,
+      title: title,
+      crumbName: displayName(beach),
+      name: subtitle || displayName(beach),
+      parkName: subtitle ? beach.park_name : null,
+      lat: beach.lat,
+      lon: beach.lon,
+      mapUrl: osmHref,
+      osmId: beach.osm_id
+    })
   });
 }
 

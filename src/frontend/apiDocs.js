@@ -25,8 +25,8 @@ import { FLAG_TTL_SECONDS } from "../flagTtl.js";
 import { STALE_MS } from "../displayFlag.js";
 import { CACHE_CONTROL_CACHEABLE } from "../cacheControl.js";
 import { OPENAPI_PATH, buildOpenApiDocument } from "../openapi.js";
-
-const SITE_ORIGIN = "https://swim.report";
+import { SITE_ORIGIN } from "../site.js";
+import { docsStructuredData } from "./structuredData.js";
 
 const LEASE_HOURS = FLAG_TTL_SECONDS / 3600;
 const STALE_HOURS = STALE_MS / 3600000;
@@ -640,6 +640,12 @@ export function renderApiDocsPage(data) {
     title: PAGE_TITLE,
     description: PAGE_DESCRIPTION,
     path: "/api/",
-    flagColor: "unknown"
+    flagColor: "unknown",
+    structuredData: docsStructuredData({
+      path: "/api/",
+      title: PAGE_TITLE,
+      description: PAGE_DESCRIPTION,
+      crumbName: "API"
+    })
   });
 }

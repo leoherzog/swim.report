@@ -255,6 +255,9 @@ If-None-Match, Accept` and `Access-Control-Max-Age: 86400`. There are no credent
 no per-origin rules. The HTML pages send no CORS headers. Any other `/api/*` path answers
 `404` with `{ "error": "not found" }`, and a method other than `GET` or `HEAD` answers `405`.
 
+Every `/api/*` response except the `/api/` guide also carries `X-Robots-Tag: noindex`. Each
+beach page links its JSON twin, so without it a crawler would index thousands of JSON bodies.
+
 Every route on the site answers `HEAD` with the status and headers its `GET` would send,
 `ETag` and `304` included, and no body. A `HEAD` is not a view: the single-beach API routes
 and the detail page write no `last_viewed` stamp for it. There is deliberately no
@@ -284,6 +287,19 @@ Liveness check, no upstream/DB access:
 
     { "ok": true }
 
+### `GET /robots.txt` and `GET /sitemap.xml`
+
+`/robots.txt` disallows every URL with a query string and names the sitemap. The `?q=`,
+`?near=` and `?ids=` lists are views of `/` that canonicalize to it, and `near=` alone spans
+every coordinate pair. Cloudflare's managed robots.txt is on for the zone and prepends its
+own block, so the AI-crawler and content-signal policy is a dashboard setting, not this file.
+
+`/sitemap.xml` lists `/`, `/api/` and every beach page that answers `200`, behind the same
+flag-worthy gate as the list and the map, in one D1 read. A beach's `<lastmod>` is the newer
+`updated` stamp of its live estimate and official, and the home page takes the newest of
+those. One file holds at most 50,000 URLs, so a table past that needs a sitemap index; the
+route logs when it reaches the cap. It is cacheable with a body-hash `ETag`, like the API.
+
 ### Static brand assets
 
 `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-192.png`, `/icon-512.png`,
@@ -310,6 +326,12 @@ confirmed-inland beaches: they are absent from the list and search, and a detail
 returns `404`. Only ocean and Great Lakes rows, plus still-unclassified rows during backfill,
 are shown. The list page's map area holds a skeleton placeholder until the map's `load` event
 fires, so it is never a blank framed box while tiles arrive.
+
+Each indexable page carries a canonical link, Open Graph and Twitter cards, and a schema.org
+JSON-LD graph: the `WebSite`, and on a beach page a `WebPage`, a `Beach` with its coordinates,
+its park and its OpenStreetMap element, and a breadcrumb. The graph never states a flag
+color, because a search feature can lift a structured value away from the words that mark it
+estimated. Error pages carry `noindex` and no share meta.
 
 The detail page opens with a **flag hero**: the beach name behind its flag icon, the flag's
 label, and a badge naming the record that supplied that color — OFFICIAL for a posted flag,
@@ -473,7 +495,8 @@ Every response also carries `strict-transport-security: max-age=31536000`,
 form-action 'self'`.
 Responses are cached at Cloudflare's edge (Workers Cache, `[cache]` in `wrangler.toml`) under
 an explicit per-route policy: successful API, beach-detail, `?ids=`, `?near=`, `/api/` and
-`/api/beaches.geojson` responses and every `301` send `cache-control: public, max-age=60,
+`/api/beaches.geojson` responses, `/robots.txt`, `/sitemap.xml` and every `301` send
+`cache-control: public, max-age=60,
 stale-while-revalidate=60, stale-if-error=600`, so a cached flag is normally at most two
 minutes old, and up to about eleven while the origin is failing (`stale-if-error`);
 `/api/beaches` and `/api/beaches.geojson` also carry a strong SHA-256 `ETag` (Cloudflare

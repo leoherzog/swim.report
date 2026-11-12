@@ -4127,6 +4127,30 @@ src/cacheControl.js:
       // CORS wrapper all stamp them and none may own the others. Policy: the Headers
       // bullet below.
 
+src/site.js:
+
+    export const SITE_ORIGIN   // "https://swim.report"
+    export const SITE_NAME     // "Swim Report"
+    export const SITE_DESCRIPTION
+      // The one-sentence site description: the list page's meta description and the
+      // WebSite node's. Constants, so no renderer or route reads them off the request.
+
+src/sitemap.js (GET /sitemap.xml; routing table below):
+
+    export function beachLastModifiedMs(row, nowMs)
+      // -> epoch ms | null. The newer updated stamp of the row's live estimate and live
+      // official, resolved through liveChipState, so an expired record never dates a page.
+    export function buildSitemapXml(rows, nowMs)
+      // -> string. Pure. The urlset for /, /api/ and every row whose id has a public form.
+    export async function handleSitemap(env, ifNoneMatch)
+      // -> Response. One D1 read, then etaggedResponse.
+
+src/robots.js (GET /robots.txt):
+
+    export const ROBOTS_TXT
+    export function robotsResponse()
+      // -> Response, text/plain, CACHE_CONTROL_CACHEABLE.
+
 src/apiCors.js (the public API's CORS policy, applied once in the router):
 
     export const API_CORS_HEADERS
@@ -4328,6 +4352,8 @@ Routing table (GET, and HEAD as GET without the body; anything else → 405):
 | GET /api/                 | renderApiDocsPage (src/frontend/apiDocs.js) | nothing | HTML API documentation page (section 9), CACHE_CONTROL_CACHEABLE, CORS headers included like every /api/* response, plus Link: </api/openapi.json>; rel="service-desc"; type="application/json" (RFC 8631) |
 | OPTIONS /api/*            | apiPreflightResponse (src/apiCors.js) | nothing | 204, no body, the preflight headers of src/apiCors.js, no-store |
 | GET /api/openapi.json     | handleOpenApi (src/openapi.js) | nothing | The OpenAPI 3.2 document from buildOpenApiDocument(), serialized and hashed once per isolate; "application/json; charset=utf-8", CACHE_CONTROL_CACHEABLE, strong SHA-256 ETag, If-None-Match → 304 (etaggedResponse); CORS like every /api/* response |
+| GET /robots.txt           | robotsResponse (src/robots.js) | nothing | ROBOTS_TXT as "text/plain; charset=utf-8", CACHE_CONTROL_CACHEABLE: one "User-agent: *" group with "Disallow: /*?" (every ?q=, ?near= and ?ids= list canonicalizes to /) and "Sitemap: " + SITE_ORIGIN + "/sitemap.xml". Cloudflare's managed robots.txt is on for the zone and prepends its own block (the AI-crawler and content-signal policy, a dashboard setting); crawlers merge the two "User-agent: *" groups, and the longer Disallow outranks the managed "Allow: /" |
+| GET /sitemap.xml          | handleSitemap (src/sitemap.js) | ONE D1 read: SELECT b.id plus the six estimate/official color, updated and expires scalar columns (CHIP_STATE_SELECT minus official_kind) FROM beaches b LEFT JOIN beach_state s ON s.beach_id = b.id WHERE [flag-worthy gate] ORDER BY b.id LIMIT 49998 (the sitemaps.org 50,000-URL file cap minus the two static entries; hitting it logs, and the fix is a sitemap index). No KV read | "application/xml; charset=utf-8" sitemaps.org urlset, built by buildSitemapXml(rows, nowMs): / then /api/ then /beach/<public id> per row whose id converts through toPublicId (a row that does not is skipped, since its URL would only redirect). A beach's lastmod is beachLastModifiedMs(row, nowMs), the newer updated stamp of its live estimate and live official under liveChipState's expiry rule, to the second; a beach with neither carries none. / takes the newest beach lastmod and /api/ none. etaggedResponse with a strong SHA-256 ETag over the body and CACHE_CONTROL_CACHEABLE; If-None-Match → 304 |
 | GET /health               | inline         | nothing                                      | JSON { "ok": true } |
 | GET /favicon.svg, /apple-touch-icon.png, /icon-192.png, /icon-512.png, /manifest.webmanifest, /og/{green,yellow,red,double-red,unknown}.png | Workers static assets ([assets] directory = "public") | nothing — served by the platform before the Worker runs | The committed file, with the platform's own content-type and ETag plus the four security headers public/_headers declares. No Worker code and no binding are involved, so nothing here can reach D1, KV or an upstream |
 | anything else             | inline         | nothing                                      | 404 (JSON {"error":"not found"} under /api/, HTML renderErrorPage otherwise) |
@@ -4344,6 +4370,10 @@ Routing table (GET, and HEAD as GET without the body; anything else → 405):
   are wrapped too. OPTIONS on any /api/* path answers apiPreflightResponse before any other
   routing. The error boundary's JSON 500 in src/index.js is built outside handleRequest, so
   the boundary wraps it in withApiCors itself and it carries the same two headers.
+- Indexing: every /api/* response except the /api/ HTML guide also carries
+  x-robots-tag: noindex, set by dispatchRequest after withApiCors (whose result always has
+  mutable headers). Every beach page links its JSON twin with rel="alternate", so without it
+  a crawler would index thousands of JSON bodies.
 - Discovery: the list page (every mode) and the detail page send an HTTP
   Link: <href>; rel="alternate"; type="application/json" header (alternateLinkHeader) and
   pass the same href to the renderer as data.alternateHref, which emits it as
@@ -4382,7 +4412,8 @@ Routing table (GET, and HEAD as GET without the body; anything else → 405):
   - CACHEABLE = "public, max-age=60, stale-while-revalidate=60, stale-if-error=600"
     on detail-page 200s, /?ids= 200s (URL-determined: the route reads neither request.cf
     nor q/near), /api/beaches/:beachId and /api/flag 200s and 304s, /api/beaches and
-    /api/beaches.geojson 200s and 304s, the /api/ docs page, and every 301 (the
+    /api/beaches.geojson 200s and 304s, the /api/ docs page, /robots.txt, the /sitemap.xml
+    200s and 304s, and every 301 (the
     storage-id redirects, /beach/:beachId.json and /api). Every cacheable
     origin is one or two D1 statements, and Workers Cache serves stale asynchronously, so
     max-age + stale-while-revalidate (120 s) is the oldest flag a live cached body can
@@ -4412,7 +4443,8 @@ Routing table (GET, and HEAD as GET without the body; anything else → 405):
   only the single-beach routes do.
 - The router never fetches upstream. It imports src/frontend/render.js,
   src/frontend/apiDocs.js, src/beachState.js, src/beachQueries.js, src/apiBeaches.js,
-  src/apiCors.js, src/cacheControl.js, src/mapFeatures.js and src/etag.js, and uses env.DB and env.FLAGS. The last_viewed UPDATE is its only
+  src/apiCors.js, src/cacheControl.js, src/mapFeatures.js, src/etag.js, src/sitemap.js and
+  src/robots.js, and uses env.DB and env.FLAGS. The last_viewed UPDATE is its only
   write; it never writes beach_state.
 - Static assets: the brand files under public/ (favicon, apple-touch icon, the two manifest
   icons, manifest.webmanifest, and the five share cards under og/) are served by Workers
@@ -4947,20 +4979,44 @@ imports.
   page CSS; the dark step is the one styles.js gives --flag-*) and renderFlagSvg(colorKey,
   label); scripts/build-brand-assets.js builds favicon.svg from the same function.
 - renderDocument(title, bodyHtml, meta) takes an optional meta of
-  { title, description, path, flagColor, iconColor, alternateHref }. A non-empty
+  { title, description, path, flagColor, iconColor, alternateHref, structuredData }. A non-empty
   alternateHref adds <link rel="alternate" type="application/json" href=…> (escaped) after
   the share meta; the list and detail pages pass it, the docs and error pages do not. With one it emits, between the <title>
-  and the identity tags: <meta name="description">, <link rel="canonical" href=SITE_ORIGIN + path>,
-  the Open Graph set (og:type "website", og:site_name "Swim Report", og:title,
-  og:description, og:url, og:image, og:image:width 1200, og:image:height 630, og:image:alt)
-  and the Twitter set (twitter:card "summary_large_image", twitter:title,
-  twitter:description, twitter:image). SITE_ORIGIN ("https://swim.report") is a constant:
-  the renderer is pure and never reads the request. renderErrorPage passes NO meta — a 404
-  claims no canonical URL and offers no share card — and still gets the identity tags.
+  and the identity tags: <meta name="description">, <meta name="robots"
+  content="max-image-preview:large">, <link rel="canonical" href=SITE_ORIGIN + path>,
+  the Open Graph set (og:type "website", og:site_name "Swim Report", og:locale "en_US",
+  og:title, og:description, og:url, og:image, og:image:type "image/png", og:image:width
+  1200, og:image:height 630, og:image:alt) and the Twitter set (twitter:card
+  "summary_large_image", twitter:title, twitter:description, twitter:image,
+  twitter:image:alt), then, when meta.structuredData is a non-empty array of schema.org
+  nodes, one <script type="application/ld+json"> holding { "@context", "@graph" } through
+  renderJsonLdScript, which writes every "<" as \u003c so an OSM name cannot close it.
+  SITE_ORIGIN, SITE_NAME and SITE_DESCRIPTION are constants in src/site.js: the renderer is
+  pure and never reads the request. renderErrorPage passes NO meta — a 404 claims no
+  canonical URL and offers no share card — and gets <meta name="robots" content="noindex">
+  in its place, plus the identity tags.
+- Structured data (src/frontend/structuredData.js) states identity only, never a flag
+  color, because a search feature that lifts a structured value out of the page drops the
+  wording that marks an estimate as estimated. The list page carries
+  homeStructuredData(): one WebSite node (@id SITE_ORIGIN + "/#website", url, name,
+  description, inLanguage "en"). The detail page carries beachStructuredData: the WebSite
+  node; a WebPage (@id the canonical URL, name the document title, isPartOf the WebSite,
+  about the Beach, breadcrumb); a Beach (@id canonical + "#beach", url, name, geo
+  GeoCoordinates rounded to 5 decimals and hasMap, the hero's OpenStreetMap link, both
+  omitted when lat or lon is null or not finite, sameAs
+  "https://www.openstreetmap.org/" + osm_id when osm_id matches (node|way|relation)/N);
+  and a two-item BreadcrumbList (Swim Report → the park-first display name). When the page
+  has a subtitle the Beach is named for the beach itself and carries containedInPlace
+  { "@type": "Park", name: park_name }; otherwise it takes the display name and no park.
+  The /api/ page carries docsStructuredData: the WebSite node, a WebPage with its
+  description, and a BreadcrumbList ending at "API".
 - og:image is one of five committed 1200x630 PNGs, /og/<color>.png, one per
   displayFlag color (green, yellow, red, double-red as two stacked flags, unknown).
   They carry the flag graphic on a wave background and NO text, so the estimated-or-official
   wording lives only in the title and description and can never disagree with the picture.
+- The list page's title, og:title and twitter:title are HOME_TITLE, "Swim Report —
+  Estimated Beach Hazard Flags": a search result shows the title without the page, so it
+  says estimated.
 - The list page canonicalizes to SITE_ORIGIN + "/" whatever the ?q= or ?near= params are,
   since those are a filtered or geolocated view of the same page. Its description is the
   one-sentence site description and its card is the gray unknown flag: the index reports no

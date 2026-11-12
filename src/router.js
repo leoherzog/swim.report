@@ -9,6 +9,8 @@ import { toPublicId, fromPublicId, fromLegacyId, parseAnyBeachId } from "./publi
 import { CACHE_CONTROL_CACHEABLE, CACHE_CONTROL_NO_STORE } from "./cacheControl.js";
 import { isApiPath, withApiCors, apiPreflightResponse } from "./apiCors.js";
 import { OPENAPI_PATH, handleOpenApi } from "./openapi.js";
+import { handleSitemap } from "./sitemap.js";
+import { robotsResponse } from "./robots.js";
 import {
   escapeLike,
   parseBeachIds,
@@ -549,8 +551,15 @@ async function dispatchRequest(request, method, env, ctx) {
 
   // Every /api/* response, whatever its status, carries the CORS headers, and
   // an OPTIONS preflight there answers 204; nothing outside /api/ answers one.
+  // All but the /api/ guide are for programs, and every beach page links its
+  // JSON twin with rel="alternate", so they ask not to be indexed. withApiCors
+  // always returns mutable headers.
   if (isApiPath(path)) {
-    return withApiCors(await routeApi(request, method, env, ctx, url));
+    const apiResponse = withApiCors(await routeApi(request, method, env, ctx, url));
+    if (path !== "/api/") {
+      apiResponse.headers.set("x-robots-tag", "noindex");
+    }
+    return apiResponse;
   }
 
   if (method !== "GET") {
@@ -562,6 +571,14 @@ async function dispatchRequest(request, method, env, ctx) {
       { ok: true },
       { status: 200, headers: { "cache-control": CACHE_CONTROL_NO_STORE } }
     );
+  }
+
+  if (path === "/robots.txt") {
+    return robotsResponse();
+  }
+
+  if (path === "/sitemap.xml") {
+    return handleSitemap(env, ifNoneMatchOf(request));
   }
 
   if (path === "/") {
