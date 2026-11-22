@@ -228,7 +228,7 @@ jobs:
           DATE=""
           for back in 0 1 2; do
             d=$(date -u -d "-$back day" +%y%m%d)
-            if curl -fsIL -o /dev/null "$BASE/us-$d.osm.pbf.md5"; then DATE="$d"; break; fi
+            if curl -fsIL -o /dev/null "$BASE/us/us-$d.osm.pbf.md5"; then DATE="$d"; break; fi
           done
           if [ -z "$DATE" ]; then
             echo "::error::no dated Geofabrik snapshot found for the last 3 days — refusing to fall back to a mutable -latest URL"
@@ -238,8 +238,11 @@ jobs:
           : > "$WORK/sources.tsv"
           # us does not carry Puerto Rico or the US Virgin Islands; they are
           # sub-extracts under us/, so the local file takes the basename.
+          # Geofabrik keeps every extract in its own directory, <path>/<name>-<date>;
+          # the flat <path>-<date> form 404s for the us/ sub-extracts.
           for c in us canada mexico us/puerto-rico us/us-virgin-islands; do
             f="$(basename "$c")-$DATE.osm.pbf"
+            url="$BASE/$c/$f"
             # -f fails the step on an HTTP error instead of writing an HTML error
             # page into a .pbf. -L is mandatory: download.geofabrik.de 302-redirects
             # to mirrors and a request without it returns no body.
@@ -256,7 +259,7 @@ jobs:
             got=""
             for attempt in 1 2 3 4 5 6 7 8 9 10; do
               if curl -fSL -C - --speed-limit 102400 --speed-time 120 --max-time 1800 \
-                  -o "$f" "$BASE/$c-$DATE.osm.pbf"; then
+                  -o "$f" "$url"; then
                 got=1
                 break
               fi
@@ -267,7 +270,7 @@ jobs:
               echo "::error::$c download did not complete in 10 attempts"
               exit 1
             fi
-            curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f.md5" "$BASE/$c-$DATE.osm.pbf.md5"
+            curl -fSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f.md5" "$url.md5"
             # The sidecar carries a bare basename, hence the cd above.
             md5sum -c "$f.md5"
             # The md5 pair is not merely checked here, it is recorded. Anything but
