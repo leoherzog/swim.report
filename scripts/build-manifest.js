@@ -63,13 +63,13 @@ export const BUILD_DECAY_MIN_RATIO = 0.85;
 // this keeps a one- or two-polygon mapper edit in the smallest regions from
 // reading as a regression by the ratio alone.
 //
-// It is clamped to the previous count (see regionFloorRefusals). Read literally,
-// max(3, floor(0.95 * previous)) inverts its own purpose for any region/layer
-// under three features: an unchanged region of 1 would be required to reach 3 and
-// would refuse every build forever. Region/layer pairs that small are ordinary
-// here, so the 3 is a relaxation of the ratio, never a requirement to grow.
-// Nothing is loosened above previous = 3, and the Level 3 region-shrink and Level
-// 3b decay checks still apply to the tail unchanged.
+// A region/layer whose prior count is below it is exempt from every per-region
+// ratio gate: Level 2's ratio half, Level 3's region shrink and Level 3b's decay.
+// Pairs that small are ordinary here, and a ratio over one or two features reads
+// any single mapper edit as a total loss. Without the exemption that edit refuses
+// every build until it leaves the decay window, which a refused build never
+// advances. The seeded floors, the global layer gates and the delete rails still
+// apply.
 export const REGION_FLOOR_MIN = 3;
 
 // Rolling window carried forward in manifest.history: about a month of
@@ -496,6 +496,12 @@ export function schemaRefusals(layerFields, requiredFields, layerCounts) {
 
 // --- Level 2: per-region floors on every clipped layer ---------------------------
 
+// Whether a per-region ratio gate compares against this prior count. The one rule
+// all three per-region ratio gates share; see REGION_FLOOR_MIN.
+function regionRatioApplies(prior) {
+  return isFiniteNumber(prior) && prior >= REGION_FLOOR_MIN;
+}
+
 // regionLayerCount >= max(REGION_FLOOR_MIN, floor(BUILD_SHRINK_MIN_RATIO * previous))
 //   and regionLayerCount >= the seeded data/layer-floors.json floor.
 //
@@ -506,7 +512,7 @@ export function schemaRefusals(layerFields, requiredFields, layerCounts) {
 //
 // The ratio half is skipped when there is no previous build, or when the previous
 // build did not record that region/layer, so a first build is never refused for
-// having nothing to compare against.
+// having nothing to compare against. It is also skipped below REGION_FLOOR_MIN.
 export function regionFloorRefusals(regionCounts, previousRegionCounts, floorsEntry) {
   const out = [];
   const seeded = isPlainObject(floorsEntry) && isPlainObject(floorsEntry.regions)
@@ -528,17 +534,14 @@ export function regionFloorRefusals(regionCounts, previousRegionCounts, floorsEn
         continue;
       }
       const previousCount = isPlainObject(previous) ? previous[logical] : null;
-      if (isFiniteNumber(previousCount) && previousCount > 0) {
-        // The clamp to previousCount is the rule described on REGION_FLOOR_MIN:
-        // the 3 relaxes the ratio for a tiny region, it never demands that a
-        // region grow to three features.
-        const floor = Math.min(previousCount, Math.max(REGION_FLOOR_MIN,
-          Math.floor(BUILD_SHRINK_MIN_RATIO * previousCount)));
+      if (regionRatioApplies(previousCount)) {
+        const floor = Math.max(REGION_FLOOR_MIN,
+          Math.floor(BUILD_SHRINK_MIN_RATIO * previousCount));
         if (count < floor) {
           out.push(refusal("region-floor", region + "/" + logical,
-            String(count) + " is below min(" + String(previousCount) + ", max(" +
-            String(REGION_FLOOR_MIN) + ", floor(" + String(BUILD_SHRINK_MIN_RATIO) + " * " +
-            String(previousCount) + "))) = " + String(floor), true));
+            String(count) + " is below max(" + String(REGION_FLOOR_MIN) + ", floor(" +
+            String(BUILD_SHRINK_MIN_RATIO) + " * " + String(previousCount) + ")) = " +
+            String(floor), true));
         }
       }
       const seededFloor = seededRegion[logical];
@@ -609,7 +612,7 @@ export function regionShrinkRefusals(regionCounts, previousRegionCounts) {
       const logical = REGION_LAYER_NAMES[l];
       const count = regions[region][logical];
       const prior = previous[logical];
-      if (!isFiniteNumber(count) || !isFiniteNumber(prior) || prior <= 0) {
+      if (!isFiniteNumber(count) || !regionRatioApplies(prior)) {
         continue;
       }
       if (count < BUILD_SHRINK_MIN_RATIO * prior) {
@@ -661,7 +664,7 @@ export function decayRefusals(layers, regionCounts, oldest) {
       const logical = REGION_LAYER_NAMES[l];
       const count = regions[region][logical];
       const prior = priorRegion[logical];
-      if (!isFiniteNumber(count) || !isFiniteNumber(prior) || prior <= 0) {
+      if (!isFiniteNumber(count) || !regionRatioApplies(prior)) {
         continue;
       }
       if (count < BUILD_DECAY_MIN_RATIO * prior) {

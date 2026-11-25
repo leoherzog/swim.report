@@ -548,15 +548,15 @@ describe("regionFloorRefusals", () => {
     expect(out[0].subject).toBe("Lake Michigan/parks-polygon");
   });
 
-  it("applies min(previous, max(REGION_FLOOR_MIN, floor(0.95 * previous)))", () => {
-    // previous 8: floor(0.95 * 8) = 7, above REGION_FLOOR_MIN, and below previous.
+  it("applies max(REGION_FLOOR_MIN, floor(0.95 * previous))", () => {
+    // previous 8: floor(0.95 * 8) = 7, above REGION_FLOOR_MIN.
     const previous = regionCounts({ "Lake Ontario": 8 });
     expect(regionFloorRefusals(regionCounts({ "Lake Ontario": 7 }), previous, { regions: {} }))
       .toEqual([]);
     const out = regionFloorRefusals(regionCounts({ "Lake Ontario": 6 }), previous, { regions: {} });
     expect(out.length).toBe(REGION_LAYER_NAMES.length);
-    expect(out[0].message).toContain("min(8, max(" + String(REGION_FLOOR_MIN) + ", floor(" +
-      String(BUILD_SHRINK_MIN_RATIO) + " * 8))) = 7");
+    expect(out[0].message).toContain("max(" + String(REGION_FLOOR_MIN) + ", floor(" +
+      String(BUILD_SHRINK_MIN_RATIO) + " * 8)) = 7");
   });
 
   it("lets REGION_FLOOR_MIN relax the ratio for a small region", () => {
@@ -567,19 +567,34 @@ describe("regionFloorRefusals", () => {
       .toEqual([]);
   });
 
-  // Contract 5.3 writes this rule as max(3, floor(0.95 * previous)), which taken
-  // literally INVERTS its own stated purpose below three features: an unchanged
-  // region of 1 would be required to reach 3 and would refuse every build
-  // forever. Region/layer pairs that small are ordinary here — coastline is
-  // legitimately zero-to-tiny at Great Lakes scope and Niagara River carries
-  // single digits — so the floor is clamped to the previous count.
+  // Read literally, max(3, floor(0.95 * previous)) would require an unchanged
+  // region of 1 to reach 3 and refuse every build forever.
   it("never demands that a tiny region GROW to REGION_FLOOR_MIN", () => {
     const previous = regionCounts({ "Niagara River": 1 });
     expect(regionFloorRefusals(regionCounts({ "Niagara River": 1 }), previous, { regions: {} }))
       .toEqual([]);
-    const lost = regionFloorRefusals(regionCounts({ "Niagara River": 0 }), previous, { regions: {} });
-    expect(lost.length).toBe(REGION_LAYER_NAMES.length);
-    expect(lost[0].message).toContain("min(1, max(3, floor(0.95 * 1))) = 1");
+  });
+
+  // Two mistagged natural=coastline ways on an inland lake, later deleted in OSM,
+  // took Lake Michigan's coastline tally from 2 to 0.
+  it("skips the ratio below REGION_FLOOR_MIN and keeps it at REGION_FLOOR_MIN", () => {
+    const previous = regionCounts({ "Lake Michigan": 2 });
+    expect(regionFloorRefusals(regionCounts({ "Lake Michigan": 0 }), previous, { regions: {} }))
+      .toEqual([]);
+    const atMin = regionFloorRefusals(regionCounts({ "Lake Michigan": 2 }),
+      regionCounts({ "Lake Michigan": REGION_FLOOR_MIN }), { regions: {} });
+    expect(atMin.length).toBe(REGION_LAYER_NAMES.length);
+  });
+
+  it("still applies the seeded floor below REGION_FLOOR_MIN", () => {
+    const seeded = { regions: { "Lake Michigan": { "coastline": 2 } } };
+    const current = regionCounts({ "Lake Michigan": { "beaches": 100, "parks-polygon": 100,
+      "parks-line": 0, "coastline": 0, "water": 100, "other-relations": 0 } });
+    const previous = regionCounts({ "Lake Michigan": { "beaches": 100, "parks-polygon": 100,
+      "parks-line": 0, "coastline": 2, "water": 100, "other-relations": 0 } });
+    const out = regionFloorRefusals(current, previous, seeded);
+    expect(out.length).toBe(1);
+    expect(out[0].message).toContain("below the seeded floor of 2");
   });
 
   it("skips the ratio for a region the previous build did not record", () => {
@@ -678,6 +693,13 @@ describe("regionShrinkRefusals", () => {
     expect(regionShrinkRefusals(regionCounts({ "Lake Erie": 1 }),
       { "Lake Erie": { "beaches": null } })).toEqual([]);
   });
+
+  it("skips a prior count below REGION_FLOOR_MIN and keeps one at REGION_FLOOR_MIN", () => {
+    expect(regionShrinkRefusals(regionCounts({ "Lake Michigan": 0 }),
+      regionCounts({ "Lake Michigan": REGION_FLOOR_MIN - 1 }))).toEqual([]);
+    expect(regionShrinkRefusals(regionCounts({ "Lake Michigan": REGION_FLOOR_MIN - 1 }),
+      regionCounts({ "Lake Michigan": REGION_FLOOR_MIN })).length).toBe(REGION_LAYER_NAMES.length);
+  });
 });
 
 // --- Level 3b: monotone decay against the oldest retained build ----------------
@@ -708,6 +730,17 @@ describe("decayRefusals", () => {
 
   it("is a no-op when the history window is empty", () => {
     expect(decayRefusals(layerSet(), regionCounts({ "Lake Erie": 1 }), null)).toEqual([]);
+  });
+
+  // Without the exemption this refusal outlives the edit: the oldest retained
+  // build keeps the pre-edit 2 until eight later builds publish.
+  it("skips a region prior below REGION_FLOOR_MIN but not a global layer prior", () => {
+    const oldest = { buildId: "OLD", layers: { "water-line.fgb": 2 },
+      regions: { "Lake Michigan": regionTally(2), "Lake Huron + Georgian Bay": regionTally(3) } };
+    const counts = regionCounts({ "Lake Michigan": 0, "Lake Huron + Georgian Bay": 2 });
+    const out = decayRefusals([layer("water-line.fgb", { featureCount: 0 })], counts, oldest);
+    expect(out.map((r) => r.subject)).toEqual(["water-line.fgb"].concat(
+      REGION_LAYER_NAMES.map((logical) => "Lake Huron + Georgian Bay/" + logical)));
   });
 });
 
